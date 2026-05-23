@@ -1,0 +1,98 @@
+---
+title: "Session store"
+description: "Mirror, import, list, load, and resume Claude JSONL sessions from host storage"
+icon: "database"
+---
+
+Claude Code stores native session history as JSONL. The adapter can mirror and
+hydrate those rows through a host-provided `SessionStore`. This mirrors the
+Claude Agent SDK's [session storage](https://code.claude.com/docs/en/agent-sdk/session-storage)
+idea while exposing it through this Go package's
+[embedded API](/docs/reference/go-api#sessionstore).
+
+## Why use a store
+
+Use a store when sessions must survive beyond the local
+[Claude session files](https://code.claude.com/docs/en/sessions) directory,
+for example:
+
+- cloud-hosted ACP agents
+- roaming editor sessions
+- explicit session import/export
+- remote resume where the local Claude JSONL file is absent
+
+## Mode support
+
+| Capability | Standalone CLI | Embedded Go |
+| --- | --- | --- |
+| Import JSONL with [`_claude/session/*`](/docs/reference/session-import) | Yes, stored in the process-local import store unless committed to a configured store. | Yes. |
+| Mirror ordinary Claude turns | No external store can be supplied through flags. | `WithSessionStore(store)` enables mirroring. |
+| Durable remote load/resume | Only for the life of the process unless a custom command embeds a store. | `WithSessionStore(store)` plus optional lister/subkey interfaces. |
+| Store-backed `session/list` | Not available through flags. | Implement `SessionStoreLister`. |
+
+## Interface
+
+```go
+type SessionStore interface {
+    Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
+    Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
+}
+```
+
+Optional interfaces:
+
+| Interface | Enables |
+| --- | --- |
+| `SessionStoreLister` | store-backed `session/list` |
+| `SessionStoreSubkeyLister` | subagent transcript hydration |
+| `SessionStoreReplacer` | atomic import replacement of existing stored sessions |
+
+## Key shape
+
+```go
+type SessionKey struct {
+    ProjectKey string
+    SessionID  string
+    Subpath    string
+}
+```
+
+`Subpath == ""` addresses the main transcript. Non-empty subpaths address
+subagent transcripts and metadata below the session.
+
+## Mirroring
+
+When a store is configured, new turns request Claude transcript mirroring.
+Received `transcript_mirror` frames are validated, mapped to `SessionKey`, and
+appended with bounded retries.
+
+Embedded Go setup:
+
+```go
+store := newYourSessionStore()
+
+err := claudeacp.Serve(ctx, input, output,
+    claudeacp.WithSessionStore(store),
+    claudeacp.WithSessionStoreLoadTimeout(5*time.Second),
+)
+```
+
+Standalone CLI imports still work through ACP extension methods, but the stock
+command has no flag for a durable external store.
+
+`WithSessionStoreLoadTimeout` defaults to 10 seconds when it is not set.
+
+## Materialized resume
+
+If [`session/load` or `session/resume`](/docs/core/sessions#load-vs-resume)
+needs a session that is not present in local Claude files, the adapter:
+
+1. Loads JSONL rows from the store.
+2. Creates an isolated temp `CLAUDE_CONFIG_DIR`.
+3. Writes Claude's expected `projects/<project>/<session>.jsonl` layout.
+4. Copies only the Claude auth/config files needed to run.
+5. Redacts copied OAuth refresh tokens where possible.
+6. Removes the temp config when the ACP session closes.
+
+Security details for materialized directories are covered in
+[Security](/docs/operations/security#filesystem-boundaries).

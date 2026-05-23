@@ -1,0 +1,196 @@
+package claudeacp
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestLoadDiscoveredSettingsMergeOrder(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	managed := filepath.Join(t.TempDir(), "managed-settings.json")
+
+	previousManagedPath := managedSettingsPath
+	managedSettingsPath = func() string { return managed }
+	t.Cleanup(func() { managedSettingsPath = previousManagedPath })
+
+	require.NoError(t, os.WriteFile(filepath.Join(home, settingsFileName), []byte(`{
+		"model": "claude-user",
+		"effortLevel": "low",
+		"availableModels": ["claude-haiku-4-5", "claude-opus-4-7[1m]"],
+		"permissions": {"defaultMode": "acceptEdits"},
+		"env": {"FROM_USER": "yes", "OVERRIDE": "user"}
+	}`), 0o600))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(cwd, settingsDirName), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, settingsDirName, settingsFileName), []byte(`{
+		"model": "claude-project",
+		"availableModels": ["claude-opus-4-7[1m]", "claude-sonnet-4-6"],
+		"permissions": {"defaultMode": "auto"},
+		"env": {"OVERRIDE": "project"}
+	}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, settingsDirName, settingsLocalFileName), []byte(`{
+		"effortLevel": "high",
+		"permissions": {"defaultMode": "dontAsk"}
+	}`), 0o600))
+	require.NoError(t, os.WriteFile(managed, []byte(`{
+		"model": "claude-managed",
+		"availableModels": ["claude-managed"],
+		"env": {"FROM_MANAGED": "yes"}
+	}`), 0o600))
+
+	settings := loadDiscoveredSettings(context.Background(), cwd, home, nil)
+	require.Equal(t, "claude-managed", settings.Model)
+	require.Equal(t, "high", settings.Effort)
+	require.Equal(t, "dontAsk", settings.PermissionMode)
+	require.True(t, settings.HasAvailableModels)
+	require.Equal(t, []string{
+		"claude-haiku-4-5",
+		"claude-opus-4-7[1m]",
+		"claude-sonnet-4-6",
+		"claude-managed",
+	}, settings.AvailableModels)
+	require.Equal(t, map[string]string{
+		"FROM_USER":    "yes",
+		"OVERRIDE":     "project",
+		"FROM_MANAGED": "yes",
+	}, settings.Env)
+}
+
+func TestLoadDiscoveredSettingsIgnoresInvalidFiles(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+
+	previousManagedPath := managedSettingsPath
+	managedSettingsPath = func() string { return filepath.Join(t.TempDir(), "missing.json") }
+	t.Cleanup(func() { managedSettingsPath = previousManagedPath })
+
+	require.NoError(t, os.WriteFile(filepath.Join(home, settingsFileName), []byte(`{bad`), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(cwd, settingsDirName), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, settingsDirName, settingsFileName), []byte(`{
+		"availableModels": [],
+		"permissions": {"defaultMode": 7},
+		"env": {"GOOD": "yes", "BAD": 1}
+	}`), 0o600))
+
+	settings := loadDiscoveredSettings(context.Background(), cwd, home, nil)
+	require.Empty(t, settings.Model)
+	require.Empty(t, settings.PermissionMode)
+	require.True(t, settings.HasAvailableModels)
+	require.Empty(t, settings.AvailableModels)
+	require.Equal(t, map[string]string{"GOOD": "yes"}, settings.Env)
+}
+
+func TestLoadDiscoveredSettingsStopsOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	settings := loadDiscoveredSettings(ctx, t.TempDir(), t.TempDir(), slog.New(slog.DiscardHandler))
+	require.Empty(t, settings.Model)
+
+	logger := slog.New(slog.DiscardHandler)
+	_, ok := loadSettingsFile(context.Background(), t.TempDir(), logger)
+	require.False(t, ok)
+	invalid := filepath.Join(t.TempDir(), "settings.json")
+	require.NoError(t, os.WriteFile(invalid, []byte(`{bad`), 0o600))
+	_, ok = loadSettingsFile(context.Background(), invalid, logger)
+	require.False(t, ok)
+}
+
+func TestSettingsHelpers(t *testing.T) {
+	require.Equal(t, "/home/claude/settings.json", userSettingsPath("/home/claude"))
+	t.Setenv("CLAUDE_CONFIG_DIR", "/env/claude")
+	require.Equal(t, "/env/claude/settings.json", userSettingsPath(""))
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	home := t.TempDir()
+	canonical, err := canonicalClaudeHome(filepath.Join(home, "."))
+	require.NoError(t, err)
+	require.Equal(t, home, canonical)
+	canonical, err = canonicalClaudeHome("")
+	require.NoError(t, err)
+	require.Empty(t, canonical)
+	_, err = canonicalClaudeHome(filepath.Join(t.TempDir(), "missing"))
+	require.Error(t, err)
+	notDir := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(notDir, []byte("settings"), 0o600))
+	_, err = canonicalClaudeHome(notDir)
+	require.Error(t, err)
+	previousAbs := filepathAbs
+	filepathAbs = func(string) (string, error) { return "", errors.New("abs failed") }
+	_, err = canonicalClaudeHome("relative")
+	require.Error(t, err)
+	filepathAbs = previousAbs
+	previousEvalSymlinks := filepathEvalSymlinks
+	filepathEvalSymlinks = func(string) (string, error) { return "", errors.New("eval failed") }
+	_, err = canonicalClaudeHome(home)
+	require.Error(t, err)
+	filepathEvalSymlinks = previousEvalSymlinks
+	t.Cleanup(func() {
+		filepathAbs = previousAbs
+		filepathEvalSymlinks = previousEvalSymlinks
+	})
+
+	previousUserHomeDir := userHomeDir
+	userHomeDir = func() (string, error) { return "", errors.New("home failed") }
+	require.Empty(t, userSettingsPath(""))
+	userHomeDir = previousUserHomeDir
+	t.Cleanup(func() { userHomeDir = previousUserHomeDir })
+
+	require.Equal(t, map[string]string{"A": "override", "B": "base"}, mergeEnv(
+		map[string]string{"A": "base", "B": "base"},
+		map[string]string{"A": "override"},
+	))
+	logs := new(bytes.Buffer)
+	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	require.Equal(t, map[string]string{"GOOD_1": "yes"}, stringMapSetting(context.Background(), map[string]any{
+		"env": map[string]any{
+			"GOOD_1":    "yes",
+			"bad":       "lowercase",
+			"1_BAD":     "digit",
+			"BAD-DASH":  "dash",
+			"BAD_EMPTY": "",
+			"BAD_NUL":   "bad\x00value",
+		},
+	}, "env", logger))
+	require.Contains(t, logs.String(), "ignoring invalid settings env key")
+	require.Contains(t, logs.String(), "bad")
+	require.NotContains(t, logs.String(), "lowercase")
+	require.False(t, validSettingsEnvName(""))
+	require.False(t, validSettingsEnvName("bad"))
+
+	allowlist, ok := settingsAvailableModelAllowlist(
+		modelConfig{AvailableModels: []string{"opus", "sonnet"}},
+		true,
+		discoveredSettings{AvailableModels: []string{"sonnet", "haiku"}, HasAvailableModels: true},
+	)
+	require.True(t, ok)
+	require.Equal(t, []string{"opus", "sonnet", "haiku"}, allowlist)
+	allowlist, ok = settingsAvailableModelAllowlist(
+		modelConfig{AvailableModels: []string{"opus", "opus"}},
+		true,
+		discoveredSettings{},
+	)
+	require.True(t, ok)
+	require.Equal(t, []string{"opus"}, allowlist)
+	require.Equal(t, "b", firstNonEmptyString("", "b", "c"))
+	require.NotEmpty(t, defaultManagedSettingsPath())
+
+	previousGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = previousGOOS })
+	runtimeGOOS = "darwin"
+	require.Contains(t, defaultManagedSettingsPath(), "/Library/Application Support/")
+	runtimeGOOS = "windows"
+	require.Contains(t, defaultManagedSettingsPath(), `C:\Program Files`)
+	runtimeGOOS = "linux"
+	require.Equal(t, "/etc/claude-code/managed-settings.json", defaultManagedSettingsPath())
+	_, ok = loadSettingsFile(context.Background(), "", nil)
+	require.False(t, ok)
+}

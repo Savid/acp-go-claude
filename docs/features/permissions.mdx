@@ -1,0 +1,79 @@
+---
+title: "Permissions"
+description: "How Claude permission requests map to ACP approval prompts"
+icon: "shield-check"
+---
+
+Permission flow is a trust boundary. The adapter does not silently approve
+tool use. Claude's permission modes are documented in
+[Claude Code permission modes](https://code.claude.com/docs/en/permission-modes),
+and the adapter's operational boundary is summarized in
+[Security](/docs/operations/security).
+
+## Configure defaults
+
+| Need | Standalone | Embedded | Per session |
+| --- | --- | --- | --- |
+| Default permission mode | no dedicated flag | [`WithDefaultPermissionMode("acceptEdits")`](/docs/reference/go-api#session-defaults) | [`_meta.claude.options.permissionMode`](/docs/reference/meta#session-options) |
+| Allow Claude skip-permissions flag | no public flag | `WithAllowSkipPermissionsFlag(true)` | not supported |
+
+## Flow
+
+1. Claude emits a `can_use_tool` control request.
+2. The session checks saved rules for the tool.
+3. If no rule applies, the agent calls ACP `session/request_permission`.
+4. The client selects allow/reject once or always.
+5. The adapter returns Claude a permission decision.
+
+The ACP-facing methods and callbacks are listed in
+[ACP methods](/docs/reference/acp-methods).
+
+Claude still owns its native permission stack. Static Claude rules and the
+active permission mode are evaluated by Claude around the adapter callback; the
+adapter's role is to preserve the ACP approval boundary and persist only
+session-scoped choices it is asked to remember.
+
+## Options sent to clients
+
+| Option | Behavior |
+| --- | --- |
+| Allow once | Allow this tool call only. |
+| Allow always | Persist an allow rule for the session when Claude does not supply more granular permission suggestions. |
+| Reject once | Deny this tool call only. |
+| Reject always | Persist a deny rule for the session. |
+
+Rules are session-scoped. They are persisted at
+`<claudeHome>/acp-go-claude/session-permissions.json` and copied only through explicit
+[session fork](https://agentclientprotocol.com/rfds/session-fork) behavior.
+
+## Hooks and plan mode
+
+Claude [hooks](https://code.claude.com/docs/en/hooks) are surfaced read-only.
+ACP clients cannot register or mutate Claude hooks through this adapter.
+
+The handled hook path is `PostToolUse`:
+
+- `EnterPlanMode` through `PostToolUse` emits `current_mode_update` with
+  `plan`.
+- `Edit` and `Write` through `PostToolUse` can emit extra
+  `tool_call_update` data with diff locations and raw Claude output.
+- Other hook callbacks continue inside Claude and are not exposed as generic
+  ACP events.
+
+`ExitPlanMode` is handled as a permission-style tool request. The client sees
+the pending switch-mode tool, chooses the next mode, and the adapter emits
+`current_mode_update` after the mode changes.
+
+## Cancellation
+
+When `session/cancel` interrupts a turn, outstanding permission requests tied
+to that turn are cancelled. Claude receives an interrupt-aware deny decision.
+Session cancellation is described in [Sessions](/docs/core/sessions#cancel).
+
+## Subagents
+
+Claude [subagent](https://code.claude.com/docs/en/sub-agents) work inherits
+the active session policy. Clients should present ACP modes such as
+`bypass_permissions`, `accept_edits`, and `auto` as applying to subagent tool
+use as well as visible main-turn tool use. Claude-owned hooks and deny rules
+can still block tools.

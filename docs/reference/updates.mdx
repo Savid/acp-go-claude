@@ -1,0 +1,86 @@
+---
+title: "Update mapping"
+description: "Session update types emitted by the adapter"
+icon: "refresh-cw"
+---
+
+## Messages
+
+| Update | When emitted |
+| --- | --- |
+| `user_message_chunk` | transcript replay and live user-side tool-result rows |
+| `agent_message_chunk` | assistant text and selected local-command result text |
+| `agent_thought_chunk` | Claude thinking/thought content |
+
+Message chunks use message IDs when Claude provides stable IDs. Clients should
+handle repeated or cumulative chunks. The content shape follows ACP
+[content blocks](https://agentclientprotocol.com/protocol/content), and the
+runtime flow is explained in [Prompt streaming](/docs/core/prompt-streaming).
+
+## Tools
+
+| Update | Content |
+| --- | --- |
+| `tool_call` | tool ID, title, kind, mapped content, locations, raw input |
+| `tool_call_update` | status, mapped result content, locations, raw output |
+| `plan` | Claude `TodoWrite` entries mapped to ACP plan entries |
+
+Terminal, Write/Edit, TodoWrite, ExitPlanMode, MCP, and generic tools receive
+specialized mapping where possible. The portable ACP shape is
+[tool calls](https://agentclientprotocol.com/protocol/tool-calls); provider
+details are carried in raw input/output and, when enabled,
+[raw Claude events](/docs/features/raw-events).
+
+`TodoWrite` does not show up as a normal tool call when it can be represented
+as an ACP plan. Todo status values map to pending, in-progress, and completed
+plan entries.
+
+## Session state
+
+| Update | When emitted |
+| --- | --- |
+| `usage_update` | after result/context usage metadata |
+| `session_info_update` | after prompts with title/updatedAt |
+| `current_mode_update` | after mode changes and plan-mode hooks |
+| `config_option_update` | after model/mode/output style/effort/Fast Mode changes |
+| `available_commands_update` | after Claude initialize metadata changes |
+
+`usage_update` follows the ACP
+[session usage](https://agentclientprotocol.com/rfds/session-usage) surface.
+The current Go SDK marks this update variant unstable; clients should tolerate
+it as an optional usage signal rather than a required stable update. Standard
+per-turn token counts are returned on `PromptResponse.usage`; `usage_update`
+is for context window and cost. For stream consumers, this adapter also mirrors
+Claude token details under `_meta.claude.usage` and final per-model details
+under `_meta.claude.modelUsage`.
+When Claude includes origin metadata, result-derived usage updates include it
+under `_meta.claude.origin`.
+When Claude Code structured output is enabled, the same final usage update
+includes the validated object under `_meta.claude.structuredOutput`.
+Mode/config updates map to [Models and config](/docs/features/models-config).
+
+`session_info_update` lets hosts refresh tab titles without replaying the
+whole transcript:
+
+```json
+{
+  "sessionId": "00000000-0000-4000-8000-000000000000",
+  "update": {
+    "sessionInfoUpdate": {
+      "title": "Fix MCP bridge auth",
+      "updatedAt": "2026-05-17T12:34:56Z"
+    }
+  }
+}
+```
+
+`current_mode_update` is emitted when the client changes mode, when Claude
+enters plan mode through the handled hook path, and when `ExitPlanMode` returns
+the session to another mode.
+
+## Replay
+
+[`session/load`](/docs/core/sessions#load-vs-resume) replays Claude transcript
+rows through normal ACP updates. Replay is capped to avoid unbounded update
+floods. If truncated, the adapter prepends an agent message explaining that
+only the first replay window was emitted.

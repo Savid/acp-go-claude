@@ -1,0 +1,42 @@
+---
+title: "Overview"
+description: "ACP agent for Claude Code, written in Go and backed by the local Claude CLI"
+icon: "sparkles"
+---
+
+`acp-go-claude` exposes the local
+[Claude Code CLI](https://code.claude.com/docs/en/overview) as an
+[Agent Client Protocol](https://agentclientprotocol.com/) agent. It speaks ACP
+over [JSON-RPC streams](https://agentclientprotocol.com/protocol/transports),
+starts `claude` subprocesses on demand, maps
+[ACP prompts](https://agentclientprotocol.com/protocol/prompt-turn) and client
+callbacks into Claude stream-json/control protocol messages, and streams
+[ACP session updates](/docs/reference/updates) back to the host.
+
+Use it when you want an ACP-compatible Claude agent without depending on a
+Claude-specific Go SDK.
+
+<CardGroup cols={2}>
+  <Card title="Two integration modes" icon="route" href="/docs/get-started/run-modes">
+    Run it as a standalone ACP subprocess or embed it in another Go application with `Serve`.
+  </Card>
+  <Card title="ACP method surface" icon="plug" href="/docs/reference/acp-methods">
+    Initialize, create sessions, prompt, cancel, load, resume, fork, stream updates, and bridge MCP through ACP.
+  </Card>
+  <Card title="Session runtime" icon="terminal" href="/docs/core/sessions">
+    Claude sessions, prompt turns, cancellation, replay, resume, fork, and transcript storage.
+  </Card>
+  <Card title="Production controls" icon="shield" href="/docs/operations/security">
+    Session-scoped permissions, gateway auth boundaries, token-file MCP shims, path validation, and predictable cleanup.
+  </Card>
+  <Card title="Observable by default" icon="chart-line" href="/docs/operations/observability">
+    Optional OpenTelemetry spans, metrics, trace propagation, and structured logs without recording prompt/tool secrets by default.
+  </Card>
+</CardGroup>
+
+<Note>
+  This project wraps the local `claude` CLI. Authentication, model availability,
+  Claude settings, tool behavior, and transcript persistence are ultimately
+  governed by the installed Claude Code version and the user's Claude
+  configuration.
+</Note>

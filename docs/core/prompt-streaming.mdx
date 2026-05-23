@@ -1,0 +1,91 @@
+---
+title: "Prompt streaming"
+description: "How Claude messages become ACP updates"
+icon: "waves"
+---
+
+Claude emits [stream-json messages](https://code.claude.com/docs/en/agent-sdk/streaming-output).
+The adapter maps them to [ACP prompt-turn](https://agentclientprotocol.com/protocol/prompt-turn)
+updates as the turn runs. See [Update mapping](/docs/reference/updates) for the
+wire-level summary.
+
+## Update types
+
+| Claude event | ACP update |
+| --- | --- |
+| user prompt or transcript row | `user_message_chunk` |
+| assistant text | `agent_message_chunk` |
+| thinking/thought content | `agent_thought_chunk` |
+| tool use | `tool_call` |
+| tool result | `tool_call_update` |
+| result/context usage | `usage_update` |
+| mode/config/model changes | current mode and config updates |
+| title/timestamp changes | `session_info_update` |
+
+Tool updates include mapped [ACP content](https://agentclientprotocol.com/protocol/content),
+status, locations when available, and raw input/output for clients that need
+provider-specific detail. Tool behavior follows the ACP
+[tool calls](https://agentclientprotocol.com/protocol/tool-calls) shape.
+
+Claude Code structured output is configured through
+[`_meta.claude.options.outputFormat`](/docs/reference/meta#session-options) on
+session start. The final result object is emitted under
+`_meta.claude.structuredOutput` on the result-derived `usage_update`.
+Claude's intermediate `StructuredOutput` tool call is not surfaced as a normal
+ACP tool call.
+
+## Content input
+
+Supported [ACP prompt blocks](https://agentclientprotocol.com/protocol/content):
+
+- text
+- image
+- resource link
+- embedded text resource
+- embedded image resource
+- embedded PDF resource
+
+Audio is not supported: the agent advertises `audio: false`, and audio blocks
+are rejected before they reach Claude. Static model/config advertising is
+covered in [Models and config](/docs/features/models-config).
+
+## Local slash commands
+
+The prompt loop detects local-only [Claude commands](https://code.claude.com/docs/en/commands)
+and strips Claude's local command marker tags from the streamed output.
+Available slash commands are discovered from Claude initialize metadata and
+emitted as `available_commands_update`.
+
+Commands that are auth, billing, release-note, keybinding, output-style
+creation, or internal todo surfaces are intentionally not advertised:
+
+```text
+/cost
+/keybindings-help
+/login
+/logout
+/output-style:new
+/release-notes
+/todos
+```
+
+Claude MCP command names ending in ` (MCP)` are exposed to ACP clients with an
+`mcp:` prefix.
+
+## Usage
+
+Prompt responses and ACP [session usage](https://agentclientprotocol.com/rfds/session-usage)
+notifications can include:
+
+- input tokens
+- output tokens
+- total tokens
+- cache read/write tokens
+- thought tokens
+- cost in USD when Claude reports it
+- context window size and used tokens when Claude reports context usage
+
+Context window size is runtime state. Static model entries intentionally avoid
+hard-coded pricing and detailed capability claims. Hosts that need provider
+rows in addition to portable updates can opt into
+[raw Claude events](/docs/features/raw-events).

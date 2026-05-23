@@ -1,0 +1,38 @@
+package claude
+
+const (
+	BehaviorAllow = "allow"
+	BehaviorDeny  = "deny"
+
+	streamJSON = "stream-json"
+
+	keyBehavior         = "behavior"
+	keyContent          = "content"
+	keyError            = "error"
+	keyErrors           = "errors"
+	keyEvent            = "event"
+	keyFastMode         = "fastMode"
+	keyHookCallback     = "hookCallbackIds"
+	keyID               = "id"
+	keyInput            = "input"
+	keyIsError          = "is_error"
+	keyMessage          = "message"
+	keyModel            = "model"
+	keyName             = "name"
+	keyOrigin           = "origin"
+	keyParentToolID     = "parent_tool_use_id"
+	keyRequest          = "request"
+	keyRequestID        = "request_id"
+	keyResponse         = "response"
+	keyResult           = "result"
+	keySessionID        = "session_id"
+	keySignature        = "signature"
+	keyStopReason       = "stop_reason"
+	keyStructuredOutput = "structured_output"
+	keySubtype          = "subtype"
+	keyText             = "text"
+	keyThinking         = "thinking"
+	keyToolUseID        = "tool_use_id"
+	keyTotalCostUSD     = "total_cost_usd"
+	keyType             = "type"
+)

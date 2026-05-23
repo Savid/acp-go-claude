@@ -1,0 +1,95 @@
+---
+title: "Quickstart"
+description: "Run the ACP agent and send a first prompt"
+icon: "rocket"
+---
+
+## Prerequisites
+
+- Go 1.25 or newer. This repo is developed with toolchain Go 1.26.3.
+- A local [`claude` CLI](https://code.claude.com/docs/en/overview) installed
+  and authenticated.
+- An [ACP client](https://agentclientprotocol.com/overview/clients) or one of
+  the [examples](/docs/get-started/examples) in this repo.
+
+## Option A: standalone CLI
+
+<Steps>
+  <Step title="Build or run the agent">
+
+    ```bash
+    go run ./cmd/acp-go-claude
+    ```
+
+    The process speaks ACP over stdin/stdout using the ACP
+    [stdio transport](https://agentclientprotocol.com/protocol/transports). In
+    normal use, an editor or host launches it as a subprocess.
+  </Step>
+
+  <Step title="Try the minimal client">
+
+    ```bash
+    go run ./examples/minimal-client "Reply with hello from ACP"
+    ```
+
+    The example starts the agent, initializes ACP, creates a session in the
+    current directory, sends a prompt, prints streamed text/tool updates, and
+    closes the session.
+  </Step>
+
+  <Step title="Try interactive chat">
+
+    ```bash
+    go run ./examples/interactive-chat
+    ```
+
+    This example demonstrates [prompt streaming](/docs/core/prompt-streaming),
+    queued input, cancellation, usage updates, tool calls, and
+    [permission callbacks](/docs/features/permissions).
+  </Step>
+</Steps>
+
+## Option B: embedded Go
+
+Use [`Serve`](/docs/reference/go-api#serve) when your Go app owns the ACP
+streams:
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "os"
+
+    claudeacp "github.com/savid/acp-go-claude"
+)
+
+func main() {
+    err := claudeacp.Serve(context.Background(), os.Stdin, os.Stdout,
+        claudeacp.WithDefaultModel("sonnet"),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+This has the same wire behavior as the standalone CLI: ACP JSON-RPC on the
+provided streams, with [Claude sessions](/docs/core/sessions) launched on
+demand. Use [CLI reference](/docs/reference/cli) for flags and
+[Go API](/docs/reference/go-api) for embedding options.
+
+## Expected host flow
+
+1. Start `acp-go-claude` as a subprocess.
+2. Call ACP [`initialize`](https://agentclientprotocol.com/protocol/initialization).
+3. Create or resume a session with an absolute `cwd`.
+4. Send [`session/prompt`](https://agentclientprotocol.com/protocol/prompt-turn).
+5. Handle streamed [`session/update`](/docs/reference/updates) notifications.
+6. Close sessions and the process when done.
+
+<Tip>
+  ACP client callbacks such as file reads, writes, permissions, elicitations,
+  and MCP messages are part of the [ACP method surface](/docs/reference/acp-methods).
+</Tip>

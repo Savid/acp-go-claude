@@ -1,0 +1,125 @@
+---
+title: "Install and configure"
+description: "Install requirements, choose a launch mode, and configure Claude"
+icon: "download"
+---
+
+## Install standalone CLI
+
+Install the command with Go:
+
+```bash
+go install github.com/savid/acp-go-claude/cmd/acp-go-claude@latest
+```
+
+This installs `acp-go-claude` into `GOBIN`, or `GOPATH/bin` when `GOBIN` is
+unset. Make sure that directory is on `PATH`.
+
+For source development:
+
+```bash
+go build ./cmd/acp-go-claude
+go run ./cmd/acp-go-claude
+```
+
+An [ACP host](https://agentclientprotocol.com/overview/clients) launches the
+resulting process and talks JSON-RPC over
+[stdin/stdout](https://agentclientprotocol.com/protocol/transports). See
+[Run modes](/docs/get-started/run-modes) for when to choose this shape.
+
+## Install embedded Go
+
+In another Go application:
+
+```bash
+go get github.com/savid/acp-go-claude
+```
+
+Then call [`Serve`](/docs/reference/go-api#serve) with your ACP streams:
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+    claudeacp.WithDefaultModel("sonnet"),
+)
+```
+
+See [Go API](/docs/reference/go-api) for the full option surface.
+
+## Claude discovery
+
+The standalone CLI discovers [Claude Code](https://code.claude.com/docs/en/overview)
+in this order:
+
+1. `WithClaudePath` or the `-claude` flag.
+2. `CLAUDE_CODE_EXECUTABLE` from the environment.
+3. `claude` from `PATH`.
+
+## Claude configuration
+
+By default, Claude uses the user's normal
+[Claude Code configuration](https://code.claude.com/docs/en/settings). You can
+point the agent at a different config directory:
+
+```bash
+go run ./cmd/acp-go-claude -claude-home /path/to/claude-home
+```
+
+Embedded equivalent:
+
+```go
+claudeacp.Serve(ctx, input, output,
+    claudeacp.WithClaudeHome("/path/to/claude-home"),
+)
+```
+
+This sets `CLAUDE_CONFIG_DIR` for launched Claude sessions. The directory is
+treated as trusted local configuration. See
+[Claude settings](/docs/features/claude-settings) for the fields this adapter
+reads.
+
+## Bare mode
+
+Bare mode launches Claude with `--bare`.
+
+```bash
+go run ./cmd/acp-go-claude -bare
+```
+
+Embedded equivalent:
+
+```go
+claudeacp.Serve(ctx, input, output,
+    claudeacp.WithBareMode(true),
+)
+```
+
+Bare mode keeps ACP-provided context and config, but opts out of Claude's
+automatic project/context discovery. It requires explicit API-key or
+[`apiKeyHelper`](https://code.claude.com/docs/en/settings) auth because Claude
+does not read keychain/OAuth credentials in bare mode. See
+[Authentication](/docs/features/authentication#bare-mode-auth).
+
+## Environment
+
+Use process environment variables in standalone mode:
+
+```bash
+ANTHROPIC_MODEL=sonnet go run ./cmd/acp-go-claude
+```
+
+For embedded Go, use `WithEnv`:
+
+```go
+claudeacp.Serve(ctx, input, output,
+    claudeacp.WithEnv(map[string]string{"ANTHROPIC_MODEL": "sonnet"}),
+)
+```
+
+The agent always adds:
+
+```bash
+CLAUDE_CODE_ENTRYPOINT=acp-go-claude
+```
+
+Gateway auth and [trace propagation](/docs/operations/observability#link-traces-to-your-application)
+can add additional Claude process environment variables at session launch time.

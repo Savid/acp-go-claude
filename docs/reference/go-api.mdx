@@ -1,0 +1,497 @@
+---
+title: "Go API"
+description: "Public package surface for embedding or configuring the ACP agent"
+icon: "code"
+---
+
+Import the root package:
+
+```go
+import claudeacp "github.com/savid/acp-go-claude"
+```
+
+The public API is intentionally small. Most applications either run the
+[standalone CLI](/docs/reference/cli) or call `Serve` with their own
+[ACP JSON-RPC streams](https://agentclientprotocol.com/protocol/transports).
+The rest of the surface configures Claude process launch, session storage,
+telemetry, and the internal MCP proxy subcommand.
+
+This page is the embedded Go reference. For standalone CLI flags and subcommands,
+see [CLI reference](/docs/reference/cli).
+
+## Serve
+
+```go
+func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) error
+```
+
+`Serve` runs the ACP agent over the provided streams. It owns:
+
+- ACP request dispatch
+- client callback routing
+- Claude session creation
+- permission, elicitation, terminal, and MCP callbacks
+- agent shutdown when the context or connection closes
+
+Use this for normal embedding:
+
+```go
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+err := claudeacp.Serve(ctx, os.Stdin, os.Stdout,
+    claudeacp.WithClaudePath("/usr/local/bin/claude"),
+    claudeacp.WithDefaultModel("sonnet"),
+    claudeacp.WithLogger(slog.Default()),
+)
+if err != nil && !errors.Is(err, context.Canceled) {
+    return err
+}
+```
+
+The `input` and `output` streams are the ACP JSON-RPC transport. Do not write
+logs, debug output, or OpenTelemetry console exporter output to the same stdout
+stream.
+
+## Agent
+
+```go
+type Agent struct { /* unexported fields */ }
+
+func NewAgent(opts ...Option) *Agent
+func (a *Agent) Close() error
+```
+
+`Agent` implements the ACP agent interfaces from
+[`github.com/coder/acp-go-sdk`](https://github.com/coder/acp-go-sdk). It is
+exported so the package can expose the protocol handler, but most hosts should
+not call agent methods directly.
+
+Use `Serve` unless you are writing package-level tests or a very custom
+transport that can provide the same callback wiring as the local dispatcher.
+Methods such as `Prompt`, permission handling, elicitation, terminal output,
+and ACP-transport MCP rely on the active ACP client connection.
+
+`Close` cancels and closes:
+
+- active Claude sessions
+- NES sessions
+- MCP bridge connections
+- in-progress session imports
+- cached permission rules
+- the active ACP client connection reference
+- materialized temporary session directories
+
+Always call `Close` if you create an `Agent` directly.
+
+## Request Builders
+
+The ACP SDK request structs are still the protocol source of truth. For
+embedded Go callers, this package also provides small constructors that return
+normal SDK request values while filling required empty slices such as
+`mcpServers`.
+
+```go
+func NewSessionRequest(cwd string, opts ...SessionRequestOption) acp.NewSessionRequest
+func LoadSessionRequest(sessionID acp.SessionId, cwd string, opts ...SessionRequestOption) acp.LoadSessionRequest
+func ResumeSessionRequest(sessionID acp.SessionId, cwd string, opts ...SessionRequestOption) acp.ResumeSessionRequest
+func ForkSessionRequest(sessionID acp.SessionId, cwd string, opts ...SessionRequestOption) acp.UnstableForkSessionRequest
+```
+
+Use them when driving an embedded ACP connection:
+
+```go
+session, err := conn.NewSession(ctx, claudeacp.NewSessionRequest(cwd))
+if err != nil {
+    return err
+}
+
+resp, err := conn.Prompt(ctx, claudeacp.TextPromptRequest(
+    session.SessionId,
+    "Reply with hello.",
+))
+```
+
+Session lifecycle request options:
+
+| Option | Purpose |
+| --- | --- |
+| `WithSessionMCPServers(servers...)` | Set MCP servers for `session/new`, `session/load`, `session/resume`, or `session/fork`. |
+| `WithSessionAdditionalDirectories(paths...)` | Set additional workspace roots. |
+| `WithSessionMeta(meta)` | Merge custom ACP `_meta`. |
+| `WithSessionClaudeOptions(options)` | Merge `_meta.claude.options`. |
+| `WithSessionRawSDKMessages(enabled)` | Set `_meta.claude.emitRawSDKMessages`. |
+| `WithSessionOutputFormat(format)` | Set `_meta.claude.options.outputFormat`. |
+
+All helpers clone incoming slices and maps before assigning them to request
+structs.
+
+Prompt helpers:
+
+```go
+func PromptRequest(sessionID acp.SessionId, blocks ...acp.ContentBlock) acp.PromptRequest
+func TextPromptRequest(sessionID acp.SessionId, text string) acp.PromptRequest
+```
+
+`PromptRequest` returns a request with a non-nil `Prompt` slice even when no
+blocks are passed.
+
+Session-list helpers are available for pointer-valued filters:
+
+```go
+func ListSessionsRequest(opts ...ListSessionsRequestOption) acp.ListSessionsRequest
+func WithListSessionsCwd(cwd string) ListSessionsRequestOption
+func WithListSessionsCursor(cursor string) ListSessionsRequestOption
+func WithListSessionsAdditionalDirectories(paths ...string) ListSessionsRequestOption
+func WithListSessionsMeta(meta map[string]any) ListSessionsRequestOption
+```
+
+## Options
+
+Options are process-wide defaults. Per-session overrides can be provided through
+ACP request fields or [`_meta.claude.options`](/docs/reference/meta#session-options).
+
+### Identity
+
+These fields configure the identity advertised by `initialize`:
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `AgentName` | `acp-go-claude` | Protocol identifier advertised in `initialize`. |
+| `AgentTitle` | `acp-go-claude` | Human-readable title advertised in `initialize`. |
+| `AgentVersion` | `0.1.0` | Version advertised in `initialize` and OTel instrumentation. |
+
+Configure these with `WithAgentName`, `WithAgentTitle`, and
+`WithAgentVersion`. The standalone CLI sets `AgentVersion` from build info when
+available.
+
+### Claude process
+
+| Option | Purpose |
+| --- | --- |
+| `WithClaudePath(path)` | Use a specific Claude CLI executable. If empty, `claude` is discovered from `PATH` or `CLAUDE_CODE_EXECUTABLE`. |
+| `WithClaudeHome(path)` | Set `CLAUDE_CONFIG_DIR` for launched Claude sessions. |
+| `WithEnv(env)` | Merge environment variables into every launched Claude process. |
+| `WithBareMode(enabled)` | Launch Claude with `--bare` for deterministic sessions. |
+| `WithSettingSources(sources...)` | Control Claude Code filesystem settings sources; no arguments disables user/project/local sources. |
+| `WithInitializeTimeout(timeout)` | Bound the Claude control-protocol initialize request. |
+| `WithControlHandlerTimeout(timeout)` | Bound one inbound Claude control request. |
+
+`WithEnv` is applied after discovered
+[Claude settings](/docs/features/claude-settings) env and before
+[gateway auth](/docs/features/authentication#gateway-auth) env. Per-session
+`_meta.claude.options.env` can override both settings and global env before
+gateway auth is applied.
+
+Bare mode disables Claude's automatic project/context discovery. Use explicit
+API-key or `apiKeyHelper` auth when launching bare sessions.
+
+Default setting sources are `user`, `project`, and `local`, matching Claude
+Code SDK behavior. Use `WithSettingSources(claudeacp.SettingSourceProject)` for
+project-only discovery, or `WithSettingSources()` to pass
+`--setting-sources=`.
+
+### Session defaults
+
+| Option | Purpose |
+| --- | --- |
+| `WithDefaultModel(model)` | Initial model for new sessions. |
+| `WithDefaultPermissionMode(mode)` | Initial Claude permission mode. |
+| `WithDefaultSystemPrompt(prompt)` | Initial system prompt for new sessions. |
+| `WithHideClaudeAuth(enabled)` | Hide Claude subscription terminal auth methods. |
+| `WithAllowSkipPermissionsFlag(enabled)` | Permit Claude's skip-permissions capability flag when available. |
+
+Supported permission-mode strings are:
+
+| Value | Meaning |
+| --- | --- |
+| `default` | Normal Claude permission behavior. |
+| `acceptEdits` | Auto-accept edit tools where Claude supports it. |
+| `bypassPermissions` | Bypass Claude permission prompts when available. |
+| `plan` | Plan mode. |
+| `dontAsk` | Reject permission prompts. |
+| `auto` | Claude auto mode. |
+
+ACP mode IDs are documented separately in [Models and config](/docs/features/models-config).
+
+### Observability
+
+| Option | Purpose |
+| --- | --- |
+| `WithLogger(logger)` | Structured diagnostic logger. Defaults to `slog.Default()`. |
+| `WithTracerProvider(provider)` | Adapter spans. If nil, tracing is a no-op. |
+| `WithMeterProvider(provider)` | Adapter metrics. If nil, metrics are no-ops. |
+| `WithTextMapPropagator(propagator)` | Extract ACP `_meta` trace context and inject Claude launch env. |
+
+The package does not call global OpenTelemetry setup functions and does not
+shut down caller-provided providers. Callers own exporter setup, `ForceFlush`,
+and `Shutdown`.
+
+See [Observability](/docs/operations/observability) for the Claude Code
+telemetry env variables and adapter metric families.
+
+### Session storage
+
+| Option | Purpose |
+| --- | --- |
+| `WithSessionStore(store)` | Mirror Claude JSONL rows and hydrate missing local sessions. |
+| `WithSessionStoreLoadTimeout(timeout)` | Bound store load/list operations used during load and resume. |
+
+If no external store is configured, ordinary sessions are not mirrored. Session
+imports still use a process-local in-memory store so imported sessions can be
+loaded or resumed during the same agent process.
+
+### MCP proxy
+
+| Option | Purpose |
+| --- | --- |
+| `WithMCPProxyCommand(command, args...)` | Override the command used for ACP-transport MCP stdio shims. |
+
+Most consumers do not need this. The default is the current executable with the
+`mcp-proxy` subcommand.
+
+## ClaudeOptions
+
+```go
+type ClaudeOptions struct {
+    Bare                  bool              `json:"bare,omitempty"`
+    Env                   map[string]string `json:"env,omitempty"`
+    SystemPrompt          string            `json:"systemPrompt,omitempty"`
+    Model                 string            `json:"model,omitempty"`
+    PermissionMode        string            `json:"permissionMode,omitempty"`
+    AdditionalDirectories []string          `json:"additionalDirectories,omitempty"`
+    OutputFormat          *ClaudeOutputFormat `json:"outputFormat,omitempty"`
+}
+
+type ClaudeOutputFormat struct {
+    Type   string         `json:"type"`
+    Schema map[string]any `json:"schema"`
+}
+
+const ClaudeOutputFormatJSONSchema = "json_schema"
+
+func (options ClaudeOptions) Meta() map[string]any
+func NewClaudeOptions(opts ...ClaudeOption) ClaudeOptions
+func JSONSchemaOutputFormat(schema map[string]any) ClaudeOutputFormat
+```
+
+Use `ClaudeOptions` to build supported
+[`_meta.claude.options`](/docs/reference/meta#session-options) values
+without hand-assembling maps:
+
+```go
+meta := claudeacp.ClaudeOptions{
+    Bare:           true,
+    Model:          "sonnet",
+    PermissionMode: "acceptEdits",
+    OutputFormat: &claudeacp.ClaudeOutputFormat{
+        Type: claudeacp.ClaudeOutputFormatJSONSchema,
+        Schema: map[string]any{
+            "type": "object",
+            "properties": map[string]any{
+                "ok": map[string]any{"type": "boolean"},
+            },
+            "required": []any{"ok"},
+            "additionalProperties": false,
+        },
+    },
+    Env: map[string]string{
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "OTEL_TRACES_EXPORTER":         "otlp",
+    },
+    AdditionalDirectories: []string{"/workspace/shared"},
+}.Meta()
+```
+
+The same value can be built with helper options:
+
+```go
+options := claudeacp.NewClaudeOptions(
+    claudeacp.WithClaudeBare(true),
+    claudeacp.WithClaudeModel("sonnet"),
+    claudeacp.WithClaudePermissionMode("acceptEdits"),
+    claudeacp.WithClaudeJSONSchema(schema),
+    claudeacp.WithClaudeEnv(map[string]string{
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "OTEL_TRACES_EXPORTER":         "otlp",
+    }),
+    claudeacp.WithClaudeAdditionalDirectories("/workspace/shared"),
+)
+
+req := claudeacp.NewSessionRequest(
+    cwd,
+    claudeacp.WithSessionClaudeOptions(options),
+)
+```
+
+Available `ClaudeOption` helpers:
+
+| Option | Purpose |
+| --- | --- |
+| `WithClaudeBare(enabled)` | Set `bare`. |
+| `WithClaudeEnv(env)` | Set session env overrides. |
+| `WithClaudeSystemPrompt(prompt)` | Set `systemPrompt`. |
+| `WithClaudeModel(model)` | Set `model`. |
+| `WithClaudePermissionMode(mode)` | Set `permissionMode`. |
+| `WithClaudeAdditionalDirectories(paths...)` | Set `additionalDirectories`. |
+| `WithClaudeOutputFormat(format)` | Set `outputFormat`. |
+| `WithClaudeJSONSchema(schema)` | Set `outputFormat` to `json_schema`. |
+
+Attach the returned value to ACP `session/new`, `session/load`, or
+`session/resume` request metadata:
+
+```json
+{
+  "_meta": {
+    "claude": {
+      "options": {
+        "bare": true,
+        "model": "sonnet",
+        "permissionMode": "acceptEdits",
+        "additionalDirectories": ["/workspace/shared"],
+        "outputFormat": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "ok": { "type": "boolean" }
+            },
+            "required": ["ok"],
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Unsupported option keys are rejected. `additionalDirectories` and `cwd` must be
+absolute paths at session start, matching ACP filesystem rules.
+`OutputFormat` is also a session-start option; changing the schema requires a
+new session fingerprint and Claude process.
+
+## SessionStore
+
+```go
+type SessionStoreEntry = json.RawMessage
+
+type SessionKey struct {
+    ProjectKey string
+    SessionID  string
+    Subpath    string
+}
+
+type SessionStore interface {
+    Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
+    Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
+}
+```
+
+`SessionStore` stores Claude-native JSONL rows, not ACP replay objects.
+Implement it when sessions need to survive outside the local Claude config
+directory.
+
+### Store contract
+
+`Append` should be durable before returning. `Load` must return immutable data
+or a copy because the adapter may retain or trim returned byte slices.
+
+Treat `SessionKey` as opaque except for the documented main/subpath split:
+
+| Field | Meaning |
+| --- | --- |
+| `ProjectKey` | Claude's sanitized project directory key for the session `cwd`. |
+| `SessionID` | Claude session UUID or imported ACP session ID. |
+| `Subpath` | Empty for the main transcript, slash-separated for subagent transcript keys. |
+
+### Optional store interfaces
+
+Implement optional interfaces to unlock more behavior:
+
+```go
+type SessionStoreLister interface {
+    ListSessions(ctx context.Context, projectKey string) ([]SessionSummary, error)
+}
+
+type SessionStoreSubkeyLister interface {
+    ListSubkeys(ctx context.Context, key SessionKey) ([]string, error)
+}
+
+type SessionStoreDeleter interface {
+    Delete(ctx context.Context, key SessionKey) error
+}
+
+type SessionStoreReplacement struct {
+    Key     SessionKey
+    Entries []SessionStoreEntry
+}
+
+type SessionStoreReplacer interface {
+    ReplaceSession(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error
+}
+```
+
+| Interface | Enables |
+| --- | --- |
+| `SessionStoreLister` | Include remote sessions in `session/list`. |
+| `SessionStoreSubkeyLister` | Hydrate subagent transcripts and metadata during store-backed load/resume. |
+| `SessionStoreDeleter` | Explicit transcript deletion for stores that need it. |
+| `SessionStoreReplacer` | Atomically replace an existing imported session without deleting the old data first. |
+
+Deleting a main transcript should also delete its subkeys.
+
+### In-memory store
+
+```go
+store := claudeacp.NewInMemorySessionStore()
+
+err := claudeacp.Serve(ctx, input, output,
+    claudeacp.WithSessionStore(store),
+)
+```
+
+`InMemorySessionStore` implements `SessionStore`, `SessionStoreLister`,
+`SessionStoreSubkeyLister`, `SessionStoreDeleter`, and
+`SessionStoreReplacer`. Use it for tests, examples, and local demos only.
+
+See [Session store](/docs/features/session-store) and
+[Session import](/docs/reference/session-import) for the wire-level behavior.
+
+## MCP proxy API
+
+```go
+const MCPProxyTokenFileEnv = "ACP_GO_CLAUDE_MCP_PROXY_TOKEN_FILE"
+
+type MCPProxyOptions struct {
+    Network string
+    Address string
+    Token   string
+    ACPID   string
+}
+
+func RunMCPProxy(ctx context.Context, stdin io.Reader, stdout io.Writer, options MCPProxyOptions) error
+```
+
+`RunMCPProxy` runs the stdio shim launched by Claude for
+[ACP-transport MCP](/docs/features/mcp#acp-transport-bridge).
+It is intended for the `acp-go-claude mcp-proxy` subcommand, not normal
+application code.
+
+The parent agent writes the bridge token to a `0600` temp file and passes the
+path in `MCPProxyTokenFileEnv`. The token value should not be placed in argv or
+ordinary logs.
+
+## Minimal embedding checklist
+
+1. Provide ACP JSON-RPC streams to `Serve`.
+2. Keep stdout reserved for ACP when serving over stdio.
+3. Use absolute `cwd` and `additionalDirectories` in session lifecycle
+   requests.
+4. Implement the ACP client callbacks your host advertises.
+5. Preserve permission prompts and user approval choices.
+6. Call cancellation through ACP `session/cancel`; do not close stdin to
+   interrupt a turn.
+7. Use `WithSessionStore` if sessions must resume without local Claude JSONL.
+8. Configure Claude Code telemetry through env and adapter telemetry through
+   OTel providers or the standalone CLI's env setup.

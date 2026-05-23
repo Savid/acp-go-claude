@@ -1,0 +1,66 @@
+---
+title: "Run modes"
+description: "Use acp-go-claude as a standalone CLI or embedded Go adapter"
+icon: "route"
+---
+
+`acp-go-claude` supports two integration shapes. Both expose the same
+[ACP](https://agentclientprotocol.com/) agent behavior and both wrap the local
+[`claude` CLI](https://code.claude.com/docs/en/overview). The difference is
+where the ACP process boundary lives.
+
+## Standalone CLI
+
+Use the standalone CLI when an editor, host, or test client launches ACP agents
+as subprocesses and talks ACP over
+[stdin/stdout](https://agentclientprotocol.com/protocol/transports):
+
+```bash
+go run ./cmd/acp-go-claude
+```
+
+This is the normal shape for editor integrations. The process is not an
+interactive chat UI; it waits for ACP JSON-RPC input from the host.
+
+Configuration lives in [CLI reference](/docs/reference/cli). Env-based
+[OpenTelemetry setup](/docs/operations/observability) is owned by the
+standalone CLI.
+
+## Embedded Go
+
+Use [`Serve`](/docs/reference/go-api#serve) when a Go application owns the ACP
+host/runtime and wants to provide the JSON-RPC streams directly:
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+    claudeacp.WithClaudePath("/usr/local/bin/claude"),
+    claudeacp.WithDefaultModel("sonnet"),
+)
+```
+
+Embedded mode is still ACP over streams. It is not a direct Anthropic API SDK
+and it is not a direct function-call chat API. Use it when you need
+programmatic options such as [`WithSessionStore`](/docs/reference/go-api#sessionstore),
+caller-owned [OTel providers](/docs/operations/observability#embedded-ownership),
+or a custom process lifecycle.
+
+Configuration lives in [Go API](/docs/reference/go-api).
+
+## Same ACP contract
+
+After startup, both modes use the same ACP method flow:
+
+```text
+initialize
+session/new or session/load or session/resume
+session/prompt
+session/update notifications...
+session/cancel optional
+session/close
+```
+
+The host must still implement the ACP client callbacks it advertises, including
+[updates](/docs/reference/updates), [permissions](/docs/features/permissions),
+[file IO](https://agentclientprotocol.com/protocol/file-system), terminal
+output, [elicitation](/docs/features/elicitation), and
+[MCP callbacks](/docs/features/mcp).

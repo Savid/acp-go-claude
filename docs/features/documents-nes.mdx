@@ -1,0 +1,58 @@
+---
+title: "Documents and NES"
+description: "Editor document context and next-edit suggestions"
+icon: "file-pen"
+---
+
+The adapter implements ACP
+[document/file-system callbacks](https://agentclientprotocol.com/protocol/file-system)
+and the unstable
+[Next Edit Suggestions RFD](https://agentclientprotocol.com/rfds/next-edit-suggestions)
+lifecycle.
+
+## Document context
+
+Supported notifications:
+
+- `document/didOpen`
+- `document/didChange`
+- `document/didFocus`
+- `document/didSave`
+- `document/didClose`
+
+Open and focused documents are tracked per [session](/docs/core/sessions).
+Before a prompt is sent to Claude, the adapter prepends focused document
+context so Claude can reason about editor state.
+
+Position encoding is negotiated during
+[`initialize`](https://agentclientprotocol.com/protocol/initialization). The
+adapter defaults to UTF-16 when the client does not negotiate another supported
+encoding.
+
+The agent advertises full-document `didChange` sync. It can apply ranged
+changes internally, but hosts should treat full sync as the negotiated
+capability.
+
+## NES lifecycle
+
+Supported unstable methods:
+
+- `nes/start`
+- `nes/suggest`
+- `nes/accept`
+- `nes/reject`
+- `nes/close`
+
+NES suggestions are Claude-backed. The adapter starts a short-lived Claude
+client, prompts it for ACP-shaped JSON suggestions, validates the result, and
+returns edit/jump/rename/search-and-replace suggestions. The implementation
+lives beside editor document state in
+[`documents.go`](https://github.com/savid/acp-go-claude/blob/main/documents.go)
+and [`nes.go`](https://github.com/savid/acp-go-claude/blob/main/nes.go).
+
+## Practical limits
+
+- Suggestion generation timeout is 90 seconds.
+- At most two NES suggestions run concurrently per NES session.
+- Invalid or prose responses are treated as an empty suggestion list.
+- Accepted/rejected suggestion IDs are recorded in session memory for context.

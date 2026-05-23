@@ -1,0 +1,191 @@
+package claudeacp
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/permissions"
+)
+
+const (
+	permissionAllowOnce    acp.PermissionOptionId = "allow_once"
+	permissionAllowAlways  acp.PermissionOptionId = "allow_always"
+	permissionRejectOnce   acp.PermissionOptionId = "reject_once"
+	permissionRejectAlways acp.PermissionOptionId = "reject_always"
+
+	jsonFieldID                 = "id"
+	jsonFieldCwd                = "cwd"
+	jsonFieldEntries            = "entries"
+	jsonFieldError              = "error"
+	jsonFieldFormat             = "format"
+	jsonFieldImportID           = "importId"
+	jsonFieldIndex              = "index"
+	jsonFieldMessage            = "message"
+	jsonFieldMethod             = "method"
+	jsonFieldMeta               = "_meta"
+	jsonFieldMode               = "mode"
+	jsonFieldOffset             = "offset"
+	jsonFieldRequest            = "request"
+	jsonFieldSHA256             = "sha256"
+	jsonFieldSubpath            = "subpath"
+	jsonFieldText               = "text"
+	jsonFieldTitle              = "title"
+	jsonFieldType               = "type"
+	jsonFieldURI                = "uri"
+	jsonFieldURL                = "url"
+	jsonFieldSubtype            = "subtype"
+	permissionUpdateAddRules    = "addRules"
+	permissionUpdateBehavior    = "behavior"
+	permissionUpdateDestination = "destination"
+	permissionUpdateDirectories = "directories"
+	permissionUpdateSetMode     = "setMode"
+	permissionUpdateRules       = "rules"
+	permissionUpdateRuleContent = "ruleContent"
+	permissionUpdateSession     = "session"
+	permissionUpdateToolName    = "toolName"
+	permissionUpdateAddDirs     = "addDirectories"
+
+	acpFieldConfig         = "config"
+	acpFieldRaw            = "raw"
+	acpFieldSessionID      = "sessionId"
+	acpMetaKey             = "github.com/savid/acp-go-claude"
+	claudeMetaToolResponse = "toolResponse"
+
+	askUserQuestionTool        = "AskUserQuestion"
+	enterPlanModeTool          = "EnterPlanMode"
+	exitPlanModeTool           = "ExitPlanMode"
+	elicitationComplete        = "elicitation_complete"
+	permissionCancelledMessage = "Permission request cancelled"
+	permissionRejectedMessage  = "Rejected by ACP client"
+
+	askFieldAnswers     = "answers"
+	askFieldDescription = "description"
+	askFieldHeader      = "header"
+	askFieldID          = jsonFieldID
+	askFieldIsOther     = "isOther"
+	askFieldIsSecret    = "isSecret"
+	askFieldMultiSelect = "multiSelect"
+	askFieldOptions     = "options"
+	askFieldQuestion    = "question"
+	askFieldQuestions   = "questions"
+
+	originKindTaskNotification = "task-notification"
+	stopReasonMaxTokens        = "max_tokens"
+
+	systemContent          = "content"
+	systemHookEventName    = "hook_event_name"
+	systemHookPostToolUse  = "PostToolUse"
+	systemHookCallbackID   = "acp_post_tool_use"
+	systemState            = "state"
+	systemStateIdle        = "idle"
+	systemStatus           = "status"
+	systemStatusCompacting = "compacting"
+	systemToolResponse     = "tool_response"
+	systemToolUseID        = "tool_use_id"
+
+	systemSubtypeCompactBoundary     = "compact_boundary"
+	systemSubtypeHookResponse        = "hook_response"
+	systemSubtypeLocalCommandOutput  = "local_command_output"
+	systemSubtypeSessionStateChanged = "session_state_changed"
+
+	compactingMessageText         = "Compacting..."
+	compactingCompleteMessageText = "\n\nCompacting completed."
+
+	defaultContextWindow = 200000
+	largeContextWindow   = 1000000
+	largeContextToken    = "1m"
+
+	streamEventMessageDelta = "message_delta"
+	streamEventMessageStart = "message_start"
+
+	localCommandContext    = "/context"
+	localCommandExtraUsage = "/extra-usage"
+	localCommandHeapdump   = "/heapdump"
+
+	defaultSessionCloseTurnWait = 5 * time.Second
+	maxHandledHooks             = 1024
+)
+
+var savePermissionRules = func(ctx context.Context, claudeHome string, sessionID acp.SessionId, rules map[string]string) error {
+	store := permissions.Store{ClaudeHome: claudeHome}
+
+	return store.Save(ctx, string(sessionID), rules)
+}
+
+// Session is an opaque handle for one Claude CLI process owned by an ACP
+// session. Callers receive Session values from Agent methods; constructing one
+// directly is unsupported.
+type Session struct {
+	agent                 *Agent
+	id                    acp.SessionId
+	cwd                   string
+	additionalDirectories []string
+	title                 string
+	updatedAt             string
+	fingerprint           string
+	model                 string
+	availableModels       []claude.AvailableModelInfo
+	modelOverrides        map[string]string
+	outputStyle           string
+	availableOutputStyles []string
+	mode                  acp.SessionModeId
+	effort                string
+	fastMode              bool
+	fastModeKnown         bool
+	availableCommands     []claude.SlashCommand
+	contextWindowSize     int
+
+	client *claude.Client
+
+	turn             chan struct{}
+	mu               sync.Mutex
+	permissionSaveMu sync.Mutex
+	cancel           context.CancelFunc
+	turnDone         <-chan struct{}
+	turnCancelled    bool
+	permissionCancel map[string]*permissionRequestCancel
+	permissionRules  map[string]string
+	mcpBridge        *mcpSessionBridge
+	materialized     *materializedSession
+	mirror           *sessionMirror
+	rawMessages      rawMessageConfig
+	gatewayAuth      bool
+	handledHooks     map[string]struct{}
+	handledHookOrder []string
+	closeTurnWait    time.Duration
+}
+
+type promptLoopState struct {
+	promptUsage            *acp.Usage
+	lastAssistantErrorKind string
+	lastAssistantModel     string
+	lastStreamUsage        usageSnapshot
+	lastStreamUsageKnown   bool
+	lastEmittedUsageTotal  int
+}
+
+type usageSnapshot struct {
+	inputTokens          int
+	outputTokens         int
+	cacheReadTokens      int
+	cacheCreationTokens  int
+	reasoningOutputToken int
+}
+
+type askUserQuestion struct {
+	ID          string
+	Question    string
+	Header      string
+	MultiSelect bool
+	IsOther     bool
+	IsSecret    bool
+	Options     []askUserQuestionOption
+}
+
+type askUserQuestionOption struct {
+	Label       string
+	Description string
+}

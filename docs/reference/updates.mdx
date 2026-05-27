@@ -59,8 +59,8 @@ When Claude Code structured output is enabled, the same final usage update
 includes the validated object under `_meta.claude.structuredOutput`.
 Mode/config updates map to [Models and config](/docs/features/models-config).
 
-`session_info_update` lets hosts refresh tab titles without replaying the
-whole transcript:
+`session_info_update` lets hosts refresh tab titles and Claude-specific session
+metadata without replaying the whole transcript:
 
 ```json
 {
@@ -73,6 +73,38 @@ whole transcript:
   }
 }
 ```
+
+Goal-only updates set `_meta.claude.goal` without changing `title` or
+`updatedAt`:
+
+```json
+{
+  "sessionId": "00000000-0000-4000-8000-000000000000",
+  "update": {
+    "sessionInfoUpdate": {
+      "_meta": {
+        "claude": {
+          "goal": {
+            "objective": "Ship OAuth login",
+            "completionCondition": "Browser login works and tests pass",
+            "status": "active",
+            "createdAt": "2026-05-27T00:00:00Z",
+            "updatedAt": "2026-05-27T00:00:00Z",
+            "completedAt": null,
+            "reason": null,
+            "reasonCode": null,
+            "goalId": null,
+            "source": "client"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+See [Goals](/docs/features/goals) for set/clear semantics and native Claude
+mapping.
 
 `current_mode_update` is emitted when the client changes mode, when Claude
 enters plan mode through the handled hook path, and when `ExitPlanMode` returns

@@ -157,6 +157,11 @@ func (a *Agent) UnstableForkSession(
 		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
+	goalInput, err := parseGoalFromMeta(params.Meta)
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+	}
+
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories, metaOptions)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.UnstableForkSessionResponse{}, validationErr
@@ -200,6 +205,8 @@ func (a *Agent) UnstableForkSession(
 	if err := a.storeStartedSession(ctx, session); err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
+
+	session.applyStoredClientGoalInput(goalInput)
 
 	if err := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); err != nil {
 		a.removeSession(ctx, session.id, session)

@@ -734,7 +734,7 @@ func TestSessionMirrorPathAndPromptDrain(t *testing.T) {
 	_, err = sessionKeyForMirrorPath(filepath.Join(t.TempDir(), "outside.jsonl"), filepath.Join(claudeHome, "projects"))
 	require.Error(t, err)
 
-	handled, err := (&Session{}).handleSessionMirror(ctx, &claude.TranscriptMirrorMessage{})
+	handled, err := (&Session{mirror: newSessionMirror(nil, nil, claudeHome)}).handleSessionMirror(ctx, &claude.TranscriptMirrorMessage{})
 	require.NoError(t, err)
 	require.True(t, handled)
 }
@@ -746,31 +746,37 @@ func TestSessionMirrorBranches(t *testing.T) {
 	projectsDir := filepath.Join(claudeHome, "projects")
 	projectKey := "-repo"
 
-	require.Nil(t, newSessionMirror(nil, nil, claudeHome))
-
-	mirror := newSessionMirror(nil, store, claudeHome)
-	handled, err := mirror.handle(ctx, &claude.UserMessage{})
-	require.NoError(t, err)
-	require.False(t, handled)
-
-	handled, err = mirror.handle(ctx, &claude.TranscriptMirrorMessage{})
-	require.NoError(t, err)
-	require.True(t, handled)
-
-	handled, err = mirror.handle(ctx, &claude.TranscriptMirrorMessage{
+	// A storeless mirror still owns goal extraction but skips the store append.
+	storelessSession := &Session{mirror: newSessionMirror(nil, nil, claudeHome)}
+	handled, err := storelessSession.handleSessionMirror(ctx, &claude.TranscriptMirrorMessage{
 		FilePath: filepath.Join(t.TempDir(), "outside.jsonl"),
 		Entries:  []SessionStoreEntry{json.RawMessage(`{"type":"user"}`)},
 	})
 	require.NoError(t, err)
 	require.True(t, handled)
 
+	storeSession := &Session{mirror: newSessionMirror(nil, store, claudeHome)}
+	handled, err = storeSession.handleSessionMirror(ctx, &claude.UserMessage{})
+	require.NoError(t, err)
+	require.False(t, handled)
+
+	handled, err = storeSession.handleSessionMirror(ctx, &claude.TranscriptMirrorMessage{})
+	require.NoError(t, err)
+	require.True(t, handled)
+
+	// appendFrame is the store-append helper: a path outside the projects dir is
+	// dropped without error, while a store failure surfaces.
+	mirror := newSessionMirror(nil, store, claudeHome)
+	require.NoError(t, mirror.appendFrame(ctx, &claude.TranscriptMirrorMessage{
+		FilePath: filepath.Join(t.TempDir(), "outside.jsonl"),
+		Entries:  []SessionStoreEntry{json.RawMessage(`{"type":"user"}`)},
+	}))
+
 	failingMirror := newSessionMirror(nil, appendFailSessionStore{}, claudeHome)
-	handled, err = failingMirror.handle(ctx, &claude.TranscriptMirrorMessage{
+	require.Error(t, failingMirror.appendFrame(ctx, &claude.TranscriptMirrorMessage{
 		FilePath: filepath.Join(projectsDir, projectKey, testSessionID+".jsonl"),
 		Entries:  []SessionStoreEntry{json.RawMessage(`{"type":"user"}`)},
-	})
-	require.Error(t, err)
-	require.True(t, handled)
+	}))
 
 	retryStore := &retryAppendStore{failures: 2}
 	err = appendMirrorEntries(ctx, retryStore, SessionKey{ProjectKey: projectKey, SessionID: testSessionID}, []SessionStoreEntry{json.RawMessage(`{"type":"user"}`)})
@@ -816,7 +822,6 @@ func TestSessionDrainMirrorBranches(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	require.NoError(t, (&Session{}).drainSessionMirror(ctx))
 
 	claudeHome := t.TempDir()
 	projectsDir := filepath.Join(claudeHome, "projects")

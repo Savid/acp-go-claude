@@ -64,8 +64,8 @@ func main() {
 ```
 
 See [Go API docs](docs/reference/go-api.mdx) for options such as Claude path,
-Claude home, default model, session storage, permissions, MCP proxy override,
-and OpenTelemetry providers.
+Claude home, default model, session storage, goals, permissions, MCP proxy
+override, and OpenTelemetry providers.
 
 ## What It Provides
 
@@ -75,11 +75,14 @@ and OpenTelemetry providers.
 - Prompt streaming for messages, thoughts, tool calls, tool results, plans,
   usage, and session metadata.
 - Claude Code structured output through session-level JSON Schema.
+- Claude-specific session goals and native `/goal` state mapping.
 - Claude permission modes, permission prompts, plan mode, elicitation, and
   `AskUserQuestion` bridging.
 - MCP stdio, HTTP, SSE, and ACP-transport bridging. SSE is still accepted for
   Claude compatibility, but HTTP is preferred for new MCP servers.
-- Optional session mirroring/import through a host-provided `SessionStore`.
+- Session import and optional durable mirroring through a host-provided
+  `SessionStore`; transcript mirror frames are always requested for native goal
+  extraction.
 - Optional raw Claude stream-json extension notifications.
 - OpenTelemetry spans, metrics, trace propagation, and structured logs without
   recording prompt/tool secrets by default.

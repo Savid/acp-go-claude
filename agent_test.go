@@ -583,6 +583,25 @@ func TestAgentInitialize(t *testing.T) {
 			"hiddenTool":       "StructuredOutput",
 			"rawEvents":        rawClaudeSDKMessageMethod,
 		},
+		claudeGoalsCapabilityKey: map[string]any{
+			capabilityScopeKey:     capabilityScopeSession,
+			goalCapabilityStateKey: "session_info_update._meta.claude.goal",
+			"initialState": map[string]any{
+				"sessionResponses": []string{
+					"session/new.result._meta.claude.goal",
+					"session/load.result._meta.claude.goal",
+					"session/resume.result._meta.claude.goal",
+				},
+				"listSummary": "session/list.result.sessions[]._meta.claude.goal",
+			},
+			"setMethod":              claudeSessionSetGoalMethod,
+			"semantics":              "full-snapshot",
+			"maxObjectiveBytes":      maxGoalObjectiveBytes,
+			"maxSummaryRunes":        maxGoalSummaryRunes,
+			"statuses":               []string{ClaudeGoalStatusActive, ClaudeGoalStatusCompleted, ClaudeGoalStatusBlocked},
+			"clientSettableStatuses": []string{ClaudeGoalStatusActive, ClaudeGoalStatusBlocked},
+			"clearValue":             nil,
+		},
 	}, resp.AgentCapabilities.Meta[claudeMetaKey])
 	require.Empty(t, resp.AuthMethods)
 }
@@ -4210,7 +4229,7 @@ func TestAgentResumeAndLoadSession(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resume.Modes)
 	require.Nil(t, resume.Models)
-	require.Empty(t, resume.Meta)
+	require.Equal(t, map[string]any{claudeMetaKey: map[string]any{claudeGoalMetaKey: nil}}, resume.Meta)
 
 	client := &recordingACPClient{}
 	_ = connectAgentForTest(t, agent, client)
@@ -4223,7 +4242,7 @@ func TestAgentResumeAndLoadSession(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, load.Modes)
 	require.Nil(t, load.Models)
-	require.Empty(t, load.Meta)
+	require.Equal(t, map[string]any{claudeMetaKey: map[string]any{claudeGoalMetaKey: nil}}, load.Meta)
 
 	require.Eventually(t, func() bool {
 		return len(client.recordedUpdates()) == 2

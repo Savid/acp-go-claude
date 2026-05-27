@@ -25,7 +25,11 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 	defer releaseTurn()
 
+	s.stopLateMirrorProcessor(ctx)
+
 	localOnlyCommand := localOnlySlashCommand(params.Prompt)
+	localGoalClear := goalClearSlashCommand(params.Prompt)
+	localGoalClearAt := time.Now().UTC().Format(time.RFC3339Nano)
 
 	prompt := params.Prompt
 	if contextText := s.agent.documentContext(s.id); contextText != "" {
@@ -94,7 +98,7 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		}
 
 		if result, ok := msg.(*claude.ResultMessage); ok {
-			resp, done, err := s.finishPromptResult(turnCtx, ctx, params, result, state, localOnlyCommand)
+			resp, done, err := s.finishPromptResult(turnCtx, ctx, params, result, state, localOnlyCommand, localGoalClear, localGoalClearAt)
 			if err != nil {
 				return acp.PromptResponse{}, err
 			}
@@ -128,6 +132,8 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 				return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
 			}
 
+			s.startLateMirrorProcessor(ctx)
+
 			return acp.PromptResponse{
 				StopReason:    stopReason,
 				Usage:         state.promptUsage,
@@ -148,6 +154,8 @@ func (s *Session) finishPromptResult(
 	result *claude.ResultMessage,
 	state *promptLoopState,
 	localOnlyCommand bool,
+	localGoalClear bool,
+	localGoalClearAt string,
 ) (acp.PromptResponse, bool, error) {
 	state.promptUsage = mergeUsage(state.promptUsage, mapper.Usage(result))
 
@@ -180,6 +188,12 @@ func (s *Session) finishPromptResult(
 		}
 	}
 
+	if !cancelled && localGoalClear {
+		if err := s.applyLocalGoalClearResult(turnCtx, result.Result, localGoalClearAt); err != nil {
+			return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
+		}
+	}
+
 	if err := s.emitLiveSessionInfoUpdate(turnCtx, params.Prompt); err != nil {
 		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
 	}
@@ -187,6 +201,8 @@ func (s *Session) finishPromptResult(
 	if err := s.drainSessionMirror(turnCtx); err != nil {
 		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
 	}
+
+	s.startLateMirrorProcessor(interruptCtx)
 
 	s.logUnknownStopReason(turnCtx, result)
 
@@ -204,29 +220,27 @@ func (s *Session) logUnknownStopReason(ctx context.Context, result *claude.Resul
 }
 
 func (s *Session) handleSessionMirror(ctx context.Context, msg claude.Message) (bool, error) {
-	if s.mirror == nil {
-		_, handled := msg.(*claude.TranscriptMirrorMessage)
-
-		return handled, nil
+	frame, isMirror := msg.(*claude.TranscriptMirrorMessage)
+	if !isMirror {
+		return false, nil
 	}
 
-	_, isMirror := msg.(*claude.TranscriptMirrorMessage)
-	if !isMirror {
-		return s.mirror.handle(ctx, msg)
+	if err := s.applyTranscriptMirrorGoals(ctx, frame, true); err != nil {
+		return true, err
+	}
+
+	if s.mirror.store == nil || len(frame.Entries) == 0 {
+		return true, nil
 	}
 
 	ctx, finishAppend := s.agent.observe.StartSessionStore(ctx, "append")
-	handled, err := s.mirror.handle(ctx, msg)
+	err := s.mirror.appendFrame(ctx, frame)
 	finishAppend(err)
 
-	return handled, err
+	return true, err
 }
 
 func (s *Session) drainSessionMirror(ctx context.Context) error {
-	if s.mirror == nil {
-		return nil
-	}
-
 	drainCtx, cancel := context.WithTimeout(ctx, sessionMirrorDrainTimeout)
 	defer cancel()
 
@@ -343,21 +357,27 @@ func fatalClaudeProcessError(err error) bool {
 }
 
 func localOnlySlashCommand(prompt []acp.ContentBlock) bool {
+	token := firstPromptToken(firstPromptText(prompt))
+	switch token {
+	case localCommandContext, localCommandExtraUsage, localCommandHeapdump:
+		return true
+	default:
+		return false
+	}
+}
+
+func firstPromptText(prompt []acp.ContentBlock) string {
 	for _, block := range prompt {
 		if block.Text == nil {
 			continue
 		}
 
-		token := firstPromptToken(block.Text.Text)
-		switch token {
-		case localCommandContext, localCommandExtraUsage, localCommandHeapdump:
-			return true
-		default:
-			return false
+		if firstPromptToken(block.Text.Text) != "" {
+			return block.Text.Text
 		}
 	}
 
-	return false
+	return ""
 }
 
 func firstPromptToken(text string) string {

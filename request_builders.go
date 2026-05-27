@@ -126,6 +126,71 @@ func WithSessionOutputFormat(format ClaudeOutputFormat) SessionRequestOption {
 	}
 }
 
+// WithSessionGoal sets initial _meta.claude.goal metadata for a session
+// lifecycle request. It serializes only client-settable goal fields and does
+// not send a /goal command to Claude.
+func WithSessionGoal(goal ClaudeGoal) SessionRequestOption {
+	value := clientGoalMap(goal)
+
+	return func(config *sessionRequestConfig) {
+		config.meta = mergeAnyMap(config.meta, map[string]any{
+			claudeMetaKey: map[string]any{
+				claudeGoalMetaKey: value,
+			},
+		})
+	}
+}
+
+// WithSessionGoalClear clears _meta.claude.goal metadata for a session
+// lifecycle request.
+func WithSessionGoalClear() SessionRequestOption {
+	return func(config *sessionRequestConfig) {
+		config.meta = mergeAnyMap(config.meta, map[string]any{
+			claudeMetaKey: map[string]any{
+				claudeGoalMetaKey: nil,
+			},
+		})
+	}
+}
+
+// SetGoalRequest constructs params for the _claude/session/setGoal extension
+// method. It serializes only client-settable goal fields and does not send a
+// /goal command to Claude.
+func SetGoalRequest(sessionID acp.SessionId, goal ClaudeGoal) map[string]any {
+	return map[string]any{
+		acpFieldSessionID: sessionID,
+		claudeGoalMetaKey: clientGoalMap(goal),
+	}
+}
+
+// ClearGoalRequest constructs params for the _claude/session/setGoal extension
+// method clear operation.
+func ClearGoalRequest(sessionID acp.SessionId) map[string]any {
+	return map[string]any{
+		acpFieldSessionID: sessionID,
+		claudeGoalMetaKey: nil,
+	}
+}
+
+func clientGoalMap(goal ClaudeGoal) map[string]any {
+	value := map[string]any{
+		goalFieldObjective: goal.Objective,
+	}
+	if goal.CompletionCondition != "" {
+		value[goalFieldCompletionCondition] = goal.CompletionCondition
+	}
+
+	if goal.Status != "" {
+		value[goalFieldStatus] = goal.Status
+	}
+
+	if goal.Reason != "" {
+		value[goalFieldReason] = goal.Reason
+	}
+
+	return value
+}
+
 func newSessionRequestConfig(opts ...SessionRequestOption) sessionRequestConfig {
 	config := sessionRequestConfig{}
 	for _, opt := range opts {

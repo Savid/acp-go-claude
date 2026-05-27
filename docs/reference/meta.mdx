@@ -94,20 +94,56 @@ payload details.
 
 ## Session response metadata
 
-Session responses include Claude-specific model variant metadata:
+Session responses include Claude-specific model variant metadata and the
+current goal snapshot:
 
 ```json
 {
   "claude": {
     "modelId": "sonnet",
     "variant": "medium",
-    "availableVariants": ["low", "medium", "high"]
+    "availableVariants": ["low", "medium", "high"],
+    "goal": null
   }
 }
 ```
 
 The portable model/config surface is documented in
 [Models and config](/docs/features/models-config).
+
+## Goals
+
+Goal state is a Claude-specific incubation surface under `_meta.claude.goal`.
+It is session metadata, not a Claude launch option:
+
+```json
+{
+  "claude": {
+    "goal": {
+      "objective": "Ship OAuth login",
+      "completionCondition": "Browser login works and tests pass",
+      "status": "active",
+      "createdAt": "2026-05-27T00:00:00Z",
+      "updatedAt": "2026-05-27T00:00:00Z",
+      "completedAt": null,
+      "reason": null,
+      "reasonCode": null,
+      "goalId": null,
+      "source": "client"
+    }
+  }
+}
+```
+
+`session_info_update` emits goal changes as `_meta.claude.goal`. The goal value
+is a full snapshot; optional fields are explicit `null` values so clients using
+ACP's recursive `_meta` merge semantics clear stale nested fields. Clearing a
+goal is `_meta.claude.goal: null`.
+
+The `_claude/session/setGoal` extension method sets or clears adapter-visible
+goal state. It does not interrupt Claude or rewrite an active turn. Claude-native
+`/goal` rows from transcript mirror frames are mapped into the same metadata
+shape when available. See [Goals](/docs/features/goals).
 
 ## Model metadata
 
@@ -205,6 +241,7 @@ The initialize response advertises:
 - `claude.sessionImport`
 - `claude.sdkMessages`
 - `claude.outputFormat`
+- `claude.goals`
 
 These fields are intentionally Claude-specific. Portable clients should rely on
 the normal ACP fields first. Method support is listed in
@@ -241,6 +278,25 @@ Example:
       "result": "usage_update._meta.claude.structuredOutput",
       "hiddenTool": "StructuredOutput",
       "rawEvents": "_claude/sdkMessage"
+    },
+    "goals": {
+      "scope": "session",
+      "state": "session_info_update._meta.claude.goal",
+      "initialState": {
+        "sessionResponses": [
+          "session/new.result._meta.claude.goal",
+          "session/load.result._meta.claude.goal",
+          "session/resume.result._meta.claude.goal"
+        ],
+        "listSummary": "session/list.result.sessions[]._meta.claude.goal"
+      },
+      "setMethod": "_claude/session/setGoal",
+      "semantics": "full-snapshot",
+      "maxObjectiveBytes": 4096,
+      "maxSummaryRunes": 256,
+      "statuses": ["active", "completed", "blocked"],
+      "clientSettableStatuses": ["active", "blocked"],
+      "clearValue": null
     }
   }
 }

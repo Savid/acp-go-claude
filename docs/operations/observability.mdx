@@ -32,6 +32,7 @@ The adapter also emits telemetry for the ACP boundary that Claude cannot see:
 - ACP-transport MCP bridge operations
 - session-store load, append, list, materialize, and delete operations
 - [raw Claude message](/docs/features/raw-events) emission failures
+- Claude-specific goal set/clear work through the ACP extension boundary
 - Claude process lifecycle
 
 For model/tool/cost analysis, prefer Claude's `claude_code.*` telemetry. For
@@ -269,6 +270,7 @@ Adapter spans and metrics do not record these values by default:
 - auth tokens
 - MCP bridge tokens
 - raw Claude JSON
+- Claude goal objective, completion condition, and reason text
 
 Claude Code also redacts sensitive content by default. Only enable Claude's
 content-bearing telemetry variables when your observability backend is approved

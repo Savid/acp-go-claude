@@ -88,6 +88,7 @@ const (
 
 	systemSubtypeCompactBoundary     = "compact_boundary"
 	systemSubtypeHookResponse        = "hook_response"
+	systemSubtypeLocalCommand        = "local_command"
 	systemSubtypeLocalCommandOutput  = "local_command_output"
 	systemSubtypeSessionStateChanged = "session_state_changed"
 
@@ -137,19 +138,27 @@ type Session struct {
 	fastModeKnown         bool
 	availableCommands     []claude.SlashCommand
 	contextWindowSize     int
+	goal                  *ClaudeGoal
+	goalRevision          int64
 
 	client *claude.Client
 
 	turn             chan struct{}
 	mu               sync.Mutex
-	permissionSaveMu sync.Mutex
-	cancel           context.CancelFunc
-	turnDone         <-chan struct{}
-	turnCancelled    bool
-	permissionCancel map[string]*permissionRequestCancel
-	permissionRules  map[string]string
-	mcpBridge        *mcpSessionBridge
-	materialized     *materializedSession
+	lateMirrorCancel context.CancelFunc
+	lateMirrorDone   chan struct{}
+	// Test seam for bounding late mirror shutdown without delaying tests.
+	lateMirrorStopTimeout time.Duration
+	permissionSaveMu      sync.Mutex
+	cancel                context.CancelFunc
+	turnDone              <-chan struct{}
+	turnCancelled         bool
+	permissionCancel      map[string]*permissionRequestCancel
+	permissionRules       map[string]string
+	mcpBridge             *mcpSessionBridge
+	materialized          *materializedSession
+	// Started sessions always have a mirror; storeless mirrors still parse
+	// native goal rows and simply skip transcript persistence.
 	mirror           *sessionMirror
 	rawMessages      rawMessageConfig
 	gatewayAuth      bool

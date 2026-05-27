@@ -2,6 +2,7 @@ package claudeacp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,6 +19,8 @@ const (
 	sessionMirrorDrainTimeout  = 150 * time.Millisecond
 )
 
+var errSessionMirrorAppend = errors.New("append transcript mirror entries")
+
 type sessionMirror struct {
 	log         *slog.Logger
 	store       SessionStore
@@ -25,10 +28,6 @@ type sessionMirror struct {
 }
 
 func newSessionMirror(log *slog.Logger, store SessionStore, claudeHome string) *sessionMirror {
-	if store == nil {
-		return nil
-	}
-
 	if log == nil {
 		log = slog.Default()
 	}
@@ -40,28 +39,22 @@ func newSessionMirror(log *slog.Logger, store SessionStore, claudeHome string) *
 	}
 }
 
-func (m *sessionMirror) handle(ctx context.Context, msg claude.Message) (bool, error) {
-	frame, ok := msg.(*claude.TranscriptMirrorMessage)
-	if !ok {
-		return false, nil
-	}
-
-	if m == nil || len(frame.Entries) == 0 {
-		return true, nil
-	}
-
+// appendFrame writes a transcript mirror frame to the session store. Callers
+// guarantee the mirror has a store configured and the frame carries entries; a
+// frame whose path falls outside the Claude projects dir is logged and dropped.
+func (m *sessionMirror) appendFrame(ctx context.Context, frame *claude.TranscriptMirrorMessage) error {
 	key, err := sessionKeyForMirrorPath(frame.FilePath, m.projectsDir)
 	if err != nil {
 		m.log.WarnContext(ctx, "dropping transcript mirror frame", slog.String("path", frame.FilePath), slog.String(jsonFieldError, err.Error()))
 
-		return true, nil
+		return nil
 	}
 
 	if err := appendMirrorEntries(ctx, m.store, *key, frame.Entries); err != nil {
-		return true, fmt.Errorf("append transcript mirror entries: %w", err)
+		return fmt.Errorf("%w: %w", errSessionMirrorAppend, err)
 	}
 
-	return true, nil
+	return nil
 }
 
 func appendMirrorEntries(ctx context.Context, store SessionStore, key SessionKey, entries []SessionStoreEntry) error {

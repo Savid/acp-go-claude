@@ -142,6 +142,8 @@ func (s *Session) Close(ctx context.Context) (err error) {
 	cancel := s.cancel
 	s.mu.Unlock()
 
+	s.stopLateMirrorProcessor(ctx)
+
 	if cancel != nil {
 		cancel()
 	}

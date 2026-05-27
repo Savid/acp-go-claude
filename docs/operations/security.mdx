@@ -55,7 +55,9 @@ an equivalent boot/session sweep for stale `acp-go-claude-mcp-token-*` files.
 
 ## Logging and telemetry
 
-Do not log credentials, MCP bridge tokens, prompt text, tool input/output, or
-raw Claude JSON unless the host deliberately opts into that data path. See
-[Observability](/docs/operations/observability#privacy-defaults) and
+Do not log credentials, MCP bridge tokens, prompt text, tool input/output, raw
+Claude JSON, or Claude goal objective/completion/reason text unless the host
+deliberately opts into that data path. See
+[Observability](/docs/operations/observability#privacy-defaults),
+[Goals](/docs/features/goals#privacy), and
 [Raw Claude events](/docs/features/raw-events) for the explicit data paths.

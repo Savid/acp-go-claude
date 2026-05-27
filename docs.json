@@ -47,6 +47,7 @@
               "docs/features/claude-settings",
               "docs/features/session-store",
               "docs/features/raw-events",
+              "docs/features/goals",
               "docs/features/documents-nes"
             ]
           }

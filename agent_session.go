@@ -31,6 +31,11 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
+	goalInput, err := parseGoalFromMeta(params.Meta)
+	if err != nil {
+		return acp.NewSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+	}
+
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories, metaOptions)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.NewSessionResponse{}, validationErr
@@ -60,6 +65,8 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, err
 	}
 
+	session.applyStoredClientGoalInput(goalInput)
+
 	if err := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); err != nil {
 		a.removeSession(ctx, session.id, session)
 
@@ -87,6 +94,11 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
+	goalInput, err := parseGoalFromMeta(params.Meta)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+	}
+
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories, metaOptions)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.ResumeSessionResponse{}, validationErr
@@ -101,6 +113,8 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
 	}
 	if session := a.activeSessionForStart(params.SessionId, start); session != nil {
+		session.applyStoredClientGoalInput(goalInput)
+
 		if emitErr := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); emitErr != nil {
 			return acp.ResumeSessionResponse{}, emitErr
 		}
@@ -134,6 +148,8 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
+	session.applyStoredClientGoalInput(goalInput)
+
 	if err := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); err != nil {
 		a.removeSession(ctx, params.SessionId, session)
 
@@ -158,6 +174,11 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
 	metaOptions, err := claudeOptionsFromMeta(params.Meta)
+	if err != nil {
+		return acp.LoadSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+	}
+
+	goalInput, err := parseGoalFromMeta(params.Meta)
 	if err != nil {
 		return acp.LoadSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
@@ -208,8 +229,8 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 			return acp.LoadSessionResponse{}, err
 		}
 
-		if err := a.storeStartedSession(ctx, session); err != nil {
-			return acp.LoadSessionResponse{}, err
+		if storeErr := a.storeStartedSession(ctx, session); storeErr != nil {
+			return acp.LoadSessionResponse{}, storeErr
 		}
 
 		startedSession = true
@@ -228,12 +249,35 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, newResourceNotFound(map[string]any{acpFieldSessionID: params.SessionId})
 	}
 
-	if err := session.replayTranscript(ctx, replayPath); err != nil {
+	if replayErr := session.replayTranscript(ctx, replayPath); replayErr != nil {
+		if startedSession {
+			a.removeSession(ctx, params.SessionId, session)
+		}
+
+		return acp.LoadSessionResponse{}, replayErr
+	}
+
+	goalChanged, err := session.applyReplayGoalSnapshot(ctx, replayPath)
+	if err != nil {
 		if startedSession {
 			a.removeSession(ctx, params.SessionId, session)
 		}
 
 		return acp.LoadSessionResponse{}, err
+	}
+
+	if session.applyStoredClientGoalInput(goalInput) {
+		goalChanged = true
+	}
+
+	if goalChanged {
+		if err := session.emitGoalInfoUpdate(ctx); err != nil {
+			if startedSession {
+				a.removeSession(ctx, params.SessionId, session)
+			}
+
+			return acp.LoadSessionResponse{}, err
+		}
 	}
 
 	if err := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); err != nil {
@@ -695,7 +739,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		SettingSources:          settingSourceArgs(a.options.SettingSources),
 		InitializeTimeout:       a.options.InitializeTimeout,
 		ControlHandlerTimeout:   a.options.ControlHandlerTimeout,
-		SessionMirror:           a.options.SessionStore != nil,
+		SessionMirror:           true,
 		Hooks: claude.Hooks{
 			claude.HookEventPostToolUse: {
 				{

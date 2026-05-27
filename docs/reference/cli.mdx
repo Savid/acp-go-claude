@@ -82,7 +82,9 @@ permission prompt tool, model, system prompt, strict MCP config, additional
 directories, setting sources,
 [resume/fork](https://code.claude.com/docs/en/sessions), and session ID.
 
-`--session-mirror` is added only when a session store is configured.
+`--session-mirror` is always added so native Claude goal rows can be observed.
+When no session store is configured, mirror frames are parsed for goals and not
+persisted.
 `--allow-dangerously-skip-permissions` is added only when explicitly enabled
 through the embedded option and supported by the local Claude CLI.
 `--setting-sources=user,project,local` is passed by default so Claude loads

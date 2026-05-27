@@ -31,7 +31,18 @@ func sessionResponseMeta(session *Session) map[string]any {
 	effort := session.effort
 	session.mu.Unlock()
 
-	return claudeModelVariantMeta(model, available, effort)
+	return mergeAnyMap(
+		claudeModelVariantMeta(model, available, effort),
+		session.goalResponseMeta(),
+	)
+}
+
+func (s *Session) goalResponseMeta() map[string]any {
+	return map[string]any{
+		claudeMetaKey: map[string]any{
+			claudeGoalMetaKey: s.goalMetaValue(),
+		},
+	}
 }
 
 func claudeModelVariantMeta(model string, available []claude.AvailableModelInfo, effort string) map[string]any {

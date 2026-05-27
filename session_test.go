@@ -1289,6 +1289,7 @@ func TestSessionLocalOnlySlashCommandForwardsResult(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	require.True(t, localOnlySlashCommand([]acp.ContentBlock{acp.ImageBlock("abc", "image/png"), acp.TextBlock("/heapdump now")}))
+	require.True(t, localOnlySlashCommand([]acp.ContentBlock{acp.TextBlock("   "), acp.TextBlock("/context")}))
 	require.False(t, localOnlySlashCommand([]acp.ContentBlock{acp.TextBlock("/compact")}))
 }
 

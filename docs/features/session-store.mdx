@@ -26,7 +26,7 @@ for example:
 | Capability | Standalone CLI | Embedded Go |
 | --- | --- | --- |
 | Import JSONL with [`_claude/session/*`](/docs/reference/session-import) | Yes, stored in the process-local import store unless committed to a configured store. | Yes. |
-| Mirror ordinary Claude turns | No external store can be supplied through flags. | `WithSessionStore(store)` enables mirroring. |
+| Mirror ordinary Claude turns | Goal extraction uses transient mirror frames; no external store can be supplied through flags. | `WithSessionStore(store)` persists mirror frames. |
 | Durable remote load/resume | Only for the life of the process unless a custom command embeds a store. | `WithSessionStore(store)` plus optional lister/subkey interfaces. |
 | Store-backed `session/list` | Not available through flags. | Implement `SessionStoreLister`. |
 
@@ -62,9 +62,11 @@ subagent transcripts and metadata below the session.
 
 ## Mirroring
 
-When a store is configured, new turns request Claude transcript mirroring.
-Received `transcript_mirror` frames are validated, mapped to `SessionKey`, and
-appended with bounded retries.
+New turns request Claude transcript mirroring so native
+[goals](/docs/features/goals) can be extracted. When a store is configured,
+received `transcript_mirror` frames are also validated, mapped to `SessionKey`,
+and appended with bounded retries. Without a store, mirror frames are parsed for
+goal state and then dropped.
 
 Embedded Go setup:
 

@@ -17,6 +17,11 @@
 // Claude-specific session import extension methods are advertised under
 // _meta.claude when the agent is initialized.
 //
+// Hosts that need Claude-specific goal UI can attach initial goal metadata with
+// [WithSessionGoal] or build _claude/session/setGoal extension params with
+// [SetGoalRequest] and [ClearGoalRequest]. Goals are exposed as
+// _meta.claude.goal and are not a portable ACP core field.
+//
 // Hosts that need adapter telemetry can provide OpenTelemetry providers with
 // [WithTracerProvider] and [WithMeterProvider]. The package never configures
 // global OpenTelemetry providers; the acp-go-claude binary handles env-based

@@ -246,6 +246,25 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 						"hiddenTool":          "StructuredOutput",
 						"rawEvents":           rawClaudeSDKMessageMethod,
 					},
+					claudeGoalsCapabilityKey: map[string]any{
+						capabilityScopeKey:     capabilityScopeSession,
+						goalCapabilityStateKey: "session_info_update._meta.claude.goal",
+						"initialState": map[string]any{
+							"sessionResponses": []string{
+								"session/new.result._meta.claude.goal",
+								"session/load.result._meta.claude.goal",
+								"session/resume.result._meta.claude.goal",
+							},
+							"listSummary": "session/list.result.sessions[]._meta.claude.goal",
+						},
+						"setMethod":              claudeSessionSetGoalMethod,
+						"semantics":              "full-snapshot",
+						"maxObjectiveBytes":      maxGoalObjectiveBytes,
+						"maxSummaryRunes":        maxGoalSummaryRunes,
+						"statuses":               []string{ClaudeGoalStatusActive, ClaudeGoalStatusCompleted, ClaudeGoalStatusBlocked},
+						"clientSettableStatuses": []string{ClaudeGoalStatusActive, ClaudeGoalStatusBlocked},
+						"clearValue":             nil,
+					},
 				},
 			},
 			LoadSession: true,
@@ -304,6 +323,8 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 		return a.commitClaudeSessionImport(ctx, params)
 	case claudeSessionAbortImportMethod:
 		return a.abortClaudeSessionImport(ctx, params)
+	case claudeSessionSetGoalMethod:
+		return a.setClaudeGoal(ctx, params)
 	default:
 		return nil, acp.NewMethodNotFound(method)
 	}

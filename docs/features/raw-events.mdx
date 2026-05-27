@@ -85,3 +85,5 @@ normal portable mapping still happens through
 Raw events include provider-native frames that the portable mapper hides, such
 as Claude's internal `StructuredOutput` tool call when
 [`outputFormat`](/docs/reference/meta#session-options) is configured.
+They may also include `transcript_mirror` frames containing native Claude
+`goal_status` rows when goal extraction observes `/goal` state.

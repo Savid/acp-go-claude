@@ -103,6 +103,14 @@ func (s *Session) sessionInfo(id acp.SessionId) acp.SessionInfo {
 		info.UpdatedAt = &updatedAt
 	}
 
+	if goal := s.goalSummaryMetaValue(); goal != nil {
+		info.Meta = map[string]any{
+			claudeMetaKey: map[string]any{
+				claudeGoalMetaKey: goal,
+			},
+		}
+	}
+
 	return info
 }
 
@@ -142,11 +150,14 @@ func (s *Session) emitRawClaudeMessage(ctx context.Context, msg claude.Message) 
 	}
 
 	s.agent.mu.Lock()
-	defer s.agent.mu.Unlock()
-
 	if s.agent.closed || s.agent.conn == nil {
+		s.agent.mu.Unlock()
+
 		return nil
 	}
+
+	conn := s.agent.conn
+	s.agent.mu.Unlock()
 
 	payload := map[string]any{
 		acpFieldSessionID: s.id,
@@ -157,7 +168,7 @@ func (s *Session) emitRawClaudeMessage(ctx context.Context, msg claude.Message) 
 		payload["rawJSON"] = rawJSON
 	}
 
-	if err := s.agent.conn.NotifyExtension(ctx, rawClaudeSDKMessageMethod, payload); err != nil {
+	if err := conn.NotifyExtension(ctx, rawClaudeSDKMessageMethod, payload); err != nil {
 		s.agent.observe.RecordRawMessageEmitFailure(ctx, err)
 
 		return err

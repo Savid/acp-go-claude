@@ -56,8 +56,13 @@ an equivalent boot/session sweep for stale `acp-go-claude-mcp-token-*` files.
 ## Logging and telemetry
 
 Do not log credentials, MCP bridge tokens, prompt text, tool input/output, raw
-Claude JSON, or Claude goal objective/completion/reason text unless the host
-deliberately opts into that data path. See
+Claude JSON, Claude goal objective/completion/reason text, or workflow
+subagent prompts/logs unless the host deliberately opts into that data path. See
 [Observability](/docs/operations/observability#privacy-defaults),
 [Goals](/docs/features/goals#privacy), and
+[Workflows](/docs/features/workflows#logs-and-files), and
 [Raw Claude events](/docs/features/raw-events) for the explicit data paths.
+
+Claude workflow frames can include `transcriptDir`, `scriptPath`, and
+`output_file` references. The adapter exposes file availability metadata but
+does not read those files by default.

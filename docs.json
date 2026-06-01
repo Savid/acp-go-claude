@@ -48,6 +48,7 @@
               "docs/features/session-store",
               "docs/features/raw-events",
               "docs/features/goals",
+              "docs/features/workflows",
               "docs/features/documents-nes"
             ]
           }

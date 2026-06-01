@@ -267,6 +267,13 @@ func (c *recordingClient) permissionCount() int {
 	return len(c.permissions)
 }
 
+func (c *recordingClient) permissionSnapshot() []acp.RequestPermissionRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]acp.RequestPermissionRequest(nil), c.permissions...)
+}
+
 func (c *recordingClient) elicitationCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()

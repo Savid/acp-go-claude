@@ -895,6 +895,232 @@ func TestSessionTaskNotificationResultsDoNotEndPrompt(t *testing.T) {
 	require.NotNil(t, updates[2].Update.SessionInfoUpdate)
 }
 
+func TestSessionWorkflowTaskNotificationResultEndsPrompt(t *testing.T) {
+	t.Parallel()
+
+	fake := newAgentFakeTransport()
+	fake.systemMessages = []map[string]any{
+		{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []any{map[string]any{
+					"type":  "tool_use",
+					"id":    "workflow-1",
+					"name":  "Workflow",
+					"input": map[string]any{"name": "wf"},
+				}},
+			},
+		},
+		{
+			"type": "user",
+			"tool_use_result": map[string]any{
+				"status": "async_launched",
+				"taskId": "task-1",
+			},
+			"content": []any{map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": "workflow-1",
+				"content":     "Workflow launched in background. Task ID: task-1",
+				"is_error":    false,
+			}},
+		},
+		{
+			"type":        "system",
+			"subtype":     "task_notification",
+			"task_id":     "task-1",
+			"tool_use_id": "workflow-1",
+			"status":      "completed",
+			"summary":     "Workflow completed",
+		},
+		{
+			"type":           "result",
+			"subtype":        "success",
+			"stop_reason":    "max_tokens",
+			"total_cost_usd": 0.02,
+			"origin":         map[string]any{"kind": "task-notification"},
+			"usage": map[string]any{
+				"input_tokens":  100,
+				"output_tokens": 50,
+			},
+		},
+	}
+	agent := NewAgent(WithClaudeHome(t.TempDir()))
+	agent.newClaudeClient = func(_ *slog.Logger, options claude.Options) *claude.Client {
+		return claude.NewClient(nil, options, fake)
+	}
+
+	client := &recordingACPClient{}
+	_ = connectAgentForTest(t, agent, client)
+
+	sessionResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
+	require.NoError(t, err)
+
+	resp, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: sessionResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("run workflow")},
+	})
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonMaxTokens, resp.StopReason)
+	require.NotNil(t, resp.Usage)
+	require.Equal(t, 100, resp.Usage.InputTokens)
+	require.Equal(t, 50, resp.Usage.OutputTokens)
+	require.Equal(t, 150, resp.Usage.TotalTokens)
+
+	var completed *acp.SessionToolCallUpdate
+	require.Eventually(t, func() bool {
+		for _, update := range client.recordedUpdates() {
+			toolUpdate := update.Update.ToolCallUpdate
+			if toolUpdate != nil &&
+				toolUpdate.ToolCallId == "workflow-1" &&
+				toolUpdate.Status != nil &&
+				*toolUpdate.Status == acp.ToolCallStatusCompleted {
+				completed = toolUpdate
+
+				return true
+			}
+		}
+
+		return false
+	}, time.Second, 10*time.Millisecond)
+
+	require.NotNil(t, completed)
+	claudeMeta := requireAnyMap(t, completed.Meta[claudeMetaKey])
+	workflow := requireAnyMap(t, claudeMeta["workflow"])
+	require.Equal(t, "task-1", workflow["taskId"])
+	require.Equal(t, "completed", workflow["status"])
+}
+
+func TestSessionPromptEmitsWorkflowUpdates(t *testing.T) {
+	t.Parallel()
+
+	fake := newAgentFakeTransport()
+	fake.systemMessages = []map[string]any{
+		{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []any{map[string]any{
+					"type":  "tool_use",
+					"id":    "workflow-1",
+					"name":  "Workflow",
+					"input": map[string]any{"name": "wf"},
+				}},
+			},
+		},
+		{
+			"type":          "system",
+			"subtype":       "task_started",
+			"task_id":       "task-1",
+			"tool_use_id":   "workflow-1",
+			"workflow_name": "wf",
+			"description":   "Run workflow",
+		},
+		{
+			"type":        "system",
+			"subtype":     "task_progress",
+			"task_id":     "task-1",
+			"tool_use_id": "workflow-1",
+			"workflow_progress": []any{
+				map[string]any{"type": "workflow_phase", "index": 1, "title": "Phase"},
+				map[string]any{"type": "workflow_agent", "index": 1, "state": "done", "resultPreview": "ok"},
+			},
+		},
+		{
+			"type":    "system",
+			"subtype": systemSubtypeSessionStateChanged,
+			"state":   systemStateIdle,
+		},
+		{
+			"type":    "system",
+			"subtype": "task_updated",
+			"task_id": "task-1",
+			"patch":   map[string]any{"status": "completed"},
+		},
+	}
+
+	agent := NewAgent(WithClaudeHome(t.TempDir()))
+	agent.newClaudeClient = func(_ *slog.Logger, options claude.Options) *claude.Client {
+		return claude.NewClient(nil, options, fake)
+	}
+
+	client := &recordingACPClient{}
+	_ = connectAgentForTest(t, agent, client)
+
+	sessionResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
+	require.NoError(t, err)
+
+	resp, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: sessionResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("run workflow")},
+	})
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+
+	var completed *acp.SessionToolCallUpdate
+	require.Eventually(t, func() bool {
+		for _, update := range client.recordedUpdates() {
+			toolUpdate := update.Update.ToolCallUpdate
+			if toolUpdate != nil &&
+				toolUpdate.ToolCallId == "workflow-1" &&
+				toolUpdate.Status != nil &&
+				*toolUpdate.Status == acp.ToolCallStatusCompleted {
+				completed = toolUpdate
+
+				return true
+			}
+		}
+
+		return false
+	}, time.Second, 10*time.Millisecond)
+
+	require.NotNil(t, completed)
+	claudeMeta := requireAnyMap(t, completed.Meta[claudeMetaKey])
+	workflow := requireAnyMap(t, claudeMeta["workflow"])
+	require.Equal(t, "task-1", workflow["taskId"])
+	require.Equal(t, "completed", workflow["status"])
+	require.Equal(t, float64(1), workflow["completedAgents"])
+}
+
+func TestSessionPromptDropsMalformedWorkflowFrames(t *testing.T) {
+	t.Parallel()
+
+	fake := newAgentFakeTransport()
+	fake.systemMessages = []map[string]any{
+		{
+			"type":        "system",
+			"subtype":     "task_progress",
+			"task_id":     "task-1",
+			"tool_use_id": "workflow-1",
+		},
+	}
+
+	agent := NewAgent(WithClaudeHome(t.TempDir()))
+	agent.newClaudeClient = func(_ *slog.Logger, options claude.Options) *claude.Client {
+		return claude.NewClient(nil, options, fake)
+	}
+
+	client := &recordingACPClient{}
+	_ = connectAgentForTest(t, agent, client)
+
+	sessionResp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
+	require.NoError(t, err)
+
+	resp, err := agent.Prompt(context.Background(), acp.PromptRequest{
+		SessionId: sessionResp.SessionId,
+		Prompt:    []acp.ContentBlock{acp.TextBlock("run workflow")},
+	})
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+	require.Empty(t, sentControlRequests(fake, "interrupt"))
+}
+
+func TestSessionWorkflowFrameErrorRecordingNilBranches(t *testing.T) {
+	t.Parallel()
+
+	(&Session{}).recordWorkflowFrameErrors(context.Background(), mapper.NewWorkflowTracker())
+	session := &Session{agent: NewAgent(WithClaudeHome(t.TempDir()))}
+	session.recordWorkflowFrameErrors(context.Background(), nil)
+}
+
 func TestSessionPromptResultErrors(t *testing.T) {
 	t.Parallel()
 

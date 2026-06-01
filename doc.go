@@ -22,6 +22,10 @@
 // [SetGoalRequest] and [ClearGoalRequest]. Goals are exposed as
 // _meta.claude.goal and are not a portable ACP core field.
 //
+// Claude Code Workflow tool progress is exposed as normal ACP tool-call updates
+// with accumulated Claude-specific phase and agent metadata under
+// _meta.claude.workflow.
+//
 // Hosts that need adapter telemetry can provide OpenTelemetry providers with
 // [WithTracerProvider] and [WithMeterProvider]. The package never configures
 // global OpenTelemetry providers; the acp-go-claude binary handles env-based

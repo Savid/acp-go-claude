@@ -76,6 +76,7 @@ override, and OpenTelemetry providers.
   usage, and session metadata.
 - Claude Code structured output through session-level JSON Schema.
 - Claude-specific session goals and native `/goal` state mapping.
+- Claude Code Workflow tool progress with accumulated phase/agent metadata.
 - Claude permission modes, permission prompts, plan mode, elicitation, and
   `AskUserQuestion` bridging.
 - MCP stdio, HTTP, SSE, and ACP-transport bridging. SSE is still accepted for

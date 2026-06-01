@@ -185,7 +185,7 @@ func (s *Session) handlePermission(ctx context.Context, request claude.Permissio
 		return claude.PermissionDecision{
 			Behavior:           claude.BehaviorAllow,
 			UpdatedInput:       request.Input,
-			UpdatedPermissions: permissionSuggestionsOrFallback(request.Suggestions, permissionUpdate(request.ToolName, claude.BehaviorAllow)),
+			UpdatedPermissions: permissionSuggestionsForAllowAlways(request.ToolName, request.Suggestions, permissionUpdate(request.ToolName, claude.BehaviorAllow)),
 		}, nil
 	case permissionRejectOnce:
 		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: permissionRejectedMessage}, nil
@@ -395,6 +395,82 @@ func permissionSuggestionsOrFallback(suggestions []map[string]any, fallback map[
 	}
 
 	return []map[string]any{fallback}
+}
+
+func permissionSuggestionsForAllowAlways(toolName string, suggestions []map[string]any, fallback map[string]any) []map[string]any {
+	if !strings.EqualFold(toolName, workflowTool) || len(suggestions) == 0 {
+		return permissionSuggestionsOrFallback(suggestions, fallback)
+	}
+
+	normalized := make([]map[string]any, 0, len(suggestions))
+	for _, suggestion := range suggestions {
+		normalized = append(normalized, normalizeWorkflowPermissionSuggestion(suggestion))
+	}
+
+	return normalized
+}
+
+func normalizeWorkflowPermissionSuggestion(suggestion map[string]any) map[string]any {
+	cloned, _ := clonePermissionSuggestionValue(suggestion).(map[string]any)
+
+	if stringValue(cloned[jsonFieldType]) != permissionUpdateAddRules ||
+		stringValue(cloned[permissionUpdateBehavior]) != claude.BehaviorAllow ||
+		stringValue(cloned[permissionUpdateDestination]) != permissionUpdateLocalSettings {
+		return cloned
+	}
+
+	for _, rule := range permissionRuleMaps(cloned[permissionUpdateRules]) {
+		if workflowPermissionRuleName(stringValue(rule[permissionUpdateToolName])) {
+			cloned[permissionUpdateDestination] = permissionUpdateSession
+
+			break
+		}
+	}
+
+	return cloned
+}
+
+func workflowPermissionRuleName(toolName string) bool {
+	return strings.HasPrefix(toolName, workflowTool+"(")
+}
+
+func permissionRuleMaps(value any) []map[string]any {
+	switch typed := value.(type) {
+	case []map[string]any:
+		return append([]map[string]any(nil), typed...)
+	default:
+		return mapSliceAny(value)
+	}
+}
+
+func clonePermissionSuggestionValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(typed))
+		for key, value := range typed {
+			cloned[key] = clonePermissionSuggestionValue(value)
+		}
+
+		return cloned
+	case []any:
+		cloned := make([]any, len(typed))
+		for i, value := range typed {
+			cloned[i] = clonePermissionSuggestionValue(value)
+		}
+
+		return cloned
+	case []map[string]any:
+		cloned := make([]map[string]any, len(typed))
+		for i, value := range typed {
+			cloned[i], _ = clonePermissionSuggestionValue(value).(map[string]any)
+		}
+
+		return cloned
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return typed
+	}
 }
 
 func describeAlwaysAllow(suggestions []map[string]any, toolName string) string {

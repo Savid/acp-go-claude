@@ -35,6 +35,12 @@ details are carried in raw input/output and, when enabled,
 as an ACP plan. Todo status values map to pending, in-progress, and completed
 plan entries.
 
+Claude Code `Workflow` remains a normal ACP tool call with kind `think`.
+Workflow task frames update the same tool call and attach accumulated topology
+under `_meta.claude.workflow`, including phases, agents, agent count buckets,
+terminal status, and file-availability hints. See
+[Workflows](/docs/features/workflows).
+
 ## Session state
 
 | Update | When emitted |

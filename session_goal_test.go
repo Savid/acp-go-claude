@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -847,6 +848,85 @@ func TestGoalLateProcessorReceivesMirrorAndHandlesErrors(t *testing.T) {
 		session.stopLateMirrorProcessor(context.Background())
 	})
 
+	t.Run("workflow update", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newAgentFakeTransport()
+		agent := NewAgent(WithClaudeHome(t.TempDir()))
+		client := &stubAgentClient{}
+		agent.setConnection(client)
+		claudeClient := claude.NewClient(nil, claude.Options{}, fake)
+		require.NoError(t, claudeClient.Start(context.Background()))
+		defer func() { require.NoError(t, claudeClient.Close()) }()
+		session := &Session{
+			agent:  agent,
+			id:     "session-1",
+			client: claudeClient,
+			mirror: newSessionMirror(nil, nil, t.TempDir()),
+		}
+		tracker := mapper.NewWorkflowTracker()
+		require.NotEmpty(t, mapper.MessageToUpdatesWithOptions(&claude.SystemMessage{
+			Subtype: "task_started",
+			Raw: map[string]any{
+				"task_id":     "task-1",
+				"tool_use_id": "workflow-1",
+			},
+		}, mapper.ToolUpdateOptions{Workflow: tracker}))
+		fake.incoming <- map[string]any{
+			jsonFieldType:    "system",
+			jsonFieldSubtype: "task_updated",
+			"task_id":        "task-1",
+			"patch":          map[string]any{"status": "completed"},
+		}
+
+		session.startLateMirrorProcessor(context.Background(), mapper.ToolUpdateOptions{Workflow: tracker})
+		require.Eventually(t, func() bool {
+			updates := client.recordedUpdates()
+			if len(updates) == 0 {
+				return false
+			}
+
+			toolUpdate := updates[len(updates)-1].Update.ToolCallUpdate
+
+			return toolUpdate != nil && toolUpdate.Status != nil && *toolUpdate.Status == acp.ToolCallStatusCompleted
+		}, time.Second, 10*time.Millisecond)
+		session.stopLateMirrorProcessor(context.Background())
+	})
+
+	t.Run("workflow update error", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newAgentFakeTransport()
+		agent := NewAgent(WithClaudeHome(t.TempDir()))
+		agent.setConnection(&stubAgentClient{updateErr: errors.New("update failed")})
+		claudeClient := claude.NewClient(nil, claude.Options{}, fake)
+		require.NoError(t, claudeClient.Start(context.Background()))
+		defer func() { require.NoError(t, claudeClient.Close()) }()
+		session := &Session{
+			agent:  agent,
+			id:     "session-1",
+			client: claudeClient,
+			mirror: newSessionMirror(nil, nil, t.TempDir()),
+		}
+		tracker := mapper.NewWorkflowTracker()
+		require.NotEmpty(t, mapper.MessageToUpdatesWithOptions(&claude.SystemMessage{
+			Subtype: "task_started",
+			Raw: map[string]any{
+				"task_id":     "task-1",
+				"tool_use_id": "workflow-1",
+			},
+		}, mapper.ToolUpdateOptions{Workflow: tracker}))
+		fake.incoming <- map[string]any{
+			jsonFieldType:    "system",
+			jsonFieldSubtype: "task_updated",
+			"task_id":        "task-1",
+			"patch":          map[string]any{"status": "completed"},
+		}
+
+		session.startLateMirrorProcessor(context.Background(), mapper.ToolUpdateOptions{Workflow: tracker})
+		waitLateMirrorDone(t, session)
+	})
+
 	t.Run("raw emit error", func(t *testing.T) {
 		t.Parallel()
 
@@ -996,6 +1076,7 @@ func TestPromptLocalGoalClearAndMirrorErrorBranches(t *testing.T) {
 		acp.PromptRequest{Prompt: []acp.ContentBlock{acp.TextBlock("/goal clear")}},
 		&claude.ResultMessage{Subtype: "success", StopReason: "end_turn", Result: "No goal set"},
 		&promptLoopState{},
+		mapper.ToolUpdateOptions{},
 		false,
 		true,
 		"2999-01-01T00:00:00Z",
@@ -1035,6 +1116,40 @@ func TestPromptSystemIdleDrainMirrorError(t *testing.T) {
 		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
 	})
 	require.Error(t, err)
+}
+
+func TestDrainSessionMirrorWorkflowUpdateError(t *testing.T) {
+	t.Parallel()
+
+	fake := newAgentFakeTransport()
+	agent := NewAgent(WithClaudeHome(t.TempDir()))
+	agent.setConnection(&stubAgentClient{updateErr: errors.New("update failed")})
+	claudeClient := claude.NewClient(nil, claude.Options{}, fake)
+	require.NoError(t, claudeClient.Start(context.Background()))
+	defer func() { require.NoError(t, claudeClient.Close()) }()
+	session := &Session{
+		agent:  agent,
+		id:     "session-1",
+		client: claudeClient,
+		mirror: newSessionMirror(nil, nil, t.TempDir()),
+	}
+	tracker := mapper.NewWorkflowTracker()
+	require.NotEmpty(t, mapper.MessageToUpdatesWithOptions(&claude.SystemMessage{
+		Subtype: "task_started",
+		Raw: map[string]any{
+			"task_id":     "task-1",
+			"tool_use_id": "workflow-1",
+		},
+	}, mapper.ToolUpdateOptions{Workflow: tracker}))
+	fake.incoming <- map[string]any{
+		jsonFieldType:    "system",
+		jsonFieldSubtype: "task_updated",
+		"task_id":        "task-1",
+		"patch":          map[string]any{"status": "completed"},
+	}
+
+	err := session.drainSessionMirror(context.Background(), mapper.ToolUpdateOptions{Workflow: tracker})
+	require.ErrorContains(t, err, "update failed")
 }
 
 func waitLateMirrorDone(t *testing.T, session *Session) {

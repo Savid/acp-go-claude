@@ -133,3 +133,54 @@ func TestSessionSetPermissionRuleDoesNotHoldSessionLockDuringSave(t *testing.T) 
 		t.Fatal("permission save did not finish")
 	}
 }
+
+func TestWorkflowPermissionSuggestionsNormalizeAllowAlwaysToSession(t *testing.T) {
+	t.Parallel()
+
+	suggestions := []map[string]any{{
+		jsonFieldType:               permissionUpdateAddRules,
+		permissionUpdateBehavior:    claude.BehaviorAllow,
+		permissionUpdateDestination: permissionUpdateLocalSettings,
+		permissionUpdateRules: []any{
+			map[string]any{permissionUpdateToolName: "Workflow(review-plan)"},
+		},
+	}}
+
+	updated := permissionSuggestionsForAllowAlways(workflowTool, suggestions, permissionUpdate(workflowTool, claude.BehaviorAllow))
+	require.Len(t, updated, 1)
+	require.Equal(t, permissionUpdateSession, updated[0][permissionUpdateDestination])
+	require.Equal(t, permissionUpdateLocalSettings, suggestions[0][permissionUpdateDestination], "normalization must not mutate Claude suggestions")
+
+	other := permissionSuggestionsForAllowAlways("Write", suggestions, permissionUpdate("Write", claude.BehaviorAllow))
+	require.Equal(t, permissionUpdateLocalSettings, other[0][permissionUpdateDestination])
+
+	empty := permissionSuggestionsForAllowAlways(workflowTool, nil, permissionUpdate(workflowTool, claude.BehaviorAllow))
+	require.Equal(t, []map[string]any{permissionUpdate(workflowTool, claude.BehaviorAllow)}, empty)
+}
+
+func TestWorkflowPermissionSuggestionsDoNotRewriteNonWorkflowRules(t *testing.T) {
+	t.Parallel()
+
+	require.Empty(t, normalizeWorkflowPermissionSuggestion(nil))
+	require.Equal(t, map[string]any{
+		jsonFieldType: "other",
+		"nested":      []any{map[string]any{"ok": true}},
+	}, normalizeWorkflowPermissionSuggestion(map[string]any{
+		jsonFieldType: "other",
+		"nested":      []any{map[string]any{"ok": true}},
+	}))
+
+	suggestions := []map[string]any{{
+		jsonFieldType:               permissionUpdateAddRules,
+		permissionUpdateBehavior:    claude.BehaviorAllow,
+		permissionUpdateDestination: permissionUpdateLocalSettings,
+		permissionUpdateRules: []map[string]any{
+			{permissionUpdateToolName: workflowTool},
+			{permissionUpdateToolName: "Write"},
+		},
+	}}
+
+	updated := permissionSuggestionsForAllowAlways(workflowTool, suggestions, permissionUpdate(workflowTool, claude.BehaviorAllow))
+	require.Len(t, updated, 1)
+	require.Equal(t, permissionUpdateLocalSettings, updated[0][permissionUpdateDestination])
+}

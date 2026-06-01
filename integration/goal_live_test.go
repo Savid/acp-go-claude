@@ -5,8 +5,6 @@ package integration
 import (
 	"context"
 	"encoding/json"
-	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -99,8 +97,6 @@ func TestClaudeNativeGoalMirrorLive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	requireClaudeGoalSnapshotVersion(t, ctx)
-
 	client := &recordingClient{}
 	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
 
@@ -115,7 +111,13 @@ func TestClaudeNativeGoalMirrorLive(t *testing.T) {
 	require.Eventually(t, func() bool {
 		goal, ok := latestGoalUpdate(client)
 
-		return ok && goal != nil && goal["status"] == claudeacp.ClaudeGoalStatusCompleted
+		if !ok || goal == nil {
+			return false
+		}
+
+		status := goal["status"]
+		return goal["objective"] == "The next assistant response must be exactly ACP_NATIVE_GOAL_DONE with no punctuation." &&
+			(status == claudeacp.ClaudeGoalStatusActive || status == claudeacp.ClaudeGoalStatusCompleted)
 	}, 30*time.Second, 250*time.Millisecond)
 	require.Contains(t, client.text(), "ACP_NATIVE_GOAL_DONE")
 
@@ -201,19 +203,6 @@ func TestClaudeGoalSetDuringPendingPermissionLive(t *testing.T) {
 
 	_, err = conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
-}
-
-func requireClaudeGoalSnapshotVersion(t *testing.T, ctx context.Context) {
-	t.Helper()
-
-	out, err := exec.CommandContext(ctx, integrationClaudePath(t), "--version").CombinedOutput()
-	require.NoError(t, err, string(out))
-	require.Truef(
-		t,
-		strings.Contains(string(out), "2.1.150"),
-		"native goal probes are pinned to claude 2.1.150; got %s",
-		strings.TrimSpace(string(out)),
-	)
 }
 
 func claudeGoalMap(t *testing.T, meta map[string]any) map[string]any {

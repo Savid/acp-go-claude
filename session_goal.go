@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/savid/acp-go-claude/internal/observer"
 )
 
@@ -49,9 +50,9 @@ const (
 	goalNativeTypeGoalStatus = "goal_status"
 	goalNativeClearCommand   = "clear"
 
-	// Version-probed against claude 2.1.150. These strings come from the
-	// undocumented local-command output for /goal clear; live tests pin the
-	// Claude version and fail loudly if the wording drifts.
+	// These strings come from the undocumented local-command output for
+	// /goal clear. Live tests exercise the current local Claude CLI so wording
+	// drift fails on behavior rather than on a stale version gate.
 	goalNativeClearOK    = "Goal cleared:"
 	goalNativeClearEmpty = "No goal set"
 
@@ -832,7 +833,7 @@ func (a *goalAccumulator) snapshot() *ClaudeGoal {
 	return &goal
 }
 
-func (s *Session) startLateMirrorProcessor(ctx context.Context) {
+func (s *Session) startLateMirrorProcessor(ctx context.Context, options ...mapper.ToolUpdateOptions) {
 	if s.client == nil || sessionMirrorLateTimeout <= 0 {
 		return
 	}
@@ -847,10 +848,14 @@ func (s *Session) startLateMirrorProcessor(ctx context.Context) {
 	s.lateMirrorDone = done
 	s.mu.Unlock()
 
-	// Between turns Claude is expected to emit mirror frames only. Raw-event
-	// subscribers still see any unexpected non-mirror frame; normal prompt
-	// processing is intentionally not run here, and the next prompt stops this
-	// processor before it starts reading.
+	toolUpdateOptions := mapper.ToolUpdateOptions{}
+	if len(options) > 0 {
+		toolUpdateOptions = options[0]
+	}
+
+	// Between turns Claude can emit transcript mirror frames and background
+	// workflow frames. Raw-event subscribers still see any unexpected frame; the
+	// next prompt stops this processor before it starts reading.
 	go func() {
 		defer recoverAgentGoroutine(ctx, s.agentLogger(), "late session mirror goal processor")
 		defer s.clearLateMirrorProcessor(done)
@@ -875,6 +880,19 @@ func (s *Session) startLateMirrorProcessor(ctx context.Context) {
 
 			if _, err := s.handleSessionMirror(lateCtx, msg); err != nil {
 				s.logGoalMirrorError(lateCtx, "process_mirror", err)
+
+				return
+			}
+
+			if toolUpdateOptions.Workflow == nil {
+				continue
+			}
+
+			updates := mapper.MessageToUpdatesWithOptions(msg, toolUpdateOptions)
+			s.recordWorkflowFrameErrors(lateCtx, toolUpdateOptions.Workflow)
+
+			if err := s.emitUpdates(lateCtx, updates); err != nil {
+				s.logGoalMirrorError(lateCtx, "emit_workflow", err)
 
 				return
 			}

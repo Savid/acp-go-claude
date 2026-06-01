@@ -87,3 +87,7 @@ as Claude's internal `StructuredOutput` tool call when
 [`outputFormat`](/docs/reference/meta#session-options) is configured.
 They may also include `transcript_mirror` frames containing native Claude
 `goal_status` rows when goal extraction observes `/goal` state.
+For [workflows](/docs/features/workflows), raw events preserve Claude's
+`task_started`, `task_progress`, `task_updated`, and `task_notification` system
+frames plus the original `Workflow` launch result. Normal mapped workflow
+updates are still emitted through ACP tool updates.

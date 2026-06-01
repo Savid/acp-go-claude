@@ -242,6 +242,7 @@ The initialize response advertises:
 - `claude.sdkMessages`
 - `claude.outputFormat`
 - `claude.goals`
+- `claude.workflows`
 
 These fields are intentionally Claude-specific. Portable clients should rely on
 the normal ACP fields first. Method support is listed in
@@ -297,7 +298,43 @@ Example:
       "statuses": ["active", "completed", "blocked"],
       "clientSettableStatuses": ["active", "blocked"],
       "clearValue": null
+    },
+    "workflows": {
+      "updates": true,
+      "scope": "session",
+      "toolKind": "think",
+      "metadataPath": "tool_call_update._meta.claude.workflow",
+      "logs": {
+        "readByDefault": false
+      },
+      "rawEvents": "_claude/sdkMessage"
     }
   }
 }
 ```
+
+## Workflow metadata
+
+Claude Code `Workflow` tool progress is exposed through normal ACP tool updates
+with `_meta.claude.workflow` carrying the accumulated workflow state:
+
+```json
+{
+  "claude": {
+    "toolName": "Workflow",
+    "workflow": {
+      "taskId": "task-123",
+      "workflowName": "review-plan",
+      "status": "completed",
+      "phases": [],
+      "agents": [],
+      "activeAgents": 0,
+      "completedAgents": 1,
+      "failedAgents": 0
+    }
+  }
+}
+```
+
+See [Workflows](/docs/features/workflows) for status mapping, topology fields,
+and log/privacy behavior.

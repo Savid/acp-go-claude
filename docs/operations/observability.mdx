@@ -33,6 +33,7 @@ The adapter also emits telemetry for the ACP boundary that Claude cannot see:
 - session-store load, append, list, materialize, and delete operations
 - [raw Claude message](/docs/features/raw-events) emission failures
 - Claude-specific goal set/clear work through the ACP extension boundary
+- malformed Claude workflow task frames dropped by the adapter mapper
 - Claude process lifecycle
 
 For model/tool/cost analysis, prefer Claude's `claude_code.*` telemetry. For
@@ -232,6 +233,7 @@ Adapter metric families include:
 - `acp_go_claude.mcp.bridge.*`
 - `acp_go_claude.session_store.*`
 - `acp_go_claude.raw_message.emit.error.count`
+- `acp_go_claude.workflow.frame.error.count`
 - `acp_go_claude.claude.process.exit.count`
 - standard `gen_ai.client.*`
 - standard `mcp.client.*`

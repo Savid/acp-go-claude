@@ -66,6 +66,7 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		Cwd:                    s.cwd,
 		SupportsTerminalOutput: s.agent.clientSupportsTerminalOutput(),
 		ToolUses:               make(map[string]claude.ToolUseBlock),
+		Workflow:               mapper.NewWorkflowTracker(),
 	}
 
 	state := &promptLoopState{}
@@ -98,7 +99,17 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		}
 
 		if result, ok := msg.(*claude.ResultMessage); ok {
-			resp, done, err := s.finishPromptResult(turnCtx, ctx, params, result, state, localOnlyCommand, localGoalClear, localGoalClearAt)
+			resp, done, err := s.finishPromptResult(
+				turnCtx,
+				ctx,
+				params,
+				result,
+				state,
+				toolUpdateOptions,
+				localOnlyCommand,
+				localGoalClear,
+				localGoalClearAt,
+			)
 			if err != nil {
 				return acp.PromptResponse{}, err
 			}
@@ -128,11 +139,11 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 				return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
 			}
 
-			if err := s.drainSessionMirror(turnCtx); err != nil {
+			if err := s.drainSessionMirror(turnCtx, toolUpdateOptions); err != nil {
 				return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
 			}
 
-			s.startLateMirrorProcessor(ctx)
+			s.startLateMirrorProcessor(ctx, toolUpdateOptions)
 
 			return acp.PromptResponse{
 				StopReason:    stopReason,
@@ -141,7 +152,10 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 			}, nil
 		}
 
-		if err := s.emitUpdates(turnCtx, mapper.MessageToUpdatesWithOptions(msg, toolUpdateOptions)); err != nil {
+		updates := mapper.MessageToUpdatesWithOptions(msg, toolUpdateOptions)
+		s.recordWorkflowFrameErrors(turnCtx, toolUpdateOptions.Workflow)
+
+		if err := s.emitUpdates(turnCtx, updates); err != nil {
 			return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
 		}
 	}
@@ -153,6 +167,7 @@ func (s *Session) finishPromptResult(
 	params acp.PromptRequest,
 	result *claude.ResultMessage,
 	state *promptLoopState,
+	toolUpdateOptions mapper.ToolUpdateOptions,
 	localOnlyCommand bool,
 	localGoalClear bool,
 	localGoalClearAt string,
@@ -171,7 +186,8 @@ func (s *Session) finishPromptResult(
 		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
 	}
 
-	if resultOriginKind(result) == originKindTaskNotification {
+	if resultOriginKind(result) == originKindTaskNotification &&
+		!workflowTaskNotificationResultCompletesPrompt(toolUpdateOptions.Workflow) {
 		return acp.PromptResponse{}, false, nil
 	}
 
@@ -198,11 +214,11 @@ func (s *Session) finishPromptResult(
 		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
 	}
 
-	if err := s.drainSessionMirror(turnCtx); err != nil {
+	if err := s.drainSessionMirror(turnCtx, toolUpdateOptions); err != nil {
 		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
 	}
 
-	s.startLateMirrorProcessor(interruptCtx)
+	s.startLateMirrorProcessor(interruptCtx, toolUpdateOptions)
 
 	s.logUnknownStopReason(turnCtx, result)
 
@@ -211,6 +227,10 @@ func (s *Session) finishPromptResult(
 		Usage:         state.promptUsage,
 		UserMessageId: params.MessageId,
 	}, true, nil
+}
+
+func workflowTaskNotificationResultCompletesPrompt(tracker *mapper.WorkflowTracker) bool {
+	return tracker.HasTracked() && !tracker.HasActive()
 }
 
 func (s *Session) logUnknownStopReason(ctx context.Context, result *claude.ResultMessage) {
@@ -240,9 +260,14 @@ func (s *Session) handleSessionMirror(ctx context.Context, msg claude.Message) (
 	return true, err
 }
 
-func (s *Session) drainSessionMirror(ctx context.Context) error {
+func (s *Session) drainSessionMirror(ctx context.Context, options ...mapper.ToolUpdateOptions) error {
 	drainCtx, cancel := context.WithTimeout(ctx, sessionMirrorDrainTimeout)
 	defer cancel()
+
+	toolUpdateOptions := mapper.ToolUpdateOptions{}
+	if len(options) > 0 {
+		toolUpdateOptions = options[0]
+	}
 
 	for {
 		msg, err := s.client.Receive(drainCtx)
@@ -259,6 +284,17 @@ func (s *Session) drainSessionMirror(ctx context.Context) error {
 		}
 
 		if _, err := s.handleSessionMirror(ctx, msg); err != nil {
+			return err
+		}
+
+		if toolUpdateOptions.Workflow == nil {
+			continue
+		}
+
+		updates := mapper.MessageToUpdatesWithOptions(msg, toolUpdateOptions)
+		s.recordWorkflowFrameErrors(ctx, toolUpdateOptions.Workflow)
+
+		if err := s.emitUpdates(ctx, updates); err != nil {
 			return err
 		}
 	}
@@ -303,6 +339,16 @@ func (s *Session) observePromptMessage(ctx context.Context, msg claude.Message, 
 	}
 
 	return s.emitOptionalUpdates(ctx, updates)
+}
+
+func (s *Session) recordWorkflowFrameErrors(ctx context.Context, tracker *mapper.WorkflowTracker) {
+	if tracker == nil || s.agent == nil {
+		return
+	}
+
+	for _, err := range tracker.DrainFrameErrors() {
+		s.agent.observe.RecordWorkflowFrameError(ctx, err.Outcome, err.ErrorType, err.FrameSubtype)
+	}
 }
 
 func observeAssistantMessage(assistant *claude.AssistantMessage, state *promptLoopState) {

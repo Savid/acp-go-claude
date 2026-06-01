@@ -22,6 +22,7 @@ const (
 	toolStructuredOutput = "StructuredOutput"
 	toolTask             = "Task"
 	toolTodoWrite        = "TodoWrite"
+	toolWorkflow         = "Workflow"
 	toolWrite            = "Write"
 
 	keyAllowedDomains   = "allowed_domains"
@@ -72,6 +73,7 @@ const (
 	keyTerminalSignal   = "signal"
 	keyThinking         = "thinking"
 	keyTitle            = "title"
+	keyToolUseResult    = "tool_use_result"
 
 	streamEventContentBlockDelta = "content_block_delta"
 	streamEventContentBlockStart = "content_block_start"
@@ -104,6 +106,7 @@ type ToolUpdateOptions struct {
 	SupportsTerminalOutput bool
 	ToolUses               map[string]claude.ToolUseBlock
 	ParentToolUseID        string
+	Workflow               *WorkflowTracker
 }
 
 // ToolInfo describes ACP-facing metadata for a Claude tool call.
@@ -124,6 +127,8 @@ func ToolCallInfo(toolName string, toolID string, input map[string]any, options 
 	switch strings.ToLower(toolName) {
 	case "agent", "task":
 		return agentToolInfo(input)
+	case keyWorkflow:
+		return workflowToolInfo(input)
 	case "bash":
 		return bashToolInfo(toolID, input, options.SupportsTerminalOutput)
 	case "read", "notebookread":
@@ -181,6 +186,8 @@ func MessageToUpdatesWithOptions(msg claude.Message, options ToolUpdateOptions) 
 		return userToolResultUpdates(typed, options)
 	case *claude.StreamEventMessage:
 		return streamEventUpdates(typed, options)
+	case *claude.SystemMessage:
+		return workflowSystemUpdates(typed, options)
 	default:
 		return nil
 	}
@@ -203,6 +210,13 @@ func userToolResultUpdates(msg *claude.UserMessage, options ToolUpdateOptions) [
 
 		parsed, ok := claude.ParseContentBlock(block).(claude.ToolResultBlock)
 		if !ok || parsed.ToolUseID == "" {
+			continue
+		}
+
+		workflowUpdates := workflowLaunchResultUpdates(parsed, options, workflowLaunchResult(msg.Raw))
+		if len(workflowUpdates) > 0 {
+			updates = append(updates, workflowUpdates...)
+
 			continue
 		}
 
@@ -467,6 +481,25 @@ func agentToolInfo(input map[string]any) ToolInfo {
 	var content []acp.ToolCallContent
 	if prompt := stringInput(input, keyPrompt); prompt != "" {
 		content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(prompt))}
+	}
+
+	return ToolInfo{Title: title, Kind: acp.ToolKindThink, Content: content}
+}
+
+func workflowToolInfo(input map[string]any) ToolInfo {
+	title := firstNonEmptyString(
+		stringInput(input, "workflow_name"),
+		stringInput(input, "name"),
+		stringInput(input, keyDescription),
+		stringInput(input, "summary"),
+	)
+	if title == "" {
+		title = toolWorkflow
+	}
+
+	var content []acp.ToolCallContent
+	if description := firstNonEmptyString(stringInput(input, keyDescription), stringInput(input, "summary")); description != "" {
+		content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(description))}
 	}
 
 	return ToolInfo{Title: title, Kind: acp.ToolKindThink, Content: content}

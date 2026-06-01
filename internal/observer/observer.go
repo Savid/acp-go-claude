@@ -46,6 +46,7 @@ const (
 	attrSessionStoreOp                     = "session.store.operation"
 	attrStopReason                         = "stop_reason"
 	attrToolName                           = "claude.tool.name"
+	attrWorkflowFrameSubtype               = "frame.subtype"
 
 	claudeClientValue    = "claude-code"
 	genAIOperationChat   = "chat"
@@ -99,6 +100,7 @@ type Observer struct {
 	sessionStoreOperationDuration metric.Float64Histogram
 	sessionStoreErrorCount        metric.Int64Counter
 	rawMessageEmitErrorCount      metric.Int64Counter
+	workflowFrameErrorCount       metric.Int64Counter
 	claudeProcessExitCount        metric.Int64Counter
 }
 
@@ -195,6 +197,7 @@ func New(config Config) *Observer {
 	observer.sessionStoreOperationDuration = mustFloat64Histogram(meter, "acp_go_claude.session_store.operation.duration", "Session store operation duration.")
 	observer.sessionStoreErrorCount = mustInt64Counter(meter, "acp_go_claude.session_store.error.count", "Session store errors.")
 	observer.rawMessageEmitErrorCount = mustInt64Counter(meter, "acp_go_claude.raw_message.emit.error.count", "Raw Claude message emission errors.")
+	observer.workflowFrameErrorCount = mustInt64Counter(meter, "acp_go_claude.workflow.frame.error.count", "Malformed Claude workflow frames dropped from mapped updates.")
 	observer.claudeProcessExitCount = mustInt64Counter(meter, "acp_go_claude.claude.process.exit.count", "Claude process exits.")
 
 	return observer
@@ -678,6 +681,27 @@ func (o *Observer) RecordRawMessageEmitFailure(ctx context.Context, err error) {
 	}
 
 	o.rawMessageEmitErrorCount.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+func (o *Observer) RecordWorkflowFrameError(ctx context.Context, outcome string, errorType string, frameSubtype string) {
+	if o == nil {
+		return
+	}
+
+	attrs := []attribute.KeyValue(nil)
+	if outcome != "" {
+		attrs = append(attrs, attribute.String(attrOutcome, outcome))
+	}
+
+	if errorType != "" {
+		attrs = append(attrs, attribute.String(attrErrorType, errorType))
+	}
+
+	if frameSubtype != "" {
+		attrs = append(attrs, attribute.String(attrWorkflowFrameSubtype, frameSubtype))
+	}
+
+	o.workflowFrameErrorCount.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 func (o *Observer) recordTokenUsage(ctx context.Context, result PromptResult, attrs []attribute.KeyValue) {

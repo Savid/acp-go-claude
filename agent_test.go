@@ -576,12 +576,12 @@ func TestAgentInitialize(t *testing.T) {
 			rawSDKMessagesEnabledByKey: rawSDKMessagesEnabledByPath,
 		},
 		outputFormatCapabilityKey: map[string]any{
-			capabilityScopeKey: capabilityScopeSession,
-			"types":            []string{ClaudeOutputFormatJSONSchema},
-			"config":           outputFormatConfigPath,
-			"result":           outputFormatResultPath,
-			"hiddenTool":       "StructuredOutput",
-			"rawEvents":        rawClaudeSDKMessageMethod,
+			capabilityScopeKey:     capabilityScopeSession,
+			"types":                []string{ClaudeOutputFormatJSONSchema},
+			"config":               outputFormatConfigPath,
+			"result":               outputFormatResultPath,
+			"hiddenTool":           "StructuredOutput",
+			capabilityRawEventsKey: rawClaudeSDKMessageMethod,
 		},
 		claudeGoalsCapabilityKey: map[string]any{
 			capabilityScopeKey:     capabilityScopeSession,
@@ -601,6 +601,16 @@ func TestAgentInitialize(t *testing.T) {
 			"statuses":               []string{ClaudeGoalStatusActive, ClaudeGoalStatusCompleted, ClaudeGoalStatusBlocked},
 			"clientSettableStatuses": []string{ClaudeGoalStatusActive, ClaudeGoalStatusBlocked},
 			"clearValue":             nil,
+		},
+		"workflows": map[string]any{
+			"updates":          true,
+			capabilityScopeKey: capabilityScopeSession,
+			"toolKind":         "think",
+			"metadataPath":     "tool_call_update._meta.claude.workflow",
+			"logs": map[string]any{
+				"readByDefault": false,
+			},
+			capabilityRawEventsKey: rawClaudeSDKMessageMethod,
 		},
 	}, resp.AgentCapabilities.Meta[claudeMetaKey])
 	require.Empty(t, resp.AuthMethods)

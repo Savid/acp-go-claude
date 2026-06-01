@@ -50,6 +50,7 @@ const (
 	clientMetaTerminalOutput = "terminal_output"
 	permissionPromptTool     = "stdio"
 	validationRequired       = "required"
+	capabilityRawEventsKey   = "rawEvents"
 
 	mcpConfigTypeACP = "acp"
 
@@ -239,12 +240,12 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 						rawSDKMessagesEnabledByKey: rawSDKMessagesEnabledByPath,
 					},
 					outputFormatCapabilityKey: map[string]any{
-						capabilityScopeKey:    capabilityScopeSession,
-						"types":               []string{ClaudeOutputFormatJSONSchema},
-						"config":              outputFormatConfigPath,
-						outputFormatResultKey: outputFormatResultPath,
-						"hiddenTool":          "StructuredOutput",
-						"rawEvents":           rawClaudeSDKMessageMethod,
+						capabilityScopeKey:     capabilityScopeSession,
+						"types":                []string{ClaudeOutputFormatJSONSchema},
+						"config":               outputFormatConfigPath,
+						outputFormatResultKey:  outputFormatResultPath,
+						"hiddenTool":           "StructuredOutput",
+						capabilityRawEventsKey: rawClaudeSDKMessageMethod,
 					},
 					claudeGoalsCapabilityKey: map[string]any{
 						capabilityScopeKey:     capabilityScopeSession,
@@ -264,6 +265,16 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 						"statuses":               []string{ClaudeGoalStatusActive, ClaudeGoalStatusCompleted, ClaudeGoalStatusBlocked},
 						"clientSettableStatuses": []string{ClaudeGoalStatusActive, ClaudeGoalStatusBlocked},
 						"clearValue":             nil,
+					},
+					"workflows": map[string]any{
+						"updates":          true,
+						capabilityScopeKey: capabilityScopeSession,
+						"toolKind":         string(acp.ToolKindThink),
+						"metadataPath":     "tool_call_update._meta.claude.workflow",
+						"logs": map[string]any{
+							"readByDefault": false,
+						},
+						capabilityRawEventsKey: rawClaudeSDKMessageMethod,
 					},
 				},
 			},

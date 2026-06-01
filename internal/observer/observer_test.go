@@ -178,6 +178,7 @@ func TestObserverRecordsAdapterSignals(t *testing.T) {
 	ctx, finishStore := observe.StartSessionStore(ctx, "materialize")
 	finishStore(nil)
 	observe.RecordRawMessageEmitFailure(ctx, errBoom)
+	observe.RecordWorkflowFrameError(ctx, "dropped", "bad_workflow_progress", "task_progress")
 
 	metrics := collectMetrics(t, reader)
 	for _, name := range []string{
@@ -194,6 +195,7 @@ func TestObserverRecordsAdapterSignals(t *testing.T) {
 		"acp_go_claude.session_store.operation.duration",
 		"acp_go_claude.session_store.error.count",
 		"acp_go_claude.raw_message.emit.error.count",
+		"acp_go_claude.workflow.frame.error.count",
 	} {
 		requireMetric(t, metrics, name)
 	}
@@ -240,6 +242,7 @@ func TestObserverNoopAndHelpers(t *testing.T) {
 	observe.RecordMCPSession(ctx, time.Time{}, MCPMessageResult{})
 	observe.RecordSessionStore(ctx, time.Now(), "", nil)
 	observe.RecordRawMessageEmitFailure(ctx, nil)
+	observe.RecordWorkflowFrameError(ctx, "", "", "")
 	require.Nil(t, observe.InjectTraceEnv(ctx, nil))
 	require.Equal(t, ctx, observe.Extract(ctx, nil))
 

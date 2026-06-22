@@ -233,6 +233,15 @@ func TestLocalAgentConnectionHandleBranches(t *testing.T) {
 	_, reqErr = conn.handle(ctx, "missing", nil)
 	require.Equal(t, -32601, reqErr.Code)
 
+	_, reqErr = conn.handle(ctx, acp.AgentMethodProvidersList, nil)
+	require.Equal(t, -32601, reqErr.Code)
+
+	_, reqErr = conn.handle(ctx, acp.AgentMethodProvidersSet, nil)
+	require.Equal(t, -32601, reqErr.Code)
+
+	_, reqErr = conn.handle(ctx, acp.AgentMethodProvidersDisable, nil)
+	require.Equal(t, -32601, reqErr.Code)
+
 	_, reqErr = conn.handle(ctx, "_example/unknown", nil)
 	require.Equal(t, -32601, reqErr.Code)
 

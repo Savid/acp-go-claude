@@ -60,7 +60,7 @@ func TestClaudeCLIAuthGatewayInitialization(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = conn.UnstableLogout(ctx, acp.UnstableLogoutRequest{})
+	_, err = conn.Logout(ctx, acp.LogoutRequest{})
 	require.NoError(t, err)
 }
 
@@ -108,7 +108,7 @@ func TestClaudeCLIGatewayAuthClosesSessionsAndRejectsProcessMCP(t *testing.T) {
 	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
 
-	_, err = conn.UnstableLogout(ctx, acp.UnstableLogoutRequest{})
+	_, err = conn.Logout(ctx, acp.LogoutRequest{})
 	require.NoError(t, err)
 
 	_, err = conn.Prompt(ctx, acp.PromptRequest{
@@ -700,13 +700,12 @@ func TestClaudeCLIResumeAndConcurrentSessions(t *testing.T) {
 	_, err = conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: first.SessionId})
 	require.NoError(t, err)
 
-	resumed, err := conn.ResumeSession(ctx, acp.ResumeSessionRequest{
+	_, err = conn.ResumeSession(ctx, acp.ResumeSessionRequest{
 		SessionId:  first.SessionId,
 		Cwd:        cwd,
 		McpServers: []acp.McpServer{},
 	})
 	require.NoError(t, err)
-	require.NotNil(t, resumed.Models)
 
 	client.resetRecordedOutput()
 	resp, err = conn.Prompt(ctx, acp.PromptRequest{
@@ -770,11 +769,22 @@ func TestClaudeCLIFailurePaths(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	_, err = conn.UnstableSetProviders(ctx, acp.UnstableSetProvidersRequest{})
-	require.Error(t, err)
+	requireMethodNotFound := func(err error) {
+		t.Helper()
 
-	_, err = conn.UnstableDisableProviders(ctx, acp.UnstableDisableProvidersRequest{})
-	require.Error(t, err)
+		var reqErr *acp.RequestError
+		require.ErrorAs(t, err, &reqErr)
+		require.Equal(t, -32601, reqErr.Code)
+	}
+
+	_, err = conn.UnstableListProviders(ctx, acp.UnstableListProvidersRequest{})
+	requireMethodNotFound(err)
+
+	_, err = conn.UnstableSetProvider(ctx, acp.UnstableSetProviderRequest{})
+	requireMethodNotFound(err)
+
+	_, err = conn.UnstableDisableProvider(ctx, acp.UnstableDisableProviderRequest{})
+	requireMethodNotFound(err)
 
 	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}})
 	require.NoError(t, err)

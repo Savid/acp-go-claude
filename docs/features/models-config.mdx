@@ -33,10 +33,9 @@ claudeacp.Serve(ctx, input, output,
 )
 ```
 
-Clients should prefer ACP `session/set_config_option` with the `model` config
-option for model changes. Unstable `session/set_model` is still implemented
-for `github.com/coder/acp-go-sdk` compatibility; see
-[ACP methods](/docs/reference/acp-methods) for the method list.
+Clients should use ACP `session/set_config_option` with the `model` config
+option for model changes; see [ACP methods](/docs/reference/acp-methods) for
+the method list.
 
 ## `CLAUDE_MODEL_CONFIG`
 

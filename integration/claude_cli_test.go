@@ -19,11 +19,6 @@ func TestClaudeCLIACPConversation(t *testing.T) {
 	client := &recordingClient{}
 	clientConn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
 
-	providers, err := clientConn.UnstableListProviders(ctx, acp.UnstableListProvidersRequest{})
-	require.NoError(t, err)
-	require.Len(t, providers.Providers, 1)
-	require.Equal(t, "claude-code", providers.Providers[0].Id)
-
 	nes, err := clientConn.UnstableStartNes(ctx, acp.UnstableStartNesRequest{})
 	require.NoError(t, err)
 	require.NotEmpty(t, nes.SessionId)
@@ -53,14 +48,12 @@ func TestClaudeCLIACPConversation(t *testing.T) {
 	session, err := clientConn.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
 	require.NotEmpty(t, session.SessionId)
-	require.NotNil(t, session.Models)
-	require.NotEmpty(t, session.Models.CurrentModelId)
-	require.NotEmpty(t, session.Models.AvailableModels)
 	require.NotEmpty(t, session.ConfigOptions)
 	claudeMeta, ok := session.Meta["claude"].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, string(session.Models.CurrentModelId), claudeMeta["modelId"])
-	require.Contains(t, sessionModelIDs(session.Models.AvailableModels), session.Models.CurrentModelId)
+	modelConfig := findSelectConfig(t, session.ConfigOptions, "model")
+	require.NotEmpty(t, modelConfig.CurrentValue)
+	require.Equal(t, string(modelConfig.CurrentValue), claudeMeta["modelId"])
 	outputStyle := findSelectConfig(t, session.ConfigOptions, "output_style")
 	require.NotEmpty(t, outputStyle.CurrentValue)
 
@@ -158,8 +151,6 @@ func TestClaudeCLIACPConversation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, fork.SessionId)
 	require.NotEqual(t, session.SessionId, fork.SessionId)
-	require.NotNil(t, fork.Models)
-	require.NotEmpty(t, fork.Models.AvailableModels)
 	require.NotEmpty(t, fork.ConfigOptions)
 
 	resp, err = clientConn.Prompt(ctx, acp.PromptRequest{

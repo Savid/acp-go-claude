@@ -77,7 +77,6 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		SessionId:     session.id,
 		Meta:          sessionResponseMeta(session),
 		Modes:         sessionModeState(session),
-		Models:        sessionModelState(session),
 		ConfigOptions: sessionConfigOptions(session),
 	}
 
@@ -124,7 +123,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		resp = acp.ResumeSessionResponse{
 			Meta:          sessionResponseMeta(session),
 			Modes:         sessionModeState(session),
-			Models:        sessionModelState(session),
 			ConfigOptions: sessionConfigOptions(session),
 		}
 
@@ -161,7 +159,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	resp = acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(session),
 		Modes:         sessionModeState(session),
-		Models:        sessionModelState(session),
 		ConfigOptions: sessionConfigOptions(session),
 	}
 
@@ -293,7 +290,6 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	resp = acp.LoadSessionResponse{
 		Meta:          sessionResponseMeta(session),
 		Modes:         sessionModeState(session),
-		Models:        sessionModelState(session),
 		ConfigOptions: sessionConfigOptions(session),
 	}
 
@@ -306,10 +302,6 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
 	if validationErr := validateOptionalAbsolutePath("cwd", params.Cwd); validationErr != nil {
-		return acp.ListSessionsResponse{}, validationErr
-	}
-
-	if validationErr := validateAbsolutePaths("additionalDirectories", params.AdditionalDirectories); validationErr != nil {
 		return acp.ListSessionsResponse{}, validationErr
 	}
 
@@ -330,7 +322,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		active = append(active, session.sessionInfo(id))
 	}
 
-	saved, err := transcript.Store{ClaudeHome: a.options.ClaudeHome}.List(ctx, params.Cwd, params.AdditionalDirectories)
+	saved, err := transcript.Store{ClaudeHome: a.options.ClaudeHome}.List(ctx, params.Cwd, nil)
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
@@ -962,7 +954,7 @@ func (a *Agent) storeHasSession(ctx context.Context, sessionID string, cwd strin
 }
 
 func (a *Agent) listStoreSessions(ctx context.Context, params acp.ListSessionsRequest) ([]acp.SessionInfo, error) {
-	if params.Cwd == nil || strings.TrimSpace(*params.Cwd) == "" || len(params.AdditionalDirectories) > 0 {
+	if params.Cwd == nil || strings.TrimSpace(*params.Cwd) == "" {
 		return nil, nil
 	}
 
@@ -1063,10 +1055,6 @@ func firstStoreUserPrompt(entry map[string]any) string {
 
 func sessionMatchesListFilters(session *Session, params acp.ListSessionsRequest) bool {
 	if params.Cwd != nil && *params.Cwd != session.cwd {
-		return false
-	}
-
-	if len(params.AdditionalDirectories) > 0 && !slices.Equal(params.AdditionalDirectories, session.additionalDirectories) {
 		return false
 	}
 

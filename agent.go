@@ -44,9 +44,6 @@ const (
 	effortXHigh       = "xhigh"
 	effortMax         = "max"
 
-	providerClaudeCode       = "claude-code"
-	providerClaudeCodeTitle  = "Claude Code"
-	providerClaudeCodeURL    = "claude://local"
 	clientMetaTerminalOutput = "terminal_output"
 	permissionPromptTool     = "stdio"
 	validationRequired       = "required"
@@ -90,7 +87,6 @@ type Agent struct {
 var (
 	_ acp.Agent                  = (*Agent)(nil)
 	_ acp.AgentLoader            = (*Agent)(nil)
-	_ acp.AgentExperimental      = (*Agent)(nil)
 	_ acp.ExtensionMethodHandler = (*Agent)(nil)
 )
 
@@ -285,7 +281,6 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 				Sse:  true,
 			},
 			Nes:              nesCapabilities(),
-			Providers:        &acp.ProvidersCapabilities{},
 			PositionEncoding: &positionEncoding,
 			PromptCapabilities: acp.PromptCapabilities{
 				EmbeddedContext: true,

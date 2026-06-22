@@ -605,12 +605,3 @@ func selectConfigValues(option *acp.SessionConfigOptionSelect) []acp.SessionConf
 
 	return values
 }
-
-func sessionModelIDs(models []acp.ModelInfo) []acp.ModelId {
-	ids := make([]acp.ModelId, 0, len(models))
-	for _, model := range models {
-		ids = append(ids, model.ModelId)
-	}
-
-	return ids
-}

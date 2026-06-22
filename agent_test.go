@@ -551,7 +551,7 @@ func TestAgentInitialize(t *testing.T) {
 	require.Equal(t, acp.TextDocumentSyncKindFull, resp.AgentCapabilities.Nes.Events.Document.DidChange.SyncKind)
 	require.NotNil(t, resp.AgentCapabilities.PositionEncoding)
 	require.Equal(t, acp.PositionEncodingKindUtf16, *resp.AgentCapabilities.PositionEncoding)
-	require.NotNil(t, resp.AgentCapabilities.Providers)
+	require.Nil(t, resp.AgentCapabilities.Providers)
 	require.True(t, resp.AgentCapabilities.PromptCapabilities.Image)
 	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Close)
 	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Fork)
@@ -1078,8 +1078,6 @@ func TestAgentNewSessionAndPrompt(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, resp.SessionId)
-	require.NotNil(t, resp.Models)
-	require.Equal(t, acp.ModelId("claude-test"), resp.Models.CurrentModelId)
 	modelConfig := findSelectConfig(resp.ConfigOptions, configModel)
 	require.NotNil(t, modelConfig)
 	require.Equal(t, acp.SessionConfigValueId("claude-test"), modelConfig.CurrentValue)
@@ -1144,8 +1142,6 @@ func TestAgentUsesClaudeInitializeMetadata(t *testing.T) {
 
 	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
-	require.NotNil(t, session.Models)
-	require.Equal(t, acp.ModelId("default"), session.Models.CurrentModelId)
 	require.Equal(t, acp.SessionConfigValueId("default"), session.ConfigOptions[0].Select.CurrentValue)
 	require.Equal(t, acp.SessionConfigOptionCategoryModel, *session.ConfigOptions[0].Select.Category)
 	require.Equal(t, "Sonnet", (*session.ConfigOptions[0].Select.Options.Ungrouped)[1].Name)
@@ -1196,8 +1192,6 @@ func TestAgentUsesClaudeSettingsMetadata(t *testing.T) {
 
 	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
-	require.NotNil(t, session.Models)
-	require.Equal(t, acp.ModelId("claude-settings"), session.Models.CurrentModelId)
 	modelConfig := findSelectConfig(session.ConfigOptions, configModel)
 	require.NotNil(t, modelConfig)
 	require.Equal(t, acp.SessionConfigValueId("claude-settings"), modelConfig.CurrentValue)
@@ -1244,8 +1238,6 @@ func TestAgentUsesClaudeSettingsFiles(t *testing.T) {
 
 	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
-	require.NotNil(t, session.Models)
-	require.Equal(t, acp.ModelId("opus"), session.Models.CurrentModelId)
 	requireClaudeVariantMeta(t, session.Meta, "opus", "high", []string{"low", "high"})
 	require.Equal(t, modeAuto, session.Modes.CurrentModeId)
 	modelConfig := findSelectConfig(session.ConfigOptions, configModel)
@@ -1545,16 +1537,6 @@ func TestAgentSessionPathValidation(t *testing.T) {
 				return err
 			},
 		},
-		{
-			name: "list relative additional directory",
-			call: func() error {
-				_, err := agent.ListSessions(context.Background(), acp.ListSessionsRequest{
-					AdditionalDirectories: []string{"relative"},
-				})
-
-				return err
-			},
-		},
 	}
 
 	for _, tc := range cases {
@@ -1611,8 +1593,6 @@ func TestAgentModelConfigEnvAndAliases(t *testing.T) {
 
 	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
-	require.NotNil(t, session.Models)
-	require.Equal(t, acp.ModelId("opus"), session.Models.CurrentModelId)
 	requireClaudeVariantMeta(t, session.Meta, "opus", "", []string{"low", "high"})
 	modelConfig := findSelectConfig(session.ConfigOptions, configModel)
 	require.NotNil(t, modelConfig)
@@ -1741,10 +1721,7 @@ func TestAgentModelSwitchReconcilesEffort(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: sessionResp.SessionId,
-		ModelId:   "haiku",
-	})
+	_, err = setModelConfig(context.Background(), agent, sessionResp.SessionId, "haiku")
 	require.NoError(t, err)
 
 	requests := sentControlRequests(fake, "apply_flag_settings")
@@ -1977,7 +1954,7 @@ func TestAgentInitialPermissionModeClampErrorClosesMCPBridge(t *testing.T) {
 	require.True(t, fake.isClosed())
 }
 
-func TestAgentUnstableSetSessionModelModeClamp(t *testing.T) {
+func TestAgentSetSessionModelConfigModeClamp(t *testing.T) {
 	t.Parallel()
 
 	fake := newAgentFakeTransport()
@@ -2008,15 +1985,14 @@ func TestAgentUnstableSetSessionModelModeClamp(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	modelResp, err := agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: session.SessionId,
-		ModelId:   "haiku",
-	})
+	modelResp, err := setModelConfig(context.Background(), agent, session.SessionId, "haiku")
 	require.NoError(t, err)
-	requireClaudeVariantMeta(t, modelResp.Meta, "claude-haiku-4-5", "", []string{})
+	modelConfig := findSelectConfig(modelResp.ConfigOptions, configModel)
+	require.NotNil(t, modelConfig)
+	require.Equal(t, acp.SessionConfigValueId("claude-haiku-4-5"), modelConfig.CurrentValue)
 }
 
-func TestAgentUnstableSetSessionModelModeClampPermissionError(t *testing.T) {
+func TestAgentSetSessionModelConfigModeClampPermissionError(t *testing.T) {
 	t.Parallel()
 
 	fake := newAgentFakeTransport()
@@ -2048,10 +2024,7 @@ func TestAgentUnstableSetSessionModelModeClampPermissionError(t *testing.T) {
 	require.NoError(t, err)
 
 	fake.controlErrors = map[string]string{"set_permission_mode": "mode failed"}
-	_, err = agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: session.SessionId,
-		ModelId:   "haiku",
-	})
+	_, err = setModelConfig(context.Background(), agent, session.SessionId, "haiku")
 	require.Error(t, err)
 }
 
@@ -2202,7 +2175,7 @@ func TestAgentGatewayAuthEnv(t *testing.T) {
 		"userEnv":             "user-value",
 	}, captured[0].Env)
 
-	_, err = agent.UnstableLogout(context.Background(), acp.UnstableLogoutRequest{})
+	_, err = agent.Logout(context.Background(), acp.LogoutRequest{})
 	require.NoError(t, err)
 	require.True(t, fakes[0].isClosed())
 	_, err = agent.session(firstSession.SessionId)
@@ -2223,7 +2196,7 @@ func TestAgentGatewayAuthEnv(t *testing.T) {
 	require.Len(t, captured, 2)
 	require.Equal(t, "", captured[1].Env[envAnthropicHeaders])
 
-	_, err = agent.UnstableLogout(context.Background(), acp.UnstableLogoutRequest{})
+	_, err = agent.Logout(context.Background(), acp.LogoutRequest{})
 	require.NoError(t, err)
 	require.True(t, fakes[1].isClosed())
 	_, err = agent.session(secondSession.SessionId)
@@ -2250,7 +2223,7 @@ func TestAgentLogoutWithoutGatewayKeepsSessions(t *testing.T) {
 	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
 
-	_, err = agent.UnstableLogout(context.Background(), acp.UnstableLogoutRequest{})
+	_, err = agent.Logout(context.Background(), acp.LogoutRequest{})
 	require.NoError(t, err)
 	require.False(t, fake.isClosed())
 
@@ -2286,7 +2259,7 @@ func TestAgentLogoutKeepsPreGatewaySessions(t *testing.T) {
 	gatewayBacked, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
 
-	_, err = agent.UnstableLogout(context.Background(), acp.UnstableLogoutRequest{})
+	_, err = agent.Logout(context.Background(), acp.LogoutRequest{})
 	require.NoError(t, err)
 	require.False(t, fakes[0].isClosed())
 	require.True(t, fakes[1].isClosed())
@@ -2324,7 +2297,7 @@ func TestAgentLogoutReturnsGatewaySessionCloseErrors(t *testing.T) {
 	fake.closeErr = closeErr
 	fake.mu.Unlock()
 
-	_, err = agent.UnstableLogout(context.Background(), acp.UnstableLogoutRequest{})
+	_, err = agent.Logout(context.Background(), acp.LogoutRequest{})
 	require.ErrorIs(t, err, closeErr)
 
 	_, err = agent.session(session.SessionId)
@@ -2483,8 +2456,6 @@ func TestModelAndConfigHelpers(t *testing.T) {
 
 	require.Nil(t, configOptions("", "", available, "", nil, "", false, false))
 	require.Nil(t, unstableConfigOptions("", "", available, "", nil, "", false, false))
-	require.Nil(t, modelState("", available))
-	require.Nil(t, unstableModelState("", available))
 
 	options := configOptions(modeDefault, "default", available, "default", []string{"default", "", "Explanatory", "default"}, "medium", true, true)
 	require.Len(t, options, 5)
@@ -2522,35 +2493,6 @@ func TestModelAndConfigHelpers(t *testing.T) {
 	require.Equal(t, modelConfigCategory, *options[4].Boolean.Category)
 	require.Equal(t, configTypeBoolean, options[4].Boolean.Type)
 	require.True(t, options[4].Boolean.CurrentValue)
-
-	models := modelState("custom", available)
-	require.NotNil(t, models)
-	require.Len(t, models.AvailableModels, 3)
-	require.Equal(t, acp.ModelId("custom"), models.CurrentModelId)
-	require.Nil(t, models.AvailableModels[1].Description)
-	require.Equal(t, claudeModelMetaForTest(map[string]any{
-		claudeModelMetaSupportedEffortKey: []string{"low", "medium", "xhigh"},
-	}), models.AvailableModels[0].Meta)
-	require.Equal(t, claudeModelMetaForTest(map[string]any{
-		claudeModelMetaContextWindowKey: defaultContextWindow,
-	}), models.AvailableModels[1].Meta)
-	require.Empty(t, models.AvailableModels[2].Meta)
-
-	models = modelState("default", available)
-	require.NotNil(t, models)
-	require.Len(t, models.AvailableModels, 2)
-
-	unstableModels := unstableModelState("custom", available)
-	require.NotNil(t, unstableModels)
-	require.Len(t, unstableModels.AvailableModels, 3)
-	require.Equal(t, acp.UnstableModelId("custom"), unstableModels.CurrentModelId)
-	require.Equal(t, claudeModelMetaForTest(map[string]any{
-		claudeModelMetaSupportedEffortKey: []string{"low", "medium", "xhigh"},
-	}), unstableModels.AvailableModels[0].Meta)
-
-	unstableModels = unstableModelState("default", available)
-	require.NotNil(t, unstableModels)
-	require.Len(t, unstableModels.AvailableModels, 2)
 
 	unstableOptions := unstableConfigOptions(modeDefault, "custom", available, "custom-style", nil, "medium", false, true)
 	require.Len(t, unstableOptions, 4)
@@ -2695,10 +2637,7 @@ func TestAgentACPConnectionStreamsUpdates(t *testing.T) {
 	require.Equal(t, acp.SessionConfigValueId(modePlan), updates[4].Update.ConfigOptionUpdate.ConfigOptions[1].Select.CurrentValue)
 	require.Equal(t, acp.SessionConfigValueId("claude-next"), updates[5].Update.ConfigOptionUpdate.ConfigOptions[0].Select.CurrentValue)
 
-	_, err = conn.UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{
-		SessionId: session.SessionId,
-		ModelId:   "claude-opus",
-	})
+	_, err = setModelConfig(ctx, conn, session.SessionId, "claude-opus")
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -4183,8 +4122,7 @@ func TestAgentListSessionsFiltersDedupeAndErrors(t *testing.T) {
 
 	cwd := "/repo"
 	list, err := agent.ListSessions(context.Background(), acp.ListSessionsRequest{
-		Cwd:                   &cwd,
-		AdditionalDirectories: []string{"/shared"},
+		Cwd: &cwd,
 	})
 	require.NoError(t, err)
 	require.Len(t, list.Sessions, 1)
@@ -4238,7 +4176,6 @@ func TestAgentResumeAndLoadSession(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, resume.Modes)
-	require.Nil(t, resume.Models)
 	require.Equal(t, map[string]any{claudeMetaKey: map[string]any{claudeGoalMetaKey: nil}}, resume.Meta)
 
 	client := &recordingACPClient{}
@@ -4251,7 +4188,6 @@ func TestAgentResumeAndLoadSession(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, load.Modes)
-	require.Nil(t, load.Models)
 	require.Equal(t, map[string]any{claudeMetaKey: map[string]any{claudeGoalMetaKey: nil}}, load.Meta)
 
 	require.Eventually(t, func() bool {
@@ -4688,8 +4624,6 @@ func TestAgentForkSession(t *testing.T) {
 	require.NotEmpty(t, resp.SessionId)
 	require.NotEqual(t, acp.SessionId("source-session"), resp.SessionId)
 	require.NotNil(t, resp.Modes)
-	require.NotNil(t, resp.Models)
-	require.Equal(t, acp.UnstableModelId("claude-test"), resp.Models.CurrentModelId)
 	requireClaudeVariantMeta(t, resp.Meta, "claude-test", "", []string{})
 	require.NotNil(t, resp.ConfigOptions)
 	require.Equal(t, acp.SessionConfigValueId("claude-test"), resp.ConfigOptions[0].Select.CurrentValue)
@@ -4807,10 +4741,7 @@ func TestAgentSessionControls(t *testing.T) {
 	require.NotNil(t, fastConfig)
 	require.True(t, fastConfig.CurrentValue)
 
-	_, err = agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: resp.SessionId,
-		ModelId:   "claude-next",
-	})
+	_, err = setModelConfig(context.Background(), agent, resp.SessionId, "claude-next")
 	require.NoError(t, err)
 }
 
@@ -4929,18 +4860,6 @@ func TestAgentSessionRuntimeControlsCancelWhileWaitingForTurn(t *testing.T) {
 				return err
 			},
 		},
-		{
-			name:    "unstable model",
-			subtype: "set_model",
-			run: func(ctx context.Context, agent *Agent, sessionID acp.SessionId) error {
-				_, err := agent.UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{
-					SessionId: sessionID,
-					ModelId:   "claude-next",
-				})
-
-				return err
-			},
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -5037,10 +4956,7 @@ func TestAgentSessionControlErrorsFromClaudeClient(t *testing.T) {
 	})
 	require.ErrorIs(t, err, sendErr)
 
-	_, err = agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: resp.SessionId,
-		ModelId:   "claude-next",
-	})
+	_, err = setModelConfig(context.Background(), agent, resp.SessionId, "claude-next")
 	require.ErrorIs(t, err, sendErr)
 
 	require.ErrorIs(t, agent.Cancel(context.Background(), acp.CancelNotification{SessionId: resp.SessionId}), sendErr)
@@ -5091,16 +5007,10 @@ func TestAgentSessionControlUpdateErrorsAndMissingSessions(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	_, err = agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: resp.SessionId,
-		ModelId:   "claude-next",
-	})
+	_, err = setModelConfig(context.Background(), agent, resp.SessionId, "claude-next")
 	require.Error(t, err)
 
-	_, err = agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: "missing",
-		ModelId:   "claude-next",
-	})
+	_, err = setModelConfig(context.Background(), agent, "missing", "claude-next")
 	require.Error(t, err)
 }
 
@@ -5157,10 +5067,7 @@ func TestAgentModelEffortApplyErrors(t *testing.T) {
 	require.NoError(t, err)
 
 	fake.setControlErrors(map[string]string{"apply_flag_settings": "effort failed"})
-	_, err = agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: resp.SessionId,
-		ModelId:   "low-only",
-	})
+	_, err = setModelConfig(context.Background(), agent, resp.SessionId, "low-only")
 	require.Error(t, err)
 }
 
@@ -5200,40 +5107,6 @@ func TestAgentNewSessionStartError(t *testing.T) {
 
 	_, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.ErrorIs(t, err, startErr)
-}
-
-func TestAgentProviders(t *testing.T) {
-	t.Parallel()
-
-	agent := NewAgent()
-
-	providers, err := agent.UnstableListProviders(context.Background(), acp.UnstableListProvidersRequest{})
-	require.NoError(t, err)
-	require.Len(t, providers.Providers, 1)
-	require.Equal(t, providerClaudeCode, providers.Providers[0].Id)
-	require.True(t, providers.Providers[0].Required)
-	require.Equal(t, providerClaudeCodeURL, providers.Providers[0].Current.BaseUrl)
-	require.Equal(t, []acp.UnstableLlmProtocol{acp.UnstableLlmProtocolAnthropic}, providers.Providers[0].Supported)
-
-	_, err = agent.UnstableDisableProviders(context.Background(), acp.UnstableDisableProvidersRequest{Id: providerClaudeCode})
-	require.Error(t, err)
-
-	_, err = agent.UnstableSetProviders(context.Background(), acp.UnstableSetProvidersRequest{
-		Id:      providerClaudeCode,
-		ApiType: acp.UnstableLlmProtocolAnthropic,
-		BaseUrl: providerClaudeCodeURL,
-	})
-	require.Error(t, err)
-
-	_, err = agent.UnstableDisableProviders(context.Background(), acp.UnstableDisableProvidersRequest{Id: "missing"})
-	require.Error(t, err)
-
-	_, err = agent.UnstableSetProviders(context.Background(), acp.UnstableSetProvidersRequest{
-		Id:      "missing",
-		ApiType: acp.UnstableLlmProtocolAnthropic,
-		BaseUrl: providerClaudeCodeURL,
-	})
-	require.Error(t, err)
 }
 
 func TestAgentNesLifecycle(t *testing.T) {
@@ -5598,11 +5471,6 @@ func TestAgentInvalidModeAndConfig(t *testing.T) {
 		},
 	})
 	require.Error(t, err)
-
-	_, err = agent.UnstableSetSessionModel(context.Background(), acp.UnstableSetSessionModelRequest{
-		SessionId: resp.SessionId,
-	})
-	require.Error(t, err)
 }
 
 func TestPaginateSessionInfos(t *testing.T) {
@@ -5673,8 +5541,6 @@ func TestAgentLocalHelpers(t *testing.T) {
 
 	otherCwd := "/other"
 	require.False(t, sessionMatchesListFilters(session, acp.ListSessionsRequest{Cwd: &otherCwd}))
-	require.True(t, sessionMatchesListFilters(session, acp.ListSessionsRequest{AdditionalDirectories: []string{"/shared"}}))
-	require.False(t, sessionMatchesListFilters(session, acp.ListSessionsRequest{AdditionalDirectories: []string{"/other"}}))
 
 	require.Equal(t, []string{"one"}, stringSliceValue([]string{"one"}))
 	require.Nil(t, stringSliceValue(1))
@@ -5734,12 +5600,8 @@ func TestAgentExperimentalNoopMethods(t *testing.T) {
 	require.Error(t, agent.UnstableAcceptNes(ctx, acp.UnstableAcceptNesNotification{}))
 	require.Error(t, agent.UnstableRejectNes(ctx, acp.UnstableRejectNesNotification{}))
 
-	_, err := agent.UnstableLogout(ctx, acp.UnstableLogoutRequest{})
+	_, err := agent.Logout(ctx, acp.LogoutRequest{})
 	require.NoError(t, err)
-
-	providers, err := agent.UnstableListProviders(ctx, acp.UnstableListProvidersRequest{})
-	require.NoError(t, err)
-	require.NotEmpty(t, providers.Providers)
 }
 
 func permissionRequest(requestID string, toolName string) map[string]any {
@@ -5766,6 +5628,25 @@ func findControlResponse(fake *agentFakeTransport, requestID string, out *claude
 	}
 
 	return false
+}
+
+type sessionConfigSetter interface {
+	SetSessionConfigOption(context.Context, acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error)
+}
+
+func setModelConfig(
+	ctx context.Context,
+	setter sessionConfigSetter,
+	sessionID acp.SessionId,
+	model string,
+) (acp.SetSessionConfigOptionResponse, error) {
+	return setter.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: sessionID,
+			ConfigId:  configModel,
+			Value:     acp.SessionConfigValueId(model),
+		},
+	})
 }
 
 func findBooleanConfig(options []acp.SessionConfigOption, id acp.SessionConfigId) *acp.SessionConfigOptionBoolean {

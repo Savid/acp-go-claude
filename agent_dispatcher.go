@@ -36,15 +36,12 @@ var (
 		acp.AgentMethodDocumentDidOpen:        localNotification((*Agent).UnstableDidOpenDocument),
 		acp.AgentMethodDocumentDidSave:        localNotification((*Agent).UnstableDidSaveDocument),
 		acp.AgentMethodInitialize:             localResponse((*Agent).Initialize),
-		acp.AgentMethodLogout:                 localResponse((*Agent).UnstableLogout),
+		acp.AgentMethodLogout:                 localResponse((*Agent).Logout),
 		acp.AgentMethodNesAccept:              localNotification((*Agent).UnstableAcceptNes),
 		acp.AgentMethodNesClose:               localResponse((*Agent).UnstableCloseNes),
 		acp.AgentMethodNesReject:              localNotification((*Agent).UnstableRejectNes),
 		acp.AgentMethodNesStart:               localResponse((*Agent).UnstableStartNes),
 		acp.AgentMethodNesSuggest:             localResponse((*Agent).UnstableSuggestNes),
-		acp.AgentMethodProvidersDisable:       localResponse((*Agent).UnstableDisableProviders),
-		acp.AgentMethodProvidersList:          localResponse((*Agent).UnstableListProviders),
-		acp.AgentMethodProvidersSet:           localResponse((*Agent).UnstableSetProviders),
 		acp.AgentMethodSessionCancel:          localNotification((*Agent).Cancel),
 		acp.AgentMethodSessionClose:           localResponse((*Agent).CloseSession),
 		acp.AgentMethodSessionFork:            localResponse((*Agent).UnstableForkSession),
@@ -55,7 +52,6 @@ var (
 		acp.AgentMethodSessionResume:          localResponse((*Agent).ResumeSession),
 		acp.AgentMethodSessionSetConfigOption: localResponse((*Agent).SetSessionConfigOption),
 		acp.AgentMethodSessionSetMode:         localResponse((*Agent).SetSessionMode),
-		acp.AgentMethodSessionSetModel:        localResponse((*Agent).UnstableSetSessionModel),
 	}
 )
 

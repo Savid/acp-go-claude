@@ -205,18 +205,6 @@ func sessionUnstableConfigOptions(session *Session) []acp.UnstableSessionConfigO
 	return unstableConfigOptions(mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown)
 }
 
-func sessionUnstableModelState(session *Session) *acp.UnstableSessionModelState {
-	model, available := session.modelInfo()
-
-	return unstableModelState(model, available)
-}
-
-func sessionModelState(session *Session) *acp.SessionModelState {
-	model, available := session.modelInfo()
-
-	return modelState(model, available)
-}
-
 func sessionModeState(session *Session) *acp.SessionModeState {
 	mode, model, available := session.modeInfo()
 
@@ -440,32 +428,6 @@ func unstableConfigOptions(
 	return options
 }
 
-func modelState(model string, available []claude.AvailableModelInfo) *acp.SessionModelState {
-	if model == "" {
-		return nil
-	}
-
-	models := stableModelInfos(model, available)
-
-	return &acp.SessionModelState{
-		CurrentModelId:  acp.ModelId(model),
-		AvailableModels: models,
-	}
-}
-
-func unstableModelState(model string, available []claude.AvailableModelInfo) *acp.UnstableSessionModelState {
-	if model == "" {
-		return nil
-	}
-
-	models := unstableModelInfos(model, available)
-
-	return &acp.UnstableSessionModelState{
-		CurrentModelId:  acp.UnstableModelId(model),
-		AvailableModels: models,
-	}
-}
-
 func configSelectOptions(model string, available []claude.AvailableModelInfo) acp.SessionConfigSelectOptionsUngrouped {
 	values := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(available)+1)
 	seen := make(map[string]struct{}, len(available)+1)
@@ -637,74 +599,6 @@ func effortDisplayName(effort string) string {
 	}
 }
 
-func stableModelInfos(model string, available []claude.AvailableModelInfo) []acp.ModelInfo {
-	models := make([]acp.ModelInfo, 0, len(available)+1)
-	seen := make(map[string]struct{}, len(available)+1)
-
-	for _, info := range available {
-		if info.Value == "" {
-			continue
-		}
-
-		if _, ok := seen[info.Value]; ok {
-			continue
-		}
-
-		models = append(models, acp.ModelInfo{
-			ModelId:     acp.ModelId(info.Value),
-			Name:        modelDisplayName(info),
-			Description: stringPtrIfNotEmpty(info.Description),
-			Meta:        claudeModelInfoMeta(info),
-		})
-		seen[info.Value] = struct{}{}
-	}
-
-	if _, ok := seen[model]; !ok {
-		info := claude.AvailableModelInfo{Value: model, DisplayName: model}
-		models = append(models, acp.ModelInfo{
-			ModelId: acp.ModelId(model),
-			Name:    model,
-			Meta:    claudeModelInfoMeta(info),
-		})
-	}
-
-	return models
-}
-
-func unstableModelInfos(model string, available []claude.AvailableModelInfo) []acp.UnstableModelInfo {
-	models := make([]acp.UnstableModelInfo, 0, len(available)+1)
-	seen := make(map[string]struct{}, len(available)+1)
-
-	for _, info := range available {
-		if info.Value == "" {
-			continue
-		}
-
-		if _, ok := seen[info.Value]; ok {
-			continue
-		}
-
-		models = append(models, acp.UnstableModelInfo{
-			ModelId:     acp.UnstableModelId(info.Value),
-			Name:        modelDisplayName(info),
-			Description: stringPtrIfNotEmpty(info.Description),
-			Meta:        claudeModelInfoMeta(info),
-		})
-		seen[info.Value] = struct{}{}
-	}
-
-	if _, ok := seen[model]; !ok {
-		info := claude.AvailableModelInfo{Value: model, DisplayName: model}
-		models = append(models, acp.UnstableModelInfo{
-			ModelId: acp.UnstableModelId(model),
-			Name:    model,
-			Meta:    claudeModelInfoMeta(info),
-		})
-	}
-
-	return models
-}
-
 func modelDisplayName(info claude.AvailableModelInfo) string {
 	if info.DisplayName != "" {
 		return info.DisplayName
@@ -796,23 +690,6 @@ func acpModeForPermission(mode string) acp.SessionModeId {
 		return modeDontAsk
 	default:
 		return modeDefault
-	}
-}
-
-func providerInfos() []acp.UnstableProviderInfo {
-	return []acp.UnstableProviderInfo{
-		{
-			Id:       providerClaudeCode,
-			Required: true,
-			Current: &acp.UnstableProviderCurrentConfig{
-				ApiType: acp.UnstableLlmProtocolAnthropic,
-				BaseUrl: providerClaudeCodeURL,
-			},
-			Supported: []acp.UnstableLlmProtocol{acp.UnstableLlmProtocolAnthropic},
-			Meta: map[string]any{
-				jsonFieldTitle: providerClaudeCodeTitle,
-			},
-		},
 	}
 }
 

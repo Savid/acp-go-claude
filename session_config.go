@@ -47,13 +47,6 @@ func (s *Session) setMode(mode acp.SessionModeId) {
 	s.mode = mode
 }
 
-func (s *Session) modelInfo() (string, []claude.AvailableModelInfo) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.model, append([]claude.AvailableModelInfo(nil), s.availableModels...)
-}
-
 func (s *Session) modeInfo() (acp.SessionModeId, string, []claude.AvailableModelInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -256,16 +256,6 @@ func WithListSessionsCursor(cursor string) ListSessionsRequestOption {
 	}
 }
 
-// WithListSessionsAdditionalDirectories filters session/list by additional
-// workspace directories.
-func WithListSessionsAdditionalDirectories(paths ...string) ListSessionsRequestOption {
-	cloned := append([]string(nil), paths...)
-
-	return func(req *acp.ListSessionsRequest) {
-		req.AdditionalDirectories = append([]string(nil), cloned...)
-	}
-}
-
 // WithListSessionsMeta sets metadata on a session/list request.
 func WithListSessionsMeta(meta map[string]any) ListSessionsRequestOption {
 	cloned := cloneAnyMap(meta)

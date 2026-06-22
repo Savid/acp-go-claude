@@ -276,16 +276,13 @@ func TestClaudeOptionsBuilderAndOutputFormat(t *testing.T) {
 
 func TestListSessionsRequestBuilder(t *testing.T) {
 	meta := map[string]any{"host": map[string]any{"name": "wagie"}}
-	dirs := []string{"/repo/shared"}
 
 	req := ListSessionsRequest(
 		WithListSessionsCwd("/repo"),
 		WithListSessionsCursor("cursor-1"),
-		WithListSessionsAdditionalDirectories(dirs...),
 		WithListSessionsMeta(meta),
 	)
 
-	dirs[0] = "/changed"
 	hostMeta := requireAnyMap(t, meta["host"])
 	hostMeta["name"] = "changed"
 
@@ -293,7 +290,6 @@ func TestListSessionsRequestBuilder(t *testing.T) {
 	require.Equal(t, "/repo", *req.Cwd)
 	require.NotNil(t, req.Cursor)
 	require.Equal(t, "cursor-1", *req.Cursor)
-	require.Equal(t, []string{"/repo/shared"}, req.AdditionalDirectories)
 	requestHostMeta := requireAnyMap(t, req.Meta["host"])
 	require.Equal(t, "wagie", requestHostMeta["name"])
 	require.NoError(t, req.Validate())

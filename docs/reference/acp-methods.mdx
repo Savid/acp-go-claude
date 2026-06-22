@@ -14,6 +14,7 @@ stdio or through streams passed to `claudeacp.Serve`.
 | --- | --- | --- |
 | `initialize` | implemented | [Initialization](https://agentclientprotocol.com/protocol/initialization), [Schema](https://agentclientprotocol.com/protocol/schema) |
 | `authenticate` | implemented for gateway auth | [Initialization](https://agentclientprotocol.com/protocol/initialization), [Schema](https://agentclientprotocol.com/protocol/schema) |
+| `logout` | clears adapter-owned gateway auth state | [Logout Method RFD](https://agentclientprotocol.com/rfds/logout-method) |
 | `session/new` | implemented | [Session Setup](https://agentclientprotocol.com/protocol/session-setup), [Schema](https://agentclientprotocol.com/protocol/schema) |
 | `session/prompt` | implemented | [Prompt Turn](https://agentclientprotocol.com/protocol/prompt-turn), [Content](https://agentclientprotocol.com/protocol/content), [Tool Calls](https://agentclientprotocol.com/protocol/tool-calls) |
 | `session/cancel` | implemented | [Prompt Turn cancellation](https://agentclientprotocol.com/protocol/prompt-turn), [Schema](https://agentclientprotocol.com/protocol/schema) |
@@ -33,14 +34,12 @@ where available.
 | Method | Status | ACP docs |
 | --- | --- | --- |
 | `session/fork` | implemented | [Session fork RFD](https://agentclientprotocol.com/rfds/session-fork) |
-| `session/set_model` | implemented for SDK compatibility; prefer `session/set_config_option` with `model` | [Session Config Options](https://agentclientprotocol.com/protocol/session-config-options), [model config RFD](https://agentclientprotocol.com/rfds/model-config-category) |
-| `providers/list` | implemented, returns required Claude Code provider | [Configurable LLM Providers RFD](https://agentclientprotocol.com/rfds/custom-llm-endpoint) |
-| `providers/set` | rejected, Claude CLI owns routing | [Configurable LLM Providers RFD](https://agentclientprotocol.com/rfds/custom-llm-endpoint) |
-| `providers/disable` | rejected for Claude provider | [Configurable LLM Providers RFD](https://agentclientprotocol.com/rfds/custom-llm-endpoint) |
-| `logout` | clears adapter-owned gateway auth state | [Logout Method RFD](https://agentclientprotocol.com/rfds/logout-method) |
 | document notifications | implemented | [Next Edit Suggestions RFD](https://agentclientprotocol.com/rfds/next-edit-suggestions), [File System](https://agentclientprotocol.com/protocol/file-system) |
 | NES lifecycle | implemented | [Next Edit Suggestions RFD](https://agentclientprotocol.com/rfds/next-edit-suggestions) |
 | `mcp/message` | implemented for ACP-transport MCP | [MCP-over-ACP RFD](https://agentclientprotocol.com/rfds/mcp-over-acp) |
+
+Provider-management RFD methods are intentionally unsupported. Clients should
+use `session/set_config_option` for model and mode selection.
 
 ## Claude-specific extension methods
 

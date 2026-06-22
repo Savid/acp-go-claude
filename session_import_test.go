@@ -573,9 +573,6 @@ func TestStoreSessionListBranches(t *testing.T) {
 	sessions, err = agent.listStoreSessions(ctx, acp.ListSessionsRequest{})
 	require.NoError(t, err)
 	require.Empty(t, sessions)
-	sessions, err = agent.listStoreSessions(ctx, acp.ListSessionsRequest{Cwd: &cwdPtr, AdditionalDirectories: []string{t.TempDir()}})
-	require.NoError(t, err)
-	require.Empty(t, sessions)
 
 	relative := "relative"
 	agent = NewAgent(WithClaudeHome(t.TempDir()), WithSessionStore(listFailStore{}))

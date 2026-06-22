@@ -9,8 +9,8 @@ import (
 	"github.com/savid/acp-go-claude/internal/mapper"
 )
 
-// UnstableLogout clears auth state owned by this adapter.
-func (a *Agent) UnstableLogout(ctx context.Context, _ acp.UnstableLogoutRequest) (acp.UnstableLogoutResponse, error) {
+// Logout clears auth state owned by this adapter.
+func (a *Agent) Logout(ctx context.Context, _ acp.LogoutRequest) (acp.LogoutResponse, error) {
 	sessions := a.clearGatewayAuthForLogout()
 
 	var closeErrs []error
@@ -37,7 +37,7 @@ func (a *Agent) UnstableLogout(ctx context.Context, _ acp.UnstableLogoutRequest)
 		closeErrs = append(closeErrs, err)
 	}
 
-	return acp.UnstableLogoutResponse{}, errors.Join(closeErrs...)
+	return acp.LogoutResponse{}, errors.Join(closeErrs...)
 }
 
 // UnstableAcceptNes records an accepted next-edit suggestion.
@@ -110,41 +110,6 @@ func (a *Agent) UnstableSuggestNes(ctx context.Context, params acp.UnstableSugge
 	a.storeNESSuggestions(params.SessionId, suggestions)
 
 	return acp.UnstableSuggestNesResponse{Suggestions: suggestions}, nil
-}
-
-// UnstableDisableProviders rejects provider disable requests for the required Claude provider.
-func (a *Agent) UnstableDisableProviders(
-	_ context.Context,
-	params acp.UnstableDisableProvidersRequest,
-) (acp.UnstableDisableProvidersResponse, error) {
-	if params.Id == providerClaudeCode {
-		return acp.UnstableDisableProvidersResponse{}, acp.NewInvalidParams(map[string]any{
-			jsonFieldID: params.Id,
-			"reason":    "Claude Code is a required provider for this agent",
-		})
-	}
-
-	return acp.UnstableDisableProvidersResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldID: params.Id})
-}
-
-// UnstableListProviders lists the Claude Code provider managed by the local CLI.
-func (a *Agent) UnstableListProviders(context.Context, acp.UnstableListProvidersRequest) (acp.UnstableListProvidersResponse, error) {
-	return acp.UnstableListProvidersResponse{Providers: providerInfos()}, nil
-}
-
-// UnstableSetProviders rejects provider routing changes because Claude CLI manages routing.
-func (a *Agent) UnstableSetProviders(
-	_ context.Context,
-	params acp.UnstableSetProvidersRequest,
-) (acp.UnstableSetProvidersResponse, error) {
-	if params.Id == providerClaudeCode {
-		return acp.UnstableSetProvidersResponse{}, acp.NewInvalidParams(map[string]any{
-			jsonFieldID: params.Id,
-			"reason":    "Claude Code provider routing is managed by the Claude CLI",
-		})
-	}
-
-	return acp.UnstableSetProvidersResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldID: params.Id})
 }
 
 // UnstableForkSession forks a Claude session and copies session permission rules.
@@ -220,58 +185,6 @@ func (a *Agent) UnstableForkSession(
 		SessionId:     session.id,
 		Meta:          sessionResponseMeta(session),
 		Modes:         sessionModeState(session),
-		Models:        sessionUnstableModelState(session),
 		ConfigOptions: sessionUnstableConfigOptions(session),
 	}, nil
-}
-
-// UnstableSetSessionModel updates the active Claude model for a session.
-func (a *Agent) UnstableSetSessionModel(ctx context.Context, params acp.UnstableSetSessionModelRequest) (acp.UnstableSetSessionModelResponse, error) {
-	if params.ModelId == "" {
-		return acp.UnstableSetSessionModelResponse{}, acp.NewInvalidParams(map[string]any{"modelId": validationRequired})
-	}
-
-	session, err := a.session(params.SessionId)
-	if err != nil {
-		return acp.UnstableSetSessionModelResponse{}, err
-	}
-
-	releaseTurn, err := session.acquireTurn(ctx)
-	if err != nil {
-		return acp.UnstableSetSessionModelResponse{}, err
-	}
-	defer releaseTurn()
-
-	model, cliModel := session.modelSelection(string(params.ModelId))
-	if err := session.client.SetModel(ctx, cliModel); err != nil {
-		return acp.UnstableSetSessionModelResponse{}, err
-	}
-
-	modeChanged, mode, effortChanged, effort := session.setModelAndClampMode(model)
-	if modeChanged {
-		if err := session.client.SetPermissionMode(ctx, string(mode)); err != nil {
-			return acp.UnstableSetSessionModelResponse{}, err
-		}
-	}
-
-	if effortChanged {
-		if err := session.applyEffort(ctx, effort); err != nil {
-			return acp.UnstableSetSessionModelResponse{}, err
-		}
-	}
-
-	options := sessionConfigOptions(session)
-	updates := []acp.SessionUpdate{{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}}}
-
-	if modeChanged {
-		updates = append(updates, acp.SessionUpdate{
-			CurrentModeUpdate: &acp.SessionCurrentModeUpdate{CurrentModeId: mode},
-		})
-	}
-
-	if err := session.emitOptionalUpdates(ctx, updates); err != nil {
-		return acp.UnstableSetSessionModelResponse{}, err
-	}
-
-	return acp.UnstableSetSessionModelResponse{Meta: sessionResponseMeta(session)}, nil
 }

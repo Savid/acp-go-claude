@@ -605,3 +605,21 @@ func selectConfigValues(option *acp.SessionConfigOptionSelect) []acp.SessionConf
 
 	return values
 }
+
+func selectConfigValueAvailable(option *acp.SessionConfigOptionSelect, value acp.SessionConfigValueId) bool {
+	for _, candidate := range selectConfigValues(option) {
+		if candidate == value {
+			return true
+		}
+	}
+
+	return false
+}
+
+func configUpdateSelect(update acp.SessionUpdate, id acp.SessionConfigId) *acp.SessionConfigOptionSelect {
+	if update.ConfigOptionUpdate == nil {
+		return nil
+	}
+
+	return selectConfig(update.ConfigOptionUpdate.ConfigOptions, id)
+}

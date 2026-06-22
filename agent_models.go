@@ -10,44 +10,11 @@ import (
 	"github.com/savid/acp-go-claude/internal/claude"
 )
 
-// SetSessionMode maps ACP modes to Claude permission modes.
-func (a *Agent) SetSessionMode(ctx context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
-	session, err := a.session(params.SessionId)
-	if err != nil {
-		return acp.SetSessionModeResponse{}, err
-	}
-
-	mode, ok := permissionModeForACP(params.ModeId)
-	if !ok {
-		return acp.SetSessionModeResponse{}, acp.NewInvalidParams(map[string]any{"modeId": params.ModeId})
-	}
-
-	releaseTurn, err := session.acquireTurn(ctx)
-	if err != nil {
-		return acp.SetSessionModeResponse{}, err
-	}
-	defer releaseTurn()
-
-	_, model, available := session.modeInfo()
-	if !modeAvailableForModel(params.ModeId, model, available) {
-		return acp.SetSessionModeResponse{}, acp.NewInvalidParams(map[string]any{"modeId": params.ModeId})
-	}
-
-	if err := session.client.SetPermissionMode(ctx, mode); err != nil {
-		return acp.SetSessionModeResponse{}, err
-	}
-
-	session.setMode(params.ModeId)
-	options := sessionConfigOptions(session)
-
-	if err := session.emitOptionalUpdates(ctx, []acp.SessionUpdate{
-		{CurrentModeUpdate: &acp.SessionCurrentModeUpdate{CurrentModeId: params.ModeId}},
-		{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}},
-	}); err != nil {
-		return acp.SetSessionModeResponse{}, err
-	}
-
-	return acp.SetSessionModeResponse{}, nil
+// SetSessionMode exists only because github.com/coder/acp-go-sdk's generated
+// Agent interface still requires it. Remove this when the upstream SDK drops
+// session/set_mode; the local ACP dispatcher intentionally does not route it.
+func (a *Agent) SetSessionMode(context.Context, acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
 // SetSessionConfigOption handles supported configuration changes.
@@ -83,9 +50,6 @@ func (a *Agent) setSessionConfigValue(
 	}
 	defer releaseTurn()
 
-	modeChanged := false
-	nextMode := acp.SessionModeId("")
-
 	switch params.ConfigId {
 	case configModel:
 		model, cliModel := session.modelSelection(string(params.Value))
@@ -98,8 +62,6 @@ func (a *Agent) setSessionConfigValue(
 			if err := session.client.SetPermissionMode(ctx, string(mode)); err != nil {
 				return acp.SetSessionConfigOptionResponse{}, err
 			}
-
-			nextMode = mode
 		}
 
 		if effortChanged {
@@ -125,9 +87,6 @@ func (a *Agent) setSessionConfigValue(
 		}
 
 		session.setMode(mode)
-
-		modeChanged = true
-		nextMode = mode
 	case configOutputStyle:
 		if err := session.client.SetOutputStyle(ctx, string(params.Value)); err != nil {
 			return acp.SetSessionConfigOptionResponse{}, err
@@ -144,12 +103,6 @@ func (a *Agent) setSessionConfigValue(
 
 	options := sessionConfigOptions(session)
 	updates := []acp.SessionUpdate{{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}}}
-
-	if modeChanged {
-		updates = append(updates, acp.SessionUpdate{
-			CurrentModeUpdate: &acp.SessionCurrentModeUpdate{CurrentModeId: nextMode},
-		})
-	}
 
 	if err := session.emitOptionalUpdates(ctx, updates); err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
@@ -203,12 +156,6 @@ func sessionUnstableConfigOptions(session *Session) []acp.UnstableSessionConfigO
 	mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown := session.configInfo()
 
 	return unstableConfigOptions(mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown)
-}
-
-func sessionModeState(session *Session) *acp.SessionModeState {
-	mode, model, available := session.modeInfo()
-
-	return modeStateForModel(mode, model, available)
 }
 
 func selectInitialModel(
@@ -276,7 +223,7 @@ func configOptions(
 	}
 
 	if mode != "" {
-		values := modeSelectOptions(mode, model, available)
+		values := modeSelectOptions(model, available)
 		options = append(options, acp.SessionConfigOption{
 			Select: &acp.SessionConfigOptionSelect{
 				Id:           configMode,
@@ -366,7 +313,7 @@ func unstableConfigOptions(
 	}
 
 	if mode != "" {
-		values := modeSelectOptions(mode, model, available)
+		values := modeSelectOptions(model, available)
 		options = append(options, acp.UnstableSessionConfigOption{
 			Select: &acp.UnstableSessionConfigOptionSelect{
 				Id:           configMode,
@@ -493,17 +440,43 @@ func outputStyleSelectOptions(current string, available []string) acp.SessionCon
 }
 
 func modeSelectOptions(
-	current acp.SessionModeId,
 	model string,
 	available []claude.AvailableModelInfo,
 ) acp.SessionConfigSelectOptionsUngrouped {
-	state := modeStateForModel(current, model, available)
-	values := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(state.AvailableModes))
+	choices := []struct {
+		id   acp.SessionModeId
+		name string
+	}{
+		{id: modeDefault, name: modeNameDefault},
+		{id: modePlan, name: "Plan"},
+		{id: modeAcceptEdits, name: "Accept Edits"},
+	}
 
-	for _, mode := range state.AvailableModes {
+	if bypassPermissionsAvailable() {
+		choices = append(choices, struct {
+			id   acp.SessionModeId
+			name string
+		}{id: modeBypassPermissions, name: "Bypass Permissions"})
+	}
+
+	if modelSupportsAutoMode(model, available) {
+		choices = append(choices, struct {
+			id   acp.SessionModeId
+			name string
+		}{id: modeAuto, name: modeNameAuto})
+	}
+
+	choices = append(choices, struct {
+		id   acp.SessionModeId
+		name string
+	}{id: modeDontAsk, name: modeNameDontAsk})
+
+	values := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(choices))
+
+	for _, mode := range choices {
 		values = append(values, acp.SessionConfigSelectOption{
-			Name:  mode.Name,
-			Value: acp.SessionConfigValueId(mode.Id),
+			Name:  mode.name,
+			Value: acp.SessionConfigValueId(mode.id),
 		})
 	}
 
@@ -613,32 +586,6 @@ func stringPtrIfNotEmpty(value string) *string {
 	}
 
 	return &value
-}
-
-func modeStateForModel(
-	current acp.SessionModeId,
-	model string,
-	available []claude.AvailableModelInfo,
-) *acp.SessionModeState {
-	modes := []acp.SessionMode{
-		{Id: modeDefault, Name: modeNameDefault},
-		{Id: modePlan, Name: "Plan"},
-		{Id: modeAcceptEdits, Name: "Accept Edits"},
-	}
-	if bypassPermissionsAvailable() {
-		modes = append(modes, acp.SessionMode{Id: modeBypassPermissions, Name: "Bypass Permissions"})
-	}
-
-	if modelSupportsAutoMode(model, available) {
-		modes = append(modes, acp.SessionMode{Id: modeAuto, Name: modeNameAuto})
-	}
-
-	modes = append(modes, acp.SessionMode{Id: modeDontAsk, Name: modeNameDontAsk})
-
-	return &acp.SessionModeState{
-		CurrentModeId:  current,
-		AvailableModes: modes,
-	}
 }
 
 func modeAvailableForModel(

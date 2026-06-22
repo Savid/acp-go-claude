@@ -6,8 +6,7 @@ icon: "sliders-horizontal"
 
 Model and configuration state comes from Claude initialize/settings metadata
 when available, with conservative fallbacks when not. ACP exposes the portable
-parts through [session modes](https://agentclientprotocol.com/protocol/session-modes)
-and [session config options](https://agentclientprotocol.com/protocol/session-config-options).
+parts through [session config options](https://agentclientprotocol.com/protocol/session-config-options).
 
 ## Model selection
 
@@ -91,8 +90,8 @@ ACP mode IDs map to
 | `auto` | Claude auto mode, only advertised for compatible models |
 | `dont_ask` | `dontAsk`, reject permission prompts |
 
-The same values are mirrored through a generic `mode` config option for clients
-without native mode UI.
+Mode selection is advertised through the `mode` config option. Session lifecycle
+responses do not include separate top-level mode state.
 
 ## Other config options
 
@@ -109,7 +108,7 @@ keeps the stable `thought_level` category for compatibility with current
 clients.
 
 Changing model can clamp mode and effort if the new model does not support the
-current choices. The agent emits config/mode updates after changes; those
+current choices. The agent emits `config_option_update` after changes; those
 updates are listed in [Update mapping](/docs/reference/updates).
 
 Known effort IDs are:

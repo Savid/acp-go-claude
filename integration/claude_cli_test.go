@@ -61,10 +61,13 @@ func TestClaudeCLIACPConversation(t *testing.T) {
 		return client.commandCount() > 0
 	}, 30*time.Second, 500*time.Millisecond)
 
-	if sessionModeAvailable(session.Modes, acp.SessionModeId("auto")) {
-		_, err = clientConn.SetSessionMode(ctx, acp.SetSessionModeRequest{
-			SessionId: session.SessionId,
-			ModeId:    acp.SessionModeId("auto"),
+	if modeConfig := selectConfig(session.ConfigOptions, "mode"); selectConfigValueAvailable(modeConfig, "auto") {
+		_, err = clientConn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+			ValueId: &acp.SetSessionConfigOptionValueId{
+				SessionId: session.SessionId,
+				ConfigId:  "mode",
+				Value:     "auto",
+			},
 		})
 		require.NoError(t, err)
 	}

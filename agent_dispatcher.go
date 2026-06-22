@@ -51,7 +51,6 @@ var (
 		acp.AgentMethodSessionPrompt:          localResponse((*Agent).Prompt),
 		acp.AgentMethodSessionResume:          localResponse((*Agent).ResumeSession),
 		acp.AgentMethodSessionSetConfigOption: localResponse((*Agent).SetSessionConfigOption),
-		acp.AgentMethodSessionSetMode:         localResponse((*Agent).SetSessionMode),
 	}
 )
 

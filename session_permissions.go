@@ -311,7 +311,7 @@ func (s *Session) handleExitPlanMode(
 	s.setMode(selectedMode)
 
 	if err := s.emitOptionalUpdates(ctx, []acp.SessionUpdate{
-		{CurrentModeUpdate: &acp.SessionCurrentModeUpdate{CurrentModeId: selectedMode}},
+		{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: sessionConfigOptions(s)}},
 	}); err != nil {
 		return claude.PermissionDecision{}, err
 	}

@@ -45,7 +45,7 @@ func TestClaudeWorkflowMappedLive(t *testing.T) {
 		)),
 	))
 	require.NoError(t, err)
-	requireBypassPermissionMode(t, session.Modes)
+	requireBypassPermissionMode(t, session.ConfigOptions)
 
 	resp, err := conn.Prompt(ctx, claudeacp.TextPromptRequest(session.SessionId, workflowLivePrompt()))
 	require.NoError(t, err)
@@ -170,16 +170,12 @@ func requireClaudeWorkflowSnapshotVersion(t *testing.T, ctx context.Context) {
 	}
 }
 
-func requireBypassPermissionMode(t *testing.T, modes *acp.SessionModeState) {
+func requireBypassPermissionMode(t *testing.T, options []acp.SessionConfigOption) {
 	t.Helper()
 
-	if modes == nil {
-		t.Skip("session did not advertise modes; cannot confirm bypass permissions availability")
-	}
-	for _, mode := range modes.AvailableModes {
-		if mode.Id == acp.SessionModeId("bypass_permissions") {
-			return
-		}
+	modeConfig := selectConfig(options, "mode")
+	if selectConfigValueAvailable(modeConfig, "bypass_permissions") {
+		return
 	}
 
 	t.Skip("bypassPermissions mode is not available; skipping workflow live prompt to avoid default-mode false pass")

@@ -47,8 +47,7 @@ terminal status, and file-availability hints. See
 | --- | --- |
 | `usage_update` | after result/context usage metadata |
 | `session_info_update` | after prompts with title/updatedAt |
-| `current_mode_update` | after mode changes and plan-mode hooks |
-| `config_option_update` | after model/mode/output style/effort/Fast Mode changes |
+| `config_option_update` | after model/mode/output style/effort/Fast Mode changes and handled plan-mode transitions |
 | `available_commands_update` | after Claude initialize metadata changes |
 
 `usage_update` follows the ACP
@@ -63,7 +62,7 @@ When Claude includes origin metadata, result-derived usage updates include it
 under `_meta.claude.origin`.
 When Claude Code structured output is enabled, the same final usage update
 includes the validated object under `_meta.claude.structuredOutput`.
-Mode/config updates map to [Models and config](/docs/features/models-config).
+Config updates map to [Models and config](/docs/features/models-config).
 
 `session_info_update` lets hosts refresh tab titles and Claude-specific session
 metadata without replaying the whole transcript:
@@ -111,10 +110,6 @@ Goal-only updates set `_meta.claude.goal` without changing `title` or
 
 See [Goals](/docs/features/goals) for set/clear semantics and native Claude
 mapping.
-
-`current_mode_update` is emitted when the client changes mode, when Claude
-enters plan mode through the handled hook path, and when `ExitPlanMode` returns
-the session to another mode.
 
 ## Replay
 

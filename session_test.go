@@ -1757,7 +1757,7 @@ func TestSessionHookResponseSideEffects(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	var diffUpdate *acp.SessionToolCallUpdate
-	var modeUpdate *acp.SessionCurrentModeUpdate
+	var modeConfig *acp.SessionConfigOptionSelect
 	for _, notification := range updates {
 		if notification.Update.ToolCallUpdate != nil && notification.Update.ToolCallUpdate.ToolCallId == "edit-1" {
 			if len(notification.Update.ToolCallUpdate.Content) > 0 {
@@ -1765,8 +1765,8 @@ func TestSessionHookResponseSideEffects(t *testing.T) {
 			}
 		}
 
-		if notification.Update.CurrentModeUpdate != nil {
-			modeUpdate = notification.Update.CurrentModeUpdate
+		if notification.Update.ConfigOptionUpdate != nil {
+			modeConfig = findSelectConfig(notification.Update.ConfigOptionUpdate.ConfigOptions, configMode)
 		}
 	}
 
@@ -1775,8 +1775,8 @@ func TestSessionHookResponseSideEffects(t *testing.T) {
 	require.Equal(t, "old", *diffUpdate.Content[0].Diff.OldText)
 	require.Equal(t, "new", diffUpdate.Content[0].Diff.NewText)
 	require.Contains(t, diffUpdate.Meta, claudeMetaKey)
-	require.NotNil(t, modeUpdate)
-	require.Equal(t, modePlan, modeUpdate.CurrentModeId)
+	require.NotNil(t, modeConfig)
+	require.Equal(t, acp.SessionConfigValueId(modePlan), modeConfig.CurrentValue)
 
 	session, err := agent.session(sessionResp.SessionId)
 	require.NoError(t, err)
@@ -1932,14 +1932,14 @@ func TestSessionHookCallbackSideEffects(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	var diffUpdate *acp.SessionToolCallUpdate
-	var modeUpdate *acp.SessionCurrentModeUpdate
+	var modeConfig *acp.SessionConfigOptionSelect
 	for _, notification := range updates {
 		if notification.Update.ToolCallUpdate != nil && notification.Update.ToolCallUpdate.ToolCallId == "edit-callback" {
 			diffUpdate = notification.Update.ToolCallUpdate
 		}
 
-		if notification.Update.CurrentModeUpdate != nil {
-			modeUpdate = notification.Update.CurrentModeUpdate
+		if notification.Update.ConfigOptionUpdate != nil {
+			modeConfig = findSelectConfig(notification.Update.ConfigOptionUpdate.ConfigOptions, configMode)
 		}
 	}
 
@@ -1948,8 +1948,8 @@ func TestSessionHookCallbackSideEffects(t *testing.T) {
 	require.Equal(t, "old", *diffUpdate.Content[0].Diff.OldText)
 	require.Equal(t, "new", diffUpdate.Content[0].Diff.NewText)
 	require.Contains(t, diffUpdate.Meta, claudeMetaKey)
-	require.NotNil(t, modeUpdate)
-	require.Equal(t, modePlan, modeUpdate.CurrentModeId)
+	require.NotNil(t, modeConfig)
+	require.Equal(t, acp.SessionConfigValueId(modePlan), modeConfig.CurrentValue)
 	require.Equal(t, modePlan, session.mode)
 }
 
@@ -2554,7 +2554,9 @@ func TestSessionExitPlanModePermissionAllow(t *testing.T) {
 
 	updates := client.recordedUpdates()
 	require.Len(t, updates, 1)
-	require.Equal(t, modeAuto, updates[0].Update.CurrentModeUpdate.CurrentModeId)
+	modeConfig := findSelectConfig(updates[0].Update.ConfigOptionUpdate.ConfigOptions, configMode)
+	require.NotNil(t, modeConfig)
+	require.Equal(t, acp.SessionConfigValueId(modeAuto), modeConfig.CurrentValue)
 }
 
 func TestSessionExitPlanModePermissionDenyBranches(t *testing.T) {

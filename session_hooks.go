@@ -105,7 +105,7 @@ func (s *Session) enterPlanModeFromHook(ctx context.Context) error {
 	s.setMode(modePlan)
 
 	return s.emitOptionalUpdates(ctx, []acp.SessionUpdate{
-		{CurrentModeUpdate: &acp.SessionCurrentModeUpdate{CurrentModeId: modePlan}},
+		{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: sessionConfigOptions(s)}},
 	})
 }
 

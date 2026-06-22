@@ -76,7 +76,6 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	resp = acp.NewSessionResponse{
 		SessionId:     session.id,
 		Meta:          sessionResponseMeta(session),
-		Modes:         sessionModeState(session),
 		ConfigOptions: sessionConfigOptions(session),
 	}
 
@@ -122,7 +121,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 		resp = acp.ResumeSessionResponse{
 			Meta:          sessionResponseMeta(session),
-			Modes:         sessionModeState(session),
 			ConfigOptions: sessionConfigOptions(session),
 		}
 
@@ -158,7 +156,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 	resp = acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(session),
-		Modes:         sessionModeState(session),
 		ConfigOptions: sessionConfigOptions(session),
 	}
 
@@ -289,7 +286,6 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 
 	resp = acp.LoadSessionResponse{
 		Meta:          sessionResponseMeta(session),
-		Modes:         sessionModeState(session),
 		ConfigOptions: sessionConfigOptions(session),
 	}
 

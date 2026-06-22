@@ -1142,6 +1142,7 @@ func TestAgentUsesClaudeInitializeMetadata(t *testing.T) {
 
 	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
+	requireNoTopLevelConfigState(t, session)
 	require.Equal(t, acp.SessionConfigValueId("default"), session.ConfigOptions[0].Select.CurrentValue)
 	require.Equal(t, acp.SessionConfigOptionCategoryModel, *session.ConfigOptions[0].Select.Category)
 	require.Equal(t, "Sonnet", (*session.ConfigOptions[0].Select.Options.Ungrouped)[1].Name)
@@ -1239,7 +1240,9 @@ func TestAgentUsesClaudeSettingsFiles(t *testing.T) {
 	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
 	requireClaudeVariantMeta(t, session.Meta, "opus", "high", []string{"low", "high"})
-	require.Equal(t, modeAuto, session.Modes.CurrentModeId)
+	modeConfig := findSelectConfig(session.ConfigOptions, configMode)
+	require.NotNil(t, modeConfig)
+	require.Equal(t, acp.SessionConfigValueId(modeAuto), modeConfig.CurrentValue)
 	modelConfig := findSelectConfig(session.ConfigOptions, configModel)
 	require.NotNil(t, modelConfig)
 	require.Equal(t, acp.SessionConfigValueId("opus"), modelConfig.CurrentValue)
@@ -1611,7 +1614,9 @@ func TestAgentModelConfigEnvAndAliases(t *testing.T) {
 		},
 		{Name: "custom", Value: "custom"},
 	})
-	require.Contains(t, session.Modes.AvailableModes, acp.SessionMode{Id: modeAuto, Name: "Auto"})
+	modeConfig := findSelectConfig(session.ConfigOptions, configMode)
+	require.NotNil(t, modeConfig)
+	require.NotNil(t, findSelectOption(*modeConfig.Options.Ungrouped, acp.SessionConfigValueId(modeAuto)))
 
 	requests := sentControlRequests(fake, "set_model")
 	require.NotEmpty(t, requests)
@@ -1642,13 +1647,12 @@ func TestAgentModelAliasAndModeGating(t *testing.T) {
 
 	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
-	require.Equal(t, modeDefault, session.Modes.CurrentModeId)
-	require.Contains(t, session.Modes.AvailableModes, acp.SessionMode{Id: modeAuto, Name: "Auto"})
+	modeConfig := findSelectConfig(session.ConfigOptions, configMode)
+	require.NotNil(t, modeConfig)
+	require.Equal(t, acp.SessionConfigValueId(modeDefault), modeConfig.CurrentValue)
+	require.NotNil(t, findSelectOption(*modeConfig.Options.Ungrouped, acp.SessionConfigValueId(modeAuto)))
 
-	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
-		SessionId: session.SessionId,
-		ModeId:    modeAuto,
-	})
+	_, err = setModeConfig(context.Background(), agent, session.SessionId, modeAuto)
 	require.NoError(t, err)
 
 	configResp, err := agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
@@ -1661,10 +1665,7 @@ func TestAgentModelAliasAndModeGating(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, acp.SessionConfigValueId("claude-haiku-4-5"), configResp.ConfigOptions[0].Select.CurrentValue)
 
-	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
-		SessionId: session.SessionId,
-		ModeId:    modeAuto,
-	})
+	_, err = setModeConfig(context.Background(), agent, session.SessionId, modeAuto)
 	require.Error(t, err)
 
 	requests := sentControlRequests(fake, "set_model")
@@ -1822,10 +1823,7 @@ func TestAgentModelModeClampPermissionError(t *testing.T) {
 	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
 
-	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
-		SessionId: session.SessionId,
-		ModeId:    modeAuto,
-	})
+	_, err = setModeConfig(context.Background(), agent, session.SessionId, modeAuto)
 	require.NoError(t, err)
 
 	fake.controlErrors = map[string]string{"set_permission_mode": "mode failed"}
@@ -1914,7 +1912,9 @@ func TestAgentInitialPermissionModeClamp(t *testing.T) {
 
 	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
-	require.Equal(t, modeDefault, session.Modes.CurrentModeId)
+	modeConfig := findSelectConfig(session.ConfigOptions, configMode)
+	require.NotNil(t, modeConfig)
+	require.Equal(t, acp.SessionConfigValueId(modeDefault), modeConfig.CurrentValue)
 
 	requests := sentControlRequests(fake, "set_permission_mode")
 	require.NotEmpty(t, requests)
@@ -1979,10 +1979,7 @@ func TestAgentSetSessionModelConfigModeClamp(t *testing.T) {
 	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
 
-	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
-		SessionId: session.SessionId,
-		ModeId:    modeAuto,
-	})
+	_, err = setModeConfig(context.Background(), agent, session.SessionId, modeAuto)
 	require.NoError(t, err)
 
 	modelResp, err := setModelConfig(context.Background(), agent, session.SessionId, "haiku")
@@ -2017,10 +2014,7 @@ func TestAgentSetSessionModelConfigModeClampPermissionError(t *testing.T) {
 	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
 
-	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
-		SessionId: session.SessionId,
-		ModeId:    modeAuto,
-	})
+	_, err = setModeConfig(context.Background(), agent, session.SessionId, modeAuto)
 	require.NoError(t, err)
 
 	fake.controlErrors = map[string]string{"set_permission_mode": "mode failed"}
@@ -2613,10 +2607,7 @@ func TestAgentACPConnectionStreamsUpdates(t *testing.T) {
 	require.NotNil(t, updates[2].Update.SessionInfoUpdate.Title)
 	require.Equal(t, "hello", *updates[2].Update.SessionInfoUpdate.Title)
 
-	_, err = conn.SetSessionMode(ctx, acp.SetSessionModeRequest{
-		SessionId: session.SessionId,
-		ModeId:    modePlan,
-	})
+	_, err = setModeConfig(ctx, conn, session.SessionId, modePlan)
 	require.NoError(t, err)
 
 	_, err = conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
@@ -2629,23 +2620,22 @@ func TestAgentACPConnectionStreamsUpdates(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
-		return len(client.recordedUpdates()) == 6
+		return len(client.recordedUpdates()) == 5
 	}, time.Second, 10*time.Millisecond)
 
 	updates = client.recordedUpdates()
-	require.Equal(t, modePlan, updates[3].Update.CurrentModeUpdate.CurrentModeId)
-	require.Equal(t, acp.SessionConfigValueId(modePlan), updates[4].Update.ConfigOptionUpdate.ConfigOptions[1].Select.CurrentValue)
-	require.Equal(t, acp.SessionConfigValueId("claude-next"), updates[5].Update.ConfigOptionUpdate.ConfigOptions[0].Select.CurrentValue)
+	require.Equal(t, acp.SessionConfigValueId(modePlan), updates[3].Update.ConfigOptionUpdate.ConfigOptions[1].Select.CurrentValue)
+	require.Equal(t, acp.SessionConfigValueId("claude-next"), updates[4].Update.ConfigOptionUpdate.ConfigOptions[0].Select.CurrentValue)
 
 	_, err = setModelConfig(ctx, conn, session.SessionId, "claude-opus")
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
-		return len(client.recordedUpdates()) == 7
+		return len(client.recordedUpdates()) == 6
 	}, time.Second, 10*time.Millisecond)
 
 	updates = client.recordedUpdates()
-	require.Equal(t, acp.SessionConfigValueId("claude-opus"), updates[6].Update.ConfigOptionUpdate.ConfigOptions[0].Select.CurrentValue)
+	require.Equal(t, acp.SessionConfigValueId("claude-opus"), updates[5].Update.ConfigOptionUpdate.ConfigOptions[0].Select.CurrentValue)
 }
 
 func TestLocalAgentPromptQueueing(t *testing.T) {
@@ -4175,7 +4165,8 @@ func TestAgentResumeAndLoadSession(t *testing.T) {
 		McpServers: []acp.McpServer{},
 	})
 	require.NoError(t, err)
-	require.NotNil(t, resume.Modes)
+	requireNoTopLevelConfigState(t, resume)
+	require.NotNil(t, findSelectConfig(resume.ConfigOptions, configMode))
 	require.Equal(t, map[string]any{claudeMetaKey: map[string]any{claudeGoalMetaKey: nil}}, resume.Meta)
 
 	client := &recordingACPClient{}
@@ -4187,7 +4178,8 @@ func TestAgentResumeAndLoadSession(t *testing.T) {
 		McpServers: []acp.McpServer{},
 	})
 	require.NoError(t, err)
-	require.NotNil(t, load.Modes)
+	requireNoTopLevelConfigState(t, load)
+	require.NotNil(t, findSelectConfig(load.ConfigOptions, configMode))
 	require.Equal(t, map[string]any{claudeMetaKey: map[string]any{claudeGoalMetaKey: nil}}, load.Meta)
 
 	require.Eventually(t, func() bool {
@@ -4621,9 +4613,9 @@ func TestAgentForkSession(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+	requireNoTopLevelConfigState(t, resp)
 	require.NotEmpty(t, resp.SessionId)
 	require.NotEqual(t, acp.SessionId("source-session"), resp.SessionId)
-	require.NotNil(t, resp.Modes)
 	requireClaudeVariantMeta(t, resp.Meta, "claude-test", "", []string{})
 	require.NotNil(t, resp.ConfigOptions)
 	require.Equal(t, acp.SessionConfigValueId("claude-test"), resp.ConfigOptions[0].Select.CurrentValue)
@@ -4682,10 +4674,7 @@ func TestAgentSessionControls(t *testing.T) {
 	resp, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/repo", McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
 
-	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
-		SessionId: resp.SessionId,
-		ModeId:    modePlan,
-	})
+	_, err = setModeConfig(context.Background(), agent, resp.SessionId, modePlan)
 	require.NoError(t, err)
 
 	configResp, err := agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
@@ -4778,10 +4767,7 @@ func TestAgentSessionRuntimeControlsWaitForTurn(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, modeErr := agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
-			SessionId: resp.SessionId,
-			ModeId:    modePlan,
-		})
+		_, modeErr := setModeConfig(context.Background(), agent, resp.SessionId, modePlan)
 		done <- modeErr
 	}()
 
@@ -4819,13 +4805,10 @@ func TestAgentSessionRuntimeControlsCancelWhileWaitingForTurn(t *testing.T) {
 		run     func(context.Context, *Agent, acp.SessionId) error
 	}{
 		{
-			name:    "set mode",
+			name:    "config mode",
 			subtype: "set_permission_mode",
 			run: func(ctx context.Context, agent *Agent, sessionID acp.SessionId) error {
-				_, err := agent.SetSessionMode(ctx, acp.SetSessionModeRequest{
-					SessionId: sessionID,
-					ModeId:    modePlan,
-				})
+				_, err := setModeConfig(ctx, agent, sessionID, modePlan)
 
 				return err
 			},
@@ -4905,12 +4888,6 @@ func TestAgentSessionControlErrorsFromClaudeClient(t *testing.T) {
 	sendErr := errors.New("send failed")
 	fake.setSendErr(sendErr)
 
-	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
-		SessionId: resp.SessionId,
-		ModeId:    modePlan,
-	})
-	require.ErrorIs(t, err, sendErr)
-
 	_, err = agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
 		ValueId: &acp.SetSessionConfigOptionValueId{
 			SessionId: resp.SessionId,
@@ -4981,10 +4958,7 @@ func TestAgentSessionControlUpdateErrorsAndMissingSessions(t *testing.T) {
 	require.NoError(t, err)
 	attachFailingConnection(agent)
 
-	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
-		SessionId: resp.SessionId,
-		ModeId:    modePlan,
-	})
+	_, err = setModeConfig(context.Background(), agent, resp.SessionId, modePlan)
 	require.Error(t, err)
 
 	fake.setControlErrors(nil)
@@ -5346,9 +5320,6 @@ func TestAgentErrors(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{SessionId: "missing"})
-	require.Error(t, err)
-
 	_, err = agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{})
 	require.Error(t, err)
 
@@ -5420,12 +5391,6 @@ func TestAgentInvalidModeAndConfig(t *testing.T) {
 		McpServers: []acp.McpServer{},
 	})
 	require.NoError(t, err)
-
-	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
-		SessionId: resp.SessionId,
-		ModeId:    "unknown",
-	})
-	require.Error(t, err)
 
 	_, err = agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
 		ValueId: &acp.SetSessionConfigOptionValueId{
@@ -5524,14 +5489,12 @@ func TestAgentLocalHelpers(t *testing.T) {
 		require.Equal(t, tc.ok, ok)
 	}
 
-	modes := sessionModeState(&Session{
-		mode:            modeAuto,
-		model:           "claude-test",
-		availableModels: []claude.AvailableModelInfo{{Value: "claude-test", SupportsAutoMode: true}},
-	})
-	require.Equal(t, modeAuto, modes.CurrentModeId)
-	require.Contains(t, modes.AvailableModes, acp.SessionMode{Id: modeAuto, Name: "Auto"})
-	require.Contains(t, modes.AvailableModes, acp.SessionMode{Id: modeDontAsk, Name: "Don't Ask"})
+	modeValues := modeSelectOptions(
+		"claude-test",
+		[]claude.AvailableModelInfo{{Value: "claude-test", SupportsAutoMode: true}},
+	)
+	require.NotNil(t, findSelectOption(modeValues, acp.SessionConfigValueId(modeAuto)))
+	require.NotNil(t, findSelectOption(modeValues, acp.SessionConfigValueId(modeDontAsk)))
 
 	session := &Session{cwd: "/repo", additionalDirectories: []string{"/shared"}}
 	require.True(t, sessionMatchesListFilters(session, acp.ListSessionsRequest{}))
@@ -5649,6 +5612,21 @@ func setModelConfig(
 	})
 }
 
+func setModeConfig(
+	ctx context.Context,
+	setter sessionConfigSetter,
+	sessionID acp.SessionId,
+	mode acp.SessionModeId,
+) (acp.SetSessionConfigOptionResponse, error) {
+	return setter.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: sessionID,
+			ConfigId:  configMode,
+			Value:     acp.SessionConfigValueId(mode),
+		},
+	})
+}
+
 func findBooleanConfig(options []acp.SessionConfigOption, id acp.SessionConfigId) *acp.SessionConfigOptionBoolean {
 	for _, option := range options {
 		if option.Boolean != nil && option.Boolean.Id == id {
@@ -5677,6 +5655,19 @@ func findSelectOption(options acp.SessionConfigSelectOptionsUngrouped, value acp
 	}
 
 	return nil
+}
+
+func requireNoTopLevelConfigState(t *testing.T, response any) {
+	t.Helper()
+
+	encoded, err := json.Marshal(response)
+	require.NoError(t, err)
+
+	var object map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(encoded, &object))
+	require.Contains(t, object, "configOptions")
+	require.NotContains(t, object, "models")
+	require.NotContains(t, object, "modes")
 }
 
 func requireModelOptionBasics(t *testing.T, got acp.SessionConfigSelectOptionsUngrouped, want []acp.SessionConfigSelectOption) {

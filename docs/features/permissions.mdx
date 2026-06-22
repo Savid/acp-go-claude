@@ -53,8 +53,8 @@ ACP clients cannot register or mutate Claude hooks through this adapter.
 
 The handled hook path is `PostToolUse`:
 
-- `EnterPlanMode` through `PostToolUse` emits `current_mode_update` with
-  `plan`.
+- `EnterPlanMode` through `PostToolUse` emits `config_option_update` with the
+  `mode` config option set to `plan`.
 - `Edit` and `Write` through `PostToolUse` can emit extra
   `tool_call_update` data with diff locations and raw Claude output.
 - Other hook callbacks continue inside Claude and are not exposed as generic
@@ -62,7 +62,7 @@ The handled hook path is `PostToolUse`:
 
 `ExitPlanMode` is handled as a permission-style tool request. The client sees
 the pending switch-mode tool, chooses the next mode, and the adapter emits
-`current_mode_update` after the mode changes.
+`config_option_update` after the mode changes.
 
 ## Cancellation
 
@@ -73,7 +73,7 @@ Session cancellation is described in [Sessions](/docs/core/sessions#cancel).
 ## Subagents
 
 Claude [subagent](https://code.claude.com/docs/en/sub-agents) work inherits
-the active session policy. Clients should present ACP modes such as
+the active session policy. Clients should present mode config values such as
 `bypass_permissions`, `accept_edits`, and `auto` as applying to subagent tool
 use as well as visible main-turn tool use. Claude-owned hooks and deny rules
 can still block tools.

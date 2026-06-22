@@ -129,20 +129,6 @@ func authAgentMethodIDs(methods []acp.AuthMethod) []string {
 	return ids
 }
 
-func sessionModeAvailable(modes *acp.SessionModeState, mode acp.SessionModeId) bool {
-	if modes == nil {
-		return false
-	}
-
-	for _, available := range modes.AvailableModes {
-		if available.Id == mode {
-			return true
-		}
-	}
-
-	return false
-}
-
 func TestClaudeCLIPermissionAllowAlwaysAndTranscriptToolReplay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -338,7 +324,8 @@ func TestClaudeCLIEnterPlanModeHookCallback(t *testing.T) {
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	require.Eventually(t, func() bool {
 		for _, update := range client.updateSnapshot() {
-			if update.CurrentModeUpdate != nil && update.CurrentModeUpdate.CurrentModeId == acp.SessionModeId("plan") {
+			modeConfig := configUpdateSelect(update, "mode")
+			if modeConfig != nil && modeConfig.CurrentValue == acp.SessionConfigValueId("plan") {
 				return true
 			}
 		}

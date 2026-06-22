@@ -184,7 +184,6 @@ func (a *Agent) UnstableForkSession(
 	return acp.UnstableForkSessionResponse{
 		SessionId:     session.id,
 		Meta:          sessionResponseMeta(session),
-		Modes:         sessionModeState(session),
 		ConfigOptions: sessionUnstableConfigOptions(session),
 	}, nil
 }

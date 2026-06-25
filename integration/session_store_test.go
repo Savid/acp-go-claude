@@ -15,7 +15,7 @@ import (
 )
 
 func TestClaudeCLISessionStoreMirrorAndResume(t *testing.T) {
-	t.Parallel()
+	parallelWhenPortableClaudeAuth(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

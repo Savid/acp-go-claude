@@ -281,8 +281,8 @@ while :; do sleep 1; done
 		_, err := os.Stat(ready)
 
 		return err == nil
-	}, time.Second, 10*time.Millisecond)
-	time.Sleep(50 * time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGTERM))
 
 	select {
@@ -444,7 +444,7 @@ func TestRunHandlesSignals(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not start")
 	}
 

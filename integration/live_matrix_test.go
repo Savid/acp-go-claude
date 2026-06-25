@@ -135,7 +135,7 @@ func TestClaudeCLIPermissionAllowAlwaysAndTranscriptToolReplay(t *testing.T) {
 
 	cwd := t.TempDir()
 	client := &recordingClient{permission: acp.PermissionOptionId("allow_always")}
-	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
+	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{}, permissionGateOptions()...)
 
 	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
@@ -200,7 +200,7 @@ func TestClaudeCLICancelPendingPermissionRequest(t *testing.T) {
 
 	cwd := t.TempDir()
 	client := newBlockingPermissionClient()
-	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
+	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{}, permissionGateOptions()...)
 
 	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
@@ -259,7 +259,7 @@ func TestClaudeCLICancelPendingPermissionRequest(t *testing.T) {
 }
 
 func TestClaudeCLIAskUserQuestionElicitation(t *testing.T) {
-	t.Parallel()
+	parallelWhenPortableClaudeAuth(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -295,7 +295,7 @@ func TestClaudeCLIAskUserQuestionElicitation(t *testing.T) {
 }
 
 func TestClaudeCLIEnterPlanModeHookCallback(t *testing.T) {
-	t.Parallel()
+	parallelWhenPortableClaudeAuth(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -440,7 +440,7 @@ func TestClaudeCLICancelLongRunningToolAndContinuesSession(t *testing.T) {
 }
 
 func TestClaudeCLIMultimodalPrompt(t *testing.T) {
-	t.Parallel()
+	parallelWhenPortableClaudeAuth(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -476,7 +476,7 @@ func TestClaudeCLIMultimodalPrompt(t *testing.T) {
 }
 
 func TestClaudeCLIRawExtensionNotifications(t *testing.T) {
-	t.Parallel()
+	parallelWhenPortableClaudeAuth(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -520,7 +520,7 @@ func TestClaudeCLIRawExtensionNotifications(t *testing.T) {
 }
 
 func TestClaudeCLIStructuredOutput(t *testing.T) {
-	t.Parallel()
+	parallelWhenPortableClaudeAuth(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -742,7 +742,7 @@ func TestClaudeCLIResumeAndConcurrentSessions(t *testing.T) {
 }
 
 func TestClaudeCLIFailurePaths(t *testing.T) {
-	t.Parallel()
+	parallelWhenPortableClaudeAuth(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

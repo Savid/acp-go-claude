@@ -111,9 +111,11 @@ func TestSettingsHelpers(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
 	home := t.TempDir()
+	canonicalHome, err := filepath.EvalSymlinks(home)
+	require.NoError(t, err)
 	canonical, err := canonicalClaudeHome(filepath.Join(home, "."))
 	require.NoError(t, err)
-	require.Equal(t, home, canonical)
+	require.Equal(t, canonicalHome, canonical)
 	canonical, err = canonicalClaudeHome("")
 	require.NoError(t, err)
 	require.Empty(t, canonical)

@@ -52,6 +52,8 @@ func TestClaudeCLISessionImportChunkCommitReplaceLoadAndResume(t *testing.T) {
 	_, err = conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: acp.SessionId(resumeFromFileExampleSessionID)})
 	require.NoError(t, err)
 
+	requirePortableClaudeAuth(t)
+
 	client = &recordingClient{}
 	conn = connectLiveAgent(t, ctx, client, acp.InitializeRequest{}, claudeacp.WithSessionStore(store))
 	_, err = conn.ResumeSession(ctx, acp.ResumeSessionRequest{

@@ -145,11 +145,13 @@ func TestSessionStoreErrorsAndValidation(t *testing.T) {
 	require.NotEmpty(t, projectKey)
 
 	dir := t.TempDir()
+	canonicalDir, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
 	link := filepath.Join(t.TempDir(), "link")
 	require.NoError(t, os.Symlink(dir, link))
 	projectKey, err = projectKeyForDirectory(link)
 	require.NoError(t, err)
-	require.Equal(t, sanitizeSessionProjectPath(dir), projectKey)
+	require.Equal(t, sanitizeSessionProjectPath(canonicalDir), projectKey)
 
 	require.False(t, isSafeSessionSubpath(""))
 	require.False(t, isSafeSessionSubpath("../bad"))

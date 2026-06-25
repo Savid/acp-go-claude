@@ -103,7 +103,7 @@ while :; do sleep 1; done
 		_, err := os.Stat(pidFile)
 
 		return err == nil
-	}, time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	rawPID, err := os.ReadFile(pidFile)
 	require.NoError(t, err)

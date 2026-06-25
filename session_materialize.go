@@ -15,7 +15,7 @@ const (
 	resumeEntryTypeAgentMetadata   = "agent_metadata"
 )
 
-var copyClaudeAuthFiles = copyClaudeAuthFilesImpl
+var copyClaudeConfigFiles = copyClaudeConfigFilesImpl
 
 type materializedSession struct {
 	configDir string
@@ -56,6 +56,12 @@ func (a *Agent) materializeStoreSession(
 	store := a.sessionStore()
 	mainKey := SessionKey{ProjectKey: projectKey, SessionID: sessionID}
 
+	if nativeTranscriptExists, existsErr := claudeNativeTranscriptExists(sourceClaudeHome, env, mainKey); existsErr != nil {
+		return nil, existsErr
+	} else if nativeTranscriptExists {
+		return noMaterializedSession()
+	}
+
 	entries, err := a.loadStoreEntries(ctx, store, mainKey)
 	if err != nil {
 		return nil, err
@@ -86,7 +92,7 @@ func (a *Agent) materializeStoreSession(
 		return nil, err
 	}
 
-	if err := copyClaudeAuthFiles(tmp, sourceClaudeHome, env); err != nil {
+	if err := copyClaudeConfigFiles(tmp, sourceClaudeHome, env); err != nil {
 		return nil, err
 	}
 
@@ -241,17 +247,29 @@ func writeJSONFile(path string, value any) error {
 	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
-func copyClaudeAuthFilesImpl(dst string, sourceClaudeHome string, env map[string]string) error {
+func claudeNativeTranscriptExists(sourceClaudeHome string, env map[string]string, key SessionKey) (bool, error) {
+	source := sourceClaudeConfigDir(sourceClaudeHome, env)
+	if source == "" || key.ProjectKey == "" || key.SessionID == "" {
+		return false, nil
+	}
+
+	path := filepath.Join(source, "projects", key.ProjectKey, key.SessionID+".jsonl")
+	info, statErr := os.Stat(path)
+
+	switch {
+	case statErr == nil:
+		return !info.IsDir(), nil
+	case os.IsNotExist(statErr):
+		return false, nil
+	default:
+		return false, fmt.Errorf("stat native Claude transcript: %w", statErr)
+	}
+}
+
+func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, env map[string]string) error {
 	source := sourceClaudeConfigDir(sourceClaudeHome, env)
 	if source == "" || filepath.Clean(source) == filepath.Clean(dst) {
 		return nil
-	}
-
-	if data, err := os.ReadFile(filepath.Join(source, ".credentials.json")); err == nil {
-		// #nosec G703 -- dst is an agent-created temporary Claude config directory.
-		if err := os.WriteFile(filepath.Join(dst, ".credentials.json"), redactClaudeRefreshToken(data), 0o600); err != nil {
-			return fmt.Errorf("copy Claude credentials: %w", err)
-		}
 	}
 
 	if data, err := os.ReadFile(filepath.Join(source, ".claude.json")); err == nil {
@@ -283,19 +301,4 @@ func sourceClaudeConfigDir(sourceClaudeHome string, env map[string]string) strin
 	}
 
 	return filepath.Join(home, ".claude")
-}
-
-func redactClaudeRefreshToken(data []byte) []byte {
-	var obj map[string]any
-	if err := json.Unmarshal(data, &obj); err != nil {
-		return data
-	}
-
-	if oauth, ok := obj["claudeAiOauth"].(map[string]any); ok {
-		delete(oauth, "refreshToken")
-	}
-
-	out, _ := json.Marshal(obj)
-
-	return append(out, '\n')
 }

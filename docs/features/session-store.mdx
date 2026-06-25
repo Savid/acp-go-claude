@@ -92,8 +92,9 @@ needs a session that is not present in local Claude files, the adapter:
 1. Loads JSONL rows from the store.
 2. Creates an isolated temp `CLAUDE_CONFIG_DIR`.
 3. Writes Claude's expected `projects/<project>/<session>.jsonl` layout.
-4. Copies only the Claude auth/config files needed to run.
-5. Redacts copied OAuth refresh tokens where possible.
+4. Copies non-secret Claude config files needed to run.
+5. Does not copy Claude credential files or `sessions/` auth state; use
+   environment-based auth for materialized store-backed resumes.
 6. Removes the temp config when the ACP session closes.
 
 Security details for materialized directories are covered in

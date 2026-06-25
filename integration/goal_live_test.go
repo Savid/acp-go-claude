@@ -100,7 +100,12 @@ func TestClaudeNativeGoalMirrorLive(t *testing.T) {
 	client := &recordingClient{}
 	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
 
-	session, err := conn.NewSession(ctx, claudeacp.NewSessionRequest(t.TempDir()))
+	session, err := conn.NewSession(ctx, claudeacp.NewSessionRequest(
+		t.TempDir(),
+		claudeacp.WithSessionClaudeOptions(claudeacp.NewClaudeOptions(
+			claudeacp.WithClaudePermissionMode("default"),
+		)),
+	))
 	require.NoError(t, err)
 
 	_, err = conn.Prompt(ctx, claudeacp.TextPromptRequest(
@@ -138,7 +143,7 @@ func TestClaudeGoalSetDuringPendingPermissionLive(t *testing.T) {
 	defer cancel()
 
 	client := newBlockingPermissionClient()
-	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
+	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{}, permissionGateOptions()...)
 
 	session, err := conn.NewSession(ctx, claudeacp.NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)

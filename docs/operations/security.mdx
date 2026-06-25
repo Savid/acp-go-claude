@@ -51,7 +51,8 @@ an equivalent boot/session sweep for stale `acp-go-claude-mcp-token-*` files.
   `WithClaudeHome` in embedded Go and is treated as trusted local
   configuration.
 - [Session store](/docs/features/session-store) materialization writes an
-  isolated temp Claude config dir and removes it on close.
+  isolated temp Claude config dir and removes it on close. It does not copy
+  Claude credential files or `sessions/` auth state into that temp dir.
 
 ## Logging and telemetry
 

@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +24,9 @@ import (
 )
 
 const livePromptRefusalRetries = 1
+const envClaudeHome = "ACP_GO_CLAUDE_HOME"
+const envAnthropicAuthToken = "ANTHROPIC_AUTH_TOKEN" //nolint:gosec // Environment variable name, not a credential value.
+const envAnthropicAPIKey = "ANTHROPIC_API_KEY"       //nolint:gosec // Environment variable name, not a credential value.
 
 var integrationLogger = slog.New(slog.DiscardHandler)
 
@@ -352,6 +357,367 @@ func integrationClaudePath(t *testing.T) string {
 	return claudePath
 }
 
+func integrationClaudeHome(t *testing.T) string {
+	t.Helper()
+
+	return os.Getenv(envClaudeHome)
+}
+
+func integrationClaudeSourceHome(t *testing.T) (string, bool) {
+	t.Helper()
+
+	source := integrationClaudeHome(t)
+	if source != "" {
+		return source, true
+	}
+
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	return filepath.Join(home, ".claude"), false
+}
+
+func isolatedClaudeHome(t *testing.T) string {
+	t.Helper()
+
+	runtime := isolatedClaudeRuntime(t)
+
+	return runtime.home
+}
+
+type isolatedClaudeRuntimeConfig struct {
+	home string
+	env  map[string]string
+}
+
+func isolatedClaudeRuntime(t *testing.T) isolatedClaudeRuntimeConfig {
+	t.Helper()
+
+	source, explicitSource := integrationClaudeSourceHome(t)
+	processAuth := processClaudeAuthAvailable()
+	env := copiedClaudeAuthEnv(t, source)
+	if len(env) == 0 && !portableClaudeAuthAvailable(t, source) {
+		t.Fatalf(
+			"live Claude integration requires portable file/env auth; refusing to launch against the real Claude home. "+
+				"Set %s, %s, or provide .credentials.json/settings.json auth in %s",
+			envAnthropicAuthToken,
+			envAnthropicAPIKey,
+			envClaudeHome,
+		)
+	}
+
+	base, err := filepath.Abs(filepath.Join("..", ".tmp", "integration-claude-home"))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(base, 0o700))
+
+	target, err := os.MkdirTemp(base, "home-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(target) })
+
+	if explicitSource || !processAuth {
+		for _, name := range []string{".credentials.json", "settings.json"} {
+			require.NoError(t, copyClaudeHomeFile(source, target, name))
+		}
+		require.NoError(t, copyClaudeStateFile(source, target))
+		require.NoError(t, copyClaudeHomeDir(source, target, "sessions"))
+	}
+
+	return isolatedClaudeRuntimeConfig{
+		home: target,
+		env:  env,
+	}
+}
+
+func copyClaudeHomeFile(sourceDir string, targetDir string, name string) error {
+	source := filepath.Join(sourceDir, name)
+	data, err := os.ReadFile(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	data, err = nullClaudeRefreshTokens(data)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filepath.Join(targetDir, name), data, 0o600)
+}
+
+func copyClaudeStateFile(sourceDir string, targetDir string) error {
+	source := filepath.Join(sourceDir, ".claude.json")
+	if _, err := os.Stat(source); errors.Is(err, os.ErrNotExist) && filepath.Base(sourceDir) == ".claude" {
+		source = filepath.Join(filepath.Dir(sourceDir), ".claude.json")
+	}
+
+	data, err := os.ReadFile(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	data, err = nullClaudeRefreshTokens(data)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filepath.Join(targetDir, ".claude.json"), data, 0o600)
+}
+
+func copyClaudeHomeDir(sourceDir string, targetDir string, name string) error {
+	sourceRoot := filepath.Join(sourceDir, name)
+	info, err := os.Stat(sourceRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+
+	targetRoot := filepath.Join(targetDir, name)
+	return filepath.WalkDir(sourceRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		rel, err := filepath.Rel(sourceRoot, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(targetRoot, rel)
+
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		if entry.Type()&os.ModeType != 0 {
+			return nil
+		}
+
+		data, err := os.ReadFile(path) // #nosec G304 -- integration helper copies selected local Claude home files.
+		if err != nil {
+			return err
+		}
+		if strings.HasSuffix(entry.Name(), ".json") {
+			data, err = nullClaudeRefreshTokens(data)
+			if err != nil {
+				return err
+			}
+		}
+
+		return os.WriteFile(target, data, 0o600) // #nosec G306 -- private integration temp home.
+	})
+}
+
+func nullClaudeRefreshTokens(data []byte) ([]byte, error) {
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, err
+	}
+
+	nullRefreshTokens(value)
+
+	out, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+
+	return append(out, '\n'), nil
+}
+
+func nullRefreshTokens(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "refreshToken" {
+				typed[key] = nil
+				continue
+			}
+			nullRefreshTokens(child)
+		}
+	case []any:
+		for _, child := range typed {
+			nullRefreshTokens(child)
+		}
+	}
+}
+
+func copiedClaudeAuthEnv(t *testing.T, sourceDir string) map[string]string {
+	t.Helper()
+
+	if processClaudeAuthAvailable() {
+		return nil
+	}
+
+	data, err := os.ReadFile(filepath.Join(sourceDir, ".credentials.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	require.NoError(t, err)
+
+	var value any
+	require.NoError(t, json.Unmarshal(data, &value))
+
+	token := strings.TrimSpace(claudeAccessToken(value))
+	if token == "" {
+		return nil
+	}
+
+	return map[string]string{envAnthropicAuthToken: token}
+}
+
+func portableClaudeAuthAvailable(t *testing.T, sourceDir string) bool {
+	t.Helper()
+
+	if processClaudeAuthAvailable() {
+		return true
+	}
+
+	if token := strings.TrimSpace(claudeAccessTokenFromFile(t, filepath.Join(sourceDir, ".credentials.json"))); token != "" {
+		return true
+	}
+
+	return claudeSettingsAuthAvailable(t, filepath.Join(sourceDir, "settings.json"))
+}
+
+func processClaudeAuthAvailable() bool {
+	return strings.TrimSpace(os.Getenv(envAnthropicAuthToken)) != "" ||
+		strings.TrimSpace(os.Getenv(envAnthropicAPIKey)) != ""
+}
+
+func claudeAccessTokenFromFile(t *testing.T, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	require.NoError(t, err)
+
+	var value any
+	require.NoError(t, json.Unmarshal(data, &value))
+
+	return claudeAccessToken(value)
+}
+
+func claudeSettingsAuthAvailable(t *testing.T, path string) bool {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	require.NoError(t, err)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+
+	env, _ := raw["env"].(map[string]any)
+	return strings.TrimSpace(stringValue(env[envAnthropicAuthToken])) != "" ||
+		strings.TrimSpace(stringValue(env[envAnthropicAPIKey])) != ""
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+
+	return text
+}
+
+func claudeAccessToken(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		if oauth, ok := typed["claudeAiOauth"].(map[string]any); ok {
+			if token, ok := oauth["accessToken"].(string); ok {
+				return token
+			}
+		}
+		for _, child := range typed {
+			if token := claudeAccessToken(child); token != "" {
+				return token
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if token := claudeAccessToken(child); token != "" {
+				return token
+			}
+		}
+	}
+
+	return ""
+}
+
+func mergeClaudeEnv(env map[string]string) claudeacp.Option {
+	return func(options *claudeacp.Options) {
+		if len(env) == 0 {
+			return
+		}
+		if options.Env == nil {
+			options.Env = map[string]string{}
+		}
+		for key, value := range env {
+			if strings.TrimSpace(options.Env[key]) == "" {
+				options.Env[key] = value
+			}
+		}
+	}
+}
+
+func mergedProcessEnv(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+
+	processEnv := os.Environ()
+	seen := make(map[string]struct{}, len(processEnv))
+	for _, item := range processEnv {
+		key, _, ok := strings.Cut(item, "=")
+		if ok {
+			seen[key] = struct{}{}
+		}
+	}
+
+	for key, value := range env {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		processEnv = append(processEnv, key+"="+value)
+	}
+
+	return processEnv
+}
+
+func permissionGateOptions() []claudeacp.Option {
+	return []claudeacp.Option{
+		claudeacp.WithDefaultPermissionMode("default"),
+		claudeacp.WithSettingSources(),
+	}
+}
+
+func requirePortableClaudeAuth(t *testing.T) {
+	t.Helper()
+
+	source, _ := integrationClaudeSourceHome(t)
+	if !portableClaudeAuthAvailable(t, source) {
+		t.Skip("store-backed materialized resume requires portable Claude file/env auth")
+	}
+}
+
+func parallelWhenPortableClaudeAuth(t *testing.T) {
+	t.Helper()
+
+	source, _ := integrationClaudeSourceHome(t)
+	if portableClaudeAuthAvailable(t, source) {
+		t.Parallel()
+	}
+}
+
 func connectLiveAgent(
 	t *testing.T,
 	ctx context.Context,
@@ -397,8 +763,11 @@ func serveLiveAgentRawForTest(
 ) liveAgentPipes {
 	t.Helper()
 
+	claudePath := integrationClaudePath(t)
+	runtime := isolatedClaudeRuntime(t)
 	base := []claudeacp.Option{
-		claudeacp.WithClaudePath(integrationClaudePath(t)),
+		claudeacp.WithClaudePath(claudePath),
+		claudeacp.WithClaudeHome(runtime.home),
 		claudeacp.WithDefaultModel(os.Getenv("ACP_GO_CLAUDE_MODEL")),
 		claudeacp.WithInitializeTimeout(30 * time.Second),
 		claudeacp.WithLogger(integrationLogger),
@@ -410,7 +779,9 @@ func serveLiveAgentRawForTest(
 
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- claudeacp.Serve(serveCtx, c2aR, a2cW, append(base, opts...)...)
+		options := append(base, opts...)
+		options = append(options, mergeClaudeEnv(runtime.env))
+		serveErr <- claudeacp.Serve(serveCtx, c2aR, a2cW, options...)
 	}()
 
 	t.Cleanup(func() {
@@ -479,12 +850,15 @@ func connectLiveAgentBinary(
 		t.Skip("set ACP_GO_CLAUDE_AGENT_BINARY to run compiled binary integration coverage")
 	}
 
-	args := []string{"-claude", integrationClaudePath(t)}
+	claudePath := integrationClaudePath(t)
+	runtime := isolatedClaudeRuntime(t)
+	args := []string{"-claude", claudePath, "-claude-home", runtime.home}
 	if model := os.Getenv("ACP_GO_CLAUDE_MODEL"); model != "" {
 		args = append(args, "-model", model)
 	}
 
 	cmd := exec.Command(agentPath, args...) // #nosec G204,G702 -- path is the test-built agent binary.
+	cmd.Env = mergedProcessEnv(runtime.env)
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
 	stdout, err := cmd.StdoutPipe()

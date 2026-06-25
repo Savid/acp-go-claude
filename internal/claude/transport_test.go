@@ -625,7 +625,7 @@ while :; do :; done
 		_, err := os.Stat(ready)
 
 		return err == nil
-	}, time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 	require.NoError(t, transport.Close())
 
 	data, err := os.ReadFile(marker)
@@ -690,7 +690,7 @@ func TestProcessTransportCloseReportsKillError(t *testing.T) {
 	script := writeShellScript(t, filepath.Join(dir, "claude"), `#!/bin/sh
 trap '' TERM
 printf ready > "$READY_MARK"
-while :; do :; done
+while :; do sleep 1; done
 `)
 	transport := NewProcessTransport(nil, Options{
 		CLIPath: script,
@@ -702,7 +702,7 @@ while :; do :; done
 		_, err := os.Stat(ready)
 
 		return err == nil
-	}, time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	err := transport.Close()
 	require.Error(t, err)

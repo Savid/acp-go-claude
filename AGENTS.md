@@ -66,7 +66,12 @@ ACP_GO_CLAUDE_RUN_INTEGRATION=1 go test -race -tags=integration -timeout=600s -p
 `make test-integration` runs the same live suite. Use
 `make test-integration-cover` for compiled `acp-go-claude` coverage through
 `GOCOVERDIR`. Set `ACP_GO_CLAUDE_MODEL` to override the model used by live
-tests.
+tests. Live tests always launch Claude with an isolated temp
+`CLAUDE_CONFIG_DIR`. Set `ACP_GO_CLAUDE_HOME` to choose the source Claude config
+copied into that temp home. When `ACP_GO_CLAUDE_HOME` is unset and process env
+auth is available, tests use a fresh temp home. If neither env auth nor copied
+portable file auth is available, tests fail instead of using the normal Claude
+home.
 
 ## Coding Rules
 

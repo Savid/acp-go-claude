@@ -12,7 +12,7 @@ import (
 )
 
 func TestClaudeACPAgentBinaryConversation(t *testing.T) {
-	t.Parallel()
+	parallelWhenPortableClaudeAuth(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()

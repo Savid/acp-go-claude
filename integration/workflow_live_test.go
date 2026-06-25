@@ -99,7 +99,7 @@ func TestClaudeWorkflowPermissionGateLive(t *testing.T) {
 	requireClaudeWorkflowSnapshotVersion(t, ctx)
 
 	client := newBlockingPermissionClient()
-	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
+	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{}, permissionGateOptions()...)
 
 	session, err := conn.NewSession(ctx, claudeacp.NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)

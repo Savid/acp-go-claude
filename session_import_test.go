@@ -261,6 +261,8 @@ func TestMaterializeStoreSessionAndResumeWiring(t *testing.T) {
 	claudeHome := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(claudeHome, ".credentials.json"), []byte(`{"claudeAiOauth":{"accessToken":"a","refreshToken":"secret"}}`), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(claudeHome, ".claude.json"), []byte(`{"ok":true}`), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(claudeHome, "sessions"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(claudeHome, "sessions", "auth.json"), []byte(`{"auth":true}`), 0o600))
 
 	store := NewInMemorySessionStore()
 	cwd := t.TempDir()
@@ -278,6 +280,7 @@ func TestMaterializeStoreSessionAndResumeWiring(t *testing.T) {
 	var captured claude.Options
 	agent := NewAgent(
 		WithClaudeHome(claudeHome),
+		WithEnv(map[string]string{envAnthropicAuthToken: "test-token"}),
 		WithSessionStore(store),
 		WithSessionStoreLoadTimeout(time.Second),
 	)
@@ -295,21 +298,69 @@ func TestMaterializeStoreSessionAndResumeWiring(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, claudeHome, captured.ClaudeHome)
 	require.True(t, captured.SessionMirror)
+	require.Equal(t, "test-token", captured.Env[envAnthropicAuthToken])
 
 	mainPath := filepath.Join(captured.ClaudeHome, "projects", projectKey, testSessionID+".jsonl")
 	require.FileExists(t, mainPath)
 	require.FileExists(t, filepath.Join(captured.ClaudeHome, "projects", projectKey, testSessionID, "subagents", "agent-a.jsonl"))
 	metaPath := filepath.Join(captured.ClaudeHome, "projects", projectKey, testSessionID, "subagents", "agent-a.meta.json")
 	require.FileExists(t, metaPath)
-	credentials, err := os.ReadFile(filepath.Join(captured.ClaudeHome, ".credentials.json"))
-	require.NoError(t, err)
-	require.NotContains(t, string(credentials), "refreshToken")
+	require.FileExists(t, filepath.Join(captured.ClaudeHome, ".claude.json"))
+	require.NoFileExists(t, filepath.Join(captured.ClaudeHome, ".credentials.json"))
+	require.NoFileExists(t, filepath.Join(captured.ClaudeHome, "sessions", "auth.json"))
 
 	session, err := agent.session(testSessionID)
 	require.NoError(t, err)
 	require.NotNil(t, session.materialized)
 	require.NoError(t, session.Close(context.Background()))
 	require.NoFileExists(t, mainPath)
+}
+
+func TestMaterializeStoreSessionKeepsNativeClaudeHomeWhenTranscriptExists(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	claudeHome := t.TempDir()
+	canonicalHome, err := filepath.EvalSymlinks(claudeHome)
+	require.NoError(t, err)
+
+	store := NewInMemorySessionStore()
+	cwd := t.TempDir()
+	projectKey, err := projectKeyForDirectory(cwd)
+	require.NoError(t, err)
+	require.NoError(t, store.Append(ctx, SessionKey{ProjectKey: projectKey, SessionID: testSessionID}, []SessionStoreEntry{
+		json.RawMessage(`{"type":"user","message":{"content":"from-store"}}`),
+	}))
+
+	nativePath := filepath.Join(canonicalHome, "projects", projectKey, testSessionID+".jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(nativePath), 0o755))
+	require.NoError(t, os.WriteFile(nativePath, []byte("{\"type\":\"user\",\"message\":{\"content\":\"native\"}}\n"), 0o600))
+
+	fake := newAgentFakeTransport()
+	var captured claude.Options
+	agent := NewAgent(
+		WithClaudeHome(claudeHome),
+		WithSessionStore(store),
+		WithSessionStoreLoadTimeout(time.Second),
+	)
+	agent.newClaudeClient = func(_ *slog.Logger, options claude.Options) *claude.Client {
+		captured = options
+
+		return claude.NewClient(nil, options, fake)
+	}
+
+	_, err = agent.ResumeSession(ctx, acp.ResumeSessionRequest{
+		SessionId: testSessionID,
+		Cwd:       cwd,
+	})
+	require.NoError(t, err)
+	require.Equal(t, canonicalHome, captured.ClaudeHome)
+
+	session, err := agent.session(testSessionID)
+	require.NoError(t, err)
+	require.Nil(t, session.materialized)
+	require.NoError(t, session.Close(context.Background()))
+	require.FileExists(t, nativePath)
 }
 
 func TestMaterializeStoreSessionBranches(t *testing.T) {
@@ -355,11 +406,11 @@ func TestMaterializeStoreSessionBranches(t *testing.T) {
 	require.Error(t, err)
 
 	func() {
-		previousCopyClaudeAuthFiles := copyClaudeAuthFiles
-		copyClaudeAuthFiles = func(string, string, map[string]string) error {
+		previousCopyClaudeConfigFiles := copyClaudeConfigFiles
+		copyClaudeConfigFiles = func(string, string, map[string]string) error {
 			return errors.New("copy failed")
 		}
-		defer func() { copyClaudeAuthFiles = previousCopyClaudeAuthFiles }()
+		defer func() { copyClaudeConfigFiles = previousCopyClaudeConfigFiles }()
 
 		agent = NewAgent(WithClaudeHome(t.TempDir()), WithSessionStore(storeWithBadSubkeys))
 		_, err = agent.materializeStoreSession(ctx, testSessionID, cwd, "", nil)
@@ -467,16 +518,21 @@ func TestMaterializeHelpers(t *testing.T) {
 
 	source := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(source, ".credentials.json"), []byte(`{"claudeAiOauth":{"refreshToken":"secret"}}`), 0o600))
-	require.NoError(t, copyClaudeAuthFiles(t.TempDir(), source, map[string]string{"CLAUDE_CONFIG_DIR": source}))
-	require.NoError(t, copyClaudeAuthFiles(source, source, nil))
-	require.Error(t, copyClaudeAuthFiles(fileParent, source, nil))
+	require.NoError(t, os.WriteFile(filepath.Join(source, ".claude.json"), []byte(`{"ok":true}`), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(source, "sessions", "nested"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(source, "sessions", "nested", "auth.json"), []byte(`{"auth":true}`), 0o600))
+	authCopyDst := t.TempDir()
+	require.NoError(t, copyClaudeConfigFiles(authCopyDst, source, map[string]string{"CLAUDE_CONFIG_DIR": source}))
+	require.FileExists(t, filepath.Join(authCopyDst, ".claude.json"))
+	require.NoFileExists(t, filepath.Join(authCopyDst, ".credentials.json"))
+	require.NoFileExists(t, filepath.Join(authCopyDst, "sessions", "nested", "auth.json"))
+	require.NoError(t, copyClaudeConfigFiles(source, source, nil))
+	require.Error(t, copyClaudeConfigFiles(fileParent, source, nil))
 
 	configOnly := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(configOnly, ".claude.json"), []byte(`{"ok":true}`), 0o600))
-	require.Error(t, copyClaudeAuthFiles(fileParent, configOnly, nil))
+	require.Error(t, copyClaudeConfigFiles(fileParent, configOnly, nil))
 
-	require.Equal(t, []byte(`{`), redactClaudeRefreshToken([]byte(`{`)))
-	require.JSONEq(t, `{"ok":true}`, string(redactClaudeRefreshToken([]byte(`{"ok":true}`))))
 	require.Equal(t, source, sourceClaudeConfigDir("", map[string]string{"CLAUDE_CONFIG_DIR": source}))
 	require.Equal(t, source, sourceClaudeConfigDir(source, nil))
 	t.Setenv("CLAUDE_CONFIG_DIR", source)
@@ -694,6 +750,8 @@ func TestSessionMirrorPathAndPromptDrain(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	claudeHome := t.TempDir()
+	canonicalHome, err := canonicalClaudeHome(claudeHome)
+	require.NoError(t, err)
 	cwd := t.TempDir()
 	projectKey, err := projectKeyForDirectory(cwd)
 	require.NoError(t, err)
@@ -711,7 +769,7 @@ func TestSessionMirrorPathAndPromptDrain(t *testing.T) {
 	fake.systemMessages = []map[string]any{
 		{
 			"type":     "transcript_mirror",
-			"filePath": filepath.Join(claudeHome, "projects", projectKey, string(resp.SessionId)+".jsonl"),
+			"filePath": filepath.Join(canonicalHome, "projects", projectKey, string(resp.SessionId)+".jsonl"),
 			"entries":  []any{map[string]any{"type": "user", "message": map[string]any{"content": "hello"}}},
 		},
 	}
@@ -880,6 +938,8 @@ func TestPromptSessionMirrorErrorBranches(t *testing.T) {
 
 	ctx := context.Background()
 	claudeHome := t.TempDir()
+	canonicalHome, err := canonicalClaudeHome(claudeHome)
+	require.NoError(t, err)
 	cwd := t.TempDir()
 	projectKey, err := projectKeyForDirectory(cwd)
 	require.NoError(t, err)
@@ -892,7 +952,7 @@ func TestPromptSessionMirrorErrorBranches(t *testing.T) {
 			name: "live mirror",
 			setup: func(fake *agentFakeTransport, sessionID acp.SessionId) {
 				fake.mu.Lock()
-				fake.systemMessages = []map[string]any{mirrorFrame(claudeHome, projectKey, string(sessionID))}
+				fake.systemMessages = []map[string]any{mirrorFrame(canonicalHome, projectKey, string(sessionID))}
 				fake.mu.Unlock()
 			},
 		},
@@ -907,7 +967,7 @@ func TestPromptSessionMirrorErrorBranches(t *testing.T) {
 					}
 
 					fake.incoming <- successResultMessage()
-					fake.incoming <- mirrorFrame(claudeHome, projectKey, string(sessionID))
+					fake.incoming <- mirrorFrame(canonicalHome, projectKey, string(sessionID))
 				})
 			},
 		},
@@ -922,11 +982,11 @@ func TestPromptSessionMirrorErrorBranches(t *testing.T) {
 					}
 
 					fake.incoming <- map[string]any{
-						"type":    "system",
-						"subtype": systemSubtypeSessionStateChanged,
-						"data":    map[string]any{systemState: systemStateIdle},
+						"type":      "system",
+						"subtype":   systemSubtypeSessionStateChanged,
+						systemState: systemStateIdle,
 					}
-					fake.incoming <- mirrorFrame(claudeHome, projectKey, string(sessionID))
+					fake.incoming <- mirrorFrame(canonicalHome, projectKey, string(sessionID))
 				})
 			},
 		},

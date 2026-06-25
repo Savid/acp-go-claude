@@ -27,6 +27,24 @@ var testLogger = slog.New(slog.DiscardHandler)
 
 func TestMain(m *testing.M) {
 	slog.SetDefault(testLogger)
+
+	testHome, err := os.MkdirTemp("", "acp-go-claude-test-home-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create test home: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(testHome)
+
+	if err := os.Setenv("HOME", testHome); err != nil {
+		fmt.Fprintf(os.Stderr, "set test HOME: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := os.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(testHome, ".claude")); err != nil {
+		fmt.Fprintf(os.Stderr, "set test CLAUDE_CONFIG_DIR: %v\n", err)
+		os.Exit(1)
+	}
+
 	goleak.VerifyTestMain(m, goleak.Cleanup(func(int) {
 		closeAgentFakeTransportsForTest()
 	}))

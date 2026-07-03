@@ -85,6 +85,10 @@ func TestProcessTransportCloseKillsUnixProcessGroup(t *testing.T) {
 	processShutdownWaitDelay = 20 * time.Millisecond
 	t.Cleanup(func() { processShutdownWaitDelay = oldWaitDelay })
 
+	oldGrace := processExitGracePeriod
+	processExitGracePeriod = 20 * time.Millisecond
+	t.Cleanup(func() { processExitGracePeriod = oldGrace })
+
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	script := writeShellScript(t, filepath.Join(dir, "claude"), `#!/bin/sh

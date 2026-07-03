@@ -607,6 +607,10 @@ func TestProcessTransportCloseSendsTermBeforeKill(t *testing.T) {
 		t.Skip("test uses /bin/sh")
 	}
 
+	oldGrace := processExitGracePeriod
+	processExitGracePeriod = 20 * time.Millisecond
+	t.Cleanup(func() { processExitGracePeriod = oldGrace })
+
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "term")
 	ready := filepath.Join(dir, "ready")
@@ -641,6 +645,10 @@ func TestProcessTransportCloseKillsAfterTermTimeout(t *testing.T) {
 	oldWaitDelay := processShutdownWaitDelay
 	processShutdownWaitDelay = 20 * time.Millisecond
 	t.Cleanup(func() { processShutdownWaitDelay = oldWaitDelay })
+
+	oldGrace := processExitGracePeriod
+	processExitGracePeriod = 20 * time.Millisecond
+	t.Cleanup(func() { processExitGracePeriod = oldGrace })
 
 	dir := t.TempDir()
 	script := writeShellScript(t, filepath.Join(dir, "claude"), `#!/bin/sh
@@ -678,6 +686,10 @@ func TestProcessTransportCloseReportsKillError(t *testing.T) {
 	oldWaitDelay := processShutdownWaitDelay
 	processShutdownWaitDelay = 20 * time.Millisecond
 	t.Cleanup(func() { processShutdownWaitDelay = oldWaitDelay })
+
+	oldGrace := processExitGracePeriod
+	processExitGracePeriod = 20 * time.Millisecond
+	t.Cleanup(func() { processExitGracePeriod = oldGrace })
 
 	oldKill := processKill
 	processKill = func(*exec.Cmd) (bool, error) {
@@ -722,6 +734,10 @@ func TestProcessTransportCloseWithoutWaitDelay(t *testing.T) {
 	processShutdownWaitDelay = 0
 	t.Cleanup(func() { processShutdownWaitDelay = oldWaitDelay })
 
+	oldGrace := processExitGracePeriod
+	processExitGracePeriod = 20 * time.Millisecond
+	t.Cleanup(func() { processExitGracePeriod = oldGrace })
+
 	dir := t.TempDir()
 	script := writeShellScript(t, filepath.Join(dir, "claude"), `#!/bin/sh
 trap 'exit 0' TERM
@@ -740,11 +756,58 @@ func TestProcessTransportWaitForShutdownWithoutWaitDelayReturnsWaitError(t *test
 
 	waitErr := errors.New("wait failed")
 	transport := &ProcessTransport{}
-	transport.waitOnce.Do(func() {
-		transport.waitErr = waitErr
-	})
+	waitCh := make(chan error, 1)
+	waitCh <- waitErr
 
-	require.ErrorIs(t, transport.waitForShutdown(false), waitErr)
+	require.ErrorIs(t, transport.waitForShutdown(waitCh, false), waitErr)
+}
+
+func TestProcessTransportCloseWaitsForVoluntaryExitBeforeTerm(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh")
+	}
+
+	terminated := make(chan struct{}, 1)
+	oldTerminate := processTerminate
+	processTerminate = func(cmd *exec.Cmd) (bool, error) {
+		terminated <- struct{}{}
+
+		return terminateProcess(cmd)
+	}
+	t.Cleanup(func() { processTerminate = oldTerminate })
+
+	dir := t.TempDir()
+	script := writeShellScript(t, filepath.Join(dir, "claude"), `#!/bin/sh
+cat >/dev/null
+exit 0
+`)
+	transport := NewProcessTransport(nil, Options{CLIPath: script})
+
+	require.NoError(t, transport.Start(context.Background()))
+	require.NoError(t, transport.Close())
+	require.NotNil(t, transport.cmd.ProcessState)
+
+	select {
+	case <-terminated:
+		t.Fatal("process exiting on stdin EOF should not be signalled")
+	default:
+	}
+}
+
+func TestProcessTransportCloseSkipsExitGraceWithoutStdin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh")
+	}
+
+	cmd := exec.Command("sh", "-c", "sleep 30")
+	require.NoError(t, cmd.Start())
+
+	transport := &ProcessTransport{cmd: cmd}
+
+	start := time.Now()
+	require.NoError(t, transport.Close())
+	require.Less(t, time.Since(start), processExitGracePeriod)
+	require.NotNil(t, cmd.ProcessState)
 }
 
 func TestWaitForProcessExitTimeout(t *testing.T) {
@@ -872,7 +935,7 @@ func TestProcessTransportStart(t *testing.T) {
 
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-claude")
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nwhile true; do sleep 1; done\n"), 0o755))
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o755))
 
 	transport := NewProcessTransport(nil, Options{
 		CLIPath: script,

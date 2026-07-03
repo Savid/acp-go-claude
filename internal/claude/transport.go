@@ -29,6 +29,7 @@ var (
 	processKill              = killProcess
 	maxJSONLineBytes         = defaultMaxJSONLineBytes
 	processShutdownWaitDelay = 5 * time.Second
+	processExitGracePeriod   = 2 * time.Second
 )
 
 // Transport is the JSON-line transport used by the Claude control protocol.
@@ -353,8 +354,11 @@ func (t *ProcessTransport) Close() error {
 		t.mu.Lock()
 		t.closed = true
 
+		stdinClosed := false
+
 		if t.stdin != nil {
 			closeErr = t.stdin.Close()
+			stdinClosed = true
 		}
 
 		if t.stderr != nil {
@@ -363,15 +367,7 @@ func (t *ProcessTransport) Close() error {
 		t.mu.Unlock()
 
 		if t.cmd != nil && t.cmd.Process != nil {
-			shutdown := false
-
-			if terminated, err := processTerminate(t.cmd); err != nil {
-				closeErr = errors.Join(closeErr, err)
-			} else {
-				shutdown = terminated
-			}
-
-			if err := t.waitForShutdown(shutdown); err != nil {
+			if err := t.shutdownProcess(stdinClosed); err != nil {
 				closeErr = errors.Join(closeErr, err)
 			}
 		}
@@ -387,18 +383,56 @@ func configureProcessCommand(cmd *exec.Cmd) {
 	configureProcessCommandPlatform(cmd)
 }
 
-func (t *ProcessTransport) waitForShutdown(shutdown bool) error {
+// shutdownProcess escalates process shutdown: stdin EOF → SIGTERM → SIGKILL.
+// The initial grace window lets the CLI exit on its own after stdin closes so
+// in-flight cleanup (e.g. MCP session termination) completes instead of being
+// cut short by a signal. The window is skipped when there was no stdin to
+// close, since the process then has no EOF cue to exit on.
+func (t *ProcessTransport) shutdownProcess(stdinClosed bool) error {
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- t.wait() }()
+
+	if stdinClosed && processExitGracePeriod > 0 {
+		timer := time.NewTimer(processExitGracePeriod)
+		defer timer.Stop()
+
+		select {
+		case err := <-waitErr:
+			if expectedShutdownProcessExit(err, true) {
+				return nil
+			}
+
+			return err
+		case <-timer.C:
+		}
+	}
+
+	shutdown := false
+
+	var closeErr error
+
+	if terminated, err := processTerminate(t.cmd); err != nil {
+		closeErr = errors.Join(closeErr, err)
+	} else {
+		shutdown = terminated
+	}
+
+	if err := t.waitForShutdown(waitErr, shutdown); err != nil {
+		closeErr = errors.Join(closeErr, err)
+	}
+
+	return closeErr
+}
+
+func (t *ProcessTransport) waitForShutdown(waitErr <-chan error, shutdown bool) error {
 	if processShutdownWaitDelay <= 0 {
-		err := t.wait()
+		err := <-waitErr
 		if expectedShutdownProcessExit(err, shutdown) {
 			return nil
 		}
 
 		return err
 	}
-
-	waitErr := make(chan error, 1)
-	go func() { waitErr <- t.wait() }()
 
 	timer := time.NewTimer(processShutdownWaitDelay)
 	defer timer.Stop()

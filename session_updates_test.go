@@ -45,6 +45,87 @@ func TestSessionUpdateEmitAndInfoHelpers(t *testing.T) {
 	require.NoError(t, session.emitOptionalUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}))
 }
 
+func TestAvailableCommandUpdateHelperBranches(t *testing.T) {
+	t.Parallel()
+
+	left := []acp.AvailableCommand{{
+		Name:        "help",
+		Description: "Help",
+		Input: &acp.AvailableCommandInput{
+			Unstructured: &acp.UnstructuredCommandInput{Hint: "[topic]"},
+		},
+	}}
+	require.True(t, availableCommandsEqual(left, cloneAvailableCommands(left)))
+	require.False(t, availableCommandsEqual(left, nil))
+	require.False(t, availableCommandsEqual(left, []acp.AvailableCommand{{Name: "other", Description: "Help"}}))
+	require.False(t, availableCommandsEqual(left, []acp.AvailableCommand{{Name: "help", Description: "Other"}}))
+	require.False(t, availableCommandsEqual(left, []acp.AvailableCommand{{
+		Name:        "help",
+		Description: "Help",
+		Input: &acp.AvailableCommandInput{
+			Unstructured: &acp.UnstructuredCommandInput{Hint: "[other]"},
+		},
+	}}))
+	require.Empty(t, availableCommandHint(acp.AvailableCommand{}))
+	require.Equal(t, "[topic]", availableCommandHint(left[0]))
+
+	agent := NewAgent()
+	conn := newRecordingAgentClient()
+	agent.setConnection(conn)
+	session := &agentSession{agent: agent, id: "session-1", availableCommands: []claude.SlashCommand{{Name: "help"}}}
+	require.NoError(t, session.emitAvailableCommandsUpdate(context.Background(), false))
+	require.NoError(t, session.emitAvailableCommandsUpdate(context.Background(), false))
+	require.Len(t, availableCommandUpdates(conn.Updates()), 1)
+
+	conn.sessionUpdateErr = errors.New("clear failed")
+	require.ErrorContains(t, session.emitClearAvailableCommandsUpdate(context.Background()), "clear failed")
+}
+
+func TestPoisonBranches(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cancelled := make(chan struct{})
+	agent := NewAgent()
+	conn := newRecordingAgentClient()
+	conn.sessionUpdateErr = errors.New("clear failed")
+	agent.setConnection(conn)
+	session := &agentSession{
+		agent:              agent,
+		id:                 "session-1",
+		cancel:             func() { close(cancelled) },
+		advertisedCommands: []acp.AvailableCommand{{Name: "help"}},
+	}
+
+	err := session.poison(ctx, "first cause")
+	require.ErrorContains(t, err, "first cause")
+	require.ErrorContains(t, session.poisonedError(), "first cause")
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("poison did not cancel active turn")
+	}
+
+	err = session.poison(ctx, "second cause")
+	require.ErrorContains(t, err, "first cause")
+
+	nilAgent := &agentSession{id: "session-2"}
+	require.ErrorContains(t, nilAgent.poison(ctx, "nil agent cause"), "nil agent cause")
+}
+
+func TestNativeSessionInvariantNoops(t *testing.T) {
+	t.Parallel()
+
+	session := &agentSession{id: "session-1"}
+	require.NoError(t, session.checkNativeSessionInvariant(context.Background(), nil))
+	require.NoError(t, session.checkNativeSessionInvariant(context.Background(), &claude.AssistantMessage{
+		Raw: map[string]any{"session_id": "session-1"},
+	}))
+	require.NoError(t, session.checkNativeSessionInvariant(context.Background(), &claude.AssistantMessage{
+		Raw: map[string]any{},
+	}))
+}
+
 func TestRawAndUsageUpdateHelpers(t *testing.T) {
 	t.Parallel()
 

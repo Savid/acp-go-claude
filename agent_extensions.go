@@ -77,12 +77,6 @@ func (a *Agent) handleForkSession(
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
-	if err := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); err != nil {
-		a.removeSession(ctx, session.id, session)
-
-		return acp.UnstableForkSessionResponse{}, err
-	}
-
 	session.emitCurrentUsageUpdate(ctx)
 
 	return acp.UnstableForkSessionResponse{

@@ -18,11 +18,32 @@ var finishPromptResultCall = (*agentSession).finishPromptResult
 
 // Prompt sends one turn to Claude and streams updates.
 func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
-	releaseTurn, err := s.acquireTurn(ctx)
+	if poisonErr := s.poisonedError(); poisonErr != nil {
+		return acp.PromptResponse{}, poisonErr
+	}
+
+	commandName := mapper.PromptCommandName(params.Prompt)
+	deniedName, alternative, denied := mapper.DeniedPromptCommand(params.Prompt)
+	commandTurn := denied || (commandName != "" && s.commandAdvertised(commandName))
+
+	releaseTurn, err := s.acquirePromptTurn(ctx, commandTurn)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
 	defer releaseTurn()
+
+	if poisonErr := s.poisonedError(); poisonErr != nil {
+		return acp.PromptResponse{}, poisonErr
+	}
+
+	if denied {
+		return acp.PromptResponse{}, acp.NewInvalidParams(map[string]any{
+			jsonFieldError:   "unsupported command",
+			"command":        deniedName,
+			"alternative":    alternative,
+			jsonFieldMessage: "Use " + alternative + " instead of /" + deniedName + ".",
+		})
+	}
 
 	s.stopLateMirrorProcessor(ctx)
 
@@ -80,6 +101,10 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 			return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
 		}
 
+		if err := s.checkNativeSessionInvariant(turnCtx, msg); err != nil {
+			return acp.PromptResponse{}, err
+		}
+
 		if handled, err := s.handleSessionMirror(turnCtx, msg); err != nil {
 			return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
 		} else if handled {
@@ -109,6 +134,10 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 				continue
 			}
 
+			if err := s.refreshCommandsAfterPromptCommand(turnCtx, commandName); err != nil {
+				return acp.PromptResponse{}, err
+			}
+
 			return resp, nil
 		}
 
@@ -136,6 +165,10 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 
 			s.startLateMirrorProcessor(ctx, toolUpdateOptions)
 
+			if err := s.refreshCommandsAfterPromptCommand(turnCtx, commandName); err != nil {
+				return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
+			}
+
 			return acp.PromptResponse{
 				StopReason:    stopReason,
 				Usage:         state.promptUsage,
@@ -150,6 +183,46 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 			return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
 		}
 	}
+}
+
+func (s *agentSession) acquirePromptTurn(ctx context.Context, exclusive bool) (func(), error) {
+	if exclusive {
+		return s.acquireExclusiveTurn(ctx)
+	}
+
+	return s.acquireTurn(ctx)
+}
+
+func (s *agentSession) commandAdvertised(name string) bool {
+	if name == "" {
+		return false
+	}
+
+	commands := availableCommandsFromUpdates(mapper.AvailableCommandsUpdate(s.commands()))
+	for _, command := range commands {
+		if command.Name == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (s *agentSession) refreshCommandsAfterPromptCommand(ctx context.Context, name string) error {
+	if name != commandReloadSkills || !s.commandAdvertised(name) {
+		return nil
+	}
+
+	info, err := s.client.RefreshInitializeInfo(ctx)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.availableCommands = info.Commands
+	s.mu.Unlock()
+
+	return s.emitAvailableCommandsUpdate(ctx, false)
 }
 
 func (s *agentSession) finishPromptResult(
@@ -227,6 +300,10 @@ func (s *agentSession) logUnknownStopReason(ctx context.Context, result *claude.
 }
 
 func (s *agentSession) handleSessionMirror(ctx context.Context, msg claude.Message) (bool, error) {
+	if err := s.poisonedError(); err != nil {
+		return false, err
+	}
+
 	frame, isMirror := msg.(*claude.TranscriptMirrorMessage)
 	if !isMirror {
 		return false, nil
@@ -263,6 +340,10 @@ func (s *agentSession) drainSessionMirror(ctx context.Context, options ...mapper
 		}
 
 		if err := s.emitRawClaudeMessage(ctx, msg); err != nil {
+			return err
+		}
+
+		if err := s.checkNativeSessionInvariant(ctx, msg); err != nil {
 			return err
 		}
 

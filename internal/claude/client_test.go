@@ -189,6 +189,35 @@ func TestClientCapturesInitializeInfo(t *testing.T) {
 	require.Equal(t, "debug", client.InitializeInfo().Commands[0].Name)
 }
 
+func TestClientRefreshInitializeInfo(t *testing.T) {
+	t.Parallel()
+
+	transport := newFakeTransport()
+	client := NewClient(nil, Options{}, transport)
+
+	go autoRespondInitializeWithResponse(transport, map[string]any{
+		"commands": []any{map[string]any{"name": "old"}},
+	})
+	startClientForTest(t, client)
+
+	go respondToControlRequestAfter(transport, "initialize", 1, map[string]any{
+		"commands": []any{map[string]any{"name": "new", "description": "New command"}},
+	})
+	info, err := client.RefreshInitializeInfo(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []SlashCommand{{Name: "new", Description: "New command"}}, info.Commands)
+	require.Equal(t, info.Commands, client.InitializeInfo().Commands)
+
+	stopped := client.activeController()
+	stopped.stop()
+	_, err = client.RefreshInitializeInfo(context.Background())
+	require.ErrorContains(t, err, "refresh claude control initialize")
+
+	unstarted := NewClient(nil, Options{}, newFakeTransport())
+	_, err = unstarted.RefreshInitializeInfo(context.Background())
+	require.ErrorIs(t, err, ErrClientNotStarted)
+}
+
 func TestClientStartRegistersHooks(t *testing.T) {
 	t.Parallel()
 

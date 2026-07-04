@@ -1,10 +1,12 @@
 package claudeacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +18,7 @@ type localAgentConnection struct {
 	agent       *Agent
 	conn        *acp.Connection
 	initialized atomic.Bool
+	hooks       *postResponseHooks
 }
 
 type localAgentHandler func(context.Context, *Agent, json.RawMessage) (any, *acp.RequestError)
@@ -45,9 +48,10 @@ var (
 )
 
 func newLocalAgentConnection(agent *Agent, output io.Writer, input io.Reader) *localAgentConnection {
-	conn := &localAgentConnection{agent: agent}
+	hooks := &postResponseHooks{log: agent.log}
+	conn := &localAgentConnection{agent: agent, hooks: hooks}
 	inputGate := newConnectionInputGate(input)
-	conn.conn = acp.NewConnection(conn.handle, output, inputGate)
+	conn.conn = acp.NewConnection(conn.handle, hooks.wrap(output), inputGate)
 	conn.conn.SetLogger(agent.log)
 	inputGate.open()
 
@@ -96,7 +100,12 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 	if strings.HasPrefix(method, "_") {
 		result, err := c.agent.HandleExtensionMethod(ctx, method, params)
 
-		return result, requestError(err)
+		reqErr := requestError(err)
+		if reqErr == nil {
+			c.enqueueLifecycleCommandHook(ctx, method, params, result)
+		}
+
+		return result, reqErr
 	}
 
 	handler, ok := localAgentHandlers[method]
@@ -109,7 +118,157 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 		c.initialized.Store(true)
 	}
 
+	if reqErr == nil {
+		c.enqueueLifecycleCommandHook(ctx, method, params, result)
+	}
+
 	return result, reqErr
+}
+
+func (c *localAgentConnection) enqueueLifecycleCommandHook(ctx context.Context, method string, params json.RawMessage, result any) {
+	sessionID, ok := lifecycleCommandSessionID(method, params, result)
+	if !ok || c.hooks == nil {
+		return
+	}
+
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		c.agent.log.ErrorContext(ctx, "marshal lifecycle response for post-response hook failed",
+			slog.String(jsonFieldMethod, method),
+			slog.String(jsonFieldError, err.Error()),
+		)
+
+		return
+	}
+
+	c.hooks.enqueue(resultJSON, func() {
+		hookCtx := context.WithoutCancel(ctx)
+
+		session, err := c.agent.session(sessionID)
+		if err != nil {
+			c.agent.log.ErrorContext(hookCtx, "post-response command update session lookup failed",
+				slog.String(jsonFieldMethod, method),
+				slog.String(acpFieldSessionID, string(sessionID)),
+				slog.String(jsonFieldError, err.Error()),
+			)
+
+			return
+		}
+
+		if err := session.emitAvailableCommandsUpdate(hookCtx, true); err != nil {
+			c.agent.log.ErrorContext(hookCtx, "post-response command update failed",
+				slog.String(jsonFieldMethod, method),
+				slog.String(acpFieldSessionID, string(sessionID)),
+				slog.String(jsonFieldError, err.Error()),
+			)
+		}
+	})
+}
+
+func lifecycleCommandSessionID(method string, params json.RawMessage, result any) (acp.SessionId, bool) {
+	switch method {
+	case acp.AgentMethodSessionNew:
+		resp, ok := result.(acp.NewSessionResponse)
+
+		return resp.SessionId, ok && resp.SessionId != ""
+	case acp.AgentMethodSessionLoad:
+		var req acp.LoadSessionRequest
+		if err := json.Unmarshal(params, &req); err != nil {
+			return "", false
+		}
+
+		return req.SessionId, req.SessionId != ""
+	case acp.AgentMethodSessionResume:
+		var req acp.ResumeSessionRequest
+		if err := json.Unmarshal(params, &req); err != nil {
+			return "", false
+		}
+
+		return req.SessionId, req.SessionId != ""
+	case ForkSessionMethod:
+		resp, ok := result.(acp.UnstableForkSessionResponse)
+
+		return resp.SessionId, ok && resp.SessionId != ""
+	default:
+		return "", false
+	}
+}
+
+type postResponseHooks struct {
+	log *slog.Logger
+	mu  sync.Mutex
+	all []postResponseHook
+}
+
+type postResponseHook struct {
+	result json.RawMessage
+	run    func()
+}
+
+func (h *postResponseHooks) wrap(writer io.Writer) io.Writer {
+	return &postResponseWriter{writer: writer, hooks: h}
+}
+
+func (h *postResponseHooks) enqueue(result json.RawMessage, run func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.all = append(h.all, postResponseHook{
+		result: append(json.RawMessage(nil), result...),
+		run:    run,
+	})
+}
+
+func (h *postResponseHooks) runAfterResponseWrite(data []byte) {
+	var msg struct {
+		ID     *json.RawMessage `json:"id"`
+		Result json.RawMessage  `json:"result"`
+		Error  *json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(data), &msg); err != nil {
+		if h.log != nil {
+			h.log.Debug("parse response for post-response hook failed", slog.String(jsonFieldError, err.Error()))
+		}
+
+		return
+	}
+
+	if msg.ID == nil || len(msg.Result) == 0 || msg.Error != nil {
+		return
+	}
+
+	h.mu.Lock()
+	for index, hook := range h.all {
+		if !bytes.Equal(bytes.TrimSpace(hook.result), bytes.TrimSpace(msg.Result)) {
+			continue
+		}
+
+		h.all = slicesDelete(h.all, index)
+		h.mu.Unlock()
+
+		go hook.run()
+
+		return
+	}
+	h.mu.Unlock()
+}
+
+func slicesDelete[S ~[]E, E any](slice S, index int) S {
+	return append(slice[:index], slice[index+1:]...)
+}
+
+type postResponseWriter struct {
+	writer io.Writer
+	hooks  *postResponseHooks
+}
+
+func (w *postResponseWriter) Write(data []byte) (int, error) {
+	n, err := w.writer.Write(data)
+	if err == nil && n == len(data) {
+		w.hooks.runAfterResponseWrite(data)
+	}
+
+	return n, err
 }
 
 func localResponse[Req any, ReqPtr localAgentParams[Req], Resp any](

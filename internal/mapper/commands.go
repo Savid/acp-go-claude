@@ -2,19 +2,36 @@ package mapper
 
 import (
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
 )
 
-var unsupportedSlashCommands = map[string]struct{}{
+const (
+	commandClear               = "clear"
+	commandConfig              = "config"
+	alternativeSessionNew      = "session/new"
+	alternativeSetConfigOption = "session/set_config_option"
+)
+
+// goal left suppression on 2026-07-05: TestClaudeGoalCommandLiveProbe proved
+// the full /goal loop emits a single terminal result on Claude Code 2.1.200.
+var suppressedCommands = map[string]struct{}{
 	"cost":             {},
+	"heapdump":         {},
 	"keybindings-help": {},
 	"login":            {},
 	"logout":           {},
 	"output-style:new": {},
 	"release-notes":    {},
 	keyTodos:           {},
+}
+
+var denyInvokeCommands = map[string]string{
+	commandClear:  alternativeSessionNew,
+	commandConfig: alternativeSetConfigOption,
 }
 
 // AvailableCommandsUpdate converts Claude slash commands into an ACP update.
@@ -26,7 +43,7 @@ func AvailableCommandsUpdate(commands []claude.SlashCommand) []acp.SessionUpdate
 	available := make([]acp.AvailableCommand, 0, len(commands))
 	for _, command := range commands {
 		name := slashCommandName(command.Name)
-		if name == "" || unsupportedSlashCommand(name) {
+		if name == "" || suppressedSlashCommand(name) || denyInvokeCommand(name) {
 			continue
 		}
 
@@ -57,25 +74,90 @@ func AvailableCommandsUpdate(commands []claude.SlashCommand) []acp.SessionUpdate
 }
 
 func slashCommandName(name string) string {
-	name = strings.TrimSpace(name)
-
 	if withoutSuffix, ok := strings.CutSuffix(name, " (MCP)"); ok {
 		name = "mcp:" + withoutSuffix
 	}
 
-	if unsafeSlashCommandName(name) {
+	if !validSlashCommandName(name) {
 		return ""
 	}
 
 	return name
 }
 
-func unsafeSlashCommandName(name string) bool {
-	return strings.ContainsAny(name, "\t\r\n")
+func validSlashCommandName(name string) bool {
+	if name == "" || strings.Contains(name, "/") || !utf8.ValidString(name) {
+		return false
+	}
+
+	for _, r := range name {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return false
+		}
+	}
+
+	return true
 }
 
-func unsupportedSlashCommand(name string) bool {
-	_, ok := unsupportedSlashCommands[name]
+// DeniedPromptCommand returns the supported ACP alternative for a prompt that
+// invokes a wrapper-invariant-breaking native command.
+func DeniedPromptCommand(prompt []acp.ContentBlock) (string, string, bool) {
+	name := PromptCommandName(prompt)
+	if name == "" {
+		return "", "", false
+	}
+
+	alternative, ok := denyInvokeCommands[name]
+	if !ok {
+		return "", "", false
+	}
+
+	return name, alternative, ok
+}
+
+// PromptCommandName returns the sanitized leading slash command in the first
+// text block, or empty when the prompt is ordinary text.
+func PromptCommandName(prompt []acp.ContentBlock) string {
+	for _, block := range prompt {
+		if block.Text == nil {
+			continue
+		}
+
+		return leadingSlashCommandName(block.Text.Text)
+	}
+
+	return ""
+}
+
+func leadingSlashCommandName(text string) string {
+	if text == "" || text[0] != '/' {
+		return ""
+	}
+
+	token := text[1:]
+	for index, r := range token {
+		if unicode.IsSpace(r) {
+			token = token[:index]
+
+			break
+		}
+	}
+
+	if !validSlashCommandName(token) {
+		return ""
+	}
+
+	return token
+}
+
+func suppressedSlashCommand(name string) bool {
+	_, ok := suppressedCommands[name]
+
+	return ok
+}
+
+func denyInvokeCommand(name string) bool {
+	_, ok := denyInvokeCommands[name]
 
 	return ok
 }

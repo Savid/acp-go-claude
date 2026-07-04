@@ -30,6 +30,33 @@ func TestSessionLifecycleBranches(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, release)
 
+	session.turn = make(chan struct{}, 2)
+	release, err = session.acquireExclusiveTurn(ctx)
+	require.NoError(t, err)
+	require.Len(t, session.turn, 2)
+	release()
+	require.Empty(t, session.turn)
+
+	partialCtx, partialCancel := context.WithCancel(ctx)
+	session.turn = make(chan struct{}, 2)
+	session.turnAcquiredHook = func(acquired int) {
+		if acquired == 1 {
+			partialCancel()
+			session.turn <- struct{}{}
+		}
+	}
+	release, err = session.acquireExclusiveTurn(partialCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, release)
+	<-session.turn
+	require.Empty(t, session.turn)
+	session.turnAcquiredHook = nil
+
+	session.turn = make(chan struct{})
+	release, err = session.acquireExclusiveTurn(cancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, release)
+
 	session.turn = nil
 	require.NotNil(t, session.turnQueue())
 

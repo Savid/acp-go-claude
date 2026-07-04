@@ -60,12 +60,6 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, err
 	}
 
-	if err := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); err != nil {
-		a.removeSession(ctx, session.id, session)
-
-		return acp.NewSessionResponse{}, err
-	}
-
 	resp = acp.NewSessionResponse{
 		SessionId:     session.id,
 		Meta:          sessionResponseMeta(session),
@@ -99,10 +93,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
 	}
 	if session := a.activeSessionForStart(params.SessionId, start); session != nil {
-		if emitErr := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); emitErr != nil {
-			return acp.ResumeSessionResponse{}, emitErr
-		}
-
 		session.emitCurrentUsageUpdate(ctx)
 
 		resp = acp.ResumeSessionResponse{
@@ -133,12 +123,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}
 
 	if err := a.storeStartedSession(ctx, session); err != nil {
-		return acp.ResumeSessionResponse{}, err
-	}
-
-	if err := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); err != nil {
-		a.removeSession(ctx, params.SessionId, session)
-
 		return acp.ResumeSessionResponse{}, err
 	}
 
@@ -240,14 +224,6 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		}
 
 		return acp.LoadSessionResponse{}, replayErr
-	}
-
-	if err := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); err != nil {
-		if startedSession {
-			a.removeSession(ctx, params.SessionId, session)
-		}
-
-		return acp.LoadSessionResponse{}, err
 	}
 
 	session.emitCurrentUsageUpdate(ctx)

@@ -114,6 +114,7 @@ const (
 	localCommandContext    = "/context"
 	localCommandExtraUsage = "/extra-usage"
 	localCommandHeapdump   = "/heapdump"
+	commandReloadSkills    = "reload-skills"
 
 	defaultSessionCloseTurnWait = 5 * time.Second
 	maxHandledHooks             = 1024
@@ -145,7 +146,9 @@ type agentSession struct {
 	fastMode              bool
 	fastModeKnown         bool
 	availableCommands     []claude.SlashCommand
+	advertisedCommands    []acp.AvailableCommand
 	contextWindowSize     int
+	poisonCause           string
 
 	client *claude.Client
 
@@ -166,6 +169,7 @@ type agentSession struct {
 	handledHooks     map[string]struct{}
 	handledHookOrder []string
 	closeTurnWait    time.Duration
+	turnAcquiredHook func(int)
 }
 
 type promptLoopState struct {

@@ -427,6 +427,21 @@ func TestFinishPromptResultAndDrainEdges(t *testing.T) {
 		map[string]any{"type": "text", "text": "ignored"},
 	}}}
 	require.NoError(t, noWorkflow.drainSessionMirror(ctx))
+
+	poisonMirror, _, poisonCleanup := newPromptFlowSession(t)
+	defer poisonCleanup()
+	poisonMirror.mu.Lock()
+	poisonMirror.poisonCause = "mirror poisoned"
+	poisonMirror.mu.Unlock()
+	handled, err := poisonMirror.handleSessionMirror(ctx, &claude.AssistantMessage{})
+	require.False(t, handled)
+	require.ErrorContains(t, err, "mirror poisoned")
+
+	resetDrain, resetTransport, resetCleanup := newPromptFlowSession(t)
+	defer resetCleanup()
+	resetTransport.messages <- map[string]any{"type": "conversation_reset"}
+	err = resetDrain.drainSessionMirror(ctx)
+	require.ErrorContains(t, err, "conversation_reset")
 }
 
 func TestFinishPromptResultEmitErrorBranches(t *testing.T) {

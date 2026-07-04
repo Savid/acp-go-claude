@@ -13,11 +13,65 @@ func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
 
 	select {
 	case turn <- struct{}{}:
+		s.afterTurnSlotAcquired(1)
+
 		return func() { <-turn }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
 		return nil, backpressureError("session_prompt")
+	}
+}
+
+func (s *agentSession) acquireExclusiveTurn(ctx context.Context) (func(), error) {
+	turn := s.turnQueue()
+
+	capacity := cap(turn)
+	if capacity <= 0 {
+		capacity = 1
+	}
+
+	acquired := 0
+	for acquired < capacity {
+		select {
+		case turn <- struct{}{}:
+			acquired++
+			s.afterTurnSlotAcquired(acquired)
+		case <-ctx.Done():
+			for ; acquired > 0; acquired-- {
+				<-turn
+			}
+
+			return nil, ctx.Err()
+		default:
+			select {
+			case <-ctx.Done():
+				for ; acquired > 0; acquired-- {
+					<-turn
+				}
+
+				return nil, ctx.Err()
+			default:
+			}
+
+			for ; acquired > 0; acquired-- {
+				<-turn
+			}
+
+			return nil, backpressureError("session_prompt")
+		}
+	}
+
+	return func() {
+		for ; acquired > 0; acquired-- {
+			<-turn
+		}
+	}, nil
+}
+
+func (s *agentSession) afterTurnSlotAcquired(acquired int) {
+	if s.turnAcquiredHook != nil {
+		s.turnAcquiredHook(acquired)
 	}
 }
 

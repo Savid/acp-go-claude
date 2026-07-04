@@ -182,6 +182,30 @@ func (c *Client) InitializeInfo() InitializeInfo {
 	}
 }
 
+// RefreshInitializeInfo re-runs Claude's control initialize request and updates
+// the cached discovery metadata.
+func (c *Client) RefreshInitializeInfo(ctx context.Context) (InitializeInfo, error) {
+	controller := c.activeController()
+	if controller == nil {
+		return InitializeInfo{}, ErrClientNotStarted
+	}
+
+	timeout := c.options.InitializeTimeout
+	if timeout <= 0 {
+		timeout = defaultInitializeTimeout
+	}
+
+	resp, err := controller.SendRequest(ctx, "initialize", map[string]any{"hooks": c.options.Hooks.toPayload()}, timeout)
+	if err != nil {
+		return InitializeInfo{}, fmt.Errorf("refresh claude control initialize: %w", err)
+	}
+
+	info := parseInitializeInfo(resp.Response[keyResponse])
+	c.setInitializeInfo(info)
+
+	return c.InitializeInfo(), nil
+}
+
 func (c *Client) setInitializeInfo(info InitializeInfo) {
 	c.infoMu.Lock()
 	defer c.infoMu.Unlock()

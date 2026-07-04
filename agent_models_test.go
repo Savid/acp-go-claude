@@ -135,6 +135,19 @@ func TestSetSessionConfigValueEdgeBranches(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	t.Run("poison after acquire turn", func(t *testing.T) {
+		agent, _, cleanup := newConfigEdgeSession(t, available)
+		defer cleanup()
+		session := agent.sessions["session-1"]
+		session.turnAcquiredHook = func(int) {
+			session.mu.Lock()
+			session.poisonCause = "poisoned after config acquire"
+			session.mu.Unlock()
+		}
+		_, err := agent.SetSessionConfigOption(ctx, SetModelRequest("session-1", "opus"))
+		require.ErrorContains(t, err, "poisoned after config acquire")
+	})
+
 	t.Run("emit config update failure", func(t *testing.T) {
 		agent, _, cleanup := newConfigEdgeSession(t, available)
 		defer cleanup()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -65,6 +66,170 @@ func (s *agentSession) emitOptionalUpdates(ctx context.Context, updates []acp.Se
 	}
 
 	return err
+}
+
+func (s *agentSession) emitAvailableCommandsUpdate(ctx context.Context, force bool) error {
+	updates := mapper.AvailableCommandsUpdate(s.commands())
+	current := availableCommandsFromUpdates(updates)
+
+	s.mu.Lock()
+	previous := cloneAvailableCommands(s.advertisedCommands)
+	s.mu.Unlock()
+
+	var emit []acp.SessionUpdate
+
+	switch {
+	case len(current) > 0:
+		if !force && availableCommandsEqual(previous, current) {
+			return nil
+		}
+
+		emit = updates
+	case len(previous) > 0:
+		emit = emptyAvailableCommandsUpdate()
+	default:
+		return nil
+	}
+
+	if err := s.emitOptionalUpdates(ctx, emit); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.advertisedCommands = cloneAvailableCommands(current)
+	s.mu.Unlock()
+
+	return nil
+}
+
+func (s *agentSession) emitClearAvailableCommandsUpdate(ctx context.Context) error {
+	if err := s.emitOptionalUpdates(ctx, emptyAvailableCommandsUpdate()); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.advertisedCommands = nil
+	s.mu.Unlock()
+
+	return nil
+}
+
+func emptyAvailableCommandsUpdate() []acp.SessionUpdate {
+	return []acp.SessionUpdate{{
+		AvailableCommandsUpdate: &acp.SessionAvailableCommandsUpdate{AvailableCommands: []acp.AvailableCommand{}},
+	}}
+}
+
+func availableCommandsFromUpdates(updates []acp.SessionUpdate) []acp.AvailableCommand {
+	for _, update := range updates {
+		if update.AvailableCommandsUpdate != nil {
+			return cloneAvailableCommands(update.AvailableCommandsUpdate.AvailableCommands)
+		}
+	}
+
+	return nil
+}
+
+func cloneAvailableCommands(commands []acp.AvailableCommand) []acp.AvailableCommand {
+	if len(commands) == 0 {
+		return nil
+	}
+
+	cloned := make([]acp.AvailableCommand, len(commands))
+	for index, command := range commands {
+		cloned[index] = command
+		if command.Input != nil {
+			input := *command.Input
+			if input.Unstructured != nil {
+				unstructured := *input.Unstructured
+				input.Unstructured = &unstructured
+			}
+
+			cloned[index].Input = &input
+		}
+	}
+
+	return cloned
+}
+
+func availableCommandsEqual(left []acp.AvailableCommand, right []acp.AvailableCommand) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	for index := range left {
+		if left[index].Name != right[index].Name || left[index].Description != right[index].Description {
+			return false
+		}
+
+		if availableCommandHint(left[index]) != availableCommandHint(right[index]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func availableCommandHint(command acp.AvailableCommand) string {
+	if command.Input == nil || command.Input.Unstructured == nil {
+		return ""
+	}
+
+	return command.Input.Unstructured.Hint
+}
+
+func (s *agentSession) poisonedError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.poisonCause == "" {
+		return nil
+	}
+
+	return poisonedSessionError(s.poisonCause)
+}
+
+func (s *agentSession) poison(ctx context.Context, cause string) error {
+	s.mu.Lock()
+	if s.poisonCause != "" {
+		cause = s.poisonCause
+		s.mu.Unlock()
+
+		return poisonedSessionError(cause)
+	}
+
+	s.poisonCause = cause
+	cancel := s.cancel
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+
+	if s.agent == nil {
+		return poisonedSessionError(cause)
+	}
+
+	s.agent.log.ErrorContext(ctx, "poison Claude session after native invariant violation",
+		slog.String(acpFieldSessionID, string(s.id)),
+		slog.String("cause", cause),
+	)
+
+	if err := s.emitClearAvailableCommandsUpdate(ctx); err != nil {
+		s.agent.log.ErrorContext(ctx, "clear available Claude commands after poison failed",
+			slog.String(acpFieldSessionID, string(s.id)),
+			slog.String(jsonFieldError, err.Error()),
+		)
+	}
+
+	return poisonedSessionError(cause)
+}
+
+func poisonedSessionError(cause string) error {
+	return acp.NewInternalError(map[string]any{
+		jsonFieldError:   "session poisoned",
+		jsonFieldMessage: cause,
+	})
 }
 
 func (s *agentSession) emitLiveSessionInfoUpdate(ctx context.Context, prompt []acp.ContentBlock) error {

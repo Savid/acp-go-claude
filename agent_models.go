@@ -41,6 +41,10 @@ func (a *Agent) setSessionConfigValue(
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
 
+	if poisonErr := session.poisonedError(); poisonErr != nil {
+		return acp.SetSessionConfigOptionResponse{}, poisonErr
+	}
+
 	switch params.ConfigId {
 	case configModel, configMode, configOutputStyle, configEffort:
 	default:
@@ -52,6 +56,10 @@ func (a *Agent) setSessionConfigValue(
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
 	defer releaseTurn()
+
+	if poisonErr := session.poisonedError(); poisonErr != nil {
+		return acp.SetSessionConfigOptionResponse{}, poisonErr
+	}
 
 	switch params.ConfigId {
 	case configModel:

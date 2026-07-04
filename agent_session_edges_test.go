@@ -28,9 +28,9 @@ func TestNewSessionEdgeBranches(t *testing.T) {
 
 	agent, conn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
 	conn.sessionUpdateErr = errors.New("optional update failed")
-	_, err = agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
-	require.ErrorContains(t, err, "optional update failed")
-	require.Empty(t, agent.sessions)
+	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	require.Contains(t, agent.sessions, resp.SessionId)
 }
 
 func TestResumeSessionEdgeBranches(t *testing.T) {
@@ -75,7 +75,7 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, err)
 	activeConn.sessionUpdateErr = errors.New("active update failed")
 	_, err = active.ResumeSession(ctx, ResumeSessionRequest(newResp.SessionId, cwd))
-	require.ErrorContains(t, err, "active update failed")
+	require.NoError(t, err)
 	activeConn.sessionUpdateErr = nil
 	require.NoError(t, active.Close())
 
@@ -87,9 +87,9 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 
 	emitFail, emitConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
 	emitConn.sessionUpdateErr = errors.New("resume update failed")
-	_, err = emitFail.ResumeSession(ctx, ResumeSessionRequest("22222222-2222-4222-8222-222222222222", cwd))
-	require.ErrorContains(t, err, "resume update failed")
-	require.Empty(t, emitFail.sessions)
+	resp, err = emitFail.ResumeSession(ctx, ResumeSessionRequest("22222222-2222-4222-8222-222222222222", cwd))
+	require.NoError(t, err)
+	require.NotEmpty(t, resp.ConfigOptions)
 
 	backpressure, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	existing, cleanup := newStartedAgentSessionForTest(t, backpressure, "existing")
@@ -217,9 +217,9 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	}))
 	emitFail, emitConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(emptyUpdateStore))
 	emitConn.sessionUpdateErr = errors.New("load update failed")
-	_, err = emitFail.LoadSession(ctx, LoadSessionRequest("44444444-4444-4444-8444-444444444444", cwd))
-	require.ErrorContains(t, err, "load update failed")
-	require.Empty(t, emitFail.sessions)
+	loadResp, err := emitFail.LoadSession(ctx, LoadSessionRequest("44444444-4444-4444-8444-444444444444", cwd))
+	require.NoError(t, err)
+	require.NotEmpty(t, loadResp.ConfigOptions)
 }
 
 func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {

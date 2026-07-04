@@ -74,6 +74,8 @@ tidy:
 	go mod tidy -diff
 
 ## vuln: run govulncheck from the go.mod tool directive
+# golang.org/x/vuln v1.4.0 panics in x/tools SSA on Go 1.26 generics;
+# keep the tool directive pinned at v1.5.0 or newer.
 vuln:
 	go tool govulncheck ./...
 

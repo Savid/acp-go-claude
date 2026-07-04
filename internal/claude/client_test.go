@@ -147,7 +147,12 @@ func TestClientCapturesInitializeInfo(t *testing.T) {
 
 	go autoRespondInitializeWithResponse(transport, map[string]any{
 		"commands": []any{
-			map[string]any{"name": "debug", "description": "Debug session", "argumentHint": "[issue]"},
+			map[string]any{
+				"name":         "debug",
+				"description":  "Debug session",
+				"argumentHint": "[issue]",
+				"aliases":      []any{"dbg", 1},
+			},
 			map[string]any{"description": "missing name"},
 			"bad",
 		},
@@ -171,7 +176,7 @@ func TestClientCapturesInitializeInfo(t *testing.T) {
 
 	info := client.InitializeInfo()
 	require.Equal(t, []SlashCommand{
-		{Name: "debug", Description: "Debug session", ArgumentHint: "[issue]"},
+		{Name: "debug", Description: "Debug session", ArgumentHint: "[issue]", Aliases: []string{"dbg"}},
 	}, info.Commands)
 	require.Equal(t, []AvailableModelInfo{
 		{
@@ -186,7 +191,9 @@ func TestClientCapturesInitializeInfo(t *testing.T) {
 	require.Equal(t, []string{"default", "Explanatory"}, info.AvailableOutputStyles)
 
 	info.Commands[0].Name = "mutated"
+	info.Commands[0].Aliases[0] = "mutated"
 	require.Equal(t, "debug", client.InitializeInfo().Commands[0].Name)
+	require.Equal(t, []string{"dbg"}, client.InitializeInfo().Commands[0].Aliases)
 }
 
 func TestClientRefreshInitializeInfo(t *testing.T) {

@@ -220,7 +220,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 						"key":    []string{acpFieldSessionID, "subpath"},
 					},
 					"structuredOutput": map[string]any{
-						"config":        "_meta.claude.options.outputSchema",
+						acpFieldConfig:  "_meta.claude.options.outputSchema",
 						jsonFieldResult: "_meta.claude.structuredOutput",
 						"schema":        "json_schema",
 					},

@@ -23,7 +23,11 @@ func TestSessionPromptDenyInvokeCommands(t *testing.T) {
 	}{
 		{name: "clear", prompt: "/clear now", wantDenied: true, wantAlt: "session/new"},
 		{name: "config", prompt: "/config model=sonnet", wantDenied: true, wantAlt: "session/set_config_option"},
+		{name: "settings alias", prompt: "/settings model=sonnet", wantDenied: true, wantAlt: "session/set_config_option"},
+		{name: "reset alias", prompt: "/reset now", wantDenied: true, wantAlt: "session/new"},
+		{name: "new alias", prompt: "/new", wantDenied: true, wantAlt: "session/new"},
 		{name: "leading whitespace bypass", prompt: " /clear now", wantMessage: " /clear now"},
+		{name: "leading whitespace alias bypass", prompt: " /reset", wantMessage: " /reset"},
 		{name: "exact name only", prompt: "/clearly now", wantMessage: "/clearly now"},
 	}
 
@@ -34,6 +38,10 @@ func TestSessionPromptDenyInvokeCommands(t *testing.T) {
 			ctx := context.Background()
 			session, transport, cleanup := newPromptFlowSession(t)
 			defer cleanup()
+			session.availableCommands = []claude.SlashCommand{
+				{Name: "clear", Aliases: []string{"reset", "new"}},
+				{Name: "config", Aliases: []string{"settings"}},
+			}
 
 			before := len(transport.Sent())
 			resp, err := session.Prompt(ctx, TextPromptRequest(session.id, tc.prompt))
@@ -147,6 +155,27 @@ func TestAvailableCommandsEmptyClear(t *testing.T) {
 	require.Empty(t, updates[1].AvailableCommands)
 }
 
+func TestNativeAliasesAreNotAdvertised(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	session, _, cleanup := newPromptFlowSession(t)
+	defer cleanup()
+	session.availableCommands = []claude.SlashCommand{
+		{Name: "help", Description: "Help", Aliases: []string{"h"}},
+		{Name: "clear", Description: "Clear", Aliases: []string{"reset", "new"}},
+		{Name: "config", Description: "Config", Aliases: []string{"settings"}},
+	}
+
+	require.NoError(t, session.emitAvailableCommandsUpdate(ctx, true))
+
+	conn, ok := session.agent.connection().(*recordingAgentClient)
+	require.True(t, ok)
+	updates := availableCommandUpdates(conn.Updates())
+	require.Len(t, updates, 1)
+	require.Equal(t, []string{"help"}, availableCommandNames(updates[0].AvailableCommands))
+}
+
 func TestReloadSkillsRediscoveryEmitsDynamicCommandUpdate(t *testing.T) {
 	t.Parallel()
 
@@ -172,6 +201,38 @@ func TestReloadSkillsRediscoveryEmitsDynamicCommandUpdate(t *testing.T) {
 	require.Len(t, updates, 1)
 	require.Equal(t, []string{commandReloadSkills, "deploy"}, availableCommandNames(updates[0].AvailableCommands))
 	require.Equal(t, "[env]", updates[0].AvailableCommands[1].Input.Unstructured.Hint)
+}
+
+func TestReloadPluginsRediscoveryEmitsDynamicCommandUpdate(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	session, transport, cleanup := newPromptFlowSession(t)
+	defer cleanup()
+	session.availableCommands = []claude.SlashCommand{
+		{Name: commandReloadPlugins, Description: "Reload plugins"},
+		{Name: "old", Description: "Old command"},
+	}
+	require.NoError(t, session.emitAvailableCommandsUpdate(ctx, true))
+
+	transport.initialize = map[string]any{
+		"commands": []any{
+			map[string]any{"name": commandReloadPlugins, "description": "Reload plugins"},
+			map[string]any{"name": "deploy", "description": "Deploy", "argumentHint": "[env]"},
+		},
+	}
+
+	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "/"+commandReloadPlugins))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+
+	conn, ok := session.agent.connection().(*recordingAgentClient)
+	require.True(t, ok)
+	updates := availableCommandUpdates(conn.Updates())
+	require.Len(t, updates, 2)
+	require.Equal(t, []string{commandReloadPlugins, "old"}, availableCommandNames(updates[0].AvailableCommands))
+	require.Equal(t, []string{commandReloadPlugins, "deploy"}, availableCommandNames(updates[1].AvailableCommands))
+	require.Equal(t, "[env]", updates[1].AvailableCommands[1].Input.Unstructured.Hint)
 }
 
 func TestReloadSkillsRefreshErrors(t *testing.T) {

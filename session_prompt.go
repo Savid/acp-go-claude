@@ -22,8 +22,9 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		return acp.PromptResponse{}, poisonErr
 	}
 
+	availableCommands := s.commands()
 	commandName := mapper.PromptCommandName(params.Prompt)
-	deniedName, alternative, denied := mapper.DeniedPromptCommand(params.Prompt)
+	deniedName, alternative, denied := mapper.DeniedPromptCommand(params.Prompt, availableCommands)
 	commandTurn := denied || (commandName != "" && s.commandAdvertised(commandName))
 
 	releaseTurn, err := s.acquirePromptTurn(ctx, commandTurn)
@@ -213,7 +214,7 @@ func (s *agentSession) commandAdvertised(name string) bool {
 }
 
 func (s *agentSession) refreshCommandsAfterPromptCommand(ctx context.Context, name string) error {
-	if name != commandReloadSkills || !s.commandAdvertised(name) {
+	if !commandRefreshesAvailableCommands(name) || !s.commandAdvertised(name) {
 		return nil
 	}
 
@@ -227,6 +228,10 @@ func (s *agentSession) refreshCommandsAfterPromptCommand(ctx context.Context, na
 	s.mu.Unlock()
 
 	return s.emitAvailableCommandsUpdate(ctx, false)
+}
+
+func commandRefreshesAvailableCommands(name string) bool {
+	return name == commandReloadSkills || name == commandReloadPlugins
 }
 
 func (s *agentSession) finishPromptResult(

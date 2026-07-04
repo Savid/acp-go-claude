@@ -94,5 +94,14 @@ func (s *agentSession) commands() []claude.SlashCommand {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return append([]claude.SlashCommand(nil), s.availableCommands...)
+	return cloneSlashCommands(s.availableCommands)
+}
+
+func cloneSlashCommands(commands []claude.SlashCommand) []claude.SlashCommand {
+	cloned := append([]claude.SlashCommand(nil), commands...)
+	for i, command := range commands {
+		cloned[i].Aliases = append([]string(nil), command.Aliases...)
+	}
+
+	return cloned
 }

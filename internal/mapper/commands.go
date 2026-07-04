@@ -101,18 +101,40 @@ func validSlashCommandName(name string) bool {
 
 // DeniedPromptCommand returns the supported ACP alternative for a prompt that
 // invokes a wrapper-invariant-breaking native command.
-func DeniedPromptCommand(prompt []acp.ContentBlock) (string, string, bool) {
+func DeniedPromptCommand(prompt []acp.ContentBlock, commands ...[]claude.SlashCommand) (string, string, bool) {
 	name := PromptCommandName(prompt)
 	if name == "" {
 		return "", "", false
 	}
 
-	alternative, ok := denyInvokeCommands[name]
+	alternative, ok := denyInvokeCommandAlternatives(commands...)[name]
 	if !ok {
 		return "", "", false
 	}
 
 	return name, alternative, ok
+}
+
+func denyInvokeCommandAlternatives(commandSets ...[]claude.SlashCommand) map[string]string {
+	alternatives := make(map[string]string, len(denyInvokeCommands))
+	for name, alternative := range denyInvokeCommands {
+		alternatives[name] = alternative
+	}
+
+	for _, commands := range commandSets {
+		for _, command := range commands {
+			if alternative, ok := denyInvokeCommands[slashCommandName(command.Name)]; ok {
+				for _, alias := range command.Aliases {
+					name := slashCommandName(alias)
+					if name != "" {
+						alternatives[name] = alternative
+					}
+				}
+			}
+		}
+	}
+
+	return alternatives
 }
 
 // PromptCommandName returns the sanitized leading slash command in the first

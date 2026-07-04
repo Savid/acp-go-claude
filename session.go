@@ -115,6 +115,7 @@ const (
 	localCommandExtraUsage = "/extra-usage"
 	localCommandHeapdump   = "/heapdump"
 	commandReloadSkills    = "reload-skills"
+	commandReloadPlugins   = "reload-plugins"
 
 	defaultSessionCloseTurnWait = 5 * time.Second
 	maxHandledHooks             = 1024

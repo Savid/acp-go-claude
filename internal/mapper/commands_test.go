@@ -15,14 +15,14 @@ func TestAvailableCommandsUpdate(t *testing.T) {
 	require.Nil(t, AvailableCommandsUpdate([]claude.SlashCommand{{Description: "missing name"}}))
 
 	updates := AvailableCommandsUpdate([]claude.SlashCommand{
-		{Name: "debug", Description: "Debug session", ArgumentHint: "[issue]"},
+		{Name: "debug", Description: "Debug session", ArgumentHint: "[issue]", Aliases: []string{"dbg"}},
 		{Name: "compact"},
 		{Name: "mcp:server:command", Description: "Run namespaced command"},
 		{Name: "server:command (MCP)", Description: "Run MCP command"},
 		{Name: "cost", Description: "suppressed"},
 		{Name: "heapdump", Description: "suppressed"},
-		{Name: commandClear, Description: "denied"},
-		{Name: commandConfig, Description: "denied"},
+		{Name: commandClear, Description: "denied", Aliases: []string{"reset", "new"}},
+		{Name: commandConfig, Description: "denied", Aliases: []string{"settings"}},
 		{Name: "login", Description: "unsupported"},
 		{Name: "bad\ncommand", Description: "invalid"},
 		{Name: "bad\tcommand (MCP)", Description: "invalid after rewrite"},
@@ -38,6 +38,10 @@ func TestAvailableCommandsUpdate(t *testing.T) {
 	require.Nil(t, commands[1].Input)
 	require.Equal(t, "mcp:server:command", commands[2].Name)
 	require.Equal(t, "mcp:server:command", commands[3].Name)
+	require.NotContains(t, []string{commands[0].Name, commands[1].Name, commands[2].Name, commands[3].Name}, "dbg")
+	require.NotContains(t, []string{commands[0].Name, commands[1].Name, commands[2].Name, commands[3].Name}, "settings")
+	require.NotContains(t, []string{commands[0].Name, commands[1].Name, commands[2].Name, commands[3].Name}, "reset")
+	require.NotContains(t, []string{commands[0].Name, commands[1].Name, commands[2].Name, commands[3].Name}, "new")
 }
 
 func TestAvailableCommandsUpdateSanitizerGrammar(t *testing.T) {
@@ -172,6 +176,67 @@ func TestDeniedPromptCommand(t *testing.T) {
 			t.Parallel()
 
 			gotName, gotAlt, gotDenied := DeniedPromptCommand(tc.prompt)
+			require.Equal(t, tc.wantDenied, gotDenied)
+			require.Equal(t, tc.wantName, gotName)
+			require.Equal(t, tc.wantAlt, gotAlt)
+		})
+	}
+}
+
+func TestDeniedPromptCommandNativeAliases(t *testing.T) {
+	t.Parallel()
+
+	commands := []claude.SlashCommand{
+		{Name: commandConfig, Aliases: []string{"settings", "bad alias"}},
+		{Name: commandClear, Aliases: []string{"reset", "new", "bad/name"}},
+		{Name: "help", Aliases: []string{"config-help"}},
+	}
+
+	tests := []struct {
+		name       string
+		prompt     []acp.ContentBlock
+		wantName   string
+		wantAlt    string
+		wantDenied bool
+	}{
+		{
+			name:       "config alias",
+			prompt:     []acp.ContentBlock{acp.TextBlock("/settings model=sonnet")},
+			wantName:   "settings",
+			wantAlt:    alternativeSetConfigOption,
+			wantDenied: true,
+		},
+		{
+			name:       "clear reset alias",
+			prompt:     []acp.ContentBlock{acp.TextBlock("/reset now")},
+			wantName:   "reset",
+			wantAlt:    alternativeSessionNew,
+			wantDenied: true,
+		},
+		{
+			name:       "clear new alias",
+			prompt:     []acp.ContentBlock{acp.TextBlock("/new")},
+			wantName:   "new",
+			wantAlt:    alternativeSessionNew,
+			wantDenied: true,
+		},
+		{
+			name:       "leading whitespace alias bypasses",
+			prompt:     []acp.ContentBlock{acp.TextBlock(" /reset")},
+			wantDenied: false,
+		},
+		{
+			name:       "non-deny command alias ignored",
+			prompt:     []acp.ContentBlock{acp.TextBlock("/config-help")},
+			wantDenied: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotName, gotAlt, gotDenied := DeniedPromptCommand(tc.prompt, commands)
 			require.Equal(t, tc.wantDenied, gotDenied)
 			require.Equal(t, tc.wantName, gotName)
 			require.Equal(t, tc.wantAlt, gotAlt)

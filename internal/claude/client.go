@@ -38,6 +38,7 @@ type SlashCommand struct {
 	Name         string
 	Description  string
 	ArgumentHint string
+	Aliases      []string
 }
 
 // AvailableModelInfo describes one Claude model choice returned by the CLI.
@@ -175,7 +176,7 @@ func (c *Client) InitializeInfo() InitializeInfo {
 	defer c.infoMu.RUnlock()
 
 	return InitializeInfo{
-		Commands:              append([]SlashCommand(nil), c.initializeInfo.Commands...),
+		Commands:              cloneSlashCommands(c.initializeInfo.Commands),
 		Models:                append([]AvailableModelInfo(nil), c.initializeInfo.Models...),
 		OutputStyle:           c.initializeInfo.OutputStyle,
 		AvailableOutputStyles: append([]string(nil), c.initializeInfo.AvailableOutputStyles...),
@@ -211,11 +212,20 @@ func (c *Client) setInitializeInfo(info InitializeInfo) {
 	defer c.infoMu.Unlock()
 
 	c.initializeInfo = InitializeInfo{
-		Commands:              append([]SlashCommand(nil), info.Commands...),
+		Commands:              cloneSlashCommands(info.Commands),
 		Models:                append([]AvailableModelInfo(nil), info.Models...),
 		OutputStyle:           info.OutputStyle,
 		AvailableOutputStyles: append([]string(nil), info.AvailableOutputStyles...),
 	}
+}
+
+func cloneSlashCommands(commands []SlashCommand) []SlashCommand {
+	cloned := append([]SlashCommand(nil), commands...)
+	for i, command := range commands {
+		cloned[i].Aliases = append([]string(nil), command.Aliases...)
+	}
+
+	return cloned
 }
 
 func parseInitializeInfo(value any) InitializeInfo {
@@ -253,6 +263,7 @@ func parseSlashCommands(value any) []SlashCommand {
 			Name:         name,
 			Description:  description,
 			ArgumentHint: argumentHint,
+			Aliases:      stringSlice(raw["aliases"]),
 		})
 	}
 

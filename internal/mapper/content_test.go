@@ -14,7 +14,7 @@ func TestPromptToClaude(t *testing.T) {
 		acp.TextBlock("hello"),
 		acp.ImageBlock("abc", "image/png"),
 		acp.ResourceLinkBlock("readme", "file:///tmp/README.md"),
-	})
+	}, nil)
 
 	require.NoError(t, err)
 	require.Len(t, blocks, 3)
@@ -36,7 +36,7 @@ func TestPromptToClaudeTextAudienceAnnotations(t *testing.T) {
 		textBlockWithAudience("client-only", acp.RoleUser),
 		textBlockWithAudience("mixed", acp.RoleUser, acp.RoleAssistant),
 		textBlockWithAudience("empty"),
-	})
+	}, nil)
 
 	require.NoError(t, err)
 	require.Equal(t, []map[string]any{
@@ -56,23 +56,43 @@ func textBlockWithAudience(text string, audience ...acp.Role) acp.ContentBlock {
 	}}
 }
 
-func TestPromptToClaudeRewritesMCPSlashCommands(t *testing.T) {
+func TestPromptToClaudeRewritesAdvertisedMCPSlashCommands(t *testing.T) {
+	t.Parallel()
+
+	blocks, err := PromptToClaude([]acp.ContentBlock{
+		acp.TextBlock("/mcp:server:name\targs"),
+		acp.TextBlock("/mcp:server:name"),
+	}, []acp.AvailableCommand{{Name: "mcp:server:name"}})
+
+	require.NoError(t, err)
+	require.Equal(t, "/server:name (MCP)\targs", blocks[0]["text"])
+	require.Equal(t, "/server:name (MCP)", blocks[1]["text"])
+}
+
+func TestPromptToClaudeLeavesUnadvertisedMCPSlashTextByteIdentical(t *testing.T) {
 	t.Parallel()
 
 	blocks, err := PromptToClaude([]acp.ContentBlock{
 		acp.TextBlock("/mcp:server:name args"),
-		acp.TextBlock("/mcp:server:name"),
 		acp.TextBlock("/mcp:bad\tserver:name"),
+		acp.TextBlock("/mcp:server"),
+		acp.TextBlock("/mcp::name"),
 		acp.TextBlock("/compact"),
 		acp.TextBlock("prefix /mcp:server:name"),
+	}, []acp.AvailableCommand{
+		{Name: "mcp:other:name"},
+		{Name: "mcp:server"},
+		{Name: "mcp::name"},
+		{Name: "mcp:bad server:name"},
 	})
 
 	require.NoError(t, err)
-	require.Equal(t, "/server:name (MCP) args", blocks[0]["text"])
-	require.Equal(t, "/server:name (MCP)", blocks[1]["text"])
-	require.Equal(t, "/mcp:bad\tserver:name", blocks[2]["text"])
-	require.Equal(t, "/compact", blocks[3]["text"])
-	require.Equal(t, "prefix /mcp:server:name", blocks[4]["text"])
+	require.Equal(t, "/mcp:server:name args", blocks[0]["text"])
+	require.Equal(t, "/mcp:bad\tserver:name", blocks[1]["text"])
+	require.Equal(t, "/mcp:server", blocks[2]["text"])
+	require.Equal(t, "/mcp::name", blocks[3]["text"])
+	require.Equal(t, "/compact", blocks[4]["text"])
+	require.Equal(t, "prefix /mcp:server:name", blocks[5]["text"])
 }
 
 func TestPromptToClaudeEmbeddedResources(t *testing.T) {
@@ -100,7 +120,7 @@ func TestPromptToClaudeEmbeddedResources(t *testing.T) {
 				Uri:  &uriImage,
 			},
 		},
-	})
+	}, nil)
 
 	require.NoError(t, err)
 	require.Len(t, blocks, 6)
@@ -123,7 +143,7 @@ func TestPromptToClaudeResourceLinks(t *testing.T) {
 		acp.ResourceLinkBlock("drive", "file:///C:/repo/a.txt"),
 		acp.ResourceLinkBlock("remote", "file://example.com/tmp/a.txt"),
 		acp.ResourceLinkBlock("zed", "zed://workspace/file.go"),
-	})
+	}, nil)
 
 	require.NoError(t, err)
 	require.Equal(t, "https://example.com/T-1", blocks[0]["text"])
@@ -139,28 +159,28 @@ func TestPromptToClaudeResourceLinks(t *testing.T) {
 func TestPromptToClaudeUnsupported(t *testing.T) {
 	t.Parallel()
 
-	_, err := PromptToClaude([]acp.ContentBlock{acp.AudioBlock("abc", "audio/wav")})
+	_, err := PromptToClaude([]acp.ContentBlock{acp.AudioBlock("abc", "audio/wav")}, nil)
 	require.Error(t, err)
 
-	_, err = PromptToClaude([]acp.ContentBlock{{}})
+	_, err = PromptToClaude([]acp.ContentBlock{{}}, nil)
 	require.Error(t, err)
 
 	_, err = PromptToClaude([]acp.ContentBlock{
 		acp.ResourceBlock(acp.EmbeddedResourceResource{
 			BlobResourceContents: &acp.BlobResourceContents{Blob: "bin"},
 		}),
-	})
+	}, nil)
 	require.Error(t, err)
 
 	_, err = PromptToClaude([]acp.ContentBlock{
 		acp.ResourceBlock(acp.EmbeddedResourceResource{}),
-	})
+	}, nil)
 	require.Error(t, err)
 
-	_, err = PromptToClaude([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image"}}})
+	_, err = PromptToClaude([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image"}}}, nil)
 	require.Error(t, err)
 
 	fileURI := "file:///tmp/image.png"
-	_, err = PromptToClaude([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &fileURI}}})
+	_, err = PromptToClaude([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &fileURI}}}, nil)
 	require.Error(t, err)
 }

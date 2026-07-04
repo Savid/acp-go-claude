@@ -103,6 +103,14 @@ func (s *agentSession) emitAvailableCommandsUpdate(ctx context.Context, force bo
 }
 
 func (s *agentSession) emitClearAvailableCommandsUpdate(ctx context.Context) error {
+	s.mu.Lock()
+	previous := len(s.advertisedCommands)
+	s.mu.Unlock()
+
+	if previous == 0 {
+		return nil
+	}
+
 	if err := s.emitOptionalUpdates(ctx, emptyAvailableCommandsUpdate()); err != nil {
 		return err
 	}

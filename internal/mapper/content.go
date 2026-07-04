@@ -9,12 +9,13 @@ import (
 )
 
 // PromptToClaude converts ACP prompt content to Claude stream-json user content.
-func PromptToClaude(prompt []acp.ContentBlock) ([]map[string]any, error) {
+func PromptToClaude(prompt []acp.ContentBlock, advertisedCommands []acp.AvailableCommand) ([]map[string]any, error) {
 	blocks := make([]map[string]any, 0, len(prompt))
 	contextBlocks := make([]map[string]any, 0)
+	advertised := advertisedCommandSet(advertisedCommands)
 
 	for _, block := range prompt {
-		converted, context, err := contentBlockToClaude(block)
+		converted, context, err := contentBlockToClaude(block, advertised)
 		if err != nil {
 			return nil, err
 		}
@@ -26,14 +27,14 @@ func PromptToClaude(prompt []acp.ContentBlock) ([]map[string]any, error) {
 	return append(blocks, contextBlocks...), nil
 }
 
-func contentBlockToClaude(block acp.ContentBlock) ([]map[string]any, []map[string]any, error) {
+func contentBlockToClaude(block acp.ContentBlock, advertisedCommands map[string]struct{}) ([]map[string]any, []map[string]any, error) {
 	switch {
 	case block.Text != nil:
 		if textAudienceIsUserOnly(block.Text.Annotations) {
 			return nil, nil, nil
 		}
 
-		return []map[string]any{textBlock(rewriteMCPSlashCommand(block.Text.Text))}, nil, nil
+		return []map[string]any{textBlock(rewriteAdvertisedMCPSlashCommand(block.Text.Text, advertisedCommands))}, nil, nil
 	case block.Image != nil:
 		if block.Image.Data != "" {
 			return []map[string]any{base64Block(typeImage, block.Image.MimeType, block.Image.Data)}, nil, nil
@@ -55,30 +56,43 @@ func contentBlockToClaude(block acp.ContentBlock) ([]map[string]any, []map[strin
 	}
 }
 
+func advertisedCommandSet(commands []acp.AvailableCommand) map[string]struct{} {
+	if len(commands) == 0 {
+		return nil
+	}
+
+	advertised := make(map[string]struct{}, len(commands))
+	for _, command := range commands {
+		if validSlashCommandName(command.Name) {
+			advertised[command.Name] = struct{}{}
+		}
+	}
+
+	return advertised
+}
+
 func textAudienceIsUserOnly(annotations *acp.Annotations) bool {
 	return annotations != nil &&
 		len(annotations.Audience) == 1 &&
 		annotations.Audience[0] == acp.RoleUser
 }
 
-func rewriteMCPSlashCommand(text string) string {
-	if !strings.HasPrefix(text, "/mcp:") {
+func rewriteAdvertisedMCPSlashCommand(text string, advertisedCommands map[string]struct{}) string {
+	name := leadingSlashCommandName(text)
+	if !strings.HasPrefix(name, "mcp:") {
 		return text
 	}
 
-	commandText, args, hasArgs := strings.Cut(text, " ")
-
-	parts := strings.SplitN(strings.TrimPrefix(commandText, "/mcp:"), ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.ContainsAny(parts[0], "\t\n\r") {
+	if _, ok := advertisedCommands[name]; !ok {
 		return text
 	}
 
-	rewritten := "/" + parts[0] + ":" + parts[1] + " (MCP)"
-	if hasArgs {
-		rewritten += " " + args
+	server, command, ok := strings.Cut(strings.TrimPrefix(name, "mcp:"), ":")
+	if !ok || server == "" || command == "" {
+		return text
 	}
 
-	return rewritten
+	return "/" + server + ":" + command + " (MCP)" + text[len(name)+1:]
 }
 
 func resourceToClaude(resource acp.EmbeddedResourceResource) ([]map[string]any, []map[string]any, error) {

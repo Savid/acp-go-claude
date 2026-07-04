@@ -176,23 +176,25 @@ func TestLifecycleCommandUpdatePostResponseHook(t *testing.T) {
 		{
 			name:   "new",
 			method: acp.AgentMethodSessionNew,
+			params: postResponseHookParams(nil, "1"),
 			result: acp.NewSessionResponse{SessionId: "session-1"},
 		},
 		{
 			name:   "load",
 			method: acp.AgentMethodSessionLoad,
-			params: json.RawMessage(`{"sessionId":"session-1"}`),
+			params: postResponseHookParams(map[string]string{"sessionId": "session-1"}, "1"),
 			result: acp.LoadSessionResponse{},
 		},
 		{
 			name:   "resume",
 			method: acp.AgentMethodSessionResume,
-			params: json.RawMessage(`{"sessionId":"session-1"}`),
+			params: postResponseHookParams(map[string]string{"sessionId": "session-1"}, "1"),
 			result: acp.ResumeSessionResponse{},
 		},
 		{
 			name:   "fork",
 			method: ForkSessionMethod,
+			params: postResponseHookParams(nil, "1"),
 			result: acp.UnstableForkSessionResponse{SessionId: "session-1"},
 		},
 	}
@@ -233,6 +235,58 @@ func TestLifecycleCommandUpdatePostResponseHook(t *testing.T) {
 	}
 }
 
+func TestLifecycleCommandPostResponseHookUsesResponseIDForIdenticalResults(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	agent := NewAgent()
+	client := newRecordingAgentClient()
+	agent.setConnection(client)
+	sessionOne := &agentSession{
+		agent:             agent,
+		id:                "session-1",
+		availableCommands: []claude.SlashCommand{{Name: "one", Description: "One"}},
+	}
+	sessionTwo := &agentSession{
+		agent:             agent,
+		id:                "session-2",
+		availableCommands: []claude.SlashCommand{{Name: "two", Description: "Two"}},
+	}
+	agent.mu.Lock()
+	agent.sessions[sessionOne.id] = sessionOne
+	agent.sessions[sessionTwo.id] = sessionTwo
+	agent.mu.Unlock()
+
+	hooks := &postResponseHooks{log: agent.log}
+	conn := &localAgentConnection{agent: agent, hooks: hooks}
+	conn.enqueueLifecycleCommandHook(
+		ctx,
+		acp.AgentMethodSessionResume,
+		postResponseHookParams(map[string]string{"sessionId": string(sessionOne.id)}, "1"),
+		acp.ResumeSessionResponse{},
+	)
+	conn.enqueueLifecycleCommandHook(
+		ctx,
+		acp.AgentMethodSessionResume,
+		postResponseHookParams(map[string]string{"sessionId": string(sessionTwo.id)}, "2"),
+		acp.ResumeSessionResponse{},
+	)
+
+	hooks.runAfterResponseWrite([]byte(`{"jsonrpc":"2.0","id":2,"result":{}}`))
+	require.Eventually(t, func() bool {
+		updates := availableCommandUpdates(client.Updates())
+
+		return len(updates) == 1 && len(updates[0].AvailableCommands) == 1 && updates[0].AvailableCommands[0].Name == "two"
+	}, time.Second, 10*time.Millisecond)
+
+	hooks.runAfterResponseWrite([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	require.Eventually(t, func() bool {
+		updates := availableCommandUpdates(client.Updates())
+
+		return len(updates) == 2 && len(updates[1].AvailableCommands) == 1 && updates[1].AvailableCommands[0].Name == "one"
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestLifecycleCommandPostResponseHookBranches(t *testing.T) {
 	t.Parallel()
 
@@ -248,15 +302,11 @@ func TestLifecycleCommandPostResponseHookBranches(t *testing.T) {
 	conn := &localAgentConnection{agent: agent, hooks: hooks}
 	conn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionList, nil, acp.ListSessionsResponse{})
 	conn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionLoad, json.RawMessage(`{bad`), acp.LoadSessionResponse{})
-
-	badMarshal := acp.NewSessionResponse{
-		SessionId: "session-1",
-		Meta:      map[string]any{"bad": make(chan struct{})},
-	}
-	conn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionNew, nil, badMarshal)
+	conn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionNew, nil, acp.NewSessionResponse{SessionId: "session-1"})
+	require.Empty(t, postResponseHookRequestID(json.RawMessage(`{bad`)))
 
 	result := acp.NewSessionResponse{SessionId: "missing"}
-	conn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionNew, nil, result)
+	conn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionNew, postResponseHookParams(nil, "1"), result)
 	resultJSON, err := json.Marshal(result)
 	require.NoError(t, err)
 	hooks.runAfterResponseWrite([]byte(`{"jsonrpc":"2.0","id":1,"result":` + string(resultJSON) + `}`))
@@ -278,7 +328,7 @@ func TestLifecycleCommandPostResponseHookBranches(t *testing.T) {
 	failHooks := &postResponseHooks{log: failAgent.log}
 	failConn := &localAgentConnection{agent: failAgent, hooks: failHooks}
 	failResult := acp.NewSessionResponse{SessionId: failSession.id}
-	failConn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionNew, nil, failResult)
+	failConn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionNew, postResponseHookParams(nil, "1"), failResult)
 	failResultJSON, err := json.Marshal(failResult)
 	require.NoError(t, err)
 	failHooks.runAfterResponseWrite([]byte(`{"jsonrpc":"2.0","id":1,"result":` + string(failResultJSON) + `}`))
@@ -290,13 +340,62 @@ func TestLifecycleCommandPostResponseHookBranches(t *testing.T) {
 	hooks.runAfterResponseWrite([]byte(`{bad`))
 	hooks.runAfterResponseWrite([]byte(`{"jsonrpc":"2.0","method":"session/update"}`))
 	hooks.runAfterResponseWrite([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"x"}}`))
-	hooks.enqueue(json.RawMessage(`{"ok":true}`), func() {})
+	hooks.enqueue("1", func() {})
 	hooks.runAfterResponseWrite([]byte(`{"jsonrpc":"2.0","id":1,"result":{"other":true}}`))
 
 	_, ok := lifecycleCommandSessionID("unknown", nil, nil)
 	require.False(t, ok)
 	_, ok = lifecycleCommandSessionID(acp.AgentMethodSessionResume, json.RawMessage(`{bad`), acp.ResumeSessionResponse{})
 	require.False(t, ok)
+}
+
+func TestPostResponseHookRequestReaderTagsLifecycleRequests(t *testing.T) {
+	t.Parallel()
+
+	tagged, err := io.ReadAll(newPostResponseHookRequestReader(bytes.NewBufferString(
+		`{"jsonrpc":"2.0","id":7,"method":"session/resume","params":{"sessionId":"session-1"}}` + "\n",
+	)))
+	require.NoError(t, err)
+
+	var msg struct {
+		Params map[string]string `json:"params"`
+	}
+	require.NoError(t, json.Unmarshal(tagged, &msg))
+	require.Equal(t, "7", msg.Params[postResponseHookIDParam])
+
+	smallReader := newPostResponseHookRequestReader(bytes.NewBufferString(
+		`{"jsonrpc":"2.0","id":8,"method":"session/resume","params":{"sessionId":"session-1"}}`,
+	))
+	buf := make([]byte, 5)
+	n, err := smallReader.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	rest, err := io.ReadAll(smallReader)
+	require.NoError(t, err)
+	require.Contains(t, string(buf)+string(rest), postResponseHookIDParam)
+
+	tests := [][]byte{
+		[]byte(`{bad`),
+		[]byte(`{"jsonrpc":"2.0","method":"session/resume","params":{}}`),
+		[]byte(`{"jsonrpc":"2.0","id":1,"method":"session/list","params":{}}`),
+		[]byte(`{"jsonrpc":"2.0","id":1,"method":"session/resume"}`),
+		[]byte(`{"jsonrpc":"2.0","id":1,"method":"session/resume","params":[]}`),
+		[]byte(`{"jsonrpc":"2.0","id":1,"method":"session/resume","params":null}`),
+	}
+	for _, line := range tests {
+		require.Equal(t, line, tagPostResponseHookRequest(line))
+	}
+}
+
+func postResponseHookParams(values map[string]string, responseID string) json.RawMessage {
+	params := map[string]string{postResponseHookIDParam: responseID}
+	for key, value := range values {
+		params[key] = value
+	}
+
+	raw, _ := json.Marshal(params)
+
+	return raw
 }
 
 func TestConnectionInputGate(t *testing.T) {

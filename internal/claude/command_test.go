@@ -146,19 +146,6 @@ func TestDiscover(t *testing.T) {
 	path, err := Discover(context.Background(), "/custom/claude", nil)
 	require.NoError(t, err)
 	require.Equal(t, "/custom/claude", path)
-
-	path, err = Discover(context.Background(), "", map[string]string{EnvClaudeCodeExecutable: "/env/claude"})
-	require.NoError(t, err)
-	require.Equal(t, "/env/claude", path)
-}
-
-func TestDiscoverFromProcessEnv(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	t.Setenv(EnvClaudeCodeExecutable, "/process/claude")
-
-	path, err := Discover(context.Background(), "", nil)
-	require.NoError(t, err)
-	require.Equal(t, "/process/claude", path)
 }
 
 func TestDiscoverCancelledExplicitPath(t *testing.T) {

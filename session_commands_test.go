@@ -71,6 +71,26 @@ func TestSuppressedCommandsPassThroughAsText(t *testing.T) {
 	}
 }
 
+func TestMCPPromptRewriteUsesAdvertisedCommandsSnapshot(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	session, transport, cleanup := newPromptFlowSession(t)
+	defer cleanup()
+	session.availableCommands = []claude.SlashCommand{{Name: "server:name (MCP)", Description: "Run MCP command"}}
+
+	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "/mcp:server:name args"))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+	require.Equal(t, "/mcp:server:name args", lastSentUserText(t, transport))
+
+	session.advertisedCommands = []acp.AvailableCommand{{Name: "mcp:server:name"}}
+	resp, err = session.Prompt(ctx, TextPromptRequest(session.id, "/mcp:server:name args"))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+	require.Equal(t, "/server:name (MCP) args", lastSentUserText(t, transport))
+}
+
 func TestCommandTurnExclusivity(t *testing.T) {
 	t.Parallel()
 

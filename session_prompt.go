@@ -50,7 +50,11 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	localOnlyCommand := localOnlySlashCommand(params.Prompt)
 	prompt := params.Prompt
 
-	content, err := mapper.PromptToClaude(prompt)
+	s.mu.Lock()
+	advertisedCommands := cloneAvailableCommands(s.advertisedCommands)
+	s.mu.Unlock()
+
+	content, err := mapper.PromptToClaude(prompt, advertisedCommands)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -467,9 +471,8 @@ func fatalClaudeProcessError(err error) bool {
 }
 
 func localOnlySlashCommand(prompt []acp.ContentBlock) bool {
-	token := firstPromptToken(firstPromptText(prompt))
-	switch token {
-	case localCommandContext, localCommandExtraUsage, localCommandHeapdump:
+	switch mapper.PromptCommandName(prompt) {
+	case localCommandContext[1:], localCommandExtraUsage[1:], localCommandHeapdump[1:]:
 		return true
 	default:
 		return false
@@ -482,21 +485,19 @@ func firstPromptText(prompt []acp.ContentBlock) string {
 			continue
 		}
 
-		if firstPromptToken(block.Text.Text) != "" {
-			return block.Text.Text
-		}
+		return block.Text.Text
 	}
 
 	return ""
 }
 
 func firstPromptToken(text string) string {
-	fields := strings.Fields(text)
-	if len(fields) == 0 {
+	name := mapper.PromptCommandName([]acp.ContentBlock{acp.TextBlock(text)})
+	if name == "" {
 		return ""
 	}
 
-	return fields[0]
+	return "/" + name
 }
 
 func (s *agentSession) streamUsageUpdates(

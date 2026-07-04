@@ -10,8 +10,6 @@ import (
 	"strings"
 )
 
-const EnvClaudeCodeExecutable = "CLAUDE_CODE_EXECUTABLE"
-
 const envClaudeCodeNested = "CLAUDECODE"
 
 var commandEnviron = os.Environ
@@ -152,7 +150,7 @@ func BuildEnv(options Options) []string {
 }
 
 // Discover finds the Claude executable.
-func Discover(ctx context.Context, cliPath string, env map[string]string) (string, error) {
+func Discover(ctx context.Context, cliPath string, _ map[string]string) (string, error) {
 	if strings.TrimSpace(cliPath) != "" {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -163,14 +161,6 @@ func Discover(ctx context.Context, cliPath string, env map[string]string) (strin
 
 	if err := ctx.Err(); err != nil {
 		return "", err
-	}
-
-	if path := strings.TrimSpace(env[EnvClaudeCodeExecutable]); path != "" {
-		return path, nil
-	}
-
-	if path := strings.TrimSpace(os.Getenv(EnvClaudeCodeExecutable)); path != "" {
-		return path, nil
 	}
 
 	path, err := exec.LookPath("claude")

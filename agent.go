@@ -217,7 +217,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 					},
 					"sessionStore": map[string]any{
 						"format": SessionStoreFormat,
-						"key":    []string{"sessionId", "subpath"},
+						"key":    []string{acpFieldSessionID, "subpath"},
 					},
 					"structuredOutput": map[string]any{
 						"config":        "_meta.claude.options.outputSchema",

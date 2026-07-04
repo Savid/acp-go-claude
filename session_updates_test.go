@@ -113,6 +113,19 @@ func TestPoisonBranches(t *testing.T) {
 	require.ErrorContains(t, nilAgent.poison(ctx, "nil agent cause"), "nil agent cause")
 }
 
+func TestPoisonBeforeAdvertisementEmitsNoCommandUpdate(t *testing.T) {
+	t.Parallel()
+
+	agent := NewAgent()
+	conn := newRecordingAgentClient()
+	agent.setConnection(conn)
+	session := &agentSession{agent: agent, id: "session-1"}
+
+	err := session.poison(context.Background(), "native reset before advertisement")
+	require.ErrorContains(t, err, "native reset before advertisement")
+	require.Empty(t, availableCommandUpdates(conn.Updates()))
+}
+
 func TestNativeSessionInvariantNoops(t *testing.T) {
 	t.Parallel()
 

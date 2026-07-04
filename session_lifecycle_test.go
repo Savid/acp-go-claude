@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,6 +47,23 @@ func TestSessionLifecycleBranches(t *testing.T) {
 		}
 	}
 	release, err = session.acquireExclusiveTurn(partialCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, release)
+	<-session.turn
+	require.Empty(t, session.turn)
+	session.turnAcquiredHook = nil
+
+	innerCancelCtx := &nthDoneContext{
+		done:       make(chan struct{}),
+		closeAfter: 3,
+	}
+	session.turn = make(chan struct{}, 2)
+	session.turnAcquiredHook = func(acquired int) {
+		if acquired == 1 {
+			session.turn <- struct{}{}
+		}
+	}
+	release, err = session.acquireExclusiveTurn(innerCancelCtx)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Nil(t, release)
 	<-session.turn
@@ -131,4 +149,37 @@ func TestSessionCancelAndCloseEdgeBranches(t *testing.T) {
 	require.NoError(t, closeErrSession.client.Start(ctx))
 	err = closeErrSession.Close(ctx)
 	require.ErrorContains(t, err, "close failed")
+}
+
+type nthDoneContext struct {
+	done       chan struct{}
+	closeAfter int
+	calls      int
+	once       sync.Once
+}
+
+func (c *nthDoneContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (c *nthDoneContext) Done() <-chan struct{} {
+	c.calls++
+	if c.calls >= c.closeAfter {
+		c.once.Do(func() { close(c.done) })
+	}
+
+	return c.done
+}
+
+func (c *nthDoneContext) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+func (c *nthDoneContext) Value(any) any {
+	return nil
 }

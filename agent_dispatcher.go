@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 )
+
+const postResponseHookIDParam = "_acp_go_claude_post_response_hook_id"
 
 type localAgentConnection struct {
 	agent       *Agent
@@ -50,7 +53,7 @@ var (
 func newLocalAgentConnection(agent *Agent, output io.Writer, input io.Reader) *localAgentConnection {
 	hooks := &postResponseHooks{log: agent.log}
 	conn := &localAgentConnection{agent: agent, hooks: hooks}
-	inputGate := newConnectionInputGate(input)
+	inputGate := newConnectionInputGate(newPostResponseHookRequestReader(input))
 	conn.conn = acp.NewConnection(conn.handle, hooks.wrap(output), inputGate)
 	conn.conn.SetLogger(agent.log)
 	inputGate.open()
@@ -131,17 +134,12 @@ func (c *localAgentConnection) enqueueLifecycleCommandHook(ctx context.Context, 
 		return
 	}
 
-	resultJSON, err := json.Marshal(result)
-	if err != nil {
-		c.agent.log.ErrorContext(ctx, "marshal lifecycle response for post-response hook failed",
-			slog.String(jsonFieldMethod, method),
-			slog.String(jsonFieldError, err.Error()),
-		)
-
+	responseID := postResponseHookRequestID(params)
+	if responseID == "" {
 		return
 	}
 
-	c.hooks.enqueue(resultJSON, func() {
+	c.hooks.enqueue(responseID, func() {
 		hookCtx := context.WithoutCancel(ctx)
 
 		session, err := c.agent.session(sessionID)
@@ -194,6 +192,96 @@ func lifecycleCommandSessionID(method string, params json.RawMessage, result any
 	}
 }
 
+type postResponseHookRequestReader struct {
+	reader     *bufio.Reader
+	pending    []byte
+	pendingErr error
+}
+
+func newPostResponseHookRequestReader(reader io.Reader) *postResponseHookRequestReader {
+	return &postResponseHookRequestReader{reader: bufio.NewReader(reader)}
+}
+
+func (r *postResponseHookRequestReader) Read(p []byte) (int, error) {
+	if len(r.pending) == 0 {
+		if r.pendingErr != nil {
+			err := r.pendingErr
+			r.pendingErr = nil
+
+			return 0, err
+		}
+
+		line, err := r.reader.ReadBytes('\n')
+		if len(line) == 0 {
+			return 0, err
+		}
+
+		r.pending = tagPostResponseHookRequest(line)
+		if err != nil {
+			r.pendingErr = err
+		}
+	}
+
+	n := copy(p, r.pending)
+	r.pending = r.pending[n:]
+
+	return n, nil
+}
+
+func tagPostResponseHookRequest(line []byte) []byte {
+	var msg struct {
+		JSONRPC string           `json:"jsonrpc,omitempty"`
+		ID      *json.RawMessage `json:"id,omitempty"`
+		Method  string           `json:"method,omitempty"`
+		Params  json.RawMessage  `json:"params,omitempty"`
+	}
+	if err := json.Unmarshal(line, &msg); err != nil {
+		return line
+	}
+
+	if msg.ID == nil || !lifecycleCommandMethod(msg.Method) || len(bytes.TrimSpace(msg.Params)) == 0 {
+		return line
+	}
+
+	params := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return line
+	}
+
+	if params == nil {
+		return line
+	}
+
+	hookID, _ := json.Marshal(responseHookID(msg.ID))
+	params[postResponseHookIDParam] = hookID
+	msg.Params, _ = json.Marshal(params)
+
+	tagged, _ := json.Marshal(msg)
+	if bytes.HasSuffix(line, []byte("\n")) {
+		tagged = append(tagged, '\n')
+	}
+
+	return tagged
+}
+
+func lifecycleCommandMethod(method string) bool {
+	switch method {
+	case acp.AgentMethodSessionNew, acp.AgentMethodSessionLoad, acp.AgentMethodSessionResume, ForkSessionMethod:
+		return true
+	default:
+		return false
+	}
+}
+
+func postResponseHookRequestID(params json.RawMessage) string {
+	var tagged map[string]string
+	if err := json.Unmarshal(params, &tagged); err != nil {
+		return ""
+	}
+
+	return tagged[postResponseHookIDParam]
+}
+
 type postResponseHooks struct {
 	log *slog.Logger
 	mu  sync.Mutex
@@ -201,29 +289,28 @@ type postResponseHooks struct {
 }
 
 type postResponseHook struct {
-	result json.RawMessage
-	run    func()
+	responseID string
+	run        func()
 }
 
 func (h *postResponseHooks) wrap(writer io.Writer) io.Writer {
 	return &postResponseWriter{writer: writer, hooks: h}
 }
 
-func (h *postResponseHooks) enqueue(result json.RawMessage, run func()) {
+func (h *postResponseHooks) enqueue(responseID string, run func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	h.all = append(h.all, postResponseHook{
-		result: append(json.RawMessage(nil), result...),
-		run:    run,
+		responseID: responseID,
+		run:        run,
 	})
 }
 
 func (h *postResponseHooks) runAfterResponseWrite(data []byte) {
 	var msg struct {
-		ID     *json.RawMessage `json:"id"`
-		Result json.RawMessage  `json:"result"`
-		Error  *json.RawMessage `json:"error"`
+		ID    *json.RawMessage `json:"id"`
+		Error *json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(data), &msg); err != nil {
 		if h.log != nil {
@@ -233,13 +320,15 @@ func (h *postResponseHooks) runAfterResponseWrite(data []byte) {
 		return
 	}
 
-	if msg.ID == nil || len(msg.Result) == 0 || msg.Error != nil {
+	if msg.ID == nil || msg.Error != nil {
 		return
 	}
 
+	responseID := responseHookID(msg.ID)
+
 	h.mu.Lock()
 	for index, hook := range h.all {
-		if !bytes.Equal(bytes.TrimSpace(hook.result), bytes.TrimSpace(msg.Result)) {
+		if hook.responseID != responseID {
 			continue
 		}
 
@@ -251,6 +340,10 @@ func (h *postResponseHooks) runAfterResponseWrite(data []byte) {
 		return
 	}
 	h.mu.Unlock()
+}
+
+func responseHookID(id *json.RawMessage) string {
+	return string(bytes.TrimSpace(*id))
 }
 
 func slicesDelete[S ~[]E, E any](slice S, index int) S {

@@ -199,10 +199,10 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 			Meta: map[string]any{
 				claudeMetaKey: map[string]any{
 					"fork": map[string]any{
-						"unstable": true,
-						"method":   ForkSessionMethod,
-						"request":  "acp.UnstableForkSessionRequest JSON payload only",
-						"response": "acp.UnstableForkSessionResponse JSON payload only",
+						"unstable":        true,
+						"method":          ForkSessionMethod,
+						"request":         "acp.UnstableForkSessionRequest JSON payload only",
+						jsonFieldResponse: "acp.UnstableForkSessionResponse JSON payload only",
 					},
 					"elicitation": map[string]any{
 						"unstable": true,
@@ -220,9 +220,9 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 						"key":    []string{"sessionId", "subpath"},
 					},
 					"structuredOutput": map[string]any{
-						"config": "_meta.claude.options.outputSchema",
-						"result": "_meta.claude.structuredOutput",
-						"schema": "json_schema",
+						"config":        "_meta.claude.options.outputSchema",
+						jsonFieldResult: "_meta.claude.structuredOutput",
+						"schema":        "json_schema",
 					},
 				},
 			},

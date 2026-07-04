@@ -894,14 +894,14 @@ func validateMCPServers(servers []acp.McpServer) error {
 		case server.Sse != nil:
 			return acp.NewInvalidParams(map[string]any{
 				jsonFieldError:    validationUnsupported,
-				"server":          server.Sse.Name,
-				rawMessageTypeKey: "sse",
+				jsonFieldServer:   server.Sse.Name,
+				rawMessageTypeKey: mcpTransportSSE,
 			})
 		case server.Acp != nil:
 			return acp.NewInvalidParams(map[string]any{
 				jsonFieldError:    validationUnsupported,
-				"server":          server.Acp.Name,
-				rawMessageTypeKey: "acp",
+				jsonFieldServer:   server.Acp.Name,
+				rawMessageTypeKey: mcpTransportACP,
 			})
 		default:
 			return acp.NewInvalidParams(map[string]any{jsonFieldError: "empty MCP server"})

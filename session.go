@@ -30,7 +30,10 @@ const (
 	jsonFieldMode                 = "mode"
 	jsonFieldOffset               = "offset"
 	jsonFieldRequest              = "request"
+	jsonFieldResponse             = "response"
+	jsonFieldResult               = "result"
 	jsonFieldSHA256               = "sha256"
+	jsonFieldServer               = "server"
 	jsonFieldSubpath              = "subpath"
 	jsonFieldText                 = "text"
 	jsonFieldTitle                = "title"
@@ -74,6 +77,9 @@ const (
 	askFieldQuestion    = "question"
 	askFieldQuestions   = "questions"
 
+	jsonSchemaTypeString       = "string"
+	mcpTransportACP            = "acp"
+	mcpTransportSSE            = "sse"
 	originKindTaskNotification = "task-notification"
 	stopReasonMaxTokens        = "max_tokens"
 
@@ -100,6 +106,7 @@ const (
 	defaultContextWindow = 200000
 	largeContextWindow   = 1000000
 	largeContextToken    = "1m"
+	syntheticModelName   = "<synthetic>"
 
 	streamEventMessageDelta = "message_delta"
 	streamEventMessageStart = "message_start"

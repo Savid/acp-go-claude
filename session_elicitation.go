@@ -173,7 +173,7 @@ func askUserQuestionSchema(questions []askUserQuestion) acp.UnstableElicitationS
 
 func askUserQuestionProperty(question askUserQuestion) map[string]any {
 	property := map[string]any{
-		jsonFieldType: "string",
+		jsonFieldType: jsonSchemaTypeString,
 	}
 
 	if title := askUserQuestionTitle(question); title != "" {
@@ -192,7 +192,7 @@ func askUserQuestionProperty(question askUserQuestion) map[string]any {
 		property[jsonFieldType] = "array"
 		property["minItems"] = 1
 		property["items"] = map[string]any{
-			jsonFieldType: "string",
+			jsonFieldType: jsonSchemaTypeString,
 			"anyOf":       askUserQuestionOneOf(question.Options),
 		}
 

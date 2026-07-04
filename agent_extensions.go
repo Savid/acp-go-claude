@@ -8,6 +8,8 @@ import (
 	"github.com/savid/acp-go-claude/internal/mapper"
 )
 
+var stableMCPServers = mapper.StableMCPServers
+
 // Logout clears auth state owned by this adapter.
 func (a *Agent) Logout(_ context.Context, _ acp.LogoutRequest) (acp.LogoutResponse, error) {
 	return acp.LogoutResponse{}, nil
@@ -36,7 +38,7 @@ func (a *Agent) handleForkSession(
 		return acp.UnstableForkSessionResponse{}, validationErr
 	}
 
-	mcpServers, err := mapper.StableMCPServers(params.McpServers)
+	mcpServers, err := stableMCPServers(params.McpServers)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}

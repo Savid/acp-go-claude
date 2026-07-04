@@ -18,6 +18,18 @@ const (
 var copyClaudeConfigFiles = copyClaudeConfigFilesImpl
 var deleteNativeTranscript = deleteNativeTranscriptImpl
 
+var (
+	materializeGlob        = filepath.Glob
+	materializeMkdirAll    = os.MkdirAll
+	materializeMkdirTemp   = os.MkdirTemp
+	materializeReadFile    = os.ReadFile
+	materializeRemove      = os.Remove
+	materializeRemoveAll   = os.RemoveAll
+	materializeStat        = os.Stat
+	materializeUserHomeDir = os.UserHomeDir
+	materializeWriteFile   = os.WriteFile
+)
+
 type materializedSession struct {
 	configDir string
 	mainPath  string
@@ -28,7 +40,7 @@ func (m *materializedSession) Close() error {
 		return nil
 	}
 
-	return os.RemoveAll(m.configDir)
+	return materializeRemoveAll(m.configDir)
 }
 
 func (a *Agent) materializeStoreSession(
@@ -72,7 +84,7 @@ func (a *Agent) materializeStoreSession(
 		return noMaterializedSession()
 	}
 
-	tmp, err := os.MkdirTemp("", "acp-go-claude-resume-*")
+	tmp, err := materializeMkdirTemp("", "acp-go-claude-resume-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp Claude config dir: %w", err)
 	}
@@ -209,7 +221,7 @@ func splitSubagentMetadata(entries []SessionStoreEntry) ([]SessionStoreEntry, ma
 }
 
 func writeStoreJSONL(path string, entries []SessionStoreEntry) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := materializeMkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create transcript dir: %w", err)
 	}
 
@@ -225,7 +237,7 @@ func writeStoreJSONL(path string, entries []SessionStoreEntry) error {
 		builder.WriteByte('\n')
 	}
 
-	if err := os.WriteFile(path, []byte(builder.String()), 0o600); err != nil {
+	if err := materializeWriteFile(path, []byte(builder.String()), 0o600); err != nil {
 		return fmt.Errorf("write transcript: %w", err)
 	}
 
@@ -233,7 +245,7 @@ func writeStoreJSONL(path string, entries []SessionStoreEntry) error {
 }
 
 func writeJSONFile(path string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := materializeMkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create metadata dir: %w", err)
 	}
 
@@ -242,7 +254,7 @@ func writeJSONFile(path string, value any) error {
 		return fmt.Errorf("encode metadata: %w", err)
 	}
 
-	return os.WriteFile(path, append(data, '\n'), 0o600)
+	return materializeWriteFile(path, append(data, '\n'), 0o600)
 }
 
 func claudeNativeTranscriptExists(sourceClaudeHome string, env map[string]string, projectKey string, sessionID string) (bool, error) {
@@ -252,7 +264,7 @@ func claudeNativeTranscriptExists(sourceClaudeHome string, env map[string]string
 	}
 
 	path := filepath.Join(source, "projects", projectKey, sessionID+".jsonl")
-	info, statErr := os.Stat(path)
+	info, statErr := materializeStat(path)
 
 	switch {
 	case statErr == nil:
@@ -270,9 +282,9 @@ func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, env map[stri
 		return nil
 	}
 
-	if data, err := os.ReadFile(filepath.Join(source, ".claude.json")); err == nil {
+	if data, err := materializeReadFile(filepath.Join(source, ".claude.json")); err == nil {
 		// #nosec G703 -- dst is an agent-created temporary Claude config directory.
-		if err := os.WriteFile(filepath.Join(dst, ".claude.json"), data, 0o600); err != nil {
+		if err := materializeWriteFile(filepath.Join(dst, ".claude.json"), data, 0o600); err != nil {
 			return fmt.Errorf("copy Claude config: %w", err)
 		}
 	}
@@ -293,7 +305,7 @@ func sourceClaudeConfigDir(sourceClaudeHome string, env map[string]string) strin
 		return filepath.Clean(configDir)
 	}
 
-	home, err := os.UserHomeDir()
+	home, err := materializeUserHomeDir()
 	if err != nil {
 		return ""
 	}
@@ -315,7 +327,7 @@ func deleteNativeTranscriptImpl(ctx context.Context, claudeHome string, sessionI
 		return nil
 	}
 
-	matches, err := filepath.Glob(filepath.Join(source, "projects", "*", sessionID+".jsonl"))
+	matches, err := materializeGlob(filepath.Join(source, "projects", "*", sessionID+".jsonl"))
 	if err != nil {
 		return err
 	}
@@ -325,12 +337,12 @@ func deleteNativeTranscriptImpl(ctx context.Context, claudeHome string, sessionI
 			return ctxErr
 		}
 
-		if removeErr := os.Remove(match); removeErr != nil && !os.IsNotExist(removeErr) {
+		if removeErr := materializeRemove(match); removeErr != nil && !os.IsNotExist(removeErr) {
 			return removeErr
 		}
 	}
 
-	sessionDirs, err := filepath.Glob(filepath.Join(source, "projects", "*", sessionID))
+	sessionDirs, err := materializeGlob(filepath.Join(source, "projects", "*", sessionID))
 	if err != nil {
 		return err
 	}
@@ -340,7 +352,7 @@ func deleteNativeTranscriptImpl(ctx context.Context, claudeHome string, sessionI
 			return ctxErr
 		}
 
-		if removeErr := os.RemoveAll(dir); removeErr != nil && !os.IsNotExist(removeErr) {
+		if removeErr := materializeRemoveAll(dir); removeErr != nil && !os.IsNotExist(removeErr) {
 			return removeErr
 		}
 	}

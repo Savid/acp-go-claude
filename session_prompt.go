@@ -14,6 +14,8 @@ import (
 	"github.com/savid/acp-go-claude/internal/mapper"
 )
 
+var finishPromptResultCall = (*agentSession).finishPromptResult
+
 // Prompt sends one turn to Claude and streams updates.
 func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
 	releaseTurn, err := s.acquireTurn(ctx)
@@ -89,7 +91,8 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		}
 
 		if result, ok := msg.(*claude.ResultMessage); ok {
-			resp, done, err := s.finishPromptResult(
+			resp, done, err := finishPromptResultCall(
+				s,
 				turnCtx,
 				ctx,
 				params,
@@ -314,7 +317,7 @@ func (s *agentSession) observePromptMessage(ctx context.Context, msg claude.Mess
 		state.lastEmittedUsageTotal = total
 	}
 
-	if model != "" && model != "<synthetic>" {
+	if model != "" && model != syntheticModelName {
 		state.lastAssistantModel = model
 	}
 
@@ -340,7 +343,7 @@ func observeAssistantMessage(assistant *claude.AssistantMessage, state *promptLo
 		state.lastAssistantErrorKind = assistant.ErrorKind
 	}
 
-	if assistant.Model != "" && assistant.Model != "<synthetic>" {
+	if assistant.Model != "" && assistant.Model != syntheticModelName {
 		state.lastAssistantModel = assistant.Model
 	}
 }
@@ -362,7 +365,7 @@ func promptResultError(result *claude.ResultMessage, assistantErrorKind string) 
 		jsonFieldSubtype: result.Subtype,
 	}
 	if result.Result != "" {
-		data["result"] = result.Result
+		data[jsonFieldResult] = result.Result
 	}
 
 	if len(result.Errors) > 0 {

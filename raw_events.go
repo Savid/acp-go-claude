@@ -15,6 +15,7 @@ const (
 	usageMetaKey            = "usage"
 	rawMessageTypeKey       = "type"
 	rawMessageOriginKey     = "origin"
+	rawEventFieldEvent      = "event"
 )
 
 type rawMessageConfig struct {

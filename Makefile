@@ -30,10 +30,10 @@ test:
 race:
 	go test -race ./...
 
-## coverage-check: write a coverage profile and print totals
+## coverage-check: require 100% statement coverage
 coverage-check:
 	go test -coverprofile=coverage.out -covermode=atomic ./...
-	go tool cover -func=coverage.out
+	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } } END { if (!found) { print "missing total coverage line"; exit 1 } }'
 
 ## test-cross-compile: compile platform-specific test branches
 test-cross-compile:

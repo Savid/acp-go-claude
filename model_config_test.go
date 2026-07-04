@@ -17,6 +17,8 @@ func TestParseModelConfigErrorsAndEmpty(t *testing.T) {
 
 	_, _, err = parseModelConfig(`[]`)
 	require.Error(t, err)
+	_, _, err = parseModelConfig(`{bad`)
+	require.Error(t, err)
 
 	_, _, err = parseModelConfig(`{"modelOverrides":[]}`)
 	require.Error(t, err)
@@ -36,10 +38,11 @@ func TestParseModelConfigErrorsAndEmpty(t *testing.T) {
 	require.Empty(t, config)
 
 	config, ok, err = modelConfigFromEnv(map[string]string{
-		envClaudeModelConfig: `{"availableModels":["opus"]}`,
+		envClaudeModelConfig: `{"modelOverrides":{"opus":"claude-opus"},"availableModels":["opus"]}`,
 	})
 	require.NoError(t, err)
 	require.True(t, ok)
+	require.Equal(t, map[string]string{"opus": "claude-opus"}, config.ModelOverrides)
 	require.Equal(t, []string{"opus"}, config.AvailableModels)
 }
 
@@ -47,6 +50,7 @@ func TestApplyAvailableModelsAllowlist(t *testing.T) {
 	t.Parallel()
 
 	available := []claude.AvailableModelInfo{
+		{Value: modelDefault, DisplayName: "Built In Default"},
 		{
 			Value:                 "claude-opus-4-6",
 			DisplayName:           "Opus",
@@ -59,11 +63,11 @@ func TestApplyAvailableModelsAllowlist(t *testing.T) {
 	copied := applyAvailableModelsAllowlist(available, nil)
 	require.Equal(t, available, copied)
 	copied[0].Value = "changed"
-	require.Equal(t, "claude-opus-4-6", available[0].Value)
+	require.Equal(t, modelDefault, available[0].Value)
 
 	filtered := applyAvailableModelsAllowlist(available, []string{" ", "default", "opus", "opus", "custom"})
 	require.Equal(t, []claude.AvailableModelInfo{
-		{Value: modelDefault, DisplayName: "Default"},
+		{Value: modelDefault, DisplayName: "Built In Default"},
 		{
 			Value:                 "opus",
 			DisplayName:           "Opus",
@@ -73,6 +77,7 @@ func TestApplyAvailableModelsAllowlist(t *testing.T) {
 		},
 		{Value: "custom", DisplayName: "custom"},
 	}, filtered)
+	require.Equal(t, claude.AvailableModelInfo{Value: modelDefault, DisplayName: modeNameDefault}, defaultModelInfo(nil))
 }
 
 func TestResolveModelPreferenceAndScoring(t *testing.T) {

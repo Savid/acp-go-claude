@@ -158,10 +158,10 @@ func (s *agentSession) emitRawClaudeMessage(ctx context.Context, msg claude.Mess
 	s.mu.Unlock()
 
 	payload := map[string]any{
-		acpFieldSessionID: s.id,
-		"sequence":        sequence,
-		"source":          "claude",
-		"event":           raw,
+		acpFieldSessionID:  s.id,
+		"sequence":         sequence,
+		"source":           "claude",
+		rawEventFieldEvent: raw,
 	}
 	if !rawEventWithinLimit(payload) {
 		s.agent.observe.RecordRawMessageEmitFailure(ctx, fmt.Errorf("raw event payload exceeds %d bytes", rawEventMaxBytes))

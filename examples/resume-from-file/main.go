@@ -31,6 +31,14 @@ type client struct {
 
 var _ acp.Client = (*client)(nil)
 
+var (
+	runMain   = run
+	runLoaded = runLoadedSession
+	getwd     = os.Getwd
+	exit      = os.Exit
+	serve     = claudeacp.Serve
+)
+
 func (*client) ReadTextFile(_ context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
 	data, err := os.ReadFile(params.Path)
 	if err != nil {
@@ -94,9 +102,9 @@ func (*client) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitReque
 }
 
 func main() {
-	if err := run(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
+	if err := runMain(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "resume-from-file: %v\n", err)
-		os.Exit(1)
+		exit(1)
 	}
 }
 
@@ -133,7 +141,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	}
 
 	if *cwd == "" {
-		*cwd, err = os.Getwd()
+		*cwd, err = getwd()
 		if err != nil {
 			return err
 		}
@@ -147,7 +155,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		return err
 	}
 
-	return runLoadedSession(ctx, store, *sessionID, *cwd, *prompt, *claudePath, *claudeHome, stdout)
+	return runLoaded(ctx, store, *sessionID, *cwd, *prompt, *claudePath, *claudeHome, stdout)
 }
 
 func runLoadedSession(
@@ -175,7 +183,7 @@ func runLoadedSession(
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- claudeacp.Serve(
+		errs <- serve(
 			serveCtx,
 			agentInput,
 			agentOutput,

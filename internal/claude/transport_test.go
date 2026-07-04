@@ -602,6 +602,23 @@ func TestProcessTransportCloseReapsProcess(t *testing.T) {
 	require.NotNil(t, cmd.ProcessState)
 }
 
+func TestProcessTransportShutdownGraceReturnsUnexpectedWaitError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh")
+	}
+
+	oldGrace := processExitGracePeriod
+	processExitGracePeriod = time.Second
+	t.Cleanup(func() { processExitGracePeriod = oldGrace })
+
+	cmd := exec.Command("sh", "-c", "exit 0")
+	require.NoError(t, cmd.Start())
+	require.NoError(t, cmd.Wait())
+
+	transport := &ProcessTransport{cmd: cmd}
+	require.ErrorContains(t, transport.shutdownProcess(true), "Wait")
+}
+
 func TestProcessTransportCloseSendsTermBeforeKill(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")

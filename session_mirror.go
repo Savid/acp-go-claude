@@ -15,11 +15,16 @@ import (
 )
 
 const (
-	sessionMirrorAppendTimeout = 60 * time.Second
-	sessionMirrorDrainTimeout  = 150 * time.Millisecond
+	defaultSessionMirrorAppendTimeout = 60 * time.Second
+	defaultSessionMirrorDrainTimeout  = 150 * time.Millisecond
 )
 
 var errSessionMirrorAppend = errors.New("append transcript mirror entries")
+
+var (
+	sessionMirrorAppendTimeout = defaultSessionMirrorAppendTimeout
+	sessionMirrorDrainTimeout  = defaultSessionMirrorDrainTimeout
+)
 
 type sessionMirror struct {
 	log         *slog.Logger
@@ -159,7 +164,7 @@ func defaultClaudeConfigDir(claudeHome string) string {
 		return filepath.Clean(configDir)
 	}
 
-	home, err := os.UserHomeDir()
+	home, err := materializeUserHomeDir()
 	if err != nil {
 		return filepath.Clean(".claude")
 	}

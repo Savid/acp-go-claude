@@ -109,6 +109,10 @@ func TestSettingsHelpers(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "/env/claude")
 	require.Equal(t, "/env/claude/settings.json", userSettingsPath(""))
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	previousUserHomeDir := userHomeDir
+	userHomeDir = func() (string, error) { return "/home/user", nil }
+	require.Equal(t, "/home/user/.claude/settings.json", userSettingsPath(""))
+	userHomeDir = previousUserHomeDir
 
 	home := t.TempDir()
 	canonicalHome, err := filepath.EvalSymlinks(home)
@@ -140,7 +144,6 @@ func TestSettingsHelpers(t *testing.T) {
 		filepathEvalSymlinks = previousEvalSymlinks
 	})
 
-	previousUserHomeDir := userHomeDir
 	userHomeDir = func() (string, error) { return "", errors.New("home failed") }
 	require.Empty(t, userSettingsPath(""))
 	userHomeDir = previousUserHomeDir

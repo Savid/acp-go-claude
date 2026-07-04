@@ -45,7 +45,7 @@ func (a *Agent) deleteCachedPermissionRulesLocked(sessionID acp.SessionId) {
 }
 
 func (a *Agent) loadPermissionRules(ctx context.Context, sessionID acp.SessionId) (map[string]string, error) {
-	store := permissions.Store{ClaudeHome: a.options.ClaudeHome}
+	store := permissions.Store{ClaudeHome: a.options.Home}
 
 	rules, err := store.Load(ctx, string(sessionID))
 	if err != nil {

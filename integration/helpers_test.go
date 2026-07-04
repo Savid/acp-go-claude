@@ -695,8 +695,8 @@ func mergedProcessEnv(env map[string]string) []string {
 
 func permissionGateOptions() []claudeacp.Option {
 	return []claudeacp.Option{
-		claudeacp.WithDefaultPermissionMode("default"),
-		claudeacp.WithSettingSources(),
+		claudeacp.WithClaudeDefaultPermissionMode("default"),
+		claudeacp.WithClaudeSettingSources(),
 	}
 }
 
@@ -766,10 +766,10 @@ func serveLiveAgentRawForTest(
 	claudePath := integrationClaudePath(t)
 	runtime := isolatedClaudeRuntime(t)
 	base := []claudeacp.Option{
-		claudeacp.WithClaudePath(claudePath),
-		claudeacp.WithClaudeHome(runtime.home),
+		claudeacp.WithExecutablePath(claudePath),
+		claudeacp.WithHome(runtime.home),
 		claudeacp.WithDefaultModel(os.Getenv("ACP_GO_CLAUDE_MODEL")),
-		claudeacp.WithInitializeTimeout(30 * time.Second),
+		claudeacp.WithClaudeInitializeTimeout(30 * time.Second),
 		claudeacp.WithLogger(integrationLogger),
 	}
 

@@ -11,7 +11,7 @@ import (
 	"github.com/savid/acp-go-claude/internal/observer"
 )
 
-func (s *Session) handleAskUserQuestion(
+func (s *agentSession) handleAskUserQuestion(
 	ctx context.Context,
 	request claude.PermissionRequest,
 ) (decision claude.PermissionDecision, err error) {
@@ -52,7 +52,7 @@ func (s *Session) handleAskUserQuestion(
 			Mode:            claude.ElicitationModeForm,
 			RequestedSchema: askUserQuestionSchema(questions),
 			Meta: map[string]any{
-				acpMetaKey: map[string]any{
+				claudeMetaKey: map[string]any{
 					"toolName":  askUserQuestionTool,
 					acpFieldRaw: request.Raw,
 				},
@@ -309,7 +309,7 @@ func nonEmptyStrings(values []string) []string {
 	return result
 }
 
-func (s *Session) handleElicitation(
+func (s *agentSession) handleElicitation(
 	ctx context.Context,
 	request claude.ElicitationRequest,
 ) (response claude.ElicitationResponse, err error) {
@@ -346,7 +346,7 @@ func (s *Session) handleElicitation(
 	}
 }
 
-func (s *Session) createFormElicitation(
+func (s *agentSession) createFormElicitation(
 	ctx context.Context,
 	conn agentClient,
 	request claude.ElicitationRequest,
@@ -366,7 +366,7 @@ func (s *Session) createFormElicitation(
 	return claudeElicitationResponse(resp), nil
 }
 
-func (s *Session) createURLElicitation(
+func (s *agentSession) createURLElicitation(
 	ctx context.Context,
 	conn agentClient,
 	request claude.ElicitationRequest,
@@ -397,7 +397,7 @@ func (s *Session) createURLElicitation(
 	return claudeElicitationResponse(resp), nil
 }
 
-func (s *Session) elicitationMeta(request claude.ElicitationRequest) map[string]any {
+func (s *agentSession) elicitationMeta(request claude.ElicitationRequest) map[string]any {
 	meta := map[string]any{
 		acpFieldSessionID: string(s.id),
 		acpFieldRaw:       request.Raw,
@@ -411,10 +411,10 @@ func (s *Session) elicitationMeta(request claude.ElicitationRequest) map[string]
 		meta["toolCallId"] = request.ToolUseID
 	}
 
-	return map[string]any{acpMetaKey: meta}
+	return map[string]any{claudeMetaKey: meta}
 }
 
-func (s *Session) elicitationScope(request claude.ElicitationRequest) elicitationScope {
+func (s *agentSession) elicitationScope(request claude.ElicitationRequest) elicitationScope {
 	scope := elicitationScope{SessionID: s.id}
 	if request.ToolUseID != "" {
 		scope.ToolCallID = acp.ToolCallId(request.ToolUseID)

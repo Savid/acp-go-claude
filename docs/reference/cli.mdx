@@ -1,110 +1,26 @@
 ---
-title: "CLI reference"
-description: "Binary flags, subcommands, and environment behavior"
-icon: "terminal"
+title: "CLI"
+description: "Command-line flags"
 ---
 
-## Agent mode
+`acp-go-claude` speaks ACP over stdin/stdout.
 
-```bash
-acp-go-claude [flags]
+```sh
+acp-go-claude -path /usr/local/bin/claude -home /tmp/claude-home -model sonnet -claude-permission-mode default
 ```
 
-The default mode serves ACP over
-[stdin/stdout](https://agentclientprotocol.com/protocol/transports). It is the
-[standalone CLI](/docs/get-started/run-modes#standalone-cli)
-counterpart to the embedded [`Serve`](/docs/reference/go-api#serve) API.
+Flags:
 
-| Flag | Default | Description |
-| --- | --- | --- |
-| `-claude` | discovered | Claude CLI executable path. |
-| `-model` | unset | Default Claude model. |
-| `-claude-home` | unset | Claude config directory passed as `CLAUDE_CONFIG_DIR`. |
-| `-bare` | `false` | Launch sessions with `--bare`. |
-| `-hide-claude-auth` | `false` | Hide Claude subscription auth methods. |
-| `-debug` | `false` | Write debug logs to stderr. |
-
-When `OTEL_LOGS_EXPORTER` is configured, standalone mode also sends adapter
-logs through the configured OpenTelemetry log exporter. `-debug` remains
-stderr-only and additive.
-
-## Terminal auth passthrough
-
-```bash
-acp-go-claude --cli [flags] auth login --claudeai
-acp-go-claude --cli [flags] auth login --console
-```
-
-This mode is advertised to ACP clients as terminal auth when supported. It
-forwards the command after `--cli`, stdio, and signals to the real Claude CLI.
-Claude is discovered through `-claude`, then `CLAUDE_CODE_EXECUTABLE`, then
-`PATH`.
-For example:
-
-```bash
-acp-go-claude --cli auth login --claudeai
-```
-
-See [Authentication](/docs/features/authentication#terminal-auth).
-
-## MCP proxy subcommand
-
-```bash
-acp-go-claude mcp-proxy \
-  -network tcp \
-  -address 127.0.0.1:12345 \
-  -acp-id server-id
-```
-
-The bridge token is read from `ACP_GO_CLAUDE_MCP_PROXY_TOKEN_FILE`. This
-subcommand is internal to
-[ACP-transport MCP](/docs/features/mcp#acp-transport-bridge) and is normally
-launched by Claude through generated MCP config.
-
-## Claude launch arguments
-
-Interactive sessions use Claude's
-[stream-json mode](https://code.claude.com/docs/en/agent-sdk/streaming-output):
-
-```bash
-claude \
-  --output-format stream-json \
-  --input-format stream-json \
-  --include-partial-messages \
-  --include-hook-events \
-  --verbose
-```
-
-The adapter adds flags as needed for
-[hooks](https://code.claude.com/docs/en/hooks), session mirroring, bare mode,
-[permission mode](https://code.claude.com/docs/en/permission-modes),
-permission prompt tool, model, system prompt, strict MCP config, additional
-directories, setting sources,
-[resume/fork](https://code.claude.com/docs/en/sessions), and session ID.
-
-`--session-mirror` is always added so native Claude goal rows can be observed.
-When no session store is configured, mirror frames are parsed for goals and not
-persisted.
-`--allow-dangerously-skip-permissions` is added only when explicitly enabled
-through the embedded option and supported by the local Claude CLI.
-`--setting-sources=user,project,local` is passed by default so Claude loads
-normal Claude Code filesystem features.
-
-## Environment
-
-| Variable | Meaning |
+| Flag | Purpose |
 | --- | --- |
-| `CLAUDE_CODE_EXECUTABLE` | Alternate Claude executable discovery path. |
-| `CLAUDE_CONFIG_DIR` | Claude config home, set by `-claude-home` or `WithClaudeHome`. |
-| `CLAUDE_CODE_ENTRYPOINT` | Set to `acp-go-claude` for launched Claude processes. |
-| `PWD` | Set to the Claude process working directory. |
-| `ANTHROPIC_MODEL` | Initial model fallback. |
-| `CLAUDE_MODEL_CONFIG` | JSON model override/allowlist config. |
-| `OTEL_*` | Used by the standalone CLI to configure OpenTelemetry exporters. |
+| `-path` | Claude CLI executable. |
+| `-home` | Claude config directory for launched sessions. |
+| `-model` | Default model. |
+| `-debug` | Emit debug logs to stderr. |
+| `-version` | Print version and exit. |
+| `-claude-bare` | Launch Claude with `--bare`. |
+| `-claude-hide-auth` | Hide Claude account helper text. |
+| `-claude-permission-mode` | Set the default Claude permission mode. |
+| `-claude-system-prompt` | Set the default system prompt. |
 
-Launched Claude sessions strip `CLAUDECODE` from the inherited environment to
-avoid nested-Claude mode confusion.
-
-For embedded equivalents to these flags and env vars, see
-[Go API](/docs/reference/go-api). Claude settings file behavior is covered in
-[Claude settings](/docs/features/claude-settings).
+Use `--cli` to pass remaining arguments directly to Claude.

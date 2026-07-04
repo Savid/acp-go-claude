@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,10 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -23,82 +19,19 @@ import (
 )
 
 const (
-	agentPackage              = "github.com/savid/acp-go-claude/cmd/acp-go-claude"
-	claudeSessionImportMethod = "_claude/session/import"
-	claudeSessionImportFormat = "claude-jsonl"
-	defaultSessionFile        = "session.jsonl"
-	defaultPrompt             = "Reply with exactly RESUME_OK and do not use tools."
+	defaultSessionFile = "session.jsonl"
+	defaultPrompt      = "Reply with exactly RESUME_OK and do not use tools."
 )
 
 type client struct {
-	output             io.Writer
-	mu                 sync.Mutex
-	messages           map[string]*messageDisplay
-	fallback           messageDisplay
-	lastAgentText      string
-	agentRunText       string
-	lastUpdateWasAgent bool
+	output io.Writer
+	mu     sync.Mutex
+	text   strings.Builder
 }
 
 var _ acp.Client = (*client)(nil)
 
-type agentConnection interface {
-	Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error)
-	CallExtension(context.Context, string, any) (json.RawMessage, error)
-	LoadSession(context.Context, acp.LoadSessionRequest) (acp.LoadSessionResponse, error)
-	Prompt(context.Context, acp.PromptRequest) (acp.PromptResponse, error)
-	CloseSession(context.Context, acp.CloseSessionRequest) (acp.CloseSessionResponse, error)
-}
-
-type startedAgent struct {
-	conn  agentConnection
-	close func()
-	wait  func() error
-}
-
-type config struct {
-	sessionFile string
-	sessionID   string
-	cwd         string
-	prompt      string
-}
-
-type sessionImportParams struct {
-	SessionID string            `json:"sessionId"`
-	Cwd       string            `json:"cwd"`
-	Format    string            `json:"format"`
-	Entries   []json.RawMessage `json:"entries"`
-}
-
-var startAgent = startAgentProcess
-var getwd = os.Getwd
-var exit = os.Exit
-var commandContext = exec.CommandContext
-var runtimeCaller = runtime.Caller
-var errPromptInterrupted = errors.New("typed prompt interrupted")
-
-func defaultSessionFilePath() string {
-	_, file, _, ok := runtimeCaller(0)
-	if !ok {
-		return defaultSessionFile
-	}
-
-	return filepath.Join(filepath.Dir(file), defaultSessionFile)
-}
-
-func (c *client) writer() io.Writer {
-	if c.output != nil {
-		return c.output
-	}
-
-	return os.Stdout
-}
-
 func (*client) ReadTextFile(_ context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	if !filepath.IsAbs(params.Path) {
-		return acp.ReadTextFileResponse{}, fmt.Errorf("path must be absolute: %s", params.Path)
-	}
-
 	data, err := os.ReadFile(params.Path)
 	if err != nil {
 		return acp.ReadTextFileResponse{}, err
@@ -108,10 +41,6 @@ func (*client) ReadTextFile(_ context.Context, params acp.ReadTextFileRequest) (
 }
 
 func (*client) WriteTextFile(_ context.Context, params acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
-	if !filepath.IsAbs(params.Path) {
-		return acp.WriteTextFileResponse{}, fmt.Errorf("path must be absolute: %s", params.Path)
-	}
-
 	if err := os.MkdirAll(filepath.Dir(params.Path), 0o755); err != nil {
 		return acp.WriteTextFileResponse{}, err
 	}
@@ -119,165 +48,29 @@ func (*client) WriteTextFile(_ context.Context, params acp.WriteTextFileRequest)
 	return acp.WriteTextFileResponse{}, os.WriteFile(params.Path, []byte(params.Content), 0o600)
 }
 
-func (*client) RequestPermission(
-	_ context.Context,
-	params acp.RequestPermissionRequest,
-) (acp.RequestPermissionResponse, error) {
-	for _, option := range params.Options {
-		if option.Kind == acp.PermissionOptionKindRejectOnce || option.Kind == acp.PermissionOptionKindRejectAlways {
-			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(option.OptionId)}, nil
-		}
-	}
-
+func (*client) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 }
 
-type messageDisplay struct {
-	text string
-}
-
-func (m *messageDisplay) writeText(output io.Writer, text string) (string, bool) {
-	switch {
-	case text == "":
-		return "", false
-	case m.text == text:
-		return "", false
-	case strings.HasPrefix(text, m.text):
-		delta := text[len(m.text):]
-		fmt.Fprint(output, delta)
-
-		m.text = text
-
-		return delta, true
-	default:
-		fmt.Fprint(output, text)
-
-		m.text += text
-
-		return text, true
-	}
-}
-
-func (c *client) messageDisplay(messageID *string) *messageDisplay {
-	if messageID == nil || *messageID == "" {
-		return &c.fallback
-	}
-
-	if c.messages == nil {
-		c.messages = make(map[string]*messageDisplay)
-	}
-
-	display := c.messages[*messageID]
-	if display == nil {
-		display = &messageDisplay{}
-		c.messages[*messageID] = display
-	}
-
-	return display
-}
-
 func (c *client) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
+	if params.Update.AgentMessageChunk == nil || params.Update.AgentMessageChunk.Content.Text == nil {
+		return nil
+	}
+
+	text := params.Update.AgentMessageChunk.Content.Text.Text
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	update := params.Update
-	output := c.writer()
-
-	switch {
-	case update.UserMessageChunk != nil && update.UserMessageChunk.Content.Text != nil:
-		text := update.UserMessageChunk.Content.Text.Text
-		if text == "" {
-			return nil
-		}
-
-		c.resetAgentRun()
-
-		fmt.Fprintf(output, "\n[user] %s\n", text)
-	case update.AgentMessageChunk != nil && update.AgentMessageChunk.Content.Text != nil:
-		chunk := update.AgentMessageChunk
-		if chunk.Content.Text.Text == "" {
-			c.resetAgentRun()
-
-			return nil
-		}
-
-		text := collapseRepeatedExactText(chunk.Content.Text.Text)
-		display := c.messageDisplay(chunk.MessageId)
-
-		if c.suppressRepeatedAgentText(display, text) {
-			display.text = text
-
-			return nil
-		}
-
-		if printed, ok := display.writeText(output, text); ok {
-			c.lastAgentText = text
-			if c.lastUpdateWasAgent {
-				c.agentRunText += printed
-			} else {
-				c.agentRunText = printed
-			}
-		}
-
-		c.lastUpdateWasAgent = true
-	case update.AgentThoughtChunk != nil && update.AgentThoughtChunk.Content.Text != nil:
-		text := update.AgentThoughtChunk.Content.Text.Text
-		if text == "" {
-			return nil
-		}
-
-		c.resetAgentRun()
-
-		fmt.Fprintf(output, "\n[thought] %s\n", text)
-	case update.ToolCall != nil:
-		c.resetAgentRun()
-
-		fmt.Fprintf(output, "\n[tool] %s %s\n", update.ToolCall.ToolCallId, update.ToolCall.Title)
-	case update.ToolCallUpdate != nil && update.ToolCallUpdate.Status != nil:
-		c.resetAgentRun()
-
-		fmt.Fprintf(output, "\n[tool] %s %s\n", update.ToolCallUpdate.ToolCallId, *update.ToolCallUpdate.Status)
+	writer := c.output
+	if writer == nil {
+		writer = os.Stdout
 	}
+
+	fmt.Fprint(writer, text)
+	c.text.WriteString(text)
 
 	return nil
-}
-
-func (c *client) resetAgentRun() {
-	c.lastUpdateWasAgent = false
-	c.agentRunText = ""
-	c.fallback.text = ""
-}
-
-func (c *client) suppressRepeatedAgentText(display *messageDisplay, text string) bool {
-	switch {
-	case c.agentRunText != "" && text == c.agentRunText:
-		return true
-	case c.agentRunText != "" && text == c.agentRunText+c.agentRunText:
-		return true
-	case !c.lastUpdateWasAgent:
-		return false
-	case display.text == "" && text == c.lastAgentText:
-		return true
-	case display.text != "" && text == display.text+display.text:
-		return true
-	case c.lastAgentText != "" && text == c.lastAgentText+c.lastAgentText:
-		return true
-	default:
-		return false
-	}
-}
-
-func collapseRepeatedExactText(text string) string {
-	half := len(text) / 2
-	if half == 0 || len(text)%2 != 0 {
-		return text
-	}
-
-	if text[:half] == text[half:] {
-		return text[:half]
-	}
-
-	return text
 }
 
 func (*client) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
@@ -301,297 +94,124 @@ func (*client) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitReque
 }
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-
-	exit(run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	if err := run(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "resume-from-file: %v\n", err)
+		os.Exit(1)
+	}
 }
 
-func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
-	cfg, err := parseConfig(args, stderr)
-	if err != nil {
-		printError(stderr, err)
-
-		return 1
-	}
-
-	entries, err := loadSessionFile(cfg.sessionFile)
-	if err != nil {
-		printError(stderr, err)
-
-		return 1
-	}
-
-	if cfg.sessionID == "" {
-		cfg.sessionID = sessionIDFromEntries(entries)
-	}
-
-	if cfg.sessionID == "" {
-		printError(stderr, errors.New("session id not found; pass -session-id"))
-
-		return 1
-	}
-
-	agent, err := startAgent(ctx, stdout, stderr)
-	if err != nil {
-		printError(stderr, err)
-
-		return 1
-	}
-	defer func() {
-		if agent.close != nil {
-			agent.close()
-		}
-
-		if agent.wait != nil {
-			_ = agent.wait()
-		}
-	}()
-
-	if err := runImportedResume(ctx, agent.conn, cfg, entries, stdin, stdout); err != nil {
-		if ctx.Err() != nil {
-			printError(stderr, ctx.Err())
-
-			return 130
-		}
-
-		printError(stderr, err)
-
-		return 1
-	}
-
-	return 0
-}
-
-func parseConfig(args []string, stderr io.Writer) (config, error) {
-	cfg := config{
-		sessionFile: defaultSessionFilePath(),
-		prompt:      defaultPrompt,
-	}
-
+func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) error {
 	flags := flag.NewFlagSet("resume-from-file", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	flags.StringVar(&cfg.sessionFile, "session-file", cfg.sessionFile, "Claude JSONL session file to import")
-	flags.StringVar(&cfg.sessionID, "session-id", "", "Claude session ID; inferred from session_id/sessionId when omitted")
-	flags.StringVar(&cfg.cwd, "cwd", "", "absolute working directory for the resumed Claude session")
-	flags.StringVar(&cfg.prompt, "prompt", cfg.prompt, "prompt to send after session/resume")
+
+	sessionFile := flags.String("file", defaultSessionFile, "Claude transcript JSONL file")
+	sessionID := flags.String("session", "", "session id; defaults to the sessionId found in the JSONL")
+	cwd := flags.String("cwd", "", "session cwd; defaults to the JSONL cwd or current directory")
+	prompt := flags.String("prompt", defaultPrompt, "prompt to send after loading history")
+	claudePath := flags.String("path", "", "path to claude CLI")
+	claudeHome := flags.String("home", "", "Claude config directory")
 
 	if err := flags.Parse(args); err != nil {
-		return config{}, err
+		return err
 	}
 
-	if positionalPrompt := strings.TrimSpace(strings.Join(flags.Args(), " ")); positionalPrompt != "" {
-		cfg.prompt = positionalPrompt
+	entries, inferredSessionID, inferredCwd, err := readTranscriptJSONL(*sessionFile)
+	if err != nil {
+		return err
 	}
 
-	if cfg.cwd == "" {
-		cwd, err := getwd()
+	if *sessionID == "" {
+		*sessionID = inferredSessionID
+	}
+
+	if *sessionID == "" {
+		return errors.New("session id is required")
+	}
+
+	if *cwd == "" {
+		*cwd = inferredCwd
+	}
+
+	if *cwd == "" {
+		*cwd, err = os.Getwd()
 		if err != nil {
-			return config{}, err
-		}
-
-		cfg.cwd = cwd
-	}
-
-	if !filepath.IsAbs(cfg.cwd) {
-		return config{}, fmt.Errorf("cwd must be absolute: %s", cfg.cwd)
-	}
-
-	return cfg, nil
-}
-
-func loadSessionFile(path string) ([]json.RawMessage, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("open %s (copy a real Claude JSONL transcript here or pass -session-file): %w", path, err)
-	}
-
-	var entries []json.RawMessage
-
-	for index, line := range bytes.Split(data, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
-			continue
-		}
-
-		entry, err := validateJSONLine(line)
-		if err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, index+1, err)
-		}
-
-		entries = append(entries, entry)
-	}
-
-	if len(entries) == 0 {
-		return nil, fmt.Errorf("%s: no JSONL entries found", path)
-	}
-
-	return entries, nil
-}
-
-func validateJSONLine(line []byte) (json.RawMessage, error) {
-	decoder := json.NewDecoder(bytes.NewReader(line))
-
-	var object map[string]json.RawMessage
-	if err := decoder.Decode(&object); err != nil {
-		return nil, err
-	}
-
-	if object == nil {
-		return nil, errors.New("entry must be a JSON object")
-	}
-
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil, errors.New("entry must contain exactly one JSON object")
-	}
-
-	return append(json.RawMessage(nil), line...), nil
-}
-
-func sessionIDFromEntries(entries []json.RawMessage) string {
-	for _, entry := range entries {
-		var object map[string]json.RawMessage
-		if err := json.Unmarshal(entry, &object); err != nil {
-			continue
-		}
-
-		for _, key := range []string{"session_id", "sessionId"} {
-			var sessionID string
-			if err := json.Unmarshal(object[key], &sessionID); err == nil && strings.TrimSpace(sessionID) != "" {
-				return strings.TrimSpace(sessionID)
-			}
+			return err
 		}
 	}
 
-	return ""
-}
-
-func startAgentProcess(ctx context.Context, output io.Writer, stderr io.Writer) (*startedAgent, error) {
-	cmd := commandContext(ctx, "go", "run", agentPackage)
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
+	store := claudeacp.NewInMemorySessionStore()
+	if err := store.Replace(ctx, claudeacp.SessionKey{SessionID: *sessionID}, []claudeacp.SessionStoreReplacement{{
+		Key:     claudeacp.SessionKey{SessionID: *sessionID},
+		Entries: entries,
+	}}); err != nil {
+		return err
 	}
 
-	agentStdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	cmd.Stderr = stderr
-
-	err = cmd.Start()
-	if err != nil {
-		return nil, err
-	}
-
-	agentOutputGate := newConnectionInputGate(agentStdout)
-	conn := acp.NewClientSideConnection(&client{output: output}, stdin, agentOutputGate)
-	conn.SetLogger(slog.New(slog.DiscardHandler))
-	agentOutputGate.open()
-
-	return &startedAgent{
-		conn: conn,
-		close: func() {
-			_ = stdin.Close()
-		},
-		wait: cmd.Wait,
-	}, nil
+	return runLoadedSession(ctx, store, *sessionID, *cwd, *prompt, *claudePath, *claudeHome, stdout)
 }
 
-type connectionInputGate struct {
-	reader io.Reader
-	ready  chan struct{}
-	once   sync.Once
-}
-
-// connectionInputGate blocks the SDK receive goroutine until the connection
-// logger is installed. The SDK starts receiving inside NewClientSideConnection.
-func newConnectionInputGate(reader io.Reader) *connectionInputGate {
-	return &connectionInputGate{
-		reader: reader,
-		ready:  make(chan struct{}),
-	}
-}
-
-func (g *connectionInputGate) open() {
-	g.once.Do(func() {
-		close(g.ready)
-	})
-}
-
-func (g *connectionInputGate) Read(p []byte) (int, error) {
-	<-g.ready
-
-	return g.reader.Read(p)
-}
-
-func runImportedResume(
+func runLoadedSession(
 	ctx context.Context,
-	conn agentConnection,
-	cfg config,
-	entries []json.RawMessage,
-	stdin io.Reader,
+	store claudeacp.SessionStore,
+	sessionID string,
+	cwd string,
+	prompt string,
+	claudePath string,
+	claudeHome string,
 	stdout io.Writer,
 ) error {
+	clientInput, agentOutput := io.Pipe()
+	agentInput, clientOutput := io.Pipe()
+
+	defer clientInput.Close()
+	defer clientOutput.Close()
+
+	client := &client{output: stdout}
+	conn := acp.NewClientSideConnection(client, clientOutput, clientInput)
+	conn.SetLogger(slog.New(slog.DiscardHandler))
+
+	serveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errs := make(chan error, 1)
+	go func() {
+		errs <- claudeacp.Serve(
+			serveCtx,
+			agentInput,
+			agentOutput,
+			claudeacp.WithExecutablePath(claudePath),
+			claudeacp.WithHome(claudeHome),
+			claudeacp.WithSessionStore(store),
+			claudeacp.WithLogger(slog.New(slog.DiscardHandler)),
+		)
+	}()
+
 	_, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 	if err != nil {
 		return err
 	}
 
-	_, err = conn.CallExtension(ctx, claudeSessionImportMethod, sessionImportParams{
-		SessionID: cfg.sessionID,
-		Cwd:       cfg.cwd,
-		Format:    claudeSessionImportFormat,
-		Entries:   entries,
-	})
+	id := acp.SessionId(sessionID)
+
+	_, err = conn.LoadSession(ctx, claudeacp.LoadSessionRequest(id, cwd))
 	if err != nil {
 		return err
 	}
 
-	sessionID := acp.SessionId(cfg.sessionID)
-
-	fmt.Fprintln(stdout, "== previous session ==")
-
-	_, err = conn.LoadSession(ctx, claudeacp.LoadSessionRequest(sessionID, cfg.cwd))
-	if err != nil {
-		return err
-	}
 	defer func() {
-		_, _ = conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: sessionID})
+		_, _ = conn.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: id})
+
+		cancel()
+
+		_ = agentInput.Close()
+		_ = agentOutput.Close()
+
+		<-errs
 	}()
 
-	fmt.Fprintln(stdout, "\n== resume smoke test ==")
+	fmt.Fprintln(stdout, "== resume smoke test ==")
 
-	resp, err := promptSession(ctx, conn, sessionID, cfg.prompt)
-	if err != nil {
-		return err
-	}
-
-	fmt.Fprintf(stdout, "\n\nresumed session: %s\nstop reason: %s\n", sessionID, resp.StopReason)
-
-	typedPrompt, err := readTypedPrompt(ctx, stdin, stdout)
-	if errors.Is(err, errPromptInterrupted) {
-		fmt.Fprintln(stdout, "\ninterrupted; closing session")
-
-		return nil
-	}
-
-	if err != nil {
-		return err
-	}
-
-	if typedPrompt == "" {
-		fmt.Fprintln(stdout, "\nno typed prompt entered; closing session")
-
-		return nil
-	}
-
-	fmt.Fprintln(stdout, "\n== typed prompt ==")
-
-	resp, err = promptSession(ctx, conn, sessionID, typedPrompt)
+	resp, err := conn.Prompt(ctx, claudeacp.TextPromptRequest(id, prompt))
 	if err != nil {
 		return err
 	}
@@ -601,50 +221,44 @@ func runImportedResume(
 	return nil
 }
 
-func promptSession(
-	ctx context.Context,
-	conn agentConnection,
-	sessionID acp.SessionId,
-	prompt string,
-) (acp.PromptResponse, error) {
-	return conn.Prompt(ctx, claudeacp.TextPromptRequest(sessionID, prompt))
-}
-
-type typedPromptResult struct {
-	text string
-	err  error
-}
-
-func readTypedPrompt(ctx context.Context, stdin io.Reader, stdout io.Writer) (string, error) {
-	fmt.Fprint(stdout, "\nenter one prompt (blank or Ctrl-C to exit): ")
-
-	select {
-	case <-ctx.Done():
-		return "", errPromptInterrupted
-	default:
+func readTranscriptJSONL(path string) ([]claudeacp.SessionStoreEntry, string, string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, "", "", err
 	}
+	defer file.Close()
 
-	result := make(chan typedPromptResult, 1)
+	var (
+		entries   []claudeacp.SessionStoreEntry
+		sessionID string
+		cwd       string
+	)
 
-	go func() {
-		text, err := bufio.NewReader(stdin).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			result <- typedPromptResult{err: err}
-
-			return
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
 		}
 
-		result <- typedPromptResult{text: strings.TrimSpace(text)}
-	}()
+		entry := claudeacp.SessionStoreEntry(append([]byte(nil), line...))
+		entries = append(entries, entry)
 
-	select {
-	case <-ctx.Done():
-		return "", errPromptInterrupted
-	case got := <-result:
-		return got.text, got.err
+		var obj map[string]any
+		if json.Unmarshal(entry, &obj) == nil {
+			if sessionID == "" {
+				sessionID, _ = obj["sessionId"].(string)
+			}
+
+			if cwd == "" {
+				cwd, _ = obj["cwd"].(string)
+			}
+		}
 	}
-}
 
-func printError(stderr io.Writer, err error) {
-	_, _ = fmt.Fprintf(stderr, "resume-from-file: %v\n", err)
+	if err := scanner.Err(); err != nil {
+		return nil, "", "", err
+	}
+
+	return entries, sessionID, cwd, nil
 }

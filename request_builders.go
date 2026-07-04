@@ -1,6 +1,11 @@
 package claudeacp
 
-import "github.com/coder/acp-go-sdk"
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/coder/acp-go-sdk"
+)
 
 // SessionRequestOption configures embedded-Go ACP session lifecycle requests.
 type SessionRequestOption func(*sessionRequestConfig)
@@ -51,7 +56,7 @@ func ResumeSessionRequest(sessionID acp.SessionId, cwd string, opts ...SessionRe
 	}
 }
 
-// ForkSessionRequest constructs an unstable session/fork request.
+// ForkSessionRequest constructs params for the Claude fork extension method.
 func ForkSessionRequest(sessionID acp.SessionId, cwd string, opts ...SessionRequestOption) acp.UnstableForkSessionRequest {
 	config := newSessionRequestConfig(opts...)
 
@@ -62,6 +67,25 @@ func ForkSessionRequest(sessionID acp.SessionId, cwd string, opts ...SessionRequ
 		AdditionalDirectories: config.additionalDirectoriesClone(),
 		Meta:                  cloneAnyMap(config.meta),
 	}
+}
+
+// CallForkSession calls the Claude fork extension method and decodes the SDK payload shape.
+func CallForkSession(
+	ctx context.Context,
+	conn *acp.ClientSideConnection,
+	params acp.UnstableForkSessionRequest,
+) (acp.UnstableForkSessionResponse, error) {
+	raw, err := conn.CallExtension(ctx, ForkSessionMethod, params)
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+
+	var resp acp.UnstableForkSessionResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
+
+	return resp, nil
 }
 
 // WithSessionMCPServers sets MCP servers for a session lifecycle request.
@@ -102,93 +126,27 @@ func WithSessionClaudeOptions(options ClaudeOptions) SessionRequestOption {
 	}
 }
 
-// WithSessionRawSDKMessages toggles raw Claude SDK message emission for a
+// WithSessionOutputSchema sets Claude JSON Schema structured output for a
 // session lifecycle request.
-func WithSessionRawSDKMessages(enabled bool) SessionRequestOption {
+func WithSessionOutputSchema(schema map[string]any) SessionRequestOption {
+	cloned := cloneAnyMap(schema)
+
+	return func(config *sessionRequestConfig) {
+		config.meta = mergeAnyMap(config.meta, ClaudeOptions{OutputSchema: cloned}.Meta())
+	}
+}
+
+// WithSessionRawEvents toggles raw Claude event emission for a session lifecycle request.
+func WithSessionRawEvents(enabled bool) SessionRequestOption {
 	return func(config *sessionRequestConfig) {
 		if config.meta == nil {
 			config.meta = map[string]any{}
 		}
 
 		claudeMeta := ensureMetaMap(config.meta, claudeMetaKey)
-		claudeMeta[emitRawSDKMessagesKey] = enabled
+		claudeMeta[metaRawEventKey] = map[string]any{metaRawEventEnabledKey: enabled}
 		config.meta[claudeMetaKey] = claudeMeta
 	}
-}
-
-// WithSessionOutputFormat sets Claude structured output for a session lifecycle
-// request.
-func WithSessionOutputFormat(format ClaudeOutputFormat) SessionRequestOption {
-	cloned := cloneOutputFormat(format)
-
-	return func(config *sessionRequestConfig) {
-		config.meta = mergeAnyMap(config.meta, ClaudeOptions{OutputFormat: &cloned}.Meta())
-	}
-}
-
-// WithSessionGoal sets initial _meta.claude.goal metadata for a session
-// lifecycle request. It serializes only client-settable goal fields and does
-// not send a /goal command to Claude.
-func WithSessionGoal(goal ClaudeGoal) SessionRequestOption {
-	value := clientGoalMap(goal)
-
-	return func(config *sessionRequestConfig) {
-		config.meta = mergeAnyMap(config.meta, map[string]any{
-			claudeMetaKey: map[string]any{
-				claudeGoalMetaKey: value,
-			},
-		})
-	}
-}
-
-// WithSessionGoalClear clears _meta.claude.goal metadata for a session
-// lifecycle request.
-func WithSessionGoalClear() SessionRequestOption {
-	return func(config *sessionRequestConfig) {
-		config.meta = mergeAnyMap(config.meta, map[string]any{
-			claudeMetaKey: map[string]any{
-				claudeGoalMetaKey: nil,
-			},
-		})
-	}
-}
-
-// SetGoalRequest constructs params for the _claude/session/setGoal extension
-// method. It serializes only client-settable goal fields and does not send a
-// /goal command to Claude.
-func SetGoalRequest(sessionID acp.SessionId, goal ClaudeGoal) map[string]any {
-	return map[string]any{
-		acpFieldSessionID: sessionID,
-		claudeGoalMetaKey: clientGoalMap(goal),
-	}
-}
-
-// ClearGoalRequest constructs params for the _claude/session/setGoal extension
-// method clear operation.
-func ClearGoalRequest(sessionID acp.SessionId) map[string]any {
-	return map[string]any{
-		acpFieldSessionID: sessionID,
-		claudeGoalMetaKey: nil,
-	}
-}
-
-func clientGoalMap(goal ClaudeGoal) map[string]any {
-	value := map[string]any{
-		goalFieldObjective: goal.Objective,
-	}
-	if goal.CompletionCondition != "" {
-		value[goalFieldCompletionCondition] = goal.CompletionCondition
-	}
-
-	if goal.Status != "" {
-		value[goalFieldStatus] = goal.Status
-	}
-
-	if goal.Reason != "" {
-		value[goalFieldReason] = goal.Reason
-	}
-
-	return value
 }
 
 func newSessionRequestConfig(opts ...SessionRequestOption) sessionRequestConfig {
@@ -225,6 +183,64 @@ func PromptRequest(sessionID acp.SessionId, blocks ...acp.ContentBlock) acp.Prom
 // content block.
 func TextPromptRequest(sessionID acp.SessionId, text string) acp.PromptRequest {
 	return PromptRequest(sessionID, acp.TextBlock(text))
+}
+
+// SetConfigOptionRequest constructs a value-id session/set_config_option request.
+func SetConfigOptionRequest(
+	sessionID acp.SessionId,
+	configID acp.SessionConfigId,
+	value acp.SessionConfigValueId,
+) acp.SetSessionConfigOptionRequest {
+	return acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: sessionID,
+			ConfigId:  configID,
+			Value:     value,
+		},
+	}
+}
+
+// SetModelRequest constructs a model selector update request.
+func SetModelRequest(sessionID acp.SessionId, model string) acp.SetSessionConfigOptionRequest {
+	return SetConfigOptionRequest(sessionID, configModel, acp.SessionConfigValueId(model))
+}
+
+// DeleteSessionRequest constructs a session/delete request.
+func DeleteSessionRequest(sessionID acp.SessionId) acp.UnstableDeleteSessionRequest {
+	return acp.UnstableDeleteSessionRequest{SessionId: sessionID}
+}
+
+// StdioMCPServer constructs an ACP stdio MCP server declaration.
+func StdioMCPServer(name string, command string, args []string, env map[string]string) acp.McpServer {
+	variables := make([]acp.EnvVariable, 0, len(env))
+	for key, value := range env {
+		variables = append(variables, acp.EnvVariable{Name: key, Value: value})
+	}
+
+	return acp.McpServer{
+		Stdio: &acp.McpServerStdio{
+			Name:    name,
+			Command: command,
+			Args:    append([]string(nil), args...),
+			Env:     variables,
+		},
+	}
+}
+
+// HTTPMCPServer constructs an ACP HTTP MCP server declaration.
+func HTTPMCPServer(name string, url string, headers map[string]string) acp.McpServer {
+	values := make([]acp.HttpHeader, 0, len(headers))
+	for key, value := range headers {
+		values = append(values, acp.HttpHeader{Name: key, Value: value})
+	}
+
+	return acp.McpServer{
+		Http: &acp.McpServerHttpInline{
+			Name:    name,
+			Url:     url,
+			Headers: values,
+		},
+	}
 }
 
 // ListSessionsRequestOption configures embedded-Go session/list requests.
@@ -294,6 +310,15 @@ func WithClaudeEnv(env map[string]string) ClaudeOption {
 	}
 }
 
+// WithClaudeOutputSchema configures Claude JSON Schema structured output.
+func WithClaudeOutputSchema(schema map[string]any) ClaudeOption {
+	cloned := cloneAnyMap(schema)
+
+	return func(options *ClaudeOptions) {
+		options.OutputSchema = cloneAnyMap(cloned)
+	}
+}
+
 // WithClaudeSystemPrompt configures the Claude session system prompt.
 func WithClaudeSystemPrompt(prompt string) ClaudeOption {
 	return func(options *ClaudeOptions) {
@@ -315,57 +340,12 @@ func WithClaudePermissionMode(mode string) ClaudeOption {
 	}
 }
 
-// WithClaudeAdditionalDirectories configures additional Claude workspace
-// directories.
-func WithClaudeAdditionalDirectories(paths ...string) ClaudeOption {
-	cloned := append([]string(nil), paths...)
-
-	return func(options *ClaudeOptions) {
-		options.AdditionalDirectories = append([]string(nil), cloned...)
-	}
-}
-
-// WithClaudeOutputFormat configures Claude structured output.
-func WithClaudeOutputFormat(format ClaudeOutputFormat) ClaudeOption {
-	cloned := cloneOutputFormat(format)
-
-	return func(options *ClaudeOptions) {
-		options.OutputFormat = &cloned
-	}
-}
-
-// WithClaudeJSONSchema configures Claude JSON Schema structured output.
-func WithClaudeJSONSchema(schema map[string]any) ClaudeOption {
-	return WithClaudeOutputFormat(JSONSchemaOutputFormat(schema))
-}
-
-// JSONSchemaOutputFormat constructs a Claude JSON Schema structured output
-// format.
-func JSONSchemaOutputFormat(schema map[string]any) ClaudeOutputFormat {
-	return ClaudeOutputFormat{
-		Type:   ClaudeOutputFormatJSONSchema,
-		Schema: cloneAnyMap(schema),
-	}
-}
-
 func cloneClaudeOptions(options ClaudeOptions) ClaudeOptions {
 	cloned := options
 	cloned.Env = cloneStringMap(options.Env)
-
-	cloned.AdditionalDirectories = append([]string(nil), options.AdditionalDirectories...)
-	if options.OutputFormat != nil {
-		outputFormat := cloneOutputFormat(*options.OutputFormat)
-		cloned.OutputFormat = &outputFormat
-	}
+	cloned.OutputSchema = cloneAnyMap(options.OutputSchema)
 
 	return cloned
-}
-
-func cloneOutputFormat(format ClaudeOutputFormat) ClaudeOutputFormat {
-	return ClaudeOutputFormat{
-		Type:   format.Type,
-		Schema: cloneAnyMap(format.Schema),
-	}
 }
 
 func mergeAnyMap(base map[string]any, overlay map[string]any) map[string]any {

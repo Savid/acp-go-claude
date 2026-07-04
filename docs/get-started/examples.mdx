@@ -1,38 +1,16 @@
 ---
 title: "Examples"
-description: "Small examples for ACP host flows"
-icon: "flask-conical"
+description: "Included example programs"
 ---
 
-## Minimal client
+| Example | Purpose |
+| --- | --- |
+| `examples/minimal-client` | Starts the adapter, sends one prompt, and prints the response. |
+| `examples/interactive-chat` | Runs a small interactive terminal client. |
+| `examples/resume-from-file` | Reads JSONL into a `SessionStore`, loads the session, and prompts it. |
 
-```bash
-go run ./examples/minimal-client "Reply with hello from ACP"
+Run any example from the repository root:
+
+```sh
+go run ./examples/minimal-client "Reply with ACP_EXAMPLE_OK"
 ```
-
-Smallest useful [ACP host](https://agentclientprotocol.com/overview/clients)
-flow: start the agent, initialize, create a session, send one prompt, print
-updates, close. The example uses the embedded request helpers such as
-`claudeacp.NewSessionRequest` and `claudeacp.TextPromptRequest` so required ACP
-empty slices are filled correctly.
-
-## Interactive chat
-
-```bash
-go run ./examples/interactive-chat
-```
-
-Terminal chat over ACP. Use it to inspect
-[streaming](/docs/core/prompt-streaming), tool updates, usage,
-[permissions](/docs/features/permissions), queued prompts, and cancellation.
-
-## Resume from file
-
-```bash
-go run ./examples/resume-from-file/main.go
-```
-
-Imports `examples/resume-from-file/session.jsonl` through
-[`_claude/session/import`](/docs/reference/session-import), loads it, prints
-the replay, then sends a smoke prompt. For durable storage, embed the agent and
-provide a [SessionStore](/docs/features/session-store).

@@ -1,9 +1,7 @@
 # acp-go-claude
 
-Go ACP agent for [Claude Code](https://code.claude.com/docs/en/overview).
-It wraps the local `claude` CLI, speaks
-[Agent Client Protocol](https://agentclientprotocol.com/) over JSON-RPC
-streams, and is built on
+Go ACP agent for Claude Code. It wraps the local `claude` CLI, speaks
+Agent Client Protocol over JSON-RPC streams, and is built on
 [`github.com/coder/acp-go-sdk`](https://github.com/coder/acp-go-sdk).
 
 Use it as either:
@@ -64,26 +62,21 @@ func main() {
 ```
 
 See [Go API docs](docs/reference/go-api.mdx) for options such as Claude path,
-Claude home, default model, session storage, goals, permissions, MCP proxy
-override, and OpenTelemetry providers.
+Claude home, default model, session storage, permissions, raw events, and
+OpenTelemetry providers.
 
 ## What It Provides
 
 - ACP session lifecycle: create, prompt, cancel, close, list, load, resume, and
-  fork.
+  extension-based fork.
 - Claude stream-json subprocess management and control protocol handling.
 - Prompt streaming for messages, thoughts, tool calls, tool results, plans,
   usage, and session metadata.
 - Claude Code structured output through session-level JSON Schema.
-- Claude-specific session goals and native `/goal` state mapping.
-- Claude Code Workflow tool progress with accumulated phase/agent metadata.
 - Claude permission modes, permission prompts, plan mode, elicitation, and
   `AskUserQuestion` bridging.
-- MCP stdio, HTTP, SSE, and ACP-transport bridging. SSE is still accepted for
-  Claude compatibility, but HTTP is preferred for new MCP servers.
-- Session import and optional durable mirroring through a host-provided
-  `SessionStore`; transcript mirror frames are always requested for native goal
-  extraction.
+- MCP stdio and HTTP server declarations.
+- Optional durable mirroring through a host-provided `SessionStore`.
 - Optional raw Claude stream-json extension notifications.
 - OpenTelemetry spans, metrics, trace propagation, and structured logs without
   recording prompt/tool secrets by default.

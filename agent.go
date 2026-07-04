@@ -15,6 +15,11 @@ import (
 )
 
 const (
+	ForkSessionMethod = "_claude/session/fork"
+	RawEventMethod    = "_claude/rawEvent"
+)
+
+const (
 	modeDefault           acp.SessionModeId = "default"
 	modePlan              acp.SessionModeId = "plan"
 	modeAcceptEdits       acp.SessionModeId = "accept_edits"
@@ -34,22 +39,18 @@ const (
 	configMode        acp.SessionConfigId = "mode"
 	configOutputStyle acp.SessionConfigId = "output_style"
 	configEffort      acp.SessionConfigId = "effort"
-	configFastMode    acp.SessionConfigId = "fast_mode"
 
-	configTypeSelect  = "select"
-	configTypeBoolean = "boolean"
-	effortLow         = "low"
-	effortMedium      = "medium"
-	effortHigh        = "high"
-	effortXHigh       = "xhigh"
-	effortMax         = "max"
+	configTypeSelect = "select"
+	effortLow        = "low"
+	effortMedium     = "medium"
+	effortHigh       = "high"
+	effortXHigh      = "xhigh"
+	effortMax        = "max"
 
 	clientMetaTerminalOutput = "terminal_output"
 	permissionPromptTool     = "stdio"
 	validationRequired       = "required"
-	capabilityRawEventsKey   = "rawEvents"
-
-	mcpConfigTypeACP = "acp"
+	validationUnsupported    = "unsupported"
 
 	listSessionsPageSize = 50
 )
@@ -68,18 +69,13 @@ type Agent struct {
 	mu                 sync.Mutex
 	closed             bool
 	conn               agentClient
-	sessions           map[acp.SessionId]*Session
-	nesSessions        map[acp.SessionId]*nesSession
-	docsMu             sync.Mutex
-	documents          map[acp.SessionId]map[string]documentState
-	focusedDocuments   map[acp.SessionId]string
+	sessions           map[acp.SessionId]*agentSession
+	store              SessionStore
+	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
-	mcpConnections     map[acp.UnstableMcpConnectionId]*mcpBridgeConn
-	gatewayAuth        *gatewayAuth
 	permissionCache    map[acp.SessionId]map[string]string
-	importStore        *InMemorySessionStore
-	imports            map[string]*sessionImport
+	activeLimitErr     error
 
 	newClaudeClient func(*slog.Logger, claude.Options) *claude.Client
 }
@@ -103,15 +99,11 @@ func NewAgent(opts ...Option) *Agent {
 		options:          options,
 		log:              log,
 		observe:          observer.New(observer.Config{MeterProvider: options.MeterProvider, Propagator: options.TextMapPropagator, TracerProvider: options.TracerProvider, Version: options.AgentVersion}),
-		sessions:         make(map[acp.SessionId]*Session),
-		nesSessions:      make(map[acp.SessionId]*nesSession),
-		documents:        make(map[acp.SessionId]map[string]documentState),
-		focusedDocuments: make(map[acp.SessionId]string),
+		sessions:         make(map[acp.SessionId]*agentSession),
+		store:            NewInMemorySessionStore(),
 		positionEncoding: acp.PositionEncodingKindUtf16,
-		mcpConnections:   make(map[acp.UnstableMcpConnectionId]*mcpBridgeConn),
 		permissionCache:  make(map[acp.SessionId]map[string]string),
-		importStore:      NewInMemorySessionStore(),
-		imports:          make(map[string]*sessionImport),
+		activeLimitErr:   validateConcurrencyLimits(options.ConcurrencyLimits),
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
 			return claude.NewClient(log, options, nil)
 		},
@@ -142,20 +134,12 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 func (a *Agent) Close() error {
 	a.mu.Lock()
 
-	sessions := make([]*Session, 0, len(a.sessions))
+	sessions := make([]*agentSession, 0, len(a.sessions))
 	for _, session := range a.sessions {
 		sessions = append(sessions, session)
 	}
 
-	nesSessions := make([]*nesSession, 0, len(a.nesSessions))
-	for _, session := range a.nesSessions {
-		nesSessions = append(nesSessions, session)
-	}
-
-	a.sessions = make(map[acp.SessionId]*Session)
-	a.nesSessions = make(map[acp.SessionId]*nesSession)
-	a.mcpConnections = make(map[acp.UnstableMcpConnectionId]*mcpBridgeConn)
-	a.imports = make(map[string]*sessionImport)
+	a.sessions = make(map[acp.SessionId]*agentSession)
 	a.permissionCache = make(map[acp.SessionId]map[string]string)
 	a.conn = nil
 	a.closed = true
@@ -165,21 +149,12 @@ func (a *Agent) Close() error {
 		a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 	}
 
-	a.docsMu.Lock()
-	a.documents = make(map[acp.SessionId]map[string]documentState)
-	a.focusedDocuments = make(map[acp.SessionId]string)
-	a.docsMu.Unlock()
-
 	var closeErrs []error
 
 	for _, session := range sessions {
 		if err := session.Close(context.Background()); err != nil {
 			closeErrs = append(closeErrs, err)
 		}
-	}
-
-	for _, session := range nesSessions {
-		session.close()
 	}
 
 	return errors.Join(closeErrs...)
@@ -197,6 +172,10 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 	_, finish := a.observe.StartACP(ctx, params.Meta, "initialize")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
+	if a.activeLimitErr != nil {
+		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: a.activeLimitErr.Error()})
+	}
+
 	title := a.options.AgentTitle
 	positionEncoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
 
@@ -212,75 +191,42 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 			Title:   &title,
 			Version: a.options.AgentVersion,
 		},
-		AuthMethods: a.authMethods(params),
+		AuthMethods: []acp.AuthMethod{},
 		AgentCapabilities: acp.AgentCapabilities{
 			Meta: map[string]any{
 				claudeMetaKey: map[string]any{
-					"promptQueueing": map[string]any{
-						capabilityScopeKey: capabilityScopeSession,
-						"sameSession":      true,
+					"fork": map[string]any{
+						"unstable": true,
+						"method":   ForkSessionMethod,
+						"request":  "acp.UnstableForkSessionRequest JSON payload only",
+						"response": "acp.UnstableForkSessionResponse JSON payload only",
 					},
-					"sessionImport": map[string]any{
-						capabilityScopeKey: capabilityScopeSession,
-						jsonFieldFormat:    claudeSessionImportFormat,
-						"methods": map[string]string{
-							"import":       claudeSessionImportMethod,
-							"importChunk":  claudeSessionImportChunkMethod,
-							"commitImport": claudeSessionCommitImportMethod,
-							"abortImport":  claudeSessionAbortImportMethod,
-						},
+					"elicitation": map[string]any{
+						"unstable": true,
+						"scope":    "session",
+						"tracks":   "in-progress ACP elicitation RFD",
 					},
-					rawSDKMessagesCapabilityKey: map[string]any{
-						capabilityScopeKey:         capabilityScopeSession,
-						rawSDKMessagesMethodKey:    rawClaudeSDKMessageMethod,
-						rawSDKMessagesEnabledByKey: rawSDKMessagesEnabledByPath,
+					"rawEvent": map[string]any{
+						"method":         RawEventMethod,
+						"enabledBy":      "_meta.claude.rawEvent.enabled",
+						"maxBytes":       rawEventMaxBytes,
+						"defaultEnabled": false,
 					},
-					outputFormatCapabilityKey: map[string]any{
-						capabilityScopeKey:     capabilityScopeSession,
-						"types":                []string{ClaudeOutputFormatJSONSchema},
-						"config":               outputFormatConfigPath,
-						outputFormatResultKey:  outputFormatResultPath,
-						"hiddenTool":           "StructuredOutput",
-						capabilityRawEventsKey: rawClaudeSDKMessageMethod,
+					"sessionStore": map[string]any{
+						"format": SessionStoreFormat,
+						"key":    []string{"sessionId", "subpath"},
 					},
-					claudeGoalsCapabilityKey: map[string]any{
-						capabilityScopeKey:     capabilityScopeSession,
-						goalCapabilityStateKey: "session_info_update._meta.claude.goal",
-						"initialState": map[string]any{
-							"sessionResponses": []string{
-								"session/new.result._meta.claude.goal",
-								"session/load.result._meta.claude.goal",
-								"session/resume.result._meta.claude.goal",
-							},
-							"listSummary": "session/list.result.sessions[]._meta.claude.goal",
-						},
-						"setMethod":              claudeSessionSetGoalMethod,
-						"semantics":              "full-snapshot",
-						"maxObjectiveBytes":      maxGoalObjectiveBytes,
-						"maxSummaryRunes":        maxGoalSummaryRunes,
-						"statuses":               []string{ClaudeGoalStatusActive, ClaudeGoalStatusCompleted, ClaudeGoalStatusBlocked},
-						"clientSettableStatuses": []string{ClaudeGoalStatusActive, ClaudeGoalStatusBlocked},
-						"clearValue":             nil,
-					},
-					"workflows": map[string]any{
-						"updates":          true,
-						capabilityScopeKey: capabilityScopeSession,
-						"toolKind":         string(acp.ToolKindThink),
-						"metadataPath":     "tool_call_update._meta.claude.workflow",
-						"logs": map[string]any{
-							"readByDefault": false,
-						},
-						capabilityRawEventsKey: rawClaudeSDKMessageMethod,
+					"structuredOutput": map[string]any{
+						"config": "_meta.claude.options.outputSchema",
+						"result": "_meta.claude.structuredOutput",
+						"schema": "json_schema",
 					},
 				},
 			},
 			LoadSession: true,
 			McpCapabilities: acp.McpCapabilities{
-				Acp:  true,
 				Http: true,
-				Sse:  true,
 			},
-			Nes:              nesCapabilities(),
 			PositionEncoding: &positionEncoding,
 			PromptCapabilities: acp.PromptCapabilities{
 				EmbeddedContext: true,
@@ -288,7 +234,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 			},
 			SessionCapabilities: acp.SessionCapabilities{
 				Close:                 &acp.SessionCloseCapabilities{},
-				Fork:                  &acp.SessionForkCapabilities{},
+				Delete:                &acp.SessionDeleteCapabilities{},
 				List:                  &acp.SessionListCapabilities{},
 				Resume:                &acp.SessionResumeCapabilities{},
 				AdditionalDirectories: &acp.SessionAdditionalDirectoriesCapabilities{},
@@ -299,21 +245,10 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 	return resp, nil
 }
 
-// Authenticate stores auth state for agent-handled methods.
+// Authenticate rejects agent-handled auth methods because Claude owns auth.
 func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest) (resp acp.AuthenticateResponse, err error) {
 	_, finish := a.observe.StartACP(ctx, params.Meta, "authenticate")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
-
-	if params.MethodId == authMethodGateway {
-		auth, err := parseGatewayAuthMeta(params.Meta)
-		if err != nil {
-			return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
-		}
-
-		a.setGatewayAuth(auth)
-
-		return acp.AuthenticateResponse{}, nil
-	}
 
 	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 }
@@ -321,16 +256,8 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 // HandleExtensionMethod handles Claude-specific ACP extension methods.
 func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	switch method {
-	case claudeSessionImportMethod:
-		return a.importClaudeSession(ctx, params)
-	case claudeSessionImportChunkMethod:
-		return a.importClaudeSessionChunk(ctx, params)
-	case claudeSessionCommitImportMethod:
-		return a.commitClaudeSessionImport(ctx, params)
-	case claudeSessionAbortImportMethod:
-		return a.abortClaudeSessionImport(ctx, params)
-	case claudeSessionSetGoalMethod:
-		return a.setClaudeGoal(ctx, params)
+	case ForkSessionMethod:
+		return a.handleForkSession(ctx, params)
 	default:
 		return nil, acp.NewMethodNotFound(method)
 	}

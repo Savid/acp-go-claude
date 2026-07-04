@@ -7,7 +7,7 @@ import (
 	"github.com/savid/acp-go-claude/internal/claude"
 )
 
-func (s *Session) modelSelection(preference string) (string, string) {
+func (s *agentSession) modelSelection(preference string) (string, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -19,7 +19,7 @@ func (s *Session) modelSelection(preference string) (string, string) {
 	return model, claudeModelID(model, s.modelOverrides)
 }
 
-func (s *Session) setModelAndClampMode(model string) (bool, acp.SessionModeId, bool, string) {
+func (s *agentSession) setModelAndClampMode(model string) (bool, acp.SessionModeId, bool, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -40,21 +40,21 @@ func (s *Session) setModelAndClampMode(model string) (bool, acp.SessionModeId, b
 	return false, s.mode, effortChanged, nextEffort
 }
 
-func (s *Session) setMode(mode acp.SessionModeId) {
+func (s *agentSession) setMode(mode acp.SessionModeId) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.mode = mode
 }
 
-func (s *Session) modeInfo() (acp.SessionModeId, string, []claude.AvailableModelInfo) {
+func (s *agentSession) modeInfo() (acp.SessionModeId, string, []claude.AvailableModelInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.mode, s.model, append([]claude.AvailableModelInfo(nil), s.availableModels...)
 }
 
-func (s *Session) configInfo() (acp.SessionModeId, string, []claude.AvailableModelInfo, string, []string, string, bool, bool) {
+func (s *agentSession) configInfo() (acp.SessionModeId, string, []claude.AvailableModelInfo, string, []string, string, bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -68,21 +68,21 @@ func (s *Session) configInfo() (acp.SessionModeId, string, []claude.AvailableMod
 		s.fastModeKnown
 }
 
-func (s *Session) setOutputStyle(style string) {
+func (s *agentSession) setOutputStyle(style string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.outputStyle = style
 }
 
-func (s *Session) setEffort(effort string) {
+func (s *agentSession) setEffort(effort string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.effort = effort
 }
 
-func (s *Session) applyEffort(ctx context.Context, effort string) error {
+func (s *agentSession) applyEffort(ctx context.Context, effort string) error {
 	if effort == "" {
 		return s.client.ApplyFlagSettings(ctx, map[string]any{string(configEffort): nil})
 	}
@@ -90,15 +90,7 @@ func (s *Session) applyEffort(ctx context.Context, effort string) error {
 	return s.client.SetEffort(ctx, effort)
 }
 
-func (s *Session) setFastMode(enabled bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.fastMode = enabled
-	s.fastModeKnown = true
-}
-
-func (s *Session) commands() []claude.SlashCommand {
+func (s *agentSession) commands() []claude.SlashCommand {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

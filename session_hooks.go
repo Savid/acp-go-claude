@@ -10,7 +10,7 @@ import (
 	"github.com/savid/acp-go-claude/internal/mapper"
 )
 
-func (s *Session) handleHookCallback(ctx context.Context, request claude.HookRequest) (claude.HookResponse, error) {
+func (s *agentSession) handleHookCallback(ctx context.Context, request claude.HookRequest) (claude.HookResponse, error) {
 	response := claude.HookResponse{Continue: true}
 	if request.EventName != systemHookPostToolUse || request.ToolUseID == "" || s.hookHandled(request.ToolUseID) {
 		return response, nil
@@ -19,7 +19,7 @@ func (s *Session) handleHookCallback(ctx context.Context, request claude.HookReq
 	return response, s.handlePostToolUseHook(ctx, request.ToolUseID, request.ToolName, request.ToolResponse)
 }
 
-func (s *Session) handlePostToolUseHook(
+func (s *agentSession) handlePostToolUseHook(
 	ctx context.Context,
 	toolUseID string,
 	toolName string,
@@ -70,7 +70,7 @@ func (s *Session) handlePostToolUseHook(
 	return nil
 }
 
-func (s *Session) hookHandled(toolUseID string) bool {
+func (s *agentSession) hookHandled(toolUseID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -79,7 +79,7 @@ func (s *Session) hookHandled(toolUseID string) bool {
 	return ok
 }
 
-func (s *Session) markHookHandled(toolUseID string) {
+func (s *agentSession) markHookHandled(toolUseID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -101,7 +101,7 @@ func (s *Session) markHookHandled(toolUseID string) {
 	}
 }
 
-func (s *Session) enterPlanModeFromHook(ctx context.Context) error {
+func (s *agentSession) enterPlanModeFromHook(ctx context.Context) error {
 	s.setMode(modePlan)
 
 	return s.emitOptionalUpdates(ctx, []acp.SessionUpdate{

@@ -17,10 +17,6 @@ type agentClient interface {
 	UnstableCreateElicitation(context.Context, acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
 	ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error)
 	WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error)
-	UnstableConnectMcp(context.Context, acp.UnstableConnectMcpRequest) (acp.UnstableConnectMcpResponse, error)
-	UnstableDisconnectMcp(context.Context, acp.UnstableDisconnectMcpRequest) (acp.UnstableDisconnectMcpResponse, error)
-	UnstableMessageMcp(context.Context, acp.UnstableMessageMcpRequest) (acp.UnstableMessageMcpResponse, error)
-	UnstableNotifyMcp(context.Context, acp.UnstableMessageMcpNotification) error
 	RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
 	SessionUpdate(context.Context, acp.SessionNotification) error
 	CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error)

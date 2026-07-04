@@ -1,59 +1,17 @@
 ---
-title: "ACP methods"
-description: "Agent methods implemented by the local dispatcher"
-icon: "square-code"
+title: "ACP Methods"
+description: "Implemented ACP methods and extensions"
 ---
 
-## Stable methods
+Core methods include initialize, session create/load/resume/list/delete,
+prompt, cancel, close, authenticate, logout, and configuration methods
+implemented by the ACP SDK connection.
 
-The method surface is identical in standalone CLI and embedded Go. The only
-difference is whether the ACP connection reaches the agent through process
-stdio or through streams passed to `claudeacp.Serve`.
+Claude extensions:
 
-| Method | Status | ACP docs |
-| --- | --- | --- |
-| `initialize` | implemented | [Initialization](https://agentclientprotocol.com/protocol/initialization), [Schema](https://agentclientprotocol.com/protocol/schema) |
-| `authenticate` | implemented for gateway auth | [Initialization](https://agentclientprotocol.com/protocol/initialization), [Schema](https://agentclientprotocol.com/protocol/schema) |
-| `logout` | clears adapter-owned gateway auth state | [Logout Method RFD](https://agentclientprotocol.com/rfds/logout-method) |
-| `session/new` | implemented | [Session Setup](https://agentclientprotocol.com/protocol/session-setup), [Schema](https://agentclientprotocol.com/protocol/schema) |
-| `session/prompt` | implemented | [Prompt Turn](https://agentclientprotocol.com/protocol/prompt-turn), [Content](https://agentclientprotocol.com/protocol/content), [Tool Calls](https://agentclientprotocol.com/protocol/tool-calls) |
-| `session/cancel` | implemented | [Prompt Turn cancellation](https://agentclientprotocol.com/protocol/prompt-turn), [Schema](https://agentclientprotocol.com/protocol/schema) |
-| `session/close` | implemented | [Schema](https://agentclientprotocol.com/protocol/schema), [Session close RFD](https://agentclientprotocol.com/rfds/session-stop) |
-| `session/list` | implemented | [Session List](https://agentclientprotocol.com/protocol/session-list) |
-| `session/load` | implemented | [Session Setup](https://agentclientprotocol.com/protocol/session-setup), [Schema](https://agentclientprotocol.com/protocol/schema) |
-| `session/resume` | implemented | [Schema](https://agentclientprotocol.com/protocol/schema), [Session resume RFD](https://agentclientprotocol.com/rfds/session-resume) |
-| `session/set_config_option` | implemented | [Session Config Options](https://agentclientprotocol.com/protocol/session-config-options) |
+| Method | Direction |
+| --- | --- |
+| `_claude/session/fork` | client to agent |
+| `_claude/rawEvent` | agent to client |
 
-## Unstable methods
-
-The methods in this section are exposed through the SDK's unstable ACP surface.
-Clients should treat them as opt-in behavior and prefer stable config methods
-where available.
-
-| Method | Status | ACP docs |
-| --- | --- | --- |
-| `session/fork` | implemented | [Session fork RFD](https://agentclientprotocol.com/rfds/session-fork) |
-| document notifications | implemented | [Next Edit Suggestions RFD](https://agentclientprotocol.com/rfds/next-edit-suggestions), [File System](https://agentclientprotocol.com/protocol/file-system) |
-| NES lifecycle | implemented | [Next Edit Suggestions RFD](https://agentclientprotocol.com/rfds/next-edit-suggestions) |
-| `mcp/message` | implemented for ACP-transport MCP | [MCP-over-ACP RFD](https://agentclientprotocol.com/rfds/mcp-over-acp) |
-
-Provider-management RFD methods are intentionally unsupported. Clients should
-use `session/set_config_option` for model and mode selection.
-
-## Claude-specific extension methods
-
-| Method | Purpose | ACP docs |
-| --- | --- | --- |
-| `_claude/session/import` | One-shot import and commit of Claude JSONL entries. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
-| `_claude/session/importChunk` | Append a chunk to a pending import. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
-| `_claude/session/commitImport` | Commit a pending import into the session store. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
-| `_claude/session/abortImport` | Drop a pending import. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
-| `_claude/session/setGoal` | Set or clear `_meta.claude.goal` session metadata. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility) |
-
-## Extension notifications
-
-| Method | Purpose | ACP docs |
-| --- | --- | --- |
-| `_claude/sdkMessage` | Emits selected raw Claude stream-json messages. | [Extensibility](https://agentclientprotocol.com/protocol/extensibility), [Session Updates](https://agentclientprotocol.com/protocol/prompt-turn) |
-
-Unsupported extension methods return `method not found`.
+Unsupported methods return a uniform JSON-RPC method-not-found error.

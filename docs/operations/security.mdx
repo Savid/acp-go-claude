@@ -1,69 +1,17 @@
 ---
 title: "Security"
-description: "Trust boundaries and operational security notes"
-icon: "shield"
+description: "Security boundaries"
 ---
 
-## Permission prompts
+Claude account material remains in the Claude config directory selected by the
+host. The adapter does not log secrets, prompt text, tool payloads, or raw event
+content by default.
 
-Permission flow is load-bearing. Do not bypass `session/request_permission`
-unless the active [Claude permission mode](https://code.claude.com/docs/en/permission-modes)
-explicitly does so. Saved allow/reject rules remain session-scoped and are
-only copied through [session fork](https://agentclientprotocol.com/rfds/session-fork).
+Permission prompts are load-bearing. The adapter does not bypass them and keeps
+permission decisions scoped to the session.
 
-## Claude authentication
+Native Claude child processes are started in their own process group and are
+configured to receive a parent-death signal on Unix platforms.
 
-Claude CLI authentication state is owned by
-[Claude Code](https://code.claude.com/docs/en/overview). ACP
-[`logout`](https://agentclientprotocol.com/rfds/logout-method) only clears
-adapter-owned gateway auth state and closes active gateway-backed sessions
-launched by this adapter.
-
-[Standalone CLI and embedded Go](/docs/get-started/run-modes) share this
-boundary. `-claude-home` and `WithClaudeHome` only choose which Claude config
-directory is passed to the Claude process; neither mode edits Claude's login
-state except by launching Claude's own auth command.
-
-## Gateway auth
-
-[Gateway auth](/docs/features/authentication#gateway-auth) accepts `baseUrl`
-under `auth._meta.gateway`. It must be an absolute HTTPS URL. Headers are
-formatted into Anthropic custom-header env for Claude.
-
-Under gateway auth, local stdio and ACP MCP servers are rejected because they
-inherit process environment. HTTP/SSE servers remain allowed.
-
-## MCP bridge token files
-
-[ACP-transport MCP](/docs/features/mcp#acp-transport-bridge) uses a loopback
-listener and a local stdio proxy. The bridge token is written to a `0600` temp
-file so it does not appear in argv or env values.
-
-Normal close removes the token file. `SIGKILL` can orphan it in `$TMPDIR`.
-Deployments should keep OS temp cleanup enabled, such as `systemd-tmpfiles` or
-an equivalent boot/session sweep for stale `acp-go-claude-mcp-token-*` files.
-
-## Filesystem boundaries
-
-- `cwd` must be absolute.
-- `additionalDirectories` must be absolute.
-- Claude home is configured with `-claude-home` in standalone CLI or
-  `WithClaudeHome` in embedded Go and is treated as trusted local
-  configuration.
-- [Session store](/docs/features/session-store) materialization writes an
-  isolated temp Claude config dir and removes it on close. It does not copy
-  Claude credential files or `sessions/` auth state into that temp dir.
-
-## Logging and telemetry
-
-Do not log credentials, MCP bridge tokens, prompt text, tool input/output, raw
-Claude JSON, Claude goal objective/completion/reason text, or workflow
-subagent prompts/logs unless the host deliberately opts into that data path. See
-[Observability](/docs/operations/observability#privacy-defaults),
-[Goals](/docs/features/goals#privacy), and
-[Workflows](/docs/features/workflows#logs-and-files), and
-[Raw Claude events](/docs/features/raw-events) for the explicit data paths.
-
-Claude workflow frames can include `transcriptDir`, `scriptPath`, and
-`output_file` references. The adapter exposes file availability metadata but
-does not read those files by default.
+MCP server declarations are validated before launch. Unsupported transports are
+rejected before Claude is started.

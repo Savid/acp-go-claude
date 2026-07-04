@@ -118,15 +118,7 @@ func mcpServerToClaude(server acp.McpServer) (string, map[string]any, error) {
 
 		return server.Http.Name, config, nil
 	case server.Sse != nil:
-		config := map[string]any{
-			keyType: typeSSE,
-			keyURL:  server.Sse.Url,
-		}
-		if headers := headersToMap(server.Sse.Headers); len(headers) > 0 {
-			config[keyHeaders] = headers
-		}
-
-		return server.Sse.Name, config, nil
+		return "", nil, fmt.Errorf("SSE MCP servers are not supported")
 	case server.Acp != nil:
 		return "", nil, fmt.Errorf("ACP-transport MCP servers are not supported by Claude Code")
 	default:

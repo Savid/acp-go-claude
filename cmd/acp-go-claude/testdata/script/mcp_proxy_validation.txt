@@ -1,7 +1,0 @@
-! exec acp-go-claude mcp-proxy -address 127.0.0.1:1
-stderr 'required'
-! stdout .+
-
-! exec acp-go-claude mcp-proxy -unknown
-stderr 'flag provided but not defined'
-! stdout .+

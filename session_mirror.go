@@ -114,14 +114,13 @@ func sessionKeyForMirrorPath(filePath string, projectsDir string) (*SessionKey, 
 		return nil, fmt.Errorf("path is not a Claude session transcript")
 	}
 
-	projectKey := parts[0]
 	if strings.HasSuffix(parts[1], ".jsonl") && len(parts) == 2 {
 		sessionID := strings.TrimSuffix(parts[1], ".jsonl")
 		if !validUUIDShape(sessionID) {
 			return nil, fmt.Errorf("session ID is not a UUID")
 		}
 
-		return &SessionKey{ProjectKey: projectKey, SessionID: sessionID}, nil
+		return &SessionKey{SessionID: sessionID}, nil
 	}
 
 	if len(parts) < 4 || parts[2] != "subagents" {
@@ -148,7 +147,7 @@ func sessionKeyForMirrorPath(filePath string, projectsDir string) (*SessionKey, 
 		return nil, fmt.Errorf("unsafe session subpath")
 	}
 
-	return &SessionKey{ProjectKey: projectKey, SessionID: sessionID, Subpath: subpath}, nil
+	return &SessionKey{SessionID: sessionID, Subpath: subpath}, nil
 }
 
 func defaultClaudeConfigDir(claudeHome string) string {

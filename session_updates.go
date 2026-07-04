@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,7 +21,7 @@ var (
 
 const liveSessionTitleMaxRunes = 256
 
-func (s *Session) emitUpdates(ctx context.Context, updates []acp.SessionUpdate) error {
+func (s *agentSession) emitUpdates(ctx context.Context, updates []acp.SessionUpdate) error {
 	if len(updates) == 0 {
 		return nil
 	}
@@ -53,7 +54,7 @@ func (s *Session) emitUpdates(ctx context.Context, updates []acp.SessionUpdate) 
 	return nil
 }
 
-func (s *Session) emitOptionalUpdates(ctx context.Context, updates []acp.SessionUpdate) error {
+func (s *agentSession) emitOptionalUpdates(ctx context.Context, updates []acp.SessionUpdate) error {
 	if len(updates) == 0 {
 		return nil
 	}
@@ -66,7 +67,7 @@ func (s *Session) emitOptionalUpdates(ctx context.Context, updates []acp.Session
 	return err
 }
 
-func (s *Session) emitLiveSessionInfoUpdate(ctx context.Context, prompt []acp.ContentBlock) error {
+func (s *agentSession) emitLiveSessionInfoUpdate(ctx context.Context, prompt []acp.ContentBlock) error {
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
 	update := acp.SessionSessionInfoUpdate{UpdatedAt: &updatedAt}
 	title := liveSessionTitleFromPrompt(prompt)
@@ -83,7 +84,7 @@ func (s *Session) emitLiveSessionInfoUpdate(ctx context.Context, prompt []acp.Co
 	return s.emitOptionalUpdates(ctx, []acp.SessionUpdate{{SessionInfoUpdate: &update}})
 }
 
-func (s *Session) sessionInfo(id acp.SessionId) acp.SessionInfo {
+func (s *agentSession) sessionInfo(id acp.SessionId) acp.SessionInfo {
 	s.mu.Lock()
 	title := s.title
 	updatedAt := s.updatedAt
@@ -101,14 +102,6 @@ func (s *Session) sessionInfo(id acp.SessionId) acp.SessionInfo {
 	}
 	if updatedAt != "" {
 		info.UpdatedAt = &updatedAt
-	}
-
-	if goal := s.goalSummaryMetaValue(); goal != nil {
-		info.Meta = map[string]any{
-			claudeMetaKey: map[string]any{
-				claudeGoalMetaKey: goal,
-			},
-		}
 	}
 
 	return info
@@ -143,7 +136,7 @@ func normalizeLiveSessionTitle(text string) string {
 	return strings.TrimSpace(string(runes[:liveSessionTitleMaxRunes-3])) + "..."
 }
 
-func (s *Session) emitRawClaudeMessage(ctx context.Context, msg claude.Message) error {
+func (s *agentSession) emitRawClaudeMessage(ctx context.Context, msg claude.Message) error {
 	raw := rawClaudeMessage(msg)
 	if !s.rawMessages.ShouldEmit(raw) {
 		return nil
@@ -159,16 +152,24 @@ func (s *Session) emitRawClaudeMessage(ctx context.Context, msg claude.Message) 
 	conn := s.agent.conn
 	s.agent.mu.Unlock()
 
+	s.mu.Lock()
+	s.rawEventSequence++
+	sequence := s.rawEventSequence
+	s.mu.Unlock()
+
 	payload := map[string]any{
 		acpFieldSessionID: s.id,
-		jsonFieldMessage:  raw,
+		"sequence":        sequence,
+		"source":          "claude",
+		"event":           raw,
+	}
+	if !rawEventWithinLimit(payload) {
+		s.agent.observe.RecordRawMessageEmitFailure(ctx, fmt.Errorf("raw event payload exceeds %d bytes", rawEventMaxBytes))
+
+		return nil
 	}
 
-	if rawJSON := rawClaudeJSON(msg); rawJSON != "" {
-		payload["rawJSON"] = rawJSON
-	}
-
-	if err := conn.NotifyExtension(ctx, rawClaudeSDKMessageMethod, payload); err != nil {
+	if err := conn.NotifyExtension(ctx, RawEventMethod, payload); err != nil {
 		s.agent.observe.RecordRawMessageEmitFailure(ctx, err)
 
 		return err
@@ -255,7 +256,7 @@ func optionalIntSum(left *int, right *int) *int {
 	return &value
 }
 
-func (s *Session) replayTranscript(ctx context.Context, path string) error {
+func (s *agentSession) replayTranscript(ctx context.Context, path string) error {
 	updates, truncated, err := transcript.ReplayUpdates(path)
 	if err != nil {
 		return err
@@ -270,7 +271,7 @@ func (s *Session) replayTranscript(ctx context.Context, path string) error {
 	return s.emitUpdates(ctx, updates)
 }
 
-func (s *Session) emitMessageSideEffects(ctx context.Context, msg claude.Message) error {
+func (s *agentSession) emitMessageSideEffects(ctx context.Context, msg claude.Message) error {
 	system, ok := msg.(*claude.SystemMessage)
 	if !ok {
 		return nil
@@ -306,7 +307,7 @@ func (s *Session) emitMessageSideEffects(ctx context.Context, msg claude.Message
 	}
 }
 
-func (s *Session) emitElicitationComplete(ctx context.Context, system *claude.SystemMessage) error {
+func (s *agentSession) emitElicitationComplete(ctx context.Context, system *claude.SystemMessage) error {
 	caps := s.agent.clientElicitationCapabilities()
 	if caps == nil || caps.Url == nil {
 		return nil
@@ -327,7 +328,7 @@ func (s *Session) emitElicitationComplete(ctx context.Context, system *claude.Sy
 	})
 }
 
-func (s *Session) emitHookResponseUpdates(ctx context.Context, msg claude.Message, options mapper.ToolUpdateOptions) error {
+func (s *agentSession) emitHookResponseUpdates(ctx context.Context, msg claude.Message, options mapper.ToolUpdateOptions) error {
 	system, ok := msg.(*claude.SystemMessage)
 	if !ok || system.Subtype != systemSubtypeHookResponse {
 		return nil

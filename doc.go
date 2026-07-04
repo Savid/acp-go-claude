@@ -14,17 +14,6 @@
 // session store receives Claude transcript mirror rows, can back session/list,
 // and can hydrate Claude JSONL into a temporary Claude config directory for
 // session/load or session/resume when the local Claude transcript is absent.
-// Claude-specific session import extension methods are advertised under
-// _meta.claude when the agent is initialized.
-//
-// Hosts that need Claude-specific goal UI can attach initial goal metadata with
-// [WithSessionGoal] or build _claude/session/setGoal extension params with
-// [SetGoalRequest] and [ClearGoalRequest]. Goals are exposed as
-// _meta.claude.goal and are not a portable ACP core field.
-//
-// Claude Code Workflow tool progress is exposed as normal ACP tool-call updates
-// with accumulated Claude-specific phase and agent metadata under
-// _meta.claude.workflow.
 //
 // Hosts that need adapter telemetry can provide OpenTelemetry providers with
 // [WithTracerProvider] and [WithMeterProvider]. The package never configures
@@ -32,6 +21,6 @@
 // exporter setup for command-line use. Caller-supplied providers remain owned
 // by the caller, including ForceFlush and Shutdown.
 //
-// Hosts that need deterministic Claude sessions can use [WithBareMode] or
+// Hosts that need deterministic Claude sessions can use [WithClaudeBareMode] or
 // per-session [ClaudeOptions] to launch Claude with --bare.
 package claudeacp

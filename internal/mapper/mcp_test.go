@@ -38,12 +38,6 @@ func TestMCPServersToClaude(t *testing.T) {
 				Command: "mcp-empty",
 			},
 		},
-		{
-			Sse: &acp.McpServerSseInline{
-				Name: "sse-empty",
-				Url:  "https://example.com/sse",
-			},
-		},
 	})
 
 	require.NoError(t, err)
@@ -54,7 +48,6 @@ func TestMCPServersToClaude(t *testing.T) {
 	require.Equal(t, "http", decoded["mcpServers"]["http"]["type"])
 	require.NotContains(t, decoded["mcpServers"]["stdio-empty"], "args")
 	require.NotContains(t, decoded["mcpServers"]["stdio-empty"], "env")
-	require.NotContains(t, decoded["mcpServers"]["sse-empty"], "headers")
 }
 
 func TestMCPServersToClaudeUnsupported(t *testing.T) {
@@ -62,6 +55,10 @@ func TestMCPServersToClaudeUnsupported(t *testing.T) {
 
 	_, err := MCPServersToClaude([]acp.McpServer{{Acp: &acp.McpServerAcpInline{Name: "acp", Id: "id"}}})
 	require.Error(t, err)
+
+	_, err = MCPServersToClaude([]acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "events", Url: "https://example.com/sse"}}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SSE MCP")
 
 	_, err = MCPServersToClaude([]acp.McpServer{{}})
 	require.Error(t, err)
@@ -130,14 +127,17 @@ func TestStableMCPServers(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, stable, 3)
 
-	config, err := MCPServersToClaude(stable)
+	_, err = MCPServersToClaude(stable)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SSE MCP")
+
+	config, err := MCPServersToClaude(stable[:2])
 	require.NoError(t, err)
 
 	var decoded map[string]map[string]map[string]any
 	require.NoError(t, json.Unmarshal([]byte(config), &decoded))
 	require.Equal(t, "mcp-fs", decoded["mcpServers"]["fs"]["command"])
 	require.Equal(t, "http", decoded["mcpServers"]["http"]["type"])
-	require.Equal(t, "sse", decoded["mcpServers"]["events"]["type"])
 
 	_, err = StableMCPServers([]acp.UnstableMcpServer{{}})
 	require.Error(t, err)

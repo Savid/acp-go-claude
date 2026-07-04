@@ -10,20 +10,17 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 
 	claudeacp "github.com/savid/acp-go-claude"
 	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 var serve = claudeacp.Serve
-var runMCPProxy = claudeacp.RunMCPProxy
 var runClaudeCLI = runCLI
 var exit = os.Exit
 var shutdownOpenTelemetry = shutdownTelemetry
 var agentVersion = buildVersion
 
-const mcpProxyCommand = "mcp-proxy"
 const cliCommandName = "acp-go-claude --cli"
 
 func main() {
@@ -37,30 +34,34 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		return runClaudeCLI(ctx, args[1:], stdin, stdout, stderr)
 	}
 
-	if len(args) > 0 && args[0] == mcpProxyCommand {
-		return runProxy(ctx, args[1:], stdin, stdout, stderr)
-	}
-
 	flags := flag.NewFlagSet("acp-go-claude", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
-	claudePath := flags.String("claude", "", "path to claude CLI")
+	claudePath := flags.String("path", "", "path to claude CLI")
+	claudeHome := flags.String("home", "", "Claude config directory")
 	model := flags.String("model", "", "default Claude model")
-	claudeHome := flags.String("claude-home", "", "Claude config directory")
-	bare := flags.Bool("bare", false, "launch Claude sessions with --bare; requires API-key or apiKeyHelper auth")
-	hideClaudeAuth := flags.Bool("hide-claude-auth", false, "hide Claude subscription terminal auth methods")
+	bare := flags.Bool("claude-bare", false, "launch Claude sessions with --bare; requires API-key or apiKeyHelper auth")
+	permissionMode := flags.String("claude-permission-mode", "", "default Claude permission mode")
+	systemPrompt := flags.String("claude-system-prompt", "", "default Claude system prompt")
+	hideClaudeAuth := flags.Bool("claude-hide-auth", false, "hide Claude subscription terminal auth methods")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
+	printVersion := flags.Bool("version", false, "print adapter version and exit")
 
 	if err := flags.Parse(args); err != nil {
 		return 2
+	}
+
+	version := agentVersion()
+	if *printVersion {
+		_, _ = fmt.Fprintln(stdout, version)
+
+		return 0
 	}
 
 	logger := slog.New(slog.DiscardHandler)
 	if *debug {
 		logger = slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
-
-	version := agentVersion()
 
 	telemetry, err := configureTelemetry(ctx, logger, version)
 	if err != nil {
@@ -83,15 +84,24 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	defer stop()
 
 	serveOptions := make([]claudeacp.Option, 0, 5+len(telemetry.options))
+
 	serveOptions = append(serveOptions,
 		claudeacp.WithAgentVersion(version),
-		claudeacp.WithClaudePath(*claudePath),
-		claudeacp.WithClaudeHome(*claudeHome),
+		claudeacp.WithExecutablePath(*claudePath),
+		claudeacp.WithHome(*claudeHome),
 		claudeacp.WithDefaultModel(*model),
-		claudeacp.WithBareMode(*bare),
-		claudeacp.WithHideClaudeAuth(*hideClaudeAuth),
+		claudeacp.WithClaudeBareMode(*bare),
+		claudeacp.WithClaudeHideAuth(*hideClaudeAuth),
 		claudeacp.WithLogger(logger),
 	)
+	if *permissionMode != "" {
+		serveOptions = append(serveOptions, claudeacp.WithClaudeDefaultPermissionMode(*permissionMode))
+	}
+
+	if *systemPrompt != "" {
+		serveOptions = append(serveOptions, claudeacp.WithClaudeDefaultSystemPrompt(*systemPrompt))
+	}
+
 	serveOptions = append(serveOptions, telemetry.options...)
 
 	serveErr := serve(ctx, stdin, stdout, serveOptions...)
@@ -129,8 +139,8 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 	flags := flag.NewFlagSet(cliCommandName, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
-	claudePath := flags.String("claude", "", "path to claude CLI")
-	claudeHome := flags.String("claude-home", "", "Claude config directory")
+	claudePath := flags.String("path", "", "path to claude CLI")
+	claudeHome := flags.String("home", "", "Claude config directory")
 
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -215,55 +225,4 @@ func commandExitCode(err error) int {
 	}
 
 	return 1
-}
-
-func runProxy(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
-	flags := flag.NewFlagSet("acp-go-claude mcp-proxy", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-
-	network := flags.String("network", "tcp", "bridge network")
-	address := flags.String("address", "", "bridge address")
-	acpID := flags.String("acp-id", "", "ACP MCP server id")
-
-	if err := flags.Parse(args); err != nil {
-		return 2
-	}
-
-	tokenValue := readTokenFile(os.Getenv(claudeacp.MCPProxyTokenFileEnv))
-
-	if *address == "" || tokenValue == "" || *acpID == "" {
-		_, _ = fmt.Fprintf(
-			stderr,
-			"acp-go-claude mcp-proxy: -address, -acp-id, and %s are required\n",
-			claudeacp.MCPProxyTokenFileEnv,
-		)
-
-		return 2
-	}
-
-	if err := runMCPProxy(ctx, stdin, stdout, claudeacp.MCPProxyOptions{
-		Network: *network,
-		Address: *address,
-		Token:   tokenValue,
-		ACPID:   *acpID,
-	}); err != nil && ctx.Err() == nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-claude mcp-proxy: %v\n", err)
-
-		return 1
-	}
-
-	return 0
-}
-
-func readTokenFile(path string) string {
-	if path == "" {
-		return ""
-	}
-
-	data, err := os.ReadFile(path) // #nosec G304,G703 -- path is supplied by the parent agent through the proxy environment.
-	if err != nil {
-		return ""
-	}
-
-	return strings.TrimSpace(string(data))
 }

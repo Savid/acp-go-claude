@@ -24,25 +24,14 @@ const (
 // a generated constant for it.
 var modelConfigCategory = acp.SessionConfigOptionCategory("model_config")
 
-func sessionResponseMeta(session *Session) map[string]any {
+func sessionResponseMeta(session *agentSession) map[string]any {
 	session.mu.Lock()
 	model := session.model
 	available := append([]claude.AvailableModelInfo(nil), session.availableModels...)
 	effort := session.effort
 	session.mu.Unlock()
 
-	return mergeAnyMap(
-		claudeModelVariantMeta(model, available, effort),
-		session.goalResponseMeta(),
-	)
-}
-
-func (s *Session) goalResponseMeta() map[string]any {
-	return map[string]any{
-		claudeMetaKey: map[string]any{
-			claudeGoalMetaKey: s.goalMetaValue(),
-		},
-	}
+	return claudeModelVariantMeta(model, available, effort)
 }
 
 func claudeModelVariantMeta(model string, available []claude.AvailableModelInfo, effort string) map[string]any {

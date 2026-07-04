@@ -31,12 +31,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
-	goalInput, err := parseGoalFromMeta(params.Meta)
-	if err != nil {
-		return acp.NewSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
-	}
-
-	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories, metaOptions)
+	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.NewSessionResponse{}, validationErr
 	}
@@ -65,8 +60,6 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, err
 	}
 
-	session.applyStoredClientGoalInput(goalInput)
-
 	if err := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); err != nil {
 		a.removeSession(ctx, session.id, session)
 
@@ -92,12 +85,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
-	goalInput, err := parseGoalFromMeta(params.Meta)
-	if err != nil {
-		return acp.ResumeSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
-	}
-
-	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories, metaOptions)
+	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.ResumeSessionResponse{}, validationErr
 	}
@@ -111,8 +99,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
 	}
 	if session := a.activeSessionForStart(params.SessionId, start); session != nil {
-		session.applyStoredClientGoalInput(goalInput)
-
 		if emitErr := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); emitErr != nil {
 			return acp.ResumeSessionResponse{}, emitErr
 		}
@@ -144,8 +130,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	session.applyStoredClientGoalInput(goalInput)
-
 	if err := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); err != nil {
 		a.removeSession(ctx, params.SessionId, session)
 
@@ -172,17 +156,12 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
-	goalInput, err := parseGoalFromMeta(params.Meta)
-	if err != nil {
-		return acp.LoadSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
-	}
-
-	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories, metaOptions)
+	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.LoadSessionResponse{}, validationErr
 	}
 
-	saved, err := transcript.Store{ClaudeHome: a.options.ClaudeHome}.Find(ctx, string(params.SessionId), params.Cwd)
+	saved, err := transcript.Store{ClaudeHome: a.options.Home}.Find(ctx, string(params.SessionId), params.Cwd)
 
 	savedPath := ""
 	if err == nil {
@@ -251,29 +230,6 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, replayErr
 	}
 
-	goalChanged, err := session.applyReplayGoalSnapshot(ctx, replayPath)
-	if err != nil {
-		if startedSession {
-			a.removeSession(ctx, params.SessionId, session)
-		}
-
-		return acp.LoadSessionResponse{}, err
-	}
-
-	if session.applyStoredClientGoalInput(goalInput) {
-		goalChanged = true
-	}
-
-	if goalChanged {
-		if err := session.emitGoalInfoUpdate(ctx); err != nil {
-			if startedSession {
-				a.removeSession(ctx, params.SessionId, session)
-			}
-
-			return acp.LoadSessionResponse{}, err
-		}
-	}
-
 	if err := session.emitOptionalUpdates(ctx, mapper.AvailableCommandsUpdate(session.commands())); err != nil {
 		if startedSession {
 			a.removeSession(ctx, params.SessionId, session)
@@ -303,7 +259,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 
 	a.mu.Lock()
 
-	activeSessions := make(map[acp.SessionId]*Session, len(a.sessions))
+	activeSessions := make(map[acp.SessionId]*agentSession, len(a.sessions))
 	for id, session := range a.sessions {
 		if !sessionMatchesListFilters(session, params) {
 			continue
@@ -318,7 +274,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		active = append(active, session.sessionInfo(id))
 	}
 
-	saved, err := transcript.Store{ClaudeHome: a.options.ClaudeHome}.List(ctx, params.Cwd, nil)
+	saved, err := transcript.Store{ClaudeHome: a.options.Home}.List(ctx, params.Cwd, nil)
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
@@ -426,11 +382,6 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		a.observe.AddActiveSession(ctx, -1)
 	}
 
-	a.docsMu.Lock()
-	delete(a.documents, params.SessionId)
-	delete(a.focusedDocuments, params.SessionId)
-	a.docsMu.Unlock()
-
 	if closeErr != nil {
 		return acp.CloseSessionResponse{}, closeErr
 	}
@@ -438,7 +389,38 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	return acp.CloseSessionResponse{}, nil
 }
 
-func (a *Agent) session(sessionID acp.SessionId) (*Session, error) {
+// UnstableDeleteSession implements ACP session/delete.
+func (a *Agent) UnstableDeleteSession(
+	ctx context.Context,
+	params acp.UnstableDeleteSessionRequest,
+) (acp.UnstableDeleteSessionResponse, error) {
+	if err := a.sessionStore().Delete(ctx, SessionKey{SessionID: string(params.SessionId)}); err != nil {
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
+
+	a.mu.Lock()
+	session := a.sessions[params.SessionId]
+	delete(a.sessions, params.SessionId)
+	a.deleteCachedPermissionRulesLocked(params.SessionId)
+	a.mu.Unlock()
+
+	if session != nil {
+		_ = session.Cancel(ctx)
+		if err := session.Close(ctx); err != nil {
+			return acp.UnstableDeleteSessionResponse{}, err
+		}
+
+		a.observe.AddActiveSession(ctx, -1)
+	}
+
+	if err := deleteNativeTranscript(ctx, a.options.Home, string(params.SessionId)); err != nil {
+		a.log.DebugContext(ctx, "delete native Claude transcript failed", slog.String(acpFieldSessionID, string(params.SessionId)), slog.String(jsonFieldError, err.Error()))
+	}
+
+	return acp.UnstableDeleteSessionResponse{}, nil
+}
+
+func (a *Agent) session(sessionID acp.SessionId) (*agentSession, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -450,7 +432,7 @@ func (a *Agent) session(sessionID acp.SessionId) (*Session, error) {
 	return session, nil
 }
 
-func (s *Session) currentModel() string {
+func (s *agentSession) currentModel() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -486,7 +468,7 @@ func promptResultForObserver(resp acp.PromptResponse, err error, model string) o
 	return result
 }
 
-func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *Session) {
+func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) {
 	a.mu.Lock()
 	removed := false
 
@@ -521,7 +503,7 @@ func (a *Agent) ensureOpen() error {
 	return nil
 }
 
-func (a *Agent) storeStartedSession(ctx context.Context, session *Session) error {
+func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) error {
 	a.mu.Lock()
 	if a.closed {
 		a.deleteCachedPermissionRulesLocked(session.id)
@@ -535,6 +517,16 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *Session) error
 	}
 
 	previous := a.sessions[session.id]
+	if previous == nil && len(a.sessions) >= a.maxActiveSessions() {
+		a.mu.Unlock()
+
+		if err := session.Close(ctx); err != nil {
+			a.log.DebugContext(ctx, "close backpressured Claude session failed", slog.String(jsonFieldError, err.Error()))
+		}
+
+		return backpressureError("active_sessions")
+	}
+
 	a.sessions[session.id] = session
 	a.mu.Unlock()
 
@@ -572,7 +564,7 @@ func (a *Agent) clientSupportsTerminalOutput() bool {
 	return clientMetaBool(a.clientCapabilities.Meta, clientMetaTerminalOutput)
 }
 
-func (a *Agent) activeSessionForStart(id acp.SessionId, start sessionStart) *Session {
+func (a *Agent) activeSessionForStart(id acp.SessionId, start sessionStart) *agentSession {
 	fingerprint := sessionStartFingerprint(start)
 
 	a.mu.Lock()
@@ -641,19 +633,13 @@ func missingClaudeSessionError(err error) bool {
 	return errors.Is(err, claude.ErrSessionNotFound) || errors.Is(err, claude.ErrQueryClosed)
 }
 
-func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessionStart) (*Session, error) {
-	gatewayEnv := a.gatewayEnv()
-
-	if err := a.validateGatewayMCPIsolation(start, gatewayEnv != nil); err != nil {
-		return nil, err
-	}
-
-	claudeHome, err := canonicalClaudeHome(a.options.ClaudeHome)
+func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessionStart) (*agentSession, error) {
+	claudeHome, err := canonicalClaudeHome(a.options.Home)
 	if err != nil {
 		return nil, err
 	}
 
-	mcpConfig, mcpBridge, err := a.mcpConfigForStart(ctx, id, start)
+	mcpConfig, err := a.mcpConfigForStart(start)
 	if err != nil {
 		return nil, err
 	}
@@ -665,13 +651,10 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 
 	env := mergeEnv(discoveredSettings.Env, a.options.Env)
 	env = mergeEnv(env, start.MetaOptions.Env)
-	env = mergeEnv(env, gatewayEnv)
 	env = a.observe.InjectTraceEnv(ctx, env)
 
 	materialized, err := a.materializeStoreSession(ctx, start.ResumeID, start.Cwd, claudeHome, env)
 	if err != nil {
-		closeSessionStartResources(mcpBridge, nil)
-
 		return nil, err
 	}
 
@@ -682,7 +665,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 
 	modelConfig, hasModelConfig, err := modelConfigFromEnv(env)
 	if err != nil {
-		closeSessionStartResources(mcpBridge, materialized)
+		closeSessionStartResources(materialized)
 
 		return nil, err
 	}
@@ -708,7 +691,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	defaultModel := firstNonEmptyString(start.MetaOptions.Model, a.options.DefaultModel)
 
 	options := claude.Options{
-		CLIPath:                 a.options.ClaudePath,
+		CLIPath:                 a.options.ExecutablePath,
 		Cwd:                     start.Cwd,
 		ClaudeHome:              processClaudeHome,
 		Env:                     env,
@@ -718,7 +701,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		Bare:                    a.options.BareMode || start.MetaOptions.Bare,
 		Model:                   claudeModelID(defaultModel, modelOverrides),
 		SystemText:              firstNonEmptyString(start.MetaOptions.SystemPrompt, a.options.DefaultSystemPrompt),
-		JSONSchema:              outputFormatJSONSchema(start.MetaOptions.OutputFormat),
+		JSONSchema:              outputSchemaJSONSchema(start.MetaOptions.OutputSchema),
 		PermissionMode:          permissionMode,
 		PermissionPromptTool:    permissionPromptTool,
 		AllowSkipPermissionsArg: a.options.AllowSkipPermissionsFlag && bypassPermissionsAvailable(),
@@ -741,15 +724,15 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 
 	permissionRules, err := a.permissionRulesForStart(ctx, id, start)
 	if err != nil {
-		closeSessionStartResources(mcpBridge, materialized)
+		closeSessionStartResources(materialized)
 
 		return nil, err
 	}
 
-	session := &Session{
+	session := &agentSession{
 		agent:                 a,
 		id:                    id,
-		turn:                  make(chan struct{}, 1),
+		turn:                  make(chan struct{}, a.maxConcurrentPrompts()),
 		cwd:                   start.Cwd,
 		additionalDirectories: slices.Clone(start.AdditionalDirectories),
 		fingerprint:           sessionStartFingerprint(start),
@@ -757,11 +740,9 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		modelOverrides:        cloneStringMap(modelOverrides),
 		mode:                  acpModeForPermission(permissionMode),
 		permissionRules:       permissions.Clone(permissionRules),
-		mcpBridge:             mcpBridge,
 		materialized:          materialized,
 		mirror:                newSessionMirror(a.log, a.options.SessionStore, processClaudeHome),
 		rawMessages:           start.RawMessages,
-		gatewayAuth:           gatewayEnv != nil,
 	}
 	options.PermissionHandler = session.handlePermission
 	options.ElicitationHandler = session.handleElicitation
@@ -773,7 +754,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	finishStart(startErr)
 
 	if startErr != nil {
-		closeSessionStartResources(mcpBridge, materialized)
+		closeSessionStartResources(materialized)
 
 		return nil, startErr
 	}
@@ -783,7 +764,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		if started {
 			_ = session.client.Close()
 
-			closeSessionStartResources(mcpBridge, materialized)
+			closeSessionStartResources(materialized)
 		}
 	}()
 
@@ -856,119 +837,62 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	return session, nil
 }
 
-func closeSessionStartResources(mcpBridge *mcpSessionBridge, materialized *materializedSession) {
-	if mcpBridge != nil {
-		mcpBridge.Close()
-	}
-
+func closeSessionStartResources(materialized *materializedSession) {
 	if materialized != nil {
 		_ = materialized.Close()
 	}
 }
 
-func (a *Agent) mcpConfigForStart(
-	ctx context.Context,
-	id acp.SessionId,
-	start sessionStart,
-) (string, *mcpSessionBridge, error) {
-	mcpServers, mcpBridge, err := a.prepareMCPServers(ctx, id, start.McpServers)
-	if err != nil {
-		return "", nil, err
+func (a *Agent) mcpConfigForStart(start sessionStart) (string, error) {
+	if err := validateMCPServers(start.McpServers); err != nil {
+		return "", err
 	}
 
-	a.warnDeprecatedSSEMCPServers(ctx, "mcp_servers", sseMCPServerNames(mcpServers))
-
-	mcpConfig, err := mapper.MCPServersToClaude(mcpServers)
+	mcpConfig, err := mapper.MCPServersToClaude(start.McpServers)
 	if err != nil {
-		if mcpBridge != nil {
-			mcpBridge.Close()
-		}
-
-		return "", nil, err
+		return "", err
 	}
 
-	return mcpConfig, mcpBridge, nil
+	return mcpConfig, nil
 }
 
-func (a *Agent) warnDeprecatedSSEMCPServers(ctx context.Context, source string, names []string) {
-	if len(names) == 0 {
-		return
-	}
-
-	for _, name := range names {
-		a.log.WarnContext(
-			ctx,
-			"SSE MCP transport is deprecated; prefer HTTP MCP transport",
-			slog.String("server", name),
-			slog.String("source", source),
-		)
-	}
-}
-
-func sseMCPServerNames(servers []acp.McpServer) []string {
-	names := make([]string, 0, len(servers))
+func validateMCPServers(servers []acp.McpServer) error {
 	for _, server := range servers {
-		if server.Sse != nil {
-			names = append(names, server.Sse.Name)
+		switch {
+		case server.Stdio != nil, server.Http != nil:
+			continue
+		case server.Sse != nil:
+			return acp.NewInvalidParams(map[string]any{
+				jsonFieldError:    validationUnsupported,
+				"server":          server.Sse.Name,
+				rawMessageTypeKey: "sse",
+			})
+		case server.Acp != nil:
+			return acp.NewInvalidParams(map[string]any{
+				jsonFieldError:    validationUnsupported,
+				"server":          server.Acp.Name,
+				rawMessageTypeKey: "acp",
+			})
+		default:
+			return acp.NewInvalidParams(map[string]any{jsonFieldError: "empty MCP server"})
 		}
-	}
-
-	return names
-}
-
-func (a *Agent) validateGatewayMCPIsolation(start sessionStart, gatewayAuth bool) error {
-	if !gatewayAuth {
-		return nil
-	}
-
-	if mcpServersUseProcess(start.McpServers) {
-		return fmt.Errorf("gateway auth cannot be used with stdio or ACP MCP servers because Claude-launched MCP processes inherit gateway credentials")
 	}
 
 	return nil
 }
 
-func mcpServersUseProcess(servers []acp.McpServer) bool {
-	for _, server := range servers {
-		if server.Stdio != nil || server.Acp != nil {
-			return true
-		}
-	}
-
-	return false
-}
-
 func (a *Agent) storeHasSession(ctx context.Context, sessionID string, cwd string) bool {
-	projectKey, err := projectKeyForDirectory(cwd)
-	if err != nil {
-		return false
-	}
-
-	entries, err := a.loadStoreEntries(ctx, a.sessionStore(), SessionKey{ProjectKey: projectKey, SessionID: sessionID})
+	entries, err := a.loadStoreEntries(ctx, a.sessionStore(), SessionKey{SessionID: sessionID})
 
 	return err == nil && len(entries) > 0
 }
 
 func (a *Agent) listStoreSessions(ctx context.Context, params acp.ListSessionsRequest) ([]acp.SessionInfo, error) {
-	if params.Cwd == nil || strings.TrimSpace(*params.Cwd) == "" {
-		return nil, nil
-	}
-
-	lister, ok := a.sessionStore().(SessionStoreLister)
-	if !ok {
-		return nil, nil
-	}
-
-	projectKey, err := projectKeyForDirectory(*params.Cwd)
-	if err != nil {
-		return nil, err
-	}
-
 	listCtx, cancel := context.WithTimeout(ctx, a.sessionStoreLoadTimeout())
 	defer cancel()
 
 	listCtx, finishList := a.observe.StartSessionStore(listCtx, "list")
-	summaries, err := lister.ListSessions(listCtx, projectKey)
+	summaries, err := a.sessionStore().ListSessions(listCtx)
 	finishList(err)
 
 	if err != nil {
@@ -981,18 +905,29 @@ func (a *Agent) listStoreSessions(ctx context.Context, params acp.ListSessionsRe
 			continue
 		}
 
-		entries, err := a.loadStoreEntries(ctx, a.sessionStore(), SessionKey{ProjectKey: projectKey, SessionID: summary.SessionID})
+		if params.Cwd != nil && strings.TrimSpace(*params.Cwd) != "" && summary.Cwd != "" && summary.Cwd != *params.Cwd {
+			continue
+		}
+
+		entries, err := a.loadStoreEntries(ctx, a.sessionStore(), SessionKey{SessionID: summary.SessionID})
 		if err != nil {
 			return nil, err
 		}
 
-		title := storeSessionTitle(summary.SessionID, entries)
-		updatedAt := time.UnixMilli(summary.MTime).UTC().Format(time.RFC3339)
+		title := firstNonEmptyString(summary.Title, storeSessionTitle(summary.SessionID, entries))
+		updatedAt := time.UnixMilli(summary.UpdatedAtUnixMilli).UTC().Format(time.RFC3339)
+		cwd := summary.Cwd
+
+		if cwd == "" && params.Cwd != nil {
+			cwd = *params.Cwd
+		}
+
 		infos = append(infos, acp.SessionInfo{
 			SessionId: acp.SessionId(summary.SessionID),
-			Cwd:       *params.Cwd,
+			Cwd:       cwd,
 			Title:     &title,
 			UpdatedAt: &updatedAt,
+			Meta:      cloneAnyMap(summary.Meta),
 		})
 	}
 
@@ -1049,7 +984,7 @@ func firstStoreUserPrompt(entry map[string]any) string {
 	return ""
 }
 
-func sessionMatchesListFilters(session *Session, params acp.ListSessionsRequest) bool {
+func sessionMatchesListFilters(session *agentSession, params acp.ListSessionsRequest) bool {
 	if params.Cwd != nil && *params.Cwd != session.cwd {
 		return false
 	}

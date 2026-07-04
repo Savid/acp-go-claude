@@ -1,80 +1,17 @@
 ---
 title: "MCP"
-description: "Stdio, HTTP, SSE, and ACP-transport MCP support"
-icon: "network"
+description: "MCP server declarations accepted by the adapter"
 ---
 
-The agent maps ACP MCP server definitions into Claude's `--mcp-config` and
-launches Claude with `--strict-mcp-config` so only the session's ACP-provided
-servers are active.
-Claude's MCP behavior is documented in
-[Claude Code MCP](https://code.claude.com/docs/en/mcp), while ACP-transport
-MCP follows the [MCP-over-ACP RFD](https://agentclientprotocol.com/rfds/mcp-over-acp).
+The adapter accepts stdio and HTTP MCP server declarations from ACP session
+requests and maps them to Claude configuration.
 
-## Configuration
-
-MCP server definitions are supplied by
-[ACP session requests](https://agentclientprotocol.com/protocol/session-setup)
-in both modes. Standalone uses the built-in `mcp-proxy` subcommand. Embedded
-hosts can override that shim with
-[`WithMCPProxyCommand`](/docs/reference/go-api#mcp-proxy) when needed.
-
-## Supported transports
-
-| ACP MCP transport | Behavior |
-| --- | --- |
-| stdio | Passed through to Claude MCP config. |
-| HTTP | Passed through when allowed by session/gateway policy. |
-| SSE | Passed through for Claude compatibility, with a warning. Prefer HTTP for new servers. |
-| ACP | Rewritten to a local stdio `mcp-proxy` shim and bridged over ACP. |
-
-When [gateway auth](/docs/features/authentication#gateway-auth) is active,
-stdio and ACP MCP servers are rejected because they inherit process
-environment. HTTP/SSE are the safer shape because they do not execute local
-subprocesses under gateway credentials.
-
-SSE remains accepted because Claude Code still supports it, but it is a
-deprecated MCP transport. The adapter logs a warning when an SSE server is
-accepted so deployments can migrate to HTTP intentionally.
-
-## ACP-transport bridge
-
-For ACP MCP servers, the adapter:
-
-1. Starts a loopback listener.
-2. Creates a random 32-byte bridge token.
-3. Writes the token to a `0600` temp file.
-4. Rewrites the server to a hidden stdio `mcp-proxy` command.
-5. Validates the token and ACP server ID on connection.
-6. Relays JSON-RPC requests/responses/notifications through ACP `mcp/message`.
-
-Bridge internals live in
-[`mcp_bridge.go`](https://github.com/savid/acp-go-claude/blob/main/mcp_bridge.go),
-[`mcp_bridge_conn.go`](https://github.com/savid/acp-go-claude/blob/main/mcp_bridge_conn.go),
-and [`mcp_bridge_proxy.go`](https://github.com/savid/acp-go-claude/blob/main/mcp_bridge_proxy.go).
-
-Embedded proxy override:
+Unsupported MCP transports fail the session request with an explicit invalid
+params error. The adapter does not open ACP-transport MCP channels.
 
 ```go
-claudeacp.Serve(ctx, input, output,
-    claudeacp.WithMCPProxyCommand("/path/to/acp-go-claude"),
-)
+servers := []acp.McpServer{
+    claudeacp.StdioMCPServer("tools", "node", []string{"server.js"}, nil),
+    claudeacp.HTTPMCPServer("remote", "https://example.test/mcp", nil),
+}
 ```
-
-## Security boundary
-
-The token file avoids exposing token material in argv or environment values.
-It is removed on normal bridge close. `SIGKILL` can orphan it in the system
-temp directory, so long-running deployments should keep normal `$TMPDIR`
-cleanup enabled. The operational boundary is summarized in
-[Security](/docs/operations/security#mcp-bridge-token-files).
-
-The bridge is an intra-user boundary. A compromised same-user process can
-generally inspect local process state and reach loopback ports.
-
-## Limits
-
-- 64 in-flight proxy forwards per connection.
-- 64 pending request-response entries per connection.
-- 10 MiB max JSON line/buffer for proxy IO.
-- Per-request forwarding timeout is 30 seconds.

@@ -54,9 +54,9 @@ func (a *Agent) materializeStoreSession(
 	defer func() { finishMaterialize(err) }()
 
 	store := a.sessionStore()
-	mainKey := SessionKey{ProjectKey: projectKey, SessionID: sessionID}
+	mainKey := SessionKey{SessionID: sessionID}
 
-	if nativeTranscriptExists, existsErr := claudeNativeTranscriptExists(sourceClaudeHome, env, mainKey); existsErr != nil {
+	if nativeTranscriptExists, existsErr := claudeNativeTranscriptExists(sourceClaudeHome, env, projectKey, sessionID); existsErr != nil {
 		return nil, existsErr
 	} else if nativeTranscriptExists {
 		return noMaterializedSession()
@@ -96,10 +96,8 @@ func (a *Agent) materializeStoreSession(
 		return nil, err
 	}
 
-	if lister, ok := store.(SessionStoreSubkeyLister); ok {
-		if err := a.materializeStoreSubkeys(ctx, store, lister, projectDir, mainKey); err != nil {
-			return nil, err
-		}
+	if err := a.materializeStoreSubkeys(ctx, store, projectDir, mainKey); err != nil {
+		return nil, err
 	}
 
 	materialized.mainPath = mainPath
@@ -138,7 +136,6 @@ func (a *Agent) sessionStoreLoadTimeout() time.Duration {
 func (a *Agent) materializeStoreSubkeys(
 	ctx context.Context,
 	store SessionStore,
-	lister SessionStoreSubkeyLister,
 	projectDir string,
 	mainKey SessionKey,
 ) error {
@@ -146,7 +143,7 @@ func (a *Agent) materializeStoreSubkeys(
 	defer cancel()
 
 	listCtx, finishListSubkeys := a.observe.StartSessionStore(listCtx, "list_subkeys")
-	subkeys, err := lister.ListSubkeys(listCtx, mainKey)
+	subkeys, err := store.ListSubkeys(listCtx, mainKey)
 	finishListSubkeys(err)
 
 	if err != nil {
@@ -160,7 +157,7 @@ func (a *Agent) materializeStoreSubkeys(
 			continue
 		}
 
-		key := SessionKey{ProjectKey: mainKey.ProjectKey, SessionID: mainKey.SessionID, Subpath: subpath}
+		key := SessionKey{SessionID: mainKey.SessionID, Subpath: subpath}
 
 		entries, err := a.loadStoreEntries(ctx, store, key)
 		if err != nil {
@@ -247,13 +244,13 @@ func writeJSONFile(path string, value any) error {
 	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
-func claudeNativeTranscriptExists(sourceClaudeHome string, env map[string]string, key SessionKey) (bool, error) {
+func claudeNativeTranscriptExists(sourceClaudeHome string, env map[string]string, projectKey string, sessionID string) (bool, error) {
 	source := sourceClaudeConfigDir(sourceClaudeHome, env)
-	if source == "" || key.ProjectKey == "" || key.SessionID == "" {
+	if source == "" || projectKey == "" || sessionID == "" {
 		return false, nil
 	}
 
-	path := filepath.Join(source, "projects", key.ProjectKey, key.SessionID+".jsonl")
+	path := filepath.Join(source, "projects", projectKey, sessionID+".jsonl")
 	info, statErr := os.Stat(path)
 
 	switch {
@@ -301,4 +298,51 @@ func sourceClaudeConfigDir(sourceClaudeHome string, env map[string]string) strin
 	}
 
 	return filepath.Join(home, ".claude")
+}
+
+func deleteNativeTranscript(ctx context.Context, claudeHome string, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if !validUUIDShape(sessionID) {
+		return nil
+	}
+
+	source := sourceClaudeConfigDir(claudeHome, nil)
+	if source == "" {
+		return nil
+	}
+
+	matches, err := filepath.Glob(filepath.Join(source, "projects", "*", sessionID+".jsonl"))
+	if err != nil {
+		return err
+	}
+
+	for _, match := range matches {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+
+		if removeErr := os.Remove(match); removeErr != nil && !os.IsNotExist(removeErr) {
+			return removeErr
+		}
+	}
+
+	sessionDirs, err := filepath.Glob(filepath.Join(source, "projects", "*", sessionID))
+	if err != nil {
+		return err
+	}
+
+	for _, dir := range sessionDirs {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+
+		if removeErr := os.RemoveAll(dir); removeErr != nil && !os.IsNotExist(removeErr) {
+			return removeErr
+		}
+	}
+
+	return nil
 }

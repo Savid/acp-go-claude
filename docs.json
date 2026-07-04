@@ -21,9 +21,9 @@
             "icon": "rocket",
             "pages": [
               "docs/overview",
-              "docs/get-started/run-modes",
               "docs/get-started/quickstart",
               "docs/get-started/install",
+              "docs/get-started/run-modes",
               "docs/get-started/examples"
             ]
           },
@@ -44,12 +44,8 @@
               "docs/features/permissions",
               "docs/features/elicitation",
               "docs/features/mcp",
-              "docs/features/claude-settings",
               "docs/features/session-store",
-              "docs/features/raw-events",
-              "docs/features/goals",
-              "docs/features/workflows",
-              "docs/features/documents-nes"
+              "docs/features/raw-events"
             ]
           }
         ]
@@ -66,7 +62,6 @@
               "docs/reference/cli",
               "docs/reference/acp-methods",
               "docs/reference/meta",
-              "docs/reference/session-import",
               "docs/reference/updates"
             ]
           },

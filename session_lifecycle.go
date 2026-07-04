@@ -8,7 +8,7 @@ import (
 
 var sessionCancelFallbackTimeout = 5 * time.Second
 
-func (s *Session) acquireTurn(ctx context.Context) (func(), error) {
+func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
 	turn := s.turnQueue()
 
 	select {
@@ -16,57 +16,24 @@ func (s *Session) acquireTurn(ctx context.Context) (func(), error) {
 		return func() { <-turn }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	}
-}
-
-func (s *Session) sessionWorkContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	s.mu.Lock()
-	turnDone := s.turnDone
-	s.mu.Unlock()
-
-	if turnDone == nil {
-		return ctx, func() {}
-	}
-
-	select {
-	case <-turnDone:
-		workCtx, cancel := context.WithCancel(ctx)
-		cancel()
-
-		return workCtx, func() {}
 	default:
+		return nil, backpressureError("session_prompt")
 	}
-
-	workCtx, cancel := context.WithCancel(ctx)
-
-	go func() {
-		defer recoverAgentGoroutine(ctx, nil, "session work watcher")
-
-		// Tie auxiliary work to the active turn. The watcher exits when the turn
-		// completes or when the caller invokes the returned cancel function.
-		select {
-		case <-turnDone:
-			cancel()
-		case <-workCtx.Done():
-		}
-	}()
-
-	return workCtx, cancel
 }
 
-func (s *Session) turnQueue() chan struct{} {
+func (s *agentSession) turnQueue() chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.turn == nil {
-		s.turn = make(chan struct{}, 1)
+		s.turn = make(chan struct{}, s.maxConcurrentPrompts())
 	}
 
 	return s.turn
 }
 
 // Cancel interrupts the active Claude turn.
-func (s *Session) Cancel(ctx context.Context) (err error) {
+func (s *agentSession) Cancel(ctx context.Context) (err error) {
 	s.mu.Lock()
 	turnCancel := s.cancel
 	turnDone := s.turnDone
@@ -95,7 +62,7 @@ func (s *Session) Cancel(ctx context.Context) (err error) {
 	return err
 }
 
-func (s *Session) cancelTurnIfInterruptStalls(ctx context.Context, done <-chan struct{}, cancel context.CancelFunc) {
+func (s *agentSession) cancelTurnIfInterruptStalls(ctx context.Context, done <-chan struct{}, cancel context.CancelFunc) {
 	if cancel == nil || done == nil || sessionCancelFallbackTimeout <= 0 {
 		return
 	}
@@ -118,7 +85,7 @@ func (s *Session) cancelTurnIfInterruptStalls(ctx context.Context, done <-chan s
 	}()
 }
 
-func (s *Session) cancelPermissionRequestsLocked() []context.CancelFunc {
+func (s *agentSession) cancelPermissionRequestsLocked() []context.CancelFunc {
 	permissionCancels := make([]context.CancelFunc, 0, len(s.permissionCancel))
 	for id, entry := range s.permissionCancel {
 		permissionCancels = append(permissionCancels, entry.cancel)
@@ -130,7 +97,7 @@ func (s *Session) cancelPermissionRequestsLocked() []context.CancelFunc {
 }
 
 // Close closes the underlying Claude process.
-func (s *Session) Close(ctx context.Context) (err error) {
+func (s *agentSession) Close(ctx context.Context) (err error) {
 	if s.agent != nil {
 		var finish func(error)
 
@@ -159,10 +126,6 @@ func (s *Session) Close(ctx context.Context) (err error) {
 		releaseTurn()
 	}
 
-	if s.mcpBridge != nil {
-		err = errors.Join(err, s.mcpBridge.Close())
-	}
-
 	if s.materialized != nil {
 		err = errors.Join(err, s.materialized.Close())
 	}
@@ -174,7 +137,7 @@ func (s *Session) Close(ctx context.Context) (err error) {
 	return err
 }
 
-func (s *Session) closeTurnTimeout() time.Duration {
+func (s *agentSession) closeTurnTimeout() time.Duration {
 	if s.closeTurnWait > 0 {
 		return s.closeTurnWait
 	}

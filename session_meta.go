@@ -11,40 +11,29 @@ const (
 	metaBareKey                  = "bare"
 	metaModelKey                 = "model"
 	metaOptionsKey               = "options"
-	metaOutputFormatKey          = "outputFormat"
-	metaOutputFormatSchemaKey    = "schema"
-	metaOutputFormatTypeKey      = "type"
+	metaOutputSchemaKey          = "outputSchema"
 	metaPermissionModeKey        = "permissionMode"
+	metaRawEventKey              = "rawEvent"
+	metaRawEventEnabledKey       = "enabled"
 	metaSystemPromptKey          = "systemPrompt"
 )
-
-// ClaudeOutputFormatJSONSchema selects Claude Code JSON Schema structured output.
-const ClaudeOutputFormatJSONSchema = "json_schema"
-
-// ClaudeOutputFormat configures Claude Code structured output for a session.
-type ClaudeOutputFormat struct {
-	Type   string         `json:"type"`
-	Schema map[string]any `json:"schema"`
-}
 
 // ClaudeOptions is the stable, supported Claude-specific subset accepted at
 // _meta.claude.options. The JSON field names below are part of this
 // package's wire contract; unsupported option keys are rejected.
 type ClaudeOptions struct {
+	// Model selects the initial Claude model for this session.
+	Model string `json:"model,omitempty"`
 	// Bare launches Claude with --bare for this session.
 	Bare bool `json:"bare,omitempty"`
 	// Env adds environment variables for this Claude session.
 	Env map[string]string `json:"env,omitempty"`
+	// OutputSchema configures Claude Code JSON Schema structured output.
+	OutputSchema map[string]any `json:"outputSchema,omitempty"`
 	// SystemPrompt overrides the default system prompt for this Claude session.
 	SystemPrompt string `json:"systemPrompt,omitempty"`
-	// Model selects the initial Claude model for this session.
-	Model string `json:"model,omitempty"`
 	// PermissionMode selects the initial Claude permission mode for this session.
 	PermissionMode string `json:"permissionMode,omitempty"`
-	// AdditionalDirectories grants this Claude session access to extra directories.
-	AdditionalDirectories []string `json:"additionalDirectories,omitempty"`
-	// OutputFormat configures Claude Code structured output for this session.
-	OutputFormat *ClaudeOutputFormat `json:"outputFormat,omitempty"`
 }
 
 // Meta returns an ACP _meta object for the supported Claude-specific options.
@@ -56,6 +45,10 @@ func (options ClaudeOptions) Meta() map[string]any {
 
 	if len(options.Env) > 0 {
 		values[settingsFieldEnv] = cloneStringMap(options.Env)
+	}
+
+	if len(options.OutputSchema) > 0 {
+		values[metaOutputSchemaKey] = cloneAnyMap(options.OutputSchema)
 	}
 
 	if options.SystemPrompt != "" {
@@ -70,17 +63,6 @@ func (options ClaudeOptions) Meta() map[string]any {
 		values[metaPermissionModeKey] = options.PermissionMode
 	}
 
-	if len(options.AdditionalDirectories) > 0 {
-		values[metaAdditionalDirectoriesKey] = append([]string(nil), options.AdditionalDirectories...)
-	}
-
-	if options.OutputFormat != nil {
-		values[metaOutputFormatKey] = map[string]any{
-			metaOutputFormatTypeKey:   options.OutputFormat.Type,
-			metaOutputFormatSchemaKey: cloneAnyMap(options.OutputFormat.Schema),
-		}
-	}
-
 	return map[string]any{
 		claudeMetaKey: map[string]any{
 			metaOptionsKey: values,
@@ -91,6 +73,10 @@ func (options ClaudeOptions) Meta() map[string]any {
 func claudeOptionsFromMeta(meta map[string]any) (ClaudeOptions, error) {
 	options := ClaudeOptions{}
 	claude, _ := meta[claudeMetaKey].(map[string]any)
+
+	if err := validateClaudeLifecycleMeta(meta, claude); err != nil {
+		return ClaudeOptions{}, err
+	}
 
 	if rawOptions, ok := claude[metaOptionsKey]; ok {
 		parsed, err := parseClaudeOptions(rawOptions)
@@ -104,28 +90,62 @@ func claudeOptionsFromMeta(meta map[string]any) (ClaudeOptions, error) {
 	return options, nil
 }
 
-func sessionAdditionalDirectories(primary []string, options ClaudeOptions) []string {
-	return mergeAdditionalDirectories(primary, options.AdditionalDirectories)
-}
+func validateClaudeLifecycleMeta(meta map[string]any, claude map[string]any) error {
+	if _, ok := meta[legacyPackageMetaKey]; ok {
+		return fmt.Errorf("_meta.%s is not supported", legacyPackageMetaKey)
+	}
 
-func outputFormatJSONSchema(outputFormat *ClaudeOutputFormat) map[string]any {
-	if outputFormat == nil || outputFormat.Type != ClaudeOutputFormatJSONSchema {
+	if claude == nil {
 		return nil
 	}
 
-	return cloneAnyMap(outputFormat.Schema)
-}
-
-func mergeAdditionalDirectories(primary []string, extra []string) []string {
-	if len(extra) == 0 {
-		return append([]string(nil), primary...)
+	for key := range claude {
+		switch key {
+		case metaOptionsKey, metaRawEventKey:
+		default:
+			return fmt.Errorf("_meta.%s.%s is not supported", claudeMetaKey, key)
+		}
 	}
 
-	merged := make([]string, 0, len(primary)+len(extra))
-	merged = append(merged, primary...)
-	merged = append(merged, extra...)
+	if rawEvent, ok := claude[metaRawEventKey]; ok {
+		if err := validateRawEventMeta(rawEvent); err != nil {
+			return err
+		}
+	}
 
-	return merged
+	return nil
+}
+
+func validateRawEventMeta(value any) error {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("_meta.%s.%s must be an object", claudeMetaKey, metaRawEventKey)
+	}
+
+	for key, item := range raw {
+		switch key {
+		case metaRawEventEnabledKey:
+			if _, ok := item.(bool); !ok {
+				return fmt.Errorf("_meta.%s.%s.%s must be a boolean", claudeMetaKey, metaRawEventKey, key)
+			}
+		default:
+			return fmt.Errorf("_meta.%s.%s.%s is not supported", claudeMetaKey, metaRawEventKey, key)
+		}
+	}
+
+	return nil
+}
+
+func sessionAdditionalDirectories(primary []string) []string {
+	return append([]string(nil), primary...)
+}
+
+func outputSchemaJSONSchema(schema map[string]any) map[string]any {
+	if len(schema) == 0 {
+		return nil
+	}
+
+	return cloneAnyMap(schema)
 }
 
 func parseClaudeOptions(value any) (ClaudeOptions, error) {
@@ -177,20 +197,13 @@ func parseClaudeOptionsMap(raw map[string]any) (ClaudeOptions, error) {
 			}
 
 			options.PermissionMode = permissionMode
-		case metaAdditionalDirectoriesKey:
-			additionalDirectories, err := stringSliceOption(value, metaOptionPath(key))
-			if err != nil {
-				return ClaudeOptions{}, err
+		case metaOutputSchemaKey:
+			schema, ok := value.(map[string]any)
+			if !ok {
+				return ClaudeOptions{}, fmt.Errorf("%s must be an object", metaOptionPath(key))
 			}
 
-			options.AdditionalDirectories = additionalDirectories
-		case metaOutputFormatKey:
-			outputFormat, err := outputFormatOption(value, metaOptionPath(key))
-			if err != nil {
-				return ClaudeOptions{}, err
-			}
-
-			options.OutputFormat = outputFormat
+			options.OutputSchema = cloneAnyMap(schema)
 		default:
 			return ClaudeOptions{}, fmt.Errorf("%s is not supported", metaOptionPath(key))
 		}
@@ -214,13 +227,13 @@ func validateClaudeOptions(options ClaudeOptions) (ClaudeOptions, error) {
 		}
 	}
 
-	if options.OutputFormat != nil {
-		outputFormat, err := validateOutputFormat(*options.OutputFormat)
+	if len(options.OutputSchema) > 0 {
+		outputSchema, err := validateOutputSchema(options.OutputSchema)
 		if err != nil {
 			return ClaudeOptions{}, err
 		}
 
-		options.OutputFormat = &outputFormat
+		options.OutputSchema = outputSchema
 	}
 
 	return options, nil
@@ -270,86 +283,15 @@ func stringMapOption(value any, path string) (map[string]string, error) {
 	}
 }
 
-func stringSliceOption(value any, path string) ([]string, error) {
-	switch typed := value.(type) {
-	case []string:
-		return append([]string(nil), typed...), nil
-	case []any:
-		result := make([]string, 0, len(typed))
-		for index, item := range typed {
-			text, ok := item.(string)
-			if !ok {
-				return nil, fmt.Errorf("%s[%d] must be a string", path, index)
-			}
-
-			result = append(result, text)
-		}
-
-		return result, nil
-	default:
-		return nil, fmt.Errorf("%s must be an array", path)
-	}
-}
-
-func outputFormatOption(value any, path string) (*ClaudeOutputFormat, error) {
-	raw, ok := value.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("%s must be an object", path)
+func validateOutputSchema(schema map[string]any) (map[string]any, error) {
+	if len(schema) == 0 {
+		return nil, fmt.Errorf("%s must be a non-empty object", metaOptionPath(metaOutputSchemaKey))
 	}
 
-	format := ClaudeOutputFormat{}
-
-	for key, item := range raw {
-		switch key {
-		case metaOutputFormatTypeKey:
-			text, ok := item.(string)
-			if !ok {
-				return nil, fmt.Errorf("%s.%s must be a string", path, key)
-			}
-
-			format.Type = text
-		case metaOutputFormatSchemaKey:
-			schema, ok := item.(map[string]any)
-			if !ok {
-				return nil, fmt.Errorf("%s.%s must be an object", path, key)
-			}
-
-			format.Schema = cloneAnyMap(schema)
-		default:
-			return nil, fmt.Errorf("%s.%s is not supported", path, key)
-		}
+	cloned := cloneAnyMap(schema)
+	if _, err := json.Marshal(cloned); err != nil {
+		return nil, fmt.Errorf("%s must be JSON-serializable: %w", metaOptionPath(metaOutputSchemaKey), err)
 	}
 
-	return &format, nil
-}
-
-func validateOutputFormat(format ClaudeOutputFormat) (ClaudeOutputFormat, error) {
-	if format.Type != ClaudeOutputFormatJSONSchema {
-		return ClaudeOutputFormat{}, fmt.Errorf("%s.%s is not supported: %s",
-			metaOptionPath(metaOutputFormatKey),
-			metaOutputFormatTypeKey,
-			format.Type,
-		)
-	}
-
-	if len(format.Schema) == 0 {
-		return ClaudeOutputFormat{}, fmt.Errorf("%s.%s must be a non-empty object",
-			metaOptionPath(metaOutputFormatKey),
-			metaOutputFormatSchemaKey,
-		)
-	}
-
-	schema := cloneAnyMap(format.Schema)
-	if _, err := json.Marshal(schema); err != nil {
-		return ClaudeOutputFormat{}, fmt.Errorf("%s.%s must be JSON-serializable: %w",
-			metaOptionPath(metaOutputFormatKey),
-			metaOutputFormatSchemaKey,
-			err,
-		)
-	}
-
-	return ClaudeOutputFormat{
-		Type:   format.Type,
-		Schema: schema,
-	}, nil
+	return cloned, nil
 }

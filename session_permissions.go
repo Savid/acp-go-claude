@@ -13,7 +13,7 @@ import (
 	"github.com/savid/acp-go-claude/internal/observer"
 )
 
-func (s *Session) permissionRule(toolName string) (string, bool) {
+func (s *agentSession) permissionRule(toolName string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -22,7 +22,7 @@ func (s *Session) permissionRule(toolName string) (string, bool) {
 	return behavior, ok
 }
 
-func (s *Session) setPermissionRule(ctx context.Context, toolName string, behavior string) {
+func (s *agentSession) setPermissionRule(ctx context.Context, toolName string, behavior string) {
 	if toolName == "" {
 		return
 	}
@@ -39,7 +39,7 @@ func (s *Session) setPermissionRule(ctx context.Context, toolName string, behavi
 	rules := s.clonePermissionRulesLocked()
 	s.mu.Unlock()
 
-	err := savePermissionRules(ctx, s.agent.options.ClaudeHome, s.id, rules)
+	err := savePermissionRules(ctx, s.agent.options.Home, s.id, rules)
 	if err == nil {
 		s.agent.cachePermissionRules(s.id, rules)
 	}
@@ -51,21 +51,21 @@ func (s *Session) setPermissionRule(ctx context.Context, toolName string, behavi
 	}
 }
 
-func (s *Session) clonePermissionRules() map[string]string {
+func (s *agentSession) clonePermissionRules() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.clonePermissionRulesLocked()
 }
 
-func (s *Session) clonePermissionRulesLocked() map[string]string {
+func (s *agentSession) clonePermissionRulesLocked() map[string]string {
 	rules := make(map[string]string, len(s.permissionRules))
 	maps.Copy(rules, s.permissionRules)
 
 	return rules
 }
 
-func (s *Session) persistPermissionRules(ctx context.Context) {
+func (s *agentSession) persistPermissionRules(ctx context.Context) {
 	s.permissionSaveMu.Lock()
 	defer s.permissionSaveMu.Unlock()
 
@@ -73,7 +73,7 @@ func (s *Session) persistPermissionRules(ctx context.Context) {
 	rules := s.clonePermissionRulesLocked()
 	s.mu.Unlock()
 
-	err := savePermissionRules(ctx, s.agent.options.ClaudeHome, s.id, rules)
+	err := savePermissionRules(ctx, s.agent.options.Home, s.id, rules)
 	if err == nil {
 		s.agent.cachePermissionRules(s.id, rules)
 	}
@@ -85,7 +85,7 @@ func (s *Session) persistPermissionRules(ctx context.Context) {
 	}
 }
 
-func (s *Session) handlePermission(ctx context.Context, request claude.PermissionRequest) (decision claude.PermissionDecision, err error) {
+func (s *agentSession) handlePermission(ctx context.Context, request claude.PermissionRequest) (decision claude.PermissionDecision, err error) {
 	if request.ToolName == askUserQuestionTool {
 		return s.handleAskUserQuestion(ctx, request)
 	}
@@ -149,7 +149,7 @@ func (s *Session) handlePermission(ctx context.Context, request claude.Permissio
 			Content:    info.Content,
 			Locations:  info.Locations,
 			RawInput:   request.Input,
-			Meta:       map[string]any{acpMetaKey: request.Raw},
+			Meta:       map[string]any{claudeMetaKey: map[string]any{acpFieldRaw: request.Raw}},
 		},
 		Options: []acp.PermissionOption{
 			{OptionId: permissionAllowOnce, Name: "Allow once", Kind: acp.PermissionOptionKindAllowOnce},
@@ -202,7 +202,7 @@ func (s *Session) handlePermission(ctx context.Context, request claude.Permissio
 	}
 }
 
-func (s *Session) permissionRequestContext(ctx context.Context, id string) (context.Context, context.CancelFunc) {
+func (s *agentSession) permissionRequestContext(ctx context.Context, id string) (context.Context, context.CancelFunc) {
 	if id == "" {
 		return ctx, func() {}
 	}
@@ -251,7 +251,7 @@ type permissionRequestCancel struct {
 	cancel context.CancelFunc
 }
 
-func (s *Session) handleExitPlanMode(
+func (s *agentSession) handleExitPlanMode(
 	ctx context.Context,
 	request claude.PermissionRequest,
 ) (claude.PermissionDecision, error) {
@@ -288,7 +288,7 @@ func (s *Session) handleExitPlanMode(
 			Content:    info.Content,
 			Locations:  info.Locations,
 			RawInput:   request.Input,
-			Meta:       map[string]any{acpMetaKey: request.Raw},
+			Meta:       map[string]any{claudeMetaKey: map[string]any{acpFieldRaw: request.Raw}},
 		},
 		Options: options,
 	})

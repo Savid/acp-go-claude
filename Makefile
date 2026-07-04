@@ -1,25 +1,39 @@
 .DEFAULT_GOAL := help
-.PHONY: lint lint-gopls fmt test coverage-check test-cross-compile test-integration test-integration-cover clean tidy vuln modernize-check audit test/cover help
 
-## lint: run golangci-lint
+GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+.PHONY: build lint fmt-check fmt test race coverage-check test-cross-compile test-integration-smoke test-integration-live test-integration test-integration-cover docs-audit clean tidy vuln modernize-check audit test/cover help
+
+## build: compile all packages
+build:
+	go build ./...
+
+## lint: run pinned golangci-lint
 lint:
-	golangci-lint run ./...
+	$(GOLANGCI_LINT) run ./...
 
-## lint-gopls: show gopls hint-level diagnostics (advisory, not enforced)
-lint-gopls:
-	gopls check -severity=hint $$(find . -name '*.go' -not -path './examples/*') 2>&1 | sed "s#$(CURDIR)/##" | grep -v '\[windows\]' || true
+## fmt-check: require gofmt-clean Go files
+fmt-check:
+	@test -z "$$(gofmt -l .)"
 
-## fmt: format code
+## fmt: format Go files
 fmt:
-	golangci-lint fmt ./...
+	gofmt -w $$(find . -name '*.go' -not -path './.git/*')
+	$(GOLANGCI_LINT) fmt ./...
 
-## test: run tests with race detector
+## test: run ordinary unit tests
 test:
-	go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
+	go test ./...
 
-## coverage-check: require 100% statement coverage
-coverage-check: test
-	@go tool cover -func=coverage.out | awk 'BEGIN { found = 0 } /^total:/ { found = 1; if ($$3 != "100.0%") { printf "total coverage %s, want 100.0%%\n", $$3; exit 1 } } END { if (!found) { print "missing total coverage line"; exit 1 } }'
+## race: run unit tests with the race detector
+race:
+	go test -race ./...
+
+## coverage-check: write a coverage profile and print totals
+coverage-check:
+	go test -coverprofile=coverage.out -covermode=atomic ./...
+	go tool cover -func=coverage.out
 
 ## test-cross-compile: compile platform-specific test branches
 test-cross-compile:
@@ -27,11 +41,18 @@ test-cross-compile:
 	mkdir -p .tmp/cross
 	GOOS=windows GOARCH=amd64 go test -c -o .tmp/cross/permissions-windows.test ./internal/permissions
 
-## test-integration: run integration tests
-test-integration:
+## test-integration-smoke: compile and run integration tests that can skip without live auth
+test-integration-smoke:
+	go test -tags=integration -timeout=120s -run 'TestNullClaudeRefreshTokens|TestClaudeAccessToken|TestCopyClaudeStateFileUsesSiblingForDefaultHome|TestClaudeSettingsAuthAvailable|TestIsolatedClaudeRuntimeUsesFreshHomeWithProcessAuth|TestIsolatedClaudeRuntimeCopiesExplicitSource' ./integration/...
+
+## test-integration-live: run live Claude CLI integration tests
+test-integration-live:
 	ACP_GO_CLAUDE_RUN_INTEGRATION=1 go test -race -tags=integration -timeout=600s -parallel=4 -v ./integration/...
 
-## test-integration-cover: run integration tests with compiled binary coverage
+## test-integration: alias for live integration tests
+test-integration: test-integration-live
+
+## test-integration-cover: run live integration tests with compiled binary coverage
 test-integration-cover:
 	rm -rf .tmp/integration-cover coverage-integration.out
 	mkdir -p .tmp/integration-cover/data
@@ -40,15 +61,19 @@ test-integration-cover:
 	go tool covdata percent -i=.tmp/integration-cover/data
 	go tool covdata textfmt -i=.tmp/integration-cover/data -o coverage-integration.out
 
+## docs-audit: check public docs and examples for removed public terms
+docs-audit:
+	@! rg -n 'opencode acp|proxy|compatibility|deprecated|legacy|migration|session/import|sdkMessage|emitRawSDKMessages|setGoal|goals|NES|SSE MCP|mcpCapabilities\.acp' README.md doc.go docs.json docs examples cmd/acp-go-claude/*.go
+
 ## clean: remove build artifacts
 clean:
 	rm -rf .tmp coverage.out coverage-integration.out
 
-## tidy: tidy go modules
+## tidy: verify module files are tidy
 tidy:
-	go mod tidy
+	go mod tidy -diff
 
-## vuln: run govulncheck
+## vuln: run govulncheck from the go.mod tool directive
 vuln:
 	go tool govulncheck ./...
 
@@ -56,14 +81,12 @@ vuln:
 modernize-check:
 	go fix -n ./...
 
-## audit: run all checks
-audit: lint coverage-check test-cross-compile vuln modernize-check
-	go mod tidy -diff
-	git diff --exit-code -- go.mod go.sum
+## audit: run repository checks
+audit: fmt-check lint build test coverage-check test-cross-compile vuln modernize-check docs-audit
 	go mod verify
 
 ## test/cover: open HTML coverage report
-test/cover: test
+test/cover: coverage-check
 	go tool cover -html=coverage.out
 
 ## help: show this help

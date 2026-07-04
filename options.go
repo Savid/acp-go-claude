@@ -33,35 +33,32 @@ type Options struct {
 	// AgentVersion is the agent version advertised during ACP initialize.
 	AgentVersion string
 
-	// ClaudePath is the Claude CLI executable path. If empty, PATH is searched.
-	ClaudePath string
-	// ClaudeHome sets CLAUDE_CONFIG_DIR for launched Claude CLI sessions.
-	ClaudeHome string
-
-	// MCPProxyCommand is the executable used for ACP-transport MCP stdio shims.
-	MCPProxyCommand string
-	// MCPProxyArgs are prepended before the generated mcp-proxy arguments.
-	MCPProxyArgs []string
+	// ExecutablePath is the Claude CLI executable path. If empty, PATH is searched.
+	ExecutablePath string
+	// Home sets CLAUDE_CONFIG_DIR for launched Claude CLI sessions.
+	Home string
+	// DefaultModel is passed to newly created Claude sessions when non-empty.
+	DefaultModel string
+	// Env is merged into every launched Claude process environment.
+	Env map[string]string
 
 	// Logger receives structured diagnostic logs. If nil, the default logger is used.
 	Logger *slog.Logger
+	// TracerProvider records adapter spans. If nil, tracing is a no-op.
+	TracerProvider trace.TracerProvider
 	// MeterProvider records adapter metrics. If nil, metrics are no-ops.
 	MeterProvider metric.MeterProvider
 	// TextMapPropagator extracts ACP _meta trace context and injects Claude launch env.
 	// If nil, W3C trace context plus baggage propagation is used.
 	TextMapPropagator propagation.TextMapPropagator
-	// TracerProvider records adapter spans. If nil, tracing is a no-op.
-	TracerProvider trace.TracerProvider
 
-	// SessionStore mirrors Claude transcript writes and backs imported remote
-	// sessions. If nil, imported sessions are kept in an in-memory store for
-	// this agent process only and ordinary sessions are not mirrored.
+	// SessionStore mirrors Claude transcript writes and backs store restores.
 	SessionStore SessionStore
 	// SessionStoreLoadTimeout bounds store load/list operations used for resume.
 	SessionStoreLoadTimeout time.Duration
+	// ConcurrencyLimits controls process-local backpressure.
+	ConcurrencyLimits ConcurrencyLimits
 
-	// DefaultModel is passed to newly created Claude sessions when non-empty.
-	DefaultModel string
 	// DefaultPermissionMode is the initial Claude permission mode.
 	DefaultPermissionMode string
 	// DefaultSystemPrompt is passed to newly created Claude sessions when non-empty.
@@ -84,10 +81,14 @@ type Options struct {
 	// ControlHandlerTimeout bounds one inbound Claude control request.
 	ControlHandlerTimeout time.Duration
 
-	// Env is merged into every launched Claude process environment.
-	Env map[string]string
-
 	defaultPermissionModeSet bool
+}
+
+// ConcurrencyLimits controls per-agent/session backpressure. Zero fields use defaults.
+type ConcurrencyLimits struct {
+	MaxActiveSessions        int
+	MaxConcurrentPrompts     int
+	MaxConcurrentClientCalls int
 }
 
 func applyOptions(opts []Option) Options {
@@ -175,27 +176,21 @@ func WithTracerProvider(provider trace.TracerProvider) Option {
 	}
 }
 
-// WithClaudePath sets the Claude CLI executable path. If unset, PATH is searched.
-func WithClaudePath(path string) Option {
+// WithExecutablePath sets the Claude CLI executable path. If unset, PATH is searched.
+func WithExecutablePath(path string) Option {
 	return func(options *Options) {
-		options.ClaudePath = path
+		options.ExecutablePath = path
 	}
 }
 
-// WithClaudeHome sets CLAUDE_CONFIG_DIR for launched Claude CLI sessions.
-func WithClaudeHome(path string) Option {
+// WithHome sets CLAUDE_CONFIG_DIR for launched Claude CLI sessions.
+func WithHome(path string) Option {
 	return func(options *Options) {
-		options.ClaudeHome = path
+		options.Home = path
 	}
 }
 
 // WithSessionStore configures external Claude transcript storage.
-//
-// A configured store enables Claude transcript mirroring for new turns and lets
-// session/load or session/resume hydrate missing local Claude JSONL from the
-// store. Implement optional SessionStoreLister, SessionStoreSubkeyLister, and
-// SessionStoreReplacer interfaces to support list, subagent hydration, and
-// atomic replacement on import.
 func WithSessionStore(store SessionStore) Option {
 	return func(options *Options) {
 		options.SessionStore = store
@@ -216,64 +211,64 @@ func WithDefaultModel(model string) Option {
 	}
 }
 
-// WithDefaultPermissionMode sets the initial Claude permission mode.
-func WithDefaultPermissionMode(mode string) Option {
+// WithClaudeDefaultPermissionMode sets the initial Claude permission mode.
+func WithClaudeDefaultPermissionMode(mode string) Option {
 	return func(options *Options) {
 		options.DefaultPermissionMode = mode
 		options.defaultPermissionModeSet = true
 	}
 }
 
-// WithDefaultSystemPrompt sets the system prompt passed to Claude sessions.
-func WithDefaultSystemPrompt(prompt string) Option {
+// WithClaudeDefaultSystemPrompt sets the system prompt passed to Claude sessions.
+func WithClaudeDefaultSystemPrompt(prompt string) Option {
 	return func(options *Options) {
 		options.DefaultSystemPrompt = prompt
 	}
 }
 
-// WithHideClaudeAuth suppresses Claude subscription terminal auth methods.
-func WithHideClaudeAuth(enabled bool) Option {
+// WithClaudeHideAuth suppresses Claude subscription terminal auth methods.
+func WithClaudeHideAuth(enabled bool) Option {
 	return func(options *Options) {
 		options.HideClaudeAuth = enabled
 	}
 }
 
-// WithBareMode launches Claude sessions with --bare. Bare mode disables
+// WithClaudeBareMode launches Claude sessions with --bare. Bare mode disables
 // Claude's automatic project/context discovery and keychain/OAuth auth; explicit
 // ACP-provided MCP config, system prompt, additional directories, and
 // API-key/apiKeyHelper auth are still passed.
-func WithBareMode(enabled bool) Option {
+func WithClaudeBareMode(enabled bool) Option {
 	return func(options *Options) {
 		options.BareMode = enabled
 	}
 }
 
-// WithSettingSources configures Claude Code filesystem settings sources passed
+// WithClaudeSettingSources configures Claude Code filesystem settings sources passed
 // as --setting-sources. With no arguments, user/project/local sources are
 // disabled for launched Claude sessions.
-func WithSettingSources(sources ...SettingSource) Option {
+func WithClaudeSettingSources(sources ...SettingSource) Option {
 	return func(options *Options) {
 		options.SettingSources = make([]SettingSource, len(sources))
 		copy(options.SettingSources, sources)
 	}
 }
 
-// WithAllowSkipPermissionsFlag permits adding Claude's skip-permissions capability flag.
-func WithAllowSkipPermissionsFlag(enabled bool) Option {
+// WithClaudeAllowSkipPermissionsFlag permits adding Claude's skip-permissions capability flag.
+func WithClaudeAllowSkipPermissionsFlag(enabled bool) Option {
 	return func(options *Options) {
 		options.AllowSkipPermissionsFlag = enabled
 	}
 }
 
-// WithInitializeTimeout bounds the Claude control-protocol initialize request.
-func WithInitializeTimeout(timeout time.Duration) Option {
+// WithClaudeInitializeTimeout bounds the Claude control-protocol initialize request.
+func WithClaudeInitializeTimeout(timeout time.Duration) Option {
 	return func(options *Options) {
 		options.InitializeTimeout = timeout
 	}
 }
 
-// WithControlHandlerTimeout bounds one inbound Claude control request.
-func WithControlHandlerTimeout(timeout time.Duration) Option {
+// WithClaudeControlHandlerTimeout bounds one inbound Claude control request.
+func WithClaudeControlHandlerTimeout(timeout time.Duration) Option {
 	return func(options *Options) {
 		options.ControlHandlerTimeout = timeout
 	}
@@ -286,13 +281,9 @@ func WithEnv(env map[string]string) Option {
 	}
 }
 
-// WithMCPProxyCommand sets the command used for ACP-transport MCP stdio shims.
-// If unset, the current executable is used and must support the "mcp-proxy"
-// subcommand.
-func WithMCPProxyCommand(command string, args ...string) Option {
+// WithConcurrencyLimits sets process-local backpressure limits. Zero fields use defaults.
+func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) {
-		options.MCPProxyCommand = command
-
-		options.MCPProxyArgs = append([]string(nil), args...)
+		options.ConcurrencyLimits = limits
 	}
 }

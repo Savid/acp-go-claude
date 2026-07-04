@@ -74,10 +74,6 @@ type recordingSessionStore struct {
 }
 
 var _ claudeacp.SessionStore = (*recordingSessionStore)(nil)
-var _ claudeacp.SessionStoreLister = (*recordingSessionStore)(nil)
-var _ claudeacp.SessionStoreSubkeyLister = (*recordingSessionStore)(nil)
-var _ claudeacp.SessionStoreDeleter = (*recordingSessionStore)(nil)
-var _ claudeacp.SessionStoreReplacer = (*recordingSessionStore)(nil)
 
 func newRecordingSessionStore() *recordingSessionStore {
 	return &recordingSessionStore{
@@ -120,10 +116,7 @@ func (s *recordingSessionStore) Load(
 	return cloneSessionStoreEntries(s.entries[key]), nil
 }
 
-func (s *recordingSessionStore) ListSessions(
-	ctx context.Context,
-	projectKey string,
-) ([]claudeacp.SessionSummary, error) {
+func (s *recordingSessionStore) ListSessions(ctx context.Context) ([]claudeacp.SessionSummary, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -133,13 +126,13 @@ func (s *recordingSessionStore) ListSessions(
 
 	summaries := make([]claudeacp.SessionSummary, 0)
 	for key := range s.entries {
-		if key.ProjectKey != projectKey || key.SessionID == "" || key.Subpath != "" {
+		if key.SessionID == "" || key.Subpath != "" {
 			continue
 		}
 
 		summaries = append(summaries, claudeacp.SessionSummary{
-			SessionID: key.SessionID,
-			MTime:     s.mtime[key],
+			SessionID:          key.SessionID,
+			UpdatedAtUnixMilli: s.mtime[key],
 		})
 	}
 
@@ -159,7 +152,7 @@ func (s *recordingSessionStore) ListSubkeys(
 
 	subkeys := make([]string, 0)
 	for candidate := range s.entries {
-		if candidate.ProjectKey != key.ProjectKey || candidate.SessionID != key.SessionID || candidate.Subpath == "" {
+		if candidate.SessionID != key.SessionID || candidate.Subpath == "" {
 			continue
 		}
 
@@ -180,7 +173,7 @@ func (s *recordingSessionStore) Delete(ctx context.Context, key claudeacp.Sessio
 	s.replaceCalls++
 
 	for candidate := range s.entries {
-		if candidate.ProjectKey != key.ProjectKey || candidate.SessionID != key.SessionID {
+		if candidate.SessionID != key.SessionID {
 			continue
 		}
 
@@ -195,7 +188,7 @@ func (s *recordingSessionStore) Delete(ctx context.Context, key claudeacp.Sessio
 	return nil
 }
 
-func (s *recordingSessionStore) ReplaceSession(
+func (s *recordingSessionStore) Replace(
 	ctx context.Context,
 	main claudeacp.SessionKey,
 	replacements []claudeacp.SessionStoreReplacement,
@@ -210,7 +203,7 @@ func (s *recordingSessionStore) ReplaceSession(
 	s.replaceCalls++
 
 	for candidate := range s.entries {
-		if candidate.ProjectKey == main.ProjectKey && candidate.SessionID == main.SessionID {
+		if candidate.SessionID == main.SessionID {
 			delete(s.entries, candidate)
 			delete(s.mtime, candidate)
 		}
@@ -218,7 +211,7 @@ func (s *recordingSessionStore) ReplaceSession(
 
 	mtime := time.Now().UnixMilli()
 	for _, replacement := range replacements {
-		if replacement.Key.ProjectKey != main.ProjectKey || replacement.Key.SessionID != main.SessionID {
+		if replacement.Key.SessionID != main.SessionID {
 			continue
 		}
 

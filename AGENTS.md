@@ -13,19 +13,16 @@ Organized by domain. Public surface lives in the root package; implementation
 details live in `internal/`.
 
 - **Entrypoint** (`cmd/acp-go-claude`): process entrypoint, ACP stdio mode,
-  and the `mcp-proxy` subcommand.
+  Claude passthrough mode, tracing setup, and signal handling.
 - **ACP agent surface** (root package, e.g. `agent.go`, `agent_connection.go`,
   `agent_dispatcher.go`, `options.go`, `auth.go`, `ids.go`): ACP method
   handlers, request dispatch, agent options, authentication, and ID helpers.
-- **Session orchestration** (`session.go`, `session_meta.go`, `raw_events.go`):
+- **Session orchestration** (`session.go`, `session_meta.go`, `raw_events.go`,
+  `session_store.go`):
   Claude turn lifecycle, prompts, cancellation, permissions, elicitation,
-  usage updates, transcript replay, and raw event handling.
-- **Editor state** (`documents.go`, `nes.go`): open-document tracking and
-  next-edit suggestion lifecycle.
+  usage updates, transcript replay, session storage, and raw event handling.
 - **Configuration** (`model_config.go`, `settings_files.go`): provider/model
   resolution and Claude settings-file handling.
-- **MCP bridge** (`mcp_bridge.go`): ACP-transport MCP bridge and local stdio
-  shim used by Claude MCP config.
 - **Claude CLI internals** (`internal/claude`): CLI process management,
   stream-json protocol, control protocol, command construction, event decoding.
 - **Protocol mapping** (`internal/mapper`): ACP-to-Claude mapping for prompts,
@@ -93,7 +90,7 @@ Unless explicitly requested, ask before:
 - Changing the permission or elicitation flow shape.
 - Adding new ACP extension methods or `_meta` fields.
 - Modifying MCP bridge token handling.
-- Changing the session-import or session-store contract.
+- Changing the session-store contract.
 
 ## Testing Rules
 
@@ -105,8 +102,8 @@ Unless explicitly requested, ask before:
 - Run `golangci-lint run ./...` before considering work complete.
 - Live integration tests launch the actual `claude` binary from `PATH`.
 - Unit tests may use in-memory transports.
-- Local helper processes in integration tests are MCP servers or MCP proxy
-  helpers with deterministic responses.
+- Local helper processes in integration tests are MCP servers with deterministic
+  responses.
 - Keep live prompts deterministic with exact sentinel replies, and assert the
   ACP stop reason plus streamed updates where practical.
 - Do not rely on `Bash` to trigger permission prompts in live tests; user Claude
@@ -118,15 +115,11 @@ Unless explicitly requested, ask before:
 - **IMPORTANT**: Do not silently bypass permission prompts. Permission flow is
   load-bearing for user trust in this agent.
 - **IMPORTANT**: Do not manage Claude CLI authentication state. ACP `logout`
-  only clears adapter-owned gateway auth state and closes gateway-backed
-  sessions launched by this adapter.
-- Do not log MCP bridge tokens, auth material, or user secrets. The ACP MCP
-  bridge's only token-material exception is a `0600` temp file used to pass the
-  bridge token to the local `mcp-proxy` without exposing it in argv or as an env
-  value; normal bridge close removes it, but SIGKILL can orphan it in `$TMPDIR`.
+  only clears adapter-owned session state.
+- Do not log auth material, user secrets, prompts, tool input, tool output, or
+  raw Claude event bodies by default.
 - Keep permission rules session-scoped. Copy them only through intentional
   session fork behavior.
-- Validate MCP bridge tokens and ACP server IDs before accepting proxy traffic.
 - Reject unsupported ACP extension/provider mutation methods with explicit
   protocol errors unless this agent implements a namespaced extension.
 - Avoid broad filesystem or network behavior in tests unless the test is

@@ -1,48 +1,11 @@
 ---
 title: "Elicitation"
-description: "ACP form and URL elicitation, including Claude AskUserQuestion"
-icon: "circle-question-mark"
+description: "Client capability gated user questions"
 ---
 
-The adapter bridges Claude user-input requests to ACP unstable
-[elicitation](https://agentclientprotocol.com/rfds/elicitation) when the client
-advertises support.
+Claude user-question requests are forwarded through ACP elicitation only after
+the client advertises elicitation support during initialize.
 
-Elicitation is ACP client behavior, so it works the same in
-[standalone CLI and embedded Go](/docs/get-started/run-modes). In standalone
-CLI the external host implements the callback. In embedded Go your app
-supplies streams connected to a host/client that implements the same callback.
-
-## Capabilities
-
-The agent uses client elicitation capabilities from ACP
-[`initialize`](https://agentclientprotocol.com/protocol/initialization). If
-form elicitation is unavailable, Claude `AskUserQuestion` requests are denied
-with a clear message.
-
-## AskUserQuestion
-
-Claude's `AskUserQuestion` tool request is parsed into an ACP
-[form elicitation](https://agentclientprotocol.com/rfds/elicitation):
-
-- each question becomes a required schema property
-- single-select questions use `oneOf`
-- multi-select questions use an array schema
-- option labels and descriptions are preserved
-- session and tool-call scope are included on the request
-
-When the client accepts, the adapter maps the answers back into Claude's tool
-input format.
-
-## Response handling
-
-If the client declines or returns no matching content, Claude receives a deny
-decision with a diagnostic message. If the client accepts, Claude receives an
-allow decision with updated tool input through the same
-[permission/control flow](/docs/features/permissions).
-
-## Raw context
-
-The elicitation metadata includes Claude raw tool data under `_meta.acp.raw`
-for clients that need to inspect provider-specific fields. More extension
-metadata is documented in [Metadata](/docs/reference/meta).
+When the capability is absent, the adapter does not send elicitation requests to
+the client. Claude receives a bounded failure response so the prompt turn can
+continue or stop according to Claude behavior.

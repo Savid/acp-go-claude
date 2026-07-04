@@ -30,21 +30,11 @@ var (
 
 	localAgentHandlers = map[string]localAgentHandler{
 		acp.AgentMethodAuthenticate:           localResponse((*Agent).Authenticate),
-		acp.AgentMethodDocumentDidChange:      localNotification((*Agent).UnstableDidChangeDocument),
-		acp.AgentMethodDocumentDidClose:       localNotification((*Agent).UnstableDidCloseDocument),
-		acp.AgentMethodDocumentDidFocus:       localNotification((*Agent).UnstableDidFocusDocument),
-		acp.AgentMethodDocumentDidOpen:        localNotification((*Agent).UnstableDidOpenDocument),
-		acp.AgentMethodDocumentDidSave:        localNotification((*Agent).UnstableDidSaveDocument),
 		acp.AgentMethodInitialize:             localResponse((*Agent).Initialize),
 		acp.AgentMethodLogout:                 localResponse((*Agent).Logout),
-		acp.AgentMethodNesAccept:              localNotification((*Agent).UnstableAcceptNes),
-		acp.AgentMethodNesClose:               localResponse((*Agent).UnstableCloseNes),
-		acp.AgentMethodNesReject:              localNotification((*Agent).UnstableRejectNes),
-		acp.AgentMethodNesStart:               localResponse((*Agent).UnstableStartNes),
-		acp.AgentMethodNesSuggest:             localResponse((*Agent).UnstableSuggestNes),
 		acp.AgentMethodSessionCancel:          localNotification((*Agent).Cancel),
 		acp.AgentMethodSessionClose:           localResponse((*Agent).CloseSession),
-		acp.AgentMethodSessionFork:            localResponse((*Agent).UnstableForkSession),
+		acp.AgentMethodSessionDelete:          localResponse((*Agent).UnstableDeleteSession),
 		acp.AgentMethodSessionList:            localResponse((*Agent).ListSessions),
 		acp.AgentMethodSessionLoad:            localResponse((*Agent).LoadSession),
 		acp.AgentMethodSessionNew:             localResponse((*Agent).NewSession),
@@ -103,14 +93,19 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 		})
 	}
 
+	if method != acp.AgentMethodInitialize {
+		release, err := c.agent.acquireClientCall(ctx)
+		if err != nil {
+			return nil, requestError(err)
+		}
+
+		defer release()
+	}
+
 	if strings.HasPrefix(method, "_") {
 		result, err := c.agent.HandleExtensionMethod(ctx, method, params)
 
 		return result, requestError(err)
-	}
-
-	if method == acp.AgentMethodMcpMessage {
-		return c.agent.handleMCPMessage(ctx, params)
 	}
 
 	handler, ok := localAgentHandlers[method]
@@ -213,34 +208,6 @@ func (c *localAgentConnection) WriteTextFile(
 	params acp.WriteTextFileRequest,
 ) (acp.WriteTextFileResponse, error) {
 	return acp.SendRequest[acp.WriteTextFileResponse](c.conn, ctx, acp.ClientMethodFsWriteTextFile, params)
-}
-
-func (c *localAgentConnection) UnstableConnectMcp(
-	ctx context.Context,
-	params acp.UnstableConnectMcpRequest,
-) (acp.UnstableConnectMcpResponse, error) {
-	return acp.SendRequest[acp.UnstableConnectMcpResponse](c.conn, ctx, acp.ClientMethodMcpConnect, params)
-}
-
-func (c *localAgentConnection) UnstableDisconnectMcp(
-	ctx context.Context,
-	params acp.UnstableDisconnectMcpRequest,
-) (acp.UnstableDisconnectMcpResponse, error) {
-	return acp.SendRequest[acp.UnstableDisconnectMcpResponse](c.conn, ctx, acp.ClientMethodMcpDisconnect, params)
-}
-
-func (c *localAgentConnection) UnstableMessageMcp(
-	ctx context.Context,
-	params acp.UnstableMessageMcpRequest,
-) (acp.UnstableMessageMcpResponse, error) {
-	return acp.SendRequest[acp.UnstableMessageMcpResponse](c.conn, ctx, acp.ClientMethodMcpMessage, params)
-}
-
-func (c *localAgentConnection) UnstableNotifyMcp(
-	ctx context.Context,
-	params acp.UnstableMessageMcpNotification,
-) error {
-	return c.conn.SendNotification(ctx, acp.ClientMethodMcpMessage, params)
 }
 
 func (c *localAgentConnection) RequestPermission(

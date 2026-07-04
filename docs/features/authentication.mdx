@@ -1,99 +1,13 @@
 ---
 title: "Authentication"
-description: "Terminal auth, gateway auth, logout, and ownership boundaries"
-icon: "key-round"
+description: "Claude account ownership"
 ---
 
-Authentication is split between [Claude Code](https://code.claude.com/docs/en/overview)
-and adapter-owned gateway state. The ACP side is negotiated during
-[initialize](https://agentclientprotocol.com/protocol/initialization) and uses
-the `authenticate`/`logout` surfaces documented in
-[ACP methods](/docs/reference/acp-methods).
+The adapter does not manage Claude Code account state. Claude authentication is
+owned by the local Claude Code installation selected by `-home` or `WithHome`.
 
-Use [CLI reference](/docs/reference/cli) for standalone auth flags and
-[Go API](/docs/reference/go-api) for embedded options. Gateway auth is always
-an ACP `authenticate` call, independent of run mode.
+ACP initialize reports no adapter auth methods. ACP logout only clears
+adapter-owned state and closes adapter sessions.
 
-## Terminal auth
-
-When the ACP client advertises terminal auth support, `initialize` can
-advertise:
-
-| Method ID | Meaning |
-| --- | --- |
-| `claude-ai-login` | Run `claude auth login --claudeai`. |
-| `console-login` | Run `claude auth login --console`. |
-
-The command is launched through:
-
-```bash
-acp-go-claude --cli auth login --claudeai
-acp-go-claude --cli auth login --console
-```
-
-This preserves stdio and forwards signals to the real Claude CLI. Use
-`-hide-claude-auth` or `WithHideClaudeAuth(true)` to suppress the Claude
-subscription login method. See [CLI reference](/docs/reference/cli) and
-[Go API](/docs/reference/go-api) for the two configuration forms.
-
-## Gateway auth
-
-When the client advertises `auth._meta.gateway`, `initialize` advertises an
-agent auth method with ID `gateway`. Gateway metadata follows ACP
-[`_meta`](https://agentclientprotocol.com/protocol/extensibility) extension
-rules.
-
-Authenticate with:
-
-```json
-{
-  "methodId": "gateway",
-  "_meta": {
-    "gateway": {
-      "baseUrl": "https://gateway.example",
-      "headers": {
-        "x-api-key": "..."
-      }
-    }
-  }
-}
-```
-
-`baseUrl` must be absolute HTTPS. Gateway-backed sessions launch Claude with:
-
-| Env var | Value |
-| --- | --- |
-| `ANTHROPIC_AUTH_TOKEN` | empty string |
-| `ANTHROPIC_BASE_URL` | gateway `baseUrl` |
-| `ANTHROPIC_CUSTOM_HEADERS` | gateway headers as sorted newline-separated `key: value` lines |
-
-## Logout
-
-ACP [`logout`](https://agentclientprotocol.com/rfds/logout-method) clears only
-adapter-owned gateway auth state. It closes active gateway-backed sessions
-launched by this adapter.
-
-Claude CLI subscription/API login state remains owned by Claude Code and is not
-deleted by this package. The trust boundary is summarized in
-[Security](/docs/operations/security).
-
-## Bare mode auth
-
-Claude `--bare` does not read keychain/OAuth credentials. Use explicit API-key
-or [`apiKeyHelper`](https://code.claude.com/docs/en/settings) auth when
-launching bare sessions.
-
-Standalone CLI:
-
-```bash
-ANTHROPIC_API_KEY=... go run ./cmd/acp-go-claude -bare
-```
-
-Embedded Go:
-
-```go
-claudeacp.Serve(ctx, input, output,
-    claudeacp.WithBareMode(true),
-    claudeacp.WithEnv(map[string]string{"ANTHROPIC_API_KEY": "..."}),
-)
-```
+For tests and automation, pass Claude environment variables with `WithEnv` or
+through the process environment used to launch the binary.

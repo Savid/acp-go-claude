@@ -1,93 +1,23 @@
 ---
-title: "Raw Claude events"
-description: "Mirror provider-native stream-json rows as extension notifications"
-icon: "braces"
+title: "Raw Events"
+description: "Opt-in Claude stream event notifications"
 ---
 
-Portable clients should rely on normal
-[ACP session updates](/docs/reference/updates). Some hosts also need
-provider-native Claude
-[stream-json rows](https://code.claude.com/docs/en/agent-sdk/streaming-output)
-for debugging, archival, or custom UI.
+Raw Claude stream events are off by default. Enable them when creating or
+loading a session:
 
-Raw event selection is per session in both
-[run modes](/docs/get-started/run-modes). Configure it in ACP request
-metadata, not as a process flag or Go option.
-
-## Capability
-
-The agent advertises:
-
-```json
-{
-  "claude": {
-    "sdkMessages": {
-      "scope": "session",
-      "method": "_claude/sdkMessage",
-      "enabledBy": "_meta.claude.emitRawSDKMessages"
-    }
-  }
+```go
+req := acp.NewSessionRequest{
+    Cwd: cwd,
+    Meta: map[string]any{
+        "_meta": map[string]any{
+            "claude": map[string]any{
+                "rawEvent": map[string]any{"enabled": true},
+            },
+        },
+    },
 }
 ```
 
-## Enable all raw messages
-
-```json
-{
-  "_meta": {
-    "claude": {
-      "emitRawSDKMessages": true
-    }
-  }
-}
-```
-
-Add this metadata to [session start requests](/docs/core/sessions#create).
-
-## Enable selected raw messages
-
-```json
-{
-  "_meta": {
-    "claude": {
-      "emitRawSDKMessages": [
-        { "type": "assistant" },
-        { "type": "result" },
-        { "type": "system", "subtype": "init" },
-        { "type": "user", "origin": "tool_result" }
-      ]
-    }
-  }
-}
-```
-
-Filters match `type`, optional `subtype`, and optional `origin.kind`.
-Internal Claude control messages with `type: "control_request"` or
-`type: "control_response"` are not emitted. See
-[Metadata](/docs/reference/meta#raw-event-emission) for the `_meta` shape and
-[ACP methods](/docs/reference/acp-methods#extension-notifications) for the
-extension notification.
-
-## Notification payload
-
-```json
-{
-  "sessionId": "00000000-0000-4000-8000-000000000000",
-  "message": { "type": "assistant" },
-  "rawJSON": "{\"type\":\"assistant\"}"
-}
-```
-
-`rawJSON` is included when the original stream-json row is available. The
-normal portable mapping still happens through
-[Prompt streaming](/docs/core/prompt-streaming).
-
-Raw events include provider-native frames that the portable mapper hides, such
-as Claude's internal `StructuredOutput` tool call when
-[`outputFormat`](/docs/reference/meta#session-options) is configured.
-They may also include `transcript_mirror` frames containing native Claude
-`goal_status` rows when goal extraction observes `/goal` state.
-For [workflows](/docs/features/workflows), raw events preserve Claude's
-`task_started`, `task_progress`, `task_updated`, and `task_notification` system
-frames plus the original `Workflow` launch result. Normal mapped workflow
-updates are still emitted through ACP tool updates.
+Notifications use `_claude/rawEvent` and contain `sessionId`, `sequence`,
+`source`, and `event`. Events over the adapter cap are dropped.

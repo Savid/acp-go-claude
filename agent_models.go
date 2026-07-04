@@ -23,7 +23,10 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	case params.ValueId != nil:
 		return a.setSessionConfigValue(ctx, params.ValueId)
 	case params.Boolean != nil:
-		return a.setSessionConfigBoolean(ctx, params.Boolean)
+		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{
+			jsonFieldError: validationUnsupported,
+			"field":        "boolean",
+		})
 	default:
 		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{acpFieldConfig: validationRequired})
 	}
@@ -111,48 +114,13 @@ func (a *Agent) setSessionConfigValue(
 	return acp.SetSessionConfigOptionResponse{ConfigOptions: options}, nil
 }
 
-func (a *Agent) setSessionConfigBoolean(
-	ctx context.Context,
-	params *acp.SetSessionConfigOptionBoolean,
-) (acp.SetSessionConfigOptionResponse, error) {
-	session, err := a.session(params.SessionId)
-	if err != nil {
-		return acp.SetSessionConfigOptionResponse{}, err
-	}
-
-	if params.ConfigId != configFastMode {
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{acpFieldConfig: "unsupported option"})
-	}
-
-	releaseTurn, err := session.acquireTurn(ctx)
-	if err != nil {
-		return acp.SetSessionConfigOptionResponse{}, err
-	}
-	defer releaseTurn()
-
-	if err := session.client.SetFastMode(ctx, params.Value); err != nil {
-		return acp.SetSessionConfigOptionResponse{}, err
-	}
-
-	session.setFastMode(params.Value)
-
-	options := sessionConfigOptions(session)
-	if err := session.emitOptionalUpdates(ctx, []acp.SessionUpdate{
-		{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}},
-	}); err != nil {
-		return acp.SetSessionConfigOptionResponse{}, err
-	}
-
-	return acp.SetSessionConfigOptionResponse{ConfigOptions: options}, nil
-}
-
-func sessionConfigOptions(session *Session) []acp.SessionConfigOption {
+func sessionConfigOptions(session *agentSession) []acp.SessionConfigOption {
 	mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown := session.configInfo()
 
 	return configOptions(mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown)
 }
 
-func sessionUnstableConfigOptions(session *Session) []acp.UnstableSessionConfigOption {
+func sessionUnstableConfigOptions(session *agentSession) []acp.UnstableSessionConfigOption {
 	mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown := session.configInfo()
 
 	return unstableConfigOptions(mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown)
@@ -243,6 +211,7 @@ func configOptions(
 			Select: &acp.SessionConfigOptionSelect{
 				Id:           configOutputStyle,
 				Name:         "Output Style",
+				Category:     configCategory(modelConfigCategory),
 				CurrentValue: acp.SessionConfigValueId(outputStyle),
 				Options: acp.SessionConfigSelectOptions{
 					Ungrouped: &values,
@@ -265,18 +234,6 @@ func configOptions(
 				},
 			})
 		}
-	}
-
-	if fastModeKnown {
-		options = append(options, acp.SessionConfigOption{
-			Boolean: &acp.SessionConfigOptionBoolean{
-				Id:           configFastMode,
-				Name:         "Fast Mode",
-				Type:         configTypeBoolean,
-				Category:     configCategory(modelConfigCategory),
-				CurrentValue: fastMode,
-			},
-		})
 	}
 
 	return options
@@ -335,6 +292,7 @@ func unstableConfigOptions(
 				Id:           configOutputStyle,
 				Name:         "Output Style",
 				Type:         configTypeSelect,
+				Category:     configCategory(modelConfigCategory),
 				CurrentValue: acp.SessionConfigValueId(outputStyle),
 				Options: acp.SessionConfigSelectOptions{
 					Ungrouped: &values,
@@ -358,18 +316,6 @@ func unstableConfigOptions(
 				},
 			})
 		}
-	}
-
-	if fastModeKnown {
-		options = append(options, acp.UnstableSessionConfigOption{
-			Boolean: &acp.UnstableSessionConfigOptionBoolean{
-				Id:           configFastMode,
-				Name:         "Fast Mode",
-				Type:         configTypeBoolean,
-				Category:     configCategory(modelConfigCategory),
-				CurrentValue: fastMode,
-			},
-		})
 	}
 
 	return options
@@ -637,23 +583,6 @@ func acpModeForPermission(mode string) acp.SessionModeId {
 		return modeDontAsk
 	default:
 		return modeDefault
-	}
-}
-
-func nesCapabilities() *acp.NesCapabilities {
-	return &acp.NesCapabilities{
-		Events: &acp.NesEventCapabilities{
-			Document: &acp.NesDocumentEventCapabilities{
-				DidOpen:   &acp.NesDocumentDidOpenCapabilities{},
-				DidChange: &acp.NesDocumentDidChangeCapabilities{SyncKind: acp.TextDocumentSyncKindFull},
-				DidFocus:  &acp.NesDocumentDidFocusCapabilities{},
-				DidSave:   &acp.NesDocumentDidSaveCapabilities{},
-				DidClose:  &acp.NesDocumentDidCloseCapabilities{},
-			},
-		},
-		Context: &acp.NesContextCapabilities{
-			OpenFiles: &acp.NesOpenFilesCapabilities{},
-		},
 	}
 }
 

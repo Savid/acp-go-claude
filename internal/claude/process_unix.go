@@ -18,7 +18,7 @@ var (
 )
 
 func configureProcessCommandPlatform(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	cmd.Cancel = func() error {
 		_, err := signalProcess(cmd, syscall.SIGTERM)
 

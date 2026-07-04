@@ -15,26 +15,17 @@ import (
 )
 
 // Prompt sends one turn to Claude and streams updates.
-func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
 	releaseTurn, err := s.acquireTurn(ctx)
 	if err != nil {
-		return acp.PromptResponse{
-			StopReason:    acp.StopReasonCancelled,
-			UserMessageId: params.MessageId,
-		}, nil
+		return acp.PromptResponse{}, err
 	}
 	defer releaseTurn()
 
 	s.stopLateMirrorProcessor(ctx)
 
 	localOnlyCommand := localOnlySlashCommand(params.Prompt)
-	localGoalClear := goalClearSlashCommand(params.Prompt)
-	localGoalClearAt := time.Now().UTC().Format(time.RFC3339Nano)
-
 	prompt := params.Prompt
-	if contextText := s.agent.documentContext(s.id); contextText != "" {
-		prompt = append([]acp.ContentBlock{acp.TextBlock(contextText)}, prompt...)
-	}
 
 	content, err := mapper.PromptToClaude(prompt)
 	if err != nil {
@@ -66,7 +57,6 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 		Cwd:                    s.cwd,
 		SupportsTerminalOutput: s.agent.clientSupportsTerminalOutput(),
 		ToolUses:               make(map[string]claude.ToolUseBlock),
-		Workflow:               mapper.NewWorkflowTracker(),
 	}
 
 	state := &promptLoopState{}
@@ -107,8 +97,6 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 				state,
 				toolUpdateOptions,
 				localOnlyCommand,
-				localGoalClear,
-				localGoalClearAt,
 			)
 			if err != nil {
 				return acp.PromptResponse{}, err
@@ -161,7 +149,7 @@ func (s *Session) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Pro
 	}
 }
 
-func (s *Session) finishPromptResult(
+func (s *agentSession) finishPromptResult(
 	turnCtx context.Context,
 	interruptCtx context.Context,
 	params acp.PromptRequest,
@@ -169,8 +157,6 @@ func (s *Session) finishPromptResult(
 	state *promptLoopState,
 	toolUpdateOptions mapper.ToolUpdateOptions,
 	localOnlyCommand bool,
-	localGoalClear bool,
-	localGoalClearAt string,
 ) (acp.PromptResponse, bool, error) {
 	state.promptUsage = mergeUsage(state.promptUsage, mapper.Usage(result))
 
@@ -204,12 +190,6 @@ func (s *Session) finishPromptResult(
 		}
 	}
 
-	if !cancelled && localGoalClear {
-		if err := s.applyLocalGoalClearResult(turnCtx, result.Result, localGoalClearAt); err != nil {
-			return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
-		}
-	}
-
 	if err := s.emitLiveSessionInfoUpdate(turnCtx, params.Prompt); err != nil {
 		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
 	}
@@ -230,23 +210,23 @@ func (s *Session) finishPromptResult(
 }
 
 func workflowTaskNotificationResultCompletesPrompt(tracker *mapper.WorkflowTracker) bool {
+	if tracker == nil {
+		return true
+	}
+
 	return tracker.HasTracked() && !tracker.HasActive()
 }
 
-func (s *Session) logUnknownStopReason(ctx context.Context, result *claude.ResultMessage) {
+func (s *agentSession) logUnknownStopReason(ctx context.Context, result *claude.ResultMessage) {
 	if reason := mapper.UnknownStopReason(result); reason != "" {
 		s.agent.log.DebugContext(ctx, "unknown Claude stop reason", slog.String("stop_reason", reason))
 	}
 }
 
-func (s *Session) handleSessionMirror(ctx context.Context, msg claude.Message) (bool, error) {
+func (s *agentSession) handleSessionMirror(ctx context.Context, msg claude.Message) (bool, error) {
 	frame, isMirror := msg.(*claude.TranscriptMirrorMessage)
 	if !isMirror {
 		return false, nil
-	}
-
-	if err := s.applyTranscriptMirrorGoals(ctx, frame, true); err != nil {
-		return true, err
 	}
 
 	if s.mirror.store == nil || len(frame.Entries) == 0 {
@@ -260,7 +240,7 @@ func (s *Session) handleSessionMirror(ctx context.Context, msg claude.Message) (
 	return true, err
 }
 
-func (s *Session) drainSessionMirror(ctx context.Context, options ...mapper.ToolUpdateOptions) error {
+func (s *agentSession) drainSessionMirror(ctx context.Context, options ...mapper.ToolUpdateOptions) error {
 	drainCtx, cancel := context.WithTimeout(ctx, sessionMirrorDrainTimeout)
 	defer cancel()
 
@@ -300,14 +280,14 @@ func (s *Session) drainSessionMirror(ctx context.Context, options ...mapper.Tool
 	}
 }
 
-func (s *Session) wasTurnCancelled() bool {
+func (s *agentSession) wasTurnCancelled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.turnCancelled
 }
 
-func (s *Session) observePromptMessage(ctx context.Context, msg claude.Message, state *promptLoopState) error {
+func (s *agentSession) observePromptMessage(ctx context.Context, msg claude.Message, state *promptLoopState) error {
 	if assistant, ok := msg.(*claude.AssistantMessage); ok {
 		observeAssistantMessage(assistant, state)
 	}
@@ -341,7 +321,7 @@ func (s *Session) observePromptMessage(ctx context.Context, msg claude.Message, 
 	return s.emitOptionalUpdates(ctx, updates)
 }
 
-func (s *Session) recordWorkflowFrameErrors(ctx context.Context, tracker *mapper.WorkflowTracker) {
+func (s *agentSession) recordWorkflowFrameErrors(ctx context.Context, tracker *mapper.WorkflowTracker) {
 	if tracker == nil || s.agent == nil {
 		return
 	}
@@ -435,7 +415,7 @@ func firstPromptToken(text string) string {
 	return fields[0]
 }
 
-func (s *Session) streamUsageUpdates(
+func (s *agentSession) streamUsageUpdates(
 	msg *claude.StreamEventMessage,
 	previous usageSnapshot,
 	previousKnown bool,
@@ -556,7 +536,7 @@ func streamUsageMeta(usage usageSnapshot) map[string]any {
 	}
 }
 
-func (s *Session) resultUsageUpdates(
+func (s *agentSession) resultUsageUpdates(
 	result *claude.ResultMessage,
 	contextUsage *claude.ContextUsage,
 	model string,
@@ -619,7 +599,7 @@ func sessionUsageClaudeMeta(update *acp.SessionUsageUpdate) map[string]any {
 	return claudeMeta
 }
 
-func (s *Session) emitCurrentUsageUpdate(ctx context.Context) {
+func (s *agentSession) emitCurrentUsageUpdate(ctx context.Context) {
 	contextUsage, err := s.client.GetContextUsage(ctx)
 	if err != nil {
 		s.agent.log.DebugContext(ctx, "get Claude context usage failed", slog.String(jsonFieldError, err.Error()))
@@ -630,7 +610,7 @@ func (s *Session) emitCurrentUsageUpdate(ctx context.Context) {
 	_ = s.emitOptionalUpdates(ctx, s.contextUsageUpdates(contextUsage))
 }
 
-func (s *Session) contextUsageUpdates(contextUsage *claude.ContextUsage) []acp.SessionUpdate {
+func (s *agentSession) contextUsageUpdates(contextUsage *claude.ContextUsage) []acp.SessionUpdate {
 	if contextUsage == nil || contextUsage.MaxTokens <= 0 {
 		return nil
 	}
@@ -645,7 +625,7 @@ func (s *Session) contextUsageUpdates(contextUsage *claude.ContextUsage) []acp.S
 	}}
 }
 
-func (s *Session) updateContextWindow(
+func (s *agentSession) updateContextWindow(
 	result *claude.ResultMessage,
 	contextUsage *claude.ContextUsage,
 	model string,
@@ -703,7 +683,7 @@ func commonPrefixLength(left string, right string) int {
 	return limit
 }
 
-func (s *Session) liveContextWindow(model string) int {
+func (s *agentSession) liveContextWindow(model string) int {
 	if modelHasLargeContext(model) {
 		return largeContextWindow
 	}
@@ -711,7 +691,7 @@ func (s *Session) liveContextWindow(model string) int {
 	return s.currentContextWindow()
 }
 
-func (s *Session) currentContextWindow() int {
+func (s *agentSession) currentContextWindow() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -722,7 +702,7 @@ func (s *Session) currentContextWindow() int {
 	return contextWindowForModel(s.model)
 }
 
-func (s *Session) setContextWindowSize(size int) {
+func (s *agentSession) setContextWindowSize(size int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -783,7 +763,7 @@ func intValue(value any) int {
 	}
 }
 
-func (s *Session) interruptAfterEmitError(ctx context.Context, err error) error {
+func (s *agentSession) interruptAfterEmitError(ctx context.Context, err error) error {
 	interruptCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 

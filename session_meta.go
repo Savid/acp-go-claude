@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/coder/acp-go-sdk"
 )
 
 const (
@@ -92,7 +94,7 @@ func claudeOptionsFromMeta(meta map[string]any) (ClaudeOptions, error) {
 
 func validateClaudeLifecycleMeta(meta map[string]any, claude map[string]any) error {
 	if _, ok := meta[legacyPackageMetaKey]; ok {
-		return fmt.Errorf("_meta.%s is not supported", legacyPackageMetaKey)
+		return unsupportedField("_meta." + legacyPackageMetaKey)
 	}
 
 	if claude == nil {
@@ -103,7 +105,7 @@ func validateClaudeLifecycleMeta(meta map[string]any, claude map[string]any) err
 		switch key {
 		case metaOptionsKey, metaRawEventKey:
 		default:
-			return fmt.Errorf("_meta.%s.%s is not supported", claudeMetaKey, key)
+			return unsupportedField("_meta." + claudeMetaKey + "." + key)
 		}
 	}
 
@@ -129,7 +131,7 @@ func validateRawEventMeta(value any) error {
 				return fmt.Errorf("_meta.%s.%s.%s must be a boolean", claudeMetaKey, metaRawEventKey, key)
 			}
 		default:
-			return fmt.Errorf("_meta.%s.%s.%s is not supported", claudeMetaKey, metaRawEventKey, key)
+			return unsupportedField("_meta." + claudeMetaKey + "." + metaRawEventKey + "." + key)
 		}
 	}
 
@@ -205,11 +207,18 @@ func parseClaudeOptionsMap(raw map[string]any) (ClaudeOptions, error) {
 
 			options.OutputSchema = cloneAnyMap(schema)
 		default:
-			return ClaudeOptions{}, fmt.Errorf("%s is not supported", metaOptionPath(key))
+			return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
 		}
 	}
 
 	return validateClaudeOptions(options)
+}
+
+func unsupportedField(path string) error {
+	return acp.NewInvalidParams(map[string]any{
+		jsonFieldError: validationUnsupported,
+		jsonFieldField: path,
+	})
 }
 
 func validateClaudeOptions(options ClaudeOptions) (ClaudeOptions, error) {

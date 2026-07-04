@@ -28,7 +28,7 @@ func (a *Agent) handleForkSession(
 
 	metaOptions, err := claudeOptionsFromMeta(params.Meta)
 	if err != nil {
-		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+		return acp.UnstableForkSessionResponse{}, lifecycleMetaError(err)
 	}
 
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)

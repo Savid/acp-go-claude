@@ -63,7 +63,7 @@ test-integration-cover:
 
 ## docs-audit: check public docs and examples for removed public terms
 docs-audit:
-	@! rg -n 'opencode acp|proxy|compatibility|deprecated|legacy|migration|session/import|sdkMessage|emitRawSDKMessages|setGoal|goals|NES|SSE MCP|mcpCapabilities\.acp' README.md doc.go docs.json docs examples cmd/acp-go-claude/*.go
+	@! rg -n -- '--cli|opencode acp|proxy|compatibility|deprecated|legacy|migration|session/import|sdkMessage|emitRawSDKMessages|setGoal|goals|thoughtLevel|"_meta"\s*:\s*\{[^}]*"mode"|NES|SSE MCP|mcpCapabilities\.acp' README.md doc.go docs.json docs examples cmd/acp-go-claude/*.go
 
 ## clean: remove build artifacts
 clean:
@@ -82,7 +82,7 @@ modernize-check:
 	go fix -n ./...
 
 ## audit: run repository checks
-audit: fmt-check lint build test coverage-check test-cross-compile vuln modernize-check docs-audit
+audit: fmt lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit
 	go mod verify
 
 ## test/cover: open HTML coverage report

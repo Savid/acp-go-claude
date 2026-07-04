@@ -93,15 +93,6 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 		})
 	}
 
-	if method != acp.AgentMethodInitialize {
-		release, err := c.agent.acquireClientCall(ctx)
-		if err != nil {
-			return nil, requestError(err)
-		}
-
-		defer release()
-	}
-
 	if strings.HasPrefix(method, "_") {
 		result, err := c.agent.HandleExtensionMethod(ctx, method, params)
 
@@ -173,6 +164,12 @@ func (c *localAgentConnection) UnstableCompleteElicitation(
 	ctx context.Context,
 	params acp.UnstableCompleteElicitationNotification,
 ) error {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	return c.conn.SendNotification(ctx, acp.ClientMethodElicitationComplete, params)
 }
 
@@ -193,6 +190,12 @@ func (c *localAgentConnection) CreateElicitation(
 		return acp.UnstableCreateElicitationResponse{}, err
 	}
 
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
+	defer release()
+
 	return acp.SendRequest[acp.UnstableCreateElicitationResponse](c.conn, ctx, acp.ClientMethodElicitationCreate, raw)
 }
 
@@ -200,6 +203,12 @@ func (c *localAgentConnection) ReadTextFile(
 	ctx context.Context,
 	params acp.ReadTextFileRequest,
 ) (acp.ReadTextFileResponse, error) {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.ReadTextFileResponse{}, err
+	}
+	defer release()
+
 	return acp.SendRequest[acp.ReadTextFileResponse](c.conn, ctx, acp.ClientMethodFsReadTextFile, params)
 }
 
@@ -207,6 +216,12 @@ func (c *localAgentConnection) WriteTextFile(
 	ctx context.Context,
 	params acp.WriteTextFileRequest,
 ) (acp.WriteTextFileResponse, error) {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.WriteTextFileResponse{}, err
+	}
+	defer release()
+
 	return acp.SendRequest[acp.WriteTextFileResponse](c.conn, ctx, acp.ClientMethodFsWriteTextFile, params)
 }
 
@@ -214,10 +229,22 @@ func (c *localAgentConnection) RequestPermission(
 	ctx context.Context,
 	params acp.RequestPermissionRequest,
 ) (acp.RequestPermissionResponse, error) {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.RequestPermissionResponse{}, err
+	}
+	defer release()
+
 	return acp.SendRequest[acp.RequestPermissionResponse](c.conn, ctx, acp.ClientMethodSessionRequestPermission, params)
 }
 
 func (c *localAgentConnection) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	return c.conn.SendNotification(ctx, acp.ClientMethodSessionUpdate, params)
 }
 
@@ -225,6 +252,12 @@ func (c *localAgentConnection) CreateTerminal(
 	ctx context.Context,
 	params acp.CreateTerminalRequest,
 ) (acp.CreateTerminalResponse, error) {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.CreateTerminalResponse{}, err
+	}
+	defer release()
+
 	return acp.SendRequest[acp.CreateTerminalResponse](c.conn, ctx, acp.ClientMethodTerminalCreate, params)
 }
 
@@ -232,6 +265,12 @@ func (c *localAgentConnection) KillTerminal(
 	ctx context.Context,
 	params acp.KillTerminalRequest,
 ) (acp.KillTerminalResponse, error) {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.KillTerminalResponse{}, err
+	}
+	defer release()
+
 	return acp.SendRequest[acp.KillTerminalResponse](c.conn, ctx, acp.ClientMethodTerminalKill, params)
 }
 
@@ -239,6 +278,12 @@ func (c *localAgentConnection) TerminalOutput(
 	ctx context.Context,
 	params acp.TerminalOutputRequest,
 ) (acp.TerminalOutputResponse, error) {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.TerminalOutputResponse{}, err
+	}
+	defer release()
+
 	return acp.SendRequest[acp.TerminalOutputResponse](c.conn, ctx, acp.ClientMethodTerminalOutput, params)
 }
 
@@ -246,6 +291,12 @@ func (c *localAgentConnection) ReleaseTerminal(
 	ctx context.Context,
 	params acp.ReleaseTerminalRequest,
 ) (acp.ReleaseTerminalResponse, error) {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.ReleaseTerminalResponse{}, err
+	}
+	defer release()
+
 	return acp.SendRequest[acp.ReleaseTerminalResponse](c.conn, ctx, acp.ClientMethodTerminalRelease, params)
 }
 
@@ -253,6 +304,12 @@ func (c *localAgentConnection) WaitForTerminalExit(
 	ctx context.Context,
 	params acp.WaitForTerminalExitRequest,
 ) (acp.WaitForTerminalExitResponse, error) {
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return acp.WaitForTerminalExitResponse{}, err
+	}
+	defer release()
+
 	return acp.SendRequest[acp.WaitForTerminalExitResponse](c.conn, ctx, acp.ClientMethodTerminalWaitForExit, params)
 }
 
@@ -260,6 +317,12 @@ func (c *localAgentConnection) NotifyExtension(ctx context.Context, method strin
 	if method == "" || !strings.HasPrefix(method, "_") {
 		return fmt.Errorf("extension method name must start with '_' (got %q)", method)
 	}
+
+	release, err := c.agent.acquireClientCall(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	return c.conn.SendNotification(ctx, method, params)
 }

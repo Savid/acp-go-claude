@@ -3,10 +3,15 @@ package claudeacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
 
@@ -51,24 +56,34 @@ func TestLifecycleMetaStrictAllowlist(t *testing.T) {
 	require.True(t, rawMessageConfigFromMeta(valid).Enabled())
 
 	tests := []struct {
-		name string
-		meta map[string]any
+		name  string
+		meta  map[string]any
+		field string
 	}{
 		{
-			name: "deleted goal",
-			meta: map[string]any{claudeMetaKey: map[string]any{"goal": map[string]any{}}},
+			name:  "deleted goal",
+			meta:  map[string]any{claudeMetaKey: map[string]any{"goal": map[string]any{}}},
+			field: "_meta.claude.goal",
 		},
 		{
-			name: "deleted raw sdk",
-			meta: map[string]any{claudeMetaKey: map[string]any{"emitRawSDKMessages": true}},
+			name:  "deleted raw sdk",
+			meta:  map[string]any{claudeMetaKey: map[string]any{"emitRawSDKMessages": true}},
+			field: "_meta.claude.emitRawSDKMessages",
 		},
 		{
-			name: "legacy package key",
-			meta: map[string]any{legacyPackageMetaKey: map[string]any{}},
+			name:  "legacy package key",
+			meta:  map[string]any{legacyPackageMetaKey: map[string]any{}},
+			field: "_meta.github.com/savid/acp-go-claude",
 		},
 		{
-			name: "unknown option",
-			meta: map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{"extra": true}}},
+			name:  "unknown option",
+			meta:  map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{"extra": true}}},
+			field: "_meta.claude.options.extra",
+		},
+		{
+			name:  "unknown raw event key",
+			meta:  map[string]any{claudeMetaKey: map[string]any{metaRawEventKey: map[string]any{"extra": true}}},
+			field: "_meta.claude.rawEvent.extra",
 		},
 	}
 
@@ -77,9 +92,72 @@ func TestLifecycleMetaStrictAllowlist(t *testing.T) {
 			t.Parallel()
 
 			_, err := claudeOptionsFromMeta(tc.meta)
-			require.Error(t, err)
+			requireExactUnsupportedField(t, err, tc.field)
 		})
 	}
+}
+
+func TestLifecycleMetaUnsupportedErrorsPreserveRequestErrorShape(t *testing.T) {
+	t.Parallel()
+
+	agent := NewAgent()
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "new session",
+			call: func() error {
+				_, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project", WithSessionMeta(map[string]any{
+					claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{"extra": true}},
+				})))
+
+				return err
+			},
+		},
+		{
+			name: "fork extension",
+			call: func() error {
+				raw, err := json.Marshal(ForkSessionRequest("parent", "/tmp/project", WithSessionMeta(map[string]any{
+					claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{"extra": true}},
+				})))
+				require.NoError(t, err)
+				_, err = agent.HandleExtensionMethod(context.Background(), ForkSessionMethod, raw)
+
+				return err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			requireExactUnsupportedField(t, tc.call(), "_meta.claude.options.extra")
+		})
+	}
+}
+
+func requireExactUnsupportedField(t *testing.T, err error, field string) {
+	t.Helper()
+
+	require.Error(t, err)
+	var reqErr *acp.RequestError
+	require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
+	require.Equal(t, -32602, reqErr.Code)
+	require.Equal(t, "Invalid params", reqErr.Message)
+	require.Equal(t, map[string]any{
+		jsonFieldError: validationUnsupported,
+		jsonFieldField: field,
+	}, reqErr.Data)
+}
+
+func requireResourceNotFound(t *testing.T, err error) {
+	t.Helper()
+
+	require.Error(t, err)
+	var reqErr *acp.RequestError
+	require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
+	require.Equal(t, -32002, reqErr.Code)
+	require.Equal(t, "Resource not found", reqErr.Message)
 }
 
 func TestInMemorySessionStoreContract(t *testing.T) {
@@ -125,6 +203,101 @@ func TestInMemorySessionStoreContract(t *testing.T) {
 	summaries, err = store.ListSessions(ctx)
 	require.NoError(t, err)
 	require.Empty(t, summaries)
+
+	require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{json.RawMessage(`{"type":"late"}`)}))
+	entries, err = store.Load(ctx, main)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+
+	require.NoError(t, store.Append(ctx, sub, []SessionStoreEntry{json.RawMessage(`{"type":"late-sub"}`)}))
+	entries, err = store.Load(ctx, sub)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestDeleteSessionTombstoneHidesNativeTranscriptAndSurfacesCleanupError(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	cwd := t.TempDir()
+	sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
+	nativePath := writeNativeTranscript(t, home, cwd, sessionID)
+
+	originalDeleteNativeTranscript := deleteNativeTranscript
+	t.Cleanup(func() { deleteNativeTranscript = originalDeleteNativeTranscript })
+
+	cleanupErr := errors.New("cleanup failed")
+	deleteCalls := 0
+	deleteNativeTranscript = func(context.Context, string, string) error {
+		deleteCalls++
+
+		return cleanupErr
+	}
+
+	agent := NewAgent(WithHome(home))
+	_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+	require.ErrorIs(t, err, cleanupErr)
+	require.FileExists(t, nativePath)
+
+	listResp, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
+	require.NoError(t, err)
+	require.Empty(t, listResp.Sessions)
+	require.GreaterOrEqual(t, deleteCalls, 2)
+}
+
+func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	cwd := t.TempDir()
+	sessionID := acp.SessionId("22222222-2222-4222-8222-222222222222")
+	nativePath := writeNativeTranscript(t, home, cwd, sessionID)
+	store := NewInMemorySessionStore()
+
+	originalDeleteNativeTranscript := deleteNativeTranscript
+	t.Cleanup(func() { deleteNativeTranscript = originalDeleteNativeTranscript })
+
+	cleanupErr := errors.New("cleanup failed")
+	deleteNativeTranscript = func(context.Context, string, string) error { return cleanupErr }
+	agent := NewAgent(WithHome(home), WithSessionStore(store))
+	_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+	require.ErrorIs(t, err, cleanupErr)
+	require.FileExists(t, nativePath)
+
+	deleteNativeTranscript = originalDeleteNativeTranscript
+	restarted := NewAgent(WithHome(home), WithSessionStore(store))
+
+	listResp, err := restarted.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
+	require.NoError(t, err)
+	require.Empty(t, listResp.Sessions)
+	require.FileExists(t, nativePath)
+
+	_, err = restarted.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
+	requireResourceNotFound(t, err)
+	require.NoFileExists(t, nativePath)
+
+	_, err = restarted.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
+	requireResourceNotFound(t, err)
+}
+
+func writeNativeTranscript(t *testing.T, home string, cwd string, sessionID acp.SessionId) string {
+	t.Helper()
+
+	projectKey, err := projectKeyForDirectory(cwd)
+	require.NoError(t, err)
+
+	path := filepath.Join(home, "projects", projectKey, string(sessionID)+".jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	entry := map[string]any{
+		jsonFieldType: "user",
+		jsonFieldCwd:  cwd,
+		"message": map[string]any{
+			"content": "hello",
+		},
+	}
+	data, err := json.Marshal(entry)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, append(data, '\n'), 0o600))
+
+	return path
 }
 
 func TestRequestBuildersContract(t *testing.T) {
@@ -173,6 +346,85 @@ func TestClientCallConcurrencyLimit(t *testing.T) {
 	release, err = agent.acquireClientCall(context.Background())
 	require.NoError(t, err)
 	release()
+}
+
+func TestCancelDuringPromptBypassesClientCallLimit(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
+	transport := newAutoControlTransport()
+	client := claude.NewClient(nil, claude.Options{InitializeTimeout: time.Second}, transport)
+	require.NoError(t, client.Start(ctx))
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+
+	agent.mu.Lock()
+	agent.sessions["session-1"] = &agentSession{
+		agent:  agent,
+		id:     "session-1",
+		client: client,
+	}
+	agent.mu.Unlock()
+
+	release, err := agent.acquireClientCall(ctx)
+	require.NoError(t, err)
+	defer release()
+
+	raw, err := json.Marshal(acp.CancelNotification{SessionId: "session-1"})
+	require.NoError(t, err)
+
+	conn := &localAgentConnection{agent: agent}
+	conn.initialized.Store(true)
+	_, reqErr := conn.handle(ctx, acp.AgentMethodSessionCancel, raw)
+	require.Nil(t, reqErr)
+}
+
+type autoControlTransport struct {
+	incoming chan map[string]any
+	errs     chan error
+
+	mu     sync.Mutex
+	closed bool
+}
+
+func newAutoControlTransport() *autoControlTransport {
+	return &autoControlTransport{
+		incoming: make(chan map[string]any, 16),
+		errs:     make(chan error, 1),
+	}
+}
+
+func (t *autoControlTransport) Start(context.Context) error { return nil }
+
+func (t *autoControlTransport) Send(_ context.Context, payload any) error {
+	if req, ok := payload.(claude.ControlRequest); ok {
+		t.incoming <- map[string]any{
+			jsonFieldType: "control_response",
+			"response": map[string]any{
+				"request_id":     req.RequestID,
+				jsonFieldSubtype: "success",
+			},
+		}
+	}
+
+	return nil
+}
+
+func (t *autoControlTransport) Messages(context.Context) (<-chan map[string]any, <-chan error) {
+	return t.incoming, t.errs
+}
+
+func (t *autoControlTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if !t.closed {
+		close(t.incoming)
+		close(t.errs)
+		t.closed = true
+	}
+
+	return nil
 }
 
 func TestRawEventLimit(t *testing.T) {

@@ -46,7 +46,7 @@ func TestRunPassesContractFlags(t *testing.T) {
 	require.True(t, got.BareMode)
 	require.Equal(t, "plan", got.DefaultPermissionMode)
 	require.Equal(t, "system", got.DefaultSystemPrompt)
-	require.True(t, got.HideClaudeAuth)
+	require.True(t, got.HideAuth)
 }
 
 func TestRunVersion(t *testing.T) {

@@ -20,6 +20,7 @@ const (
 	jsonFieldCwd                  = "cwd"
 	jsonFieldEntries              = "entries"
 	jsonFieldError                = "error"
+	jsonFieldField                = "field"
 	jsonFieldFormat               = "format"
 	jsonFieldImportID             = "importId"
 	jsonFieldIndex                = "index"

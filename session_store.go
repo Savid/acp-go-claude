@@ -84,7 +84,9 @@ func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entri
 
 	s.ensure()
 
-	delete(s.tombstone, key)
+	if s.isTombstonedLocked(key) {
+		return nil
+	}
 
 	for _, entry := range entries {
 		s.entries[key] = append(s.entries[key], cloneStoreEntry(entry))

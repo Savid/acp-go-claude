@@ -28,7 +28,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 
 	metaOptions, err := claudeOptionsFromMeta(params.Meta)
 	if err != nil {
-		return acp.NewSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+		return acp.NewSessionResponse{}, lifecycleMetaError(err)
 	}
 
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
@@ -82,7 +82,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 	metaOptions, err := claudeOptionsFromMeta(params.Meta)
 	if err != nil {
-		return acp.ResumeSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
 	}
 
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
@@ -111,6 +111,12 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		}
 
 		return resp, nil
+	}
+
+	if blocked, blockErr := a.nativeSessionBlocked(ctx, params.SessionId); blockErr != nil {
+		return acp.ResumeSessionResponse{}, blockErr
+	} else if blocked {
+		return acp.ResumeSessionResponse{}, newResourceNotFound(map[string]any{acpFieldSessionID: params.SessionId})
 	}
 
 	if openErr := a.ensureOpen(); openErr != nil {
@@ -153,12 +159,18 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 
 	metaOptions, err := claudeOptionsFromMeta(params.Meta)
 	if err != nil {
-		return acp.LoadSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
 	}
 
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.LoadSessionResponse{}, validationErr
+	}
+
+	if blocked, blockErr := a.nativeSessionBlocked(ctx, params.SessionId); blockErr != nil {
+		return acp.LoadSessionResponse{}, blockErr
+	} else if blocked {
+		return acp.LoadSessionResponse{}, newResourceNotFound(map[string]any{acpFieldSessionID: params.SessionId})
 	}
 
 	saved, err := transcript.Store{ClaudeHome: a.options.Home}.Find(ctx, string(params.SessionId), params.Cwd)
@@ -274,9 +286,14 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		active = append(active, session.sessionInfo(id))
 	}
 
-	saved, err := transcript.Store{ClaudeHome: a.options.Home}.List(ctx, params.Cwd, nil)
-	if err != nil {
-		return acp.ListSessionsResponse{}, err
+	a.retryDeletedNativeTranscripts(ctx)
+
+	var saved []transcript.Session
+	if a.nativeSessionFallbackEnabled() {
+		saved, err = transcript.Store{ClaudeHome: a.options.Home}.List(ctx, params.Cwd, nil)
+		if err != nil {
+			return acp.ListSessionsResponse{}, err
+		}
 	}
 
 	storeSessions, err := a.listStoreSessions(ctx, params)
@@ -293,6 +310,12 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	}
 
 	for _, session := range saved {
+		if a.isDeleted(session.Info.SessionId) {
+			a.retryDeleteNativeTranscript(ctx, session.Info.SessionId)
+
+			continue
+		}
+
 		if _, ok := seen[session.Info.SessionId]; ok {
 			continue
 		}
@@ -401,20 +424,27 @@ func (a *Agent) UnstableDeleteSession(
 	a.mu.Lock()
 	session := a.sessions[params.SessionId]
 	delete(a.sessions, params.SessionId)
+	a.deleted[params.SessionId] = struct{}{}
 	a.deleteCachedPermissionRulesLocked(params.SessionId)
 	a.mu.Unlock()
+
+	var cleanupErr error
 
 	if session != nil {
 		_ = session.Cancel(ctx)
 		if err := session.Close(ctx); err != nil {
-			return acp.UnstableDeleteSessionResponse{}, err
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 
 		a.observe.AddActiveSession(ctx, -1)
 	}
 
 	if err := deleteNativeTranscript(ctx, a.options.Home, string(params.SessionId)); err != nil {
-		a.log.DebugContext(ctx, "delete native Claude transcript failed", slog.String(acpFieldSessionID, string(params.SessionId)), slog.String(jsonFieldError, err.Error()))
+		cleanupErr = errors.Join(cleanupErr, err)
+	}
+
+	if cleanupErr != nil {
+		return acp.UnstableDeleteSessionResponse{}, cleanupErr
 	}
 
 	return acp.UnstableDeleteSessionResponse{}, nil
@@ -885,6 +915,64 @@ func (a *Agent) storeHasSession(ctx context.Context, sessionID string, cwd strin
 	entries, err := a.loadStoreEntries(ctx, a.sessionStore(), SessionKey{SessionID: sessionID})
 
 	return err == nil && len(entries) > 0
+}
+
+func (a *Agent) nativeSessionFallbackEnabled() bool {
+	return a.options.SessionStore == nil
+}
+
+func (a *Agent) nativeSessionBlocked(ctx context.Context, sessionID acp.SessionId) (bool, error) {
+	if a.isDeleted(sessionID) {
+		a.retryDeleteNativeTranscript(ctx, sessionID)
+
+		return true, nil
+	}
+
+	if a.nativeSessionFallbackEnabled() {
+		return false, nil
+	}
+
+	entries, err := a.loadStoreEntries(ctx, a.sessionStore(), SessionKey{SessionID: string(sessionID)})
+	if err != nil {
+		return false, err
+	}
+
+	if len(entries) > 0 {
+		return false, nil
+	}
+
+	a.retryDeleteNativeTranscript(ctx, sessionID)
+
+	return true, nil
+}
+
+func (a *Agent) isDeleted(sessionID acp.SessionId) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	_, ok := a.deleted[sessionID]
+
+	return ok
+}
+
+func (a *Agent) retryDeletedNativeTranscripts(ctx context.Context) {
+	a.mu.Lock()
+
+	ids := make([]acp.SessionId, 0, len(a.deleted))
+	for id := range a.deleted {
+		ids = append(ids, id)
+	}
+	a.mu.Unlock()
+
+	for _, id := range ids {
+		a.retryDeleteNativeTranscript(ctx, id)
+	}
+}
+
+func (a *Agent) retryDeleteNativeTranscript(ctx context.Context, sessionID acp.SessionId) {
+	if err := deleteNativeTranscript(ctx, a.options.Home, string(sessionID)); err != nil {
+		a.log.DebugContext(ctx, "retry delete native Claude transcript failed", slog.String(acpFieldSessionID, string(sessionID)), slog.String(jsonFieldError, err.Error()))
+	}
 }
 
 func (a *Agent) listStoreSessions(ctx context.Context, params acp.ListSessionsRequest) ([]acp.SessionInfo, error) {

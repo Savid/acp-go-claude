@@ -71,6 +71,7 @@ type Agent struct {
 	conn               agentClient
 	sessions           map[acp.SessionId]*agentSession
 	store              SessionStore
+	deleted            map[acp.SessionId]struct{}
 	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
@@ -101,6 +102,7 @@ func NewAgent(opts ...Option) *Agent {
 		observe:          observer.New(observer.Config{MeterProvider: options.MeterProvider, Propagator: options.TextMapPropagator, TracerProvider: options.TracerProvider, Version: options.AgentVersion}),
 		sessions:         make(map[acp.SessionId]*agentSession),
 		store:            NewInMemorySessionStore(),
+		deleted:          make(map[acp.SessionId]struct{}),
 		positionEncoding: acp.PositionEncodingKindUtf16,
 		permissionCache:  make(map[acp.SessionId]map[string]string),
 		activeLimitErr:   validateConcurrencyLimits(options.ConcurrencyLimits),
@@ -141,6 +143,7 @@ func (a *Agent) Close() error {
 
 	a.sessions = make(map[acp.SessionId]*agentSession)
 	a.permissionCache = make(map[acp.SessionId]map[string]string)
+	a.deleted = make(map[acp.SessionId]struct{})
 	a.conn = nil
 	a.closed = true
 	a.mu.Unlock()

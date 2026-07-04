@@ -16,6 +16,7 @@ const (
 )
 
 var copyClaudeConfigFiles = copyClaudeConfigFilesImpl
+var deleteNativeTranscript = deleteNativeTranscriptImpl
 
 type materializedSession struct {
 	configDir string
@@ -300,7 +301,7 @@ func sourceClaudeConfigDir(sourceClaudeHome string, env map[string]string) strin
 	return filepath.Join(home, ".claude")
 }
 
-func deleteNativeTranscript(ctx context.Context, claudeHome string, sessionID string) error {
+func deleteNativeTranscriptImpl(ctx context.Context, claudeHome string, sessionID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

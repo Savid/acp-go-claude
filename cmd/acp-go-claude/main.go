@@ -2,26 +2,20 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 
 	claudeacp "github.com/savid/acp-go-claude"
-	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 var serve = claudeacp.Serve
-var runClaudeCLI = runCLI
 var exit = os.Exit
 var shutdownOpenTelemetry = shutdownTelemetry
 var agentVersion = buildVersion
-
-const cliCommandName = "acp-go-claude --cli"
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
@@ -30,10 +24,6 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
-	if len(args) > 0 && args[0] == "--cli" {
-		return runClaudeCLI(ctx, args[1:], stdin, stdout, stderr)
-	}
-
 	flags := flag.NewFlagSet("acp-go-claude", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
@@ -133,96 +123,4 @@ func pendingSignal(signals <-chan os.Signal) os.Signal {
 	default:
 		return nil
 	}
-}
-
-func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
-	flags := flag.NewFlagSet(cliCommandName, flag.ContinueOnError)
-	flags.SetOutput(stderr)
-
-	claudePath := flags.String("path", "", "path to claude CLI")
-	claudeHome := flags.String("home", "", "Claude config directory")
-
-	if err := flags.Parse(args); err != nil {
-		return 2
-	}
-
-	path := *claudePath
-	if path == "" {
-		path = os.Getenv(claude.EnvClaudeCodeExecutable)
-	}
-
-	if path == "" {
-		var err error
-
-		path, err = exec.LookPath("claude")
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "%s: find claude in PATH: %v\n", cliCommandName, err)
-
-			return 1
-		}
-	}
-
-	cmd := exec.CommandContext(ctx, path, flags.Args()...) // #nosec G204,G702 -- path and args are the explicit Claude CLI auth command requested by the user.
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.Env = os.Environ()
-
-	if *claudeHome != "" {
-		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+*claudeHome)
-	}
-
-	if err := cmd.Start(); err != nil {
-		_, _ = fmt.Fprintf(stderr, "%s: %v\n", cliCommandName, err)
-
-		return 1
-	}
-
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, forwardedSignals()...)
-
-	done := make(chan struct{})
-
-	go func() {
-		defer signal.Stop(signals)
-
-		for {
-			select {
-			case sig := <-signals:
-				if cmd.Process != nil {
-					_ = cmd.Process.Signal(sig)
-				}
-			case <-done:
-				return
-			}
-		}
-	}()
-
-	err := cmd.Wait()
-
-	close(done)
-
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "%s: %v\n", cliCommandName, err)
-
-		return commandExitCode(err)
-	}
-
-	return 0
-}
-
-func commandExitCode(err error) int {
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		code := exitErr.ExitCode()
-		if code >= 0 {
-			return code
-		}
-
-		if code := signalExitCode(exitErr); code > 0 {
-			return code
-		}
-	}
-
-	return 1
 }

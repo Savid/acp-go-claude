@@ -63,8 +63,8 @@ type Options struct {
 	DefaultPermissionMode string
 	// DefaultSystemPrompt is passed to newly created Claude sessions when non-empty.
 	DefaultSystemPrompt string
-	// HideClaudeAuth suppresses Claude subscription terminal auth methods.
-	HideClaudeAuth bool
+	// HideAuth suppresses Claude subscription terminal auth methods.
+	HideAuth bool
 	// BareMode launches Claude with --bare for deterministic sessions that opt
 	// out of Claude's automatic project/context discovery. Bare mode also
 	// requires explicit API-key or apiKeyHelper auth.
@@ -229,7 +229,7 @@ func WithClaudeDefaultSystemPrompt(prompt string) Option {
 // WithClaudeHideAuth suppresses Claude subscription terminal auth methods.
 func WithClaudeHideAuth(enabled bool) Option {
 	return func(options *Options) {
-		options.HideClaudeAuth = enabled
+		options.HideAuth = enabled
 	}
 }
 

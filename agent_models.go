@@ -25,7 +25,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	case params.Boolean != nil:
 		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{
 			jsonFieldError: validationUnsupported,
-			"field":        "boolean",
+			jsonFieldField: "boolean",
 		})
 	default:
 		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{acpFieldConfig: validationRequired})

@@ -126,6 +126,31 @@ func TestHandleAskUserQuestion(t *testing.T) {
 	require.ErrorContains(t, err, "elicit failed")
 }
 
+func TestClientElicitationCapabilityGating(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		caps     *acp.ElicitationCapabilities
+		wantForm bool
+		wantURL  bool
+	}{
+		{name: "nil", caps: nil, wantForm: false, wantURL: false},
+		{name: "empty object", caps: &acp.ElicitationCapabilities{}, wantForm: true, wantURL: false},
+		{name: "url only", caps: &acp.ElicitationCapabilities{Url: &acp.ElicitationUrlCapabilities{}}, wantForm: false, wantURL: true},
+		{name: "form explicit", caps: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}, wantForm: true, wantURL: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			agent := NewAgent()
+			agent.clientCapabilities.Elicitation = tt.caps
+			require.Equal(t, tt.wantForm, agent.clientSupportsFormElicitation())
+			require.Equal(t, tt.wantURL, agent.clientSupportsURLElicitation())
+		})
+	}
+}
+
 func TestElicitationHelpersAndHandlers(t *testing.T) {
 	agent := NewAgent()
 	session := &agentSession{agent: agent, id: "session-1"}
@@ -153,6 +178,11 @@ func TestElicitationHelpersAndHandlers(t *testing.T) {
 	_, err = session.handleElicitation(t.Context(), claude.ElicitationRequest{Mode: claude.ElicitationModeForm})
 	require.ErrorContains(t, err, "form failed")
 	conn.elicitErr = nil
+
+	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{}
+	response, err = session.handleElicitation(t.Context(), claude.ElicitationRequest{Mode: claude.ElicitationModeForm})
+	require.NoError(t, err)
+	require.Equal(t, claude.ElicitationActionAccept, response.Action)
 
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Url: &acp.ElicitationUrlCapabilities{}}
 	response, err = session.handleElicitation(t.Context(), claude.ElicitationRequest{Mode: claude.ElicitationModeForm})

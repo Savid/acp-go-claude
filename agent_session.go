@@ -587,6 +587,21 @@ func (a *Agent) clientElicitationCapabilities() *acp.ElicitationCapabilities {
 	return a.clientCapabilities.Elicitation
 }
 
+func (a *Agent) clientSupportsFormElicitation() bool {
+	caps := a.clientElicitationCapabilities()
+	if caps == nil {
+		return false
+	}
+
+	return caps.Form != nil || caps.Url == nil
+}
+
+func (a *Agent) clientSupportsURLElicitation() bool {
+	caps := a.clientElicitationCapabilities()
+
+	return caps != nil && caps.Url != nil
+}
+
 func (a *Agent) clientSupportsTerminalOutput() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()

@@ -25,8 +25,7 @@ func (s *agentSession) handleAskUserQuestion(
 
 	conn := s.agent.connection()
 
-	caps := s.agent.clientElicitationCapabilities()
-	if conn == nil || caps == nil || caps.Form == nil {
+	if conn == nil || !s.agent.clientSupportsFormElicitation() {
 		return claude.PermissionDecision{
 			Behavior: claude.BehaviorDeny,
 			Message:  "AskUserQuestion requires ACP form elicitation support",
@@ -322,21 +321,19 @@ func (s *agentSession) handleElicitation(
 	}()
 
 	conn := s.agent.connection()
-	caps := s.agent.clientElicitationCapabilities()
-
-	if conn == nil || caps == nil {
+	if conn == nil {
 		return claude.ElicitationResponse{Action: claude.ElicitationActionDecline}, nil
 	}
 
 	switch request.Mode {
 	case claude.ElicitationModeForm:
-		if caps.Form == nil {
+		if !s.agent.clientSupportsFormElicitation() {
 			return claude.ElicitationResponse{Action: claude.ElicitationActionDecline}, nil
 		}
 
 		return s.createFormElicitation(ctx, conn, request)
 	case claude.ElicitationModeURL:
-		if caps.Url == nil || request.URL == "" {
+		if !s.agent.clientSupportsURLElicitation() || request.URL == "" {
 			return claude.ElicitationResponse{Action: claude.ElicitationActionDecline}, nil
 		}
 

@@ -40,6 +40,11 @@ test-cross-compile:
 	rm -rf .tmp/cross
 	mkdir -p .tmp/cross
 	GOOS=windows GOARCH=amd64 go test -c -o .tmp/cross/permissions-windows.test ./internal/permissions
+	GOOS=linux GOARCH=amd64 go test -c -o .tmp/cross/claude-linux.test ./internal/claude
+	GOOS=darwin GOARCH=arm64 go test -c -o .tmp/cross/claude-darwin.test ./internal/claude
+	GOOS=freebsd GOARCH=amd64 go build ./...
+	GOOS=openbsd GOARCH=amd64 go build ./...
+	GOOS=windows GOARCH=amd64 go build ./...
 
 ## test-integration-smoke: compile and run integration tests that can skip without live auth
 test-integration-smoke:

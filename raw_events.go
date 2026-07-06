@@ -10,7 +10,6 @@ const (
 	rawEventMaxBytes = 64 * 1024
 
 	claudeMetaKey           = "claude"
-	legacyPackageMetaKey    = "github.com/savid/acp-go-claude"
 	structuredOutputMetaKey = "structuredOutput"
 	usageMetaKey            = "usage"
 	rawMessageTypeKey       = "type"

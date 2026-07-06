@@ -42,11 +42,6 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "legacy meta",
-			meta:    map[string]any{legacyPackageMetaKey: map[string]any{}},
-			wantErr: legacyPackageMetaKey,
-		},
-		{
 			name:    "unknown claude field",
 			meta:    map[string]any{claudeMetaKey: map[string]any{"extra": true}},
 			wantErr: "_meta.claude.extra",

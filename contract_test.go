@@ -71,11 +71,6 @@ func TestLifecycleMetaStrictAllowlist(t *testing.T) {
 			field: "_meta.claude.emitRawSDKMessages",
 		},
 		{
-			name:  "legacy package key",
-			meta:  map[string]any{legacyPackageMetaKey: map[string]any{}},
-			field: "_meta.github.com/savid/acp-go-claude",
-		},
-		{
 			name:  "unknown option",
 			meta:  map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{"extra": true}}},
 			field: "_meta.claude.options.extra",

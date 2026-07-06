@@ -80,3 +80,29 @@ OpenTelemetry providers.
 - Optional raw Claude stream-json extension notifications.
 - OpenTelemetry spans, metrics, trace propagation, and structured logs without
   recording prompt/tool secrets by default.
+
+## Docs
+
+- [Overview](docs/overview.mdx)
+- [Run modes](docs/get-started/run-modes.mdx)
+- [Go API](docs/reference/go-api.mdx)
+- [ACP methods](docs/reference/acp-methods.mdx)
+- [Observability](docs/operations/observability.mdx)
+
+## Development
+
+```sh
+make audit
+make test-integration-smoke
+make test-integration
+make test-integration-cover
+```
+
+Live integration tests require a local authenticated `claude` CLI. The full
+integration target sets `ACP_GO_CLAUDE_RUN_INTEGRATION=1` and may spend model
+tokens. Live tests always launch Claude with an isolated temp
+`CLAUDE_CONFIG_DIR`. When process env auth is available and `ACP_GO_CLAUDE_HOME`
+is unset, tests use a fresh temp home. Otherwise they copy the source home into
+the temp home and clear copied auth refresh tokens so live tests cannot rotate
+the source home's refresh token. If neither env auth nor copied portable file
+auth is available, tests fail instead of launching without isolated auth.

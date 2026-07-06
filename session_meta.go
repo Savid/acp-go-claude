@@ -76,7 +76,7 @@ func claudeOptionsFromMeta(meta map[string]any) (ClaudeOptions, error) {
 	options := ClaudeOptions{}
 	claude, _ := meta[claudeMetaKey].(map[string]any)
 
-	if err := validateClaudeLifecycleMeta(meta, claude); err != nil {
+	if err := validateClaudeLifecycleMeta(claude); err != nil {
 		return ClaudeOptions{}, err
 	}
 
@@ -92,11 +92,7 @@ func claudeOptionsFromMeta(meta map[string]any) (ClaudeOptions, error) {
 	return options, nil
 }
 
-func validateClaudeLifecycleMeta(meta map[string]any, claude map[string]any) error {
-	if _, ok := meta[legacyPackageMetaKey]; ok {
-		return unsupportedField("_meta." + legacyPackageMetaKey)
-	}
-
+func validateClaudeLifecycleMeta(claude map[string]any) error {
 	if claude == nil {
 		return nil
 	}

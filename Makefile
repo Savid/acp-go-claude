@@ -89,7 +89,7 @@ modernize-check:
 	go fix -n ./...
 
 ## audit: run repository checks
-audit: fmt lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit
+audit: fmt-check lint build test coverage-check test-cross-compile tidy vuln modernize-check docs-audit
 	go mod verify
 
 ## test/cover: open HTML coverage report

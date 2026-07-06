@@ -23,10 +23,12 @@ Common options:
 | `WithHome` | Set `CLAUDE_CONFIG_DIR` for launched Claude processes. |
 | `WithDefaultModel` | Set the default Claude model string. |
 | `WithEnv` | Add environment variables for Claude children. |
+| `WithSeedFiles` | Write files into the resolved Claude config dir before launch (requires `WithHome`). |
 | `WithSessionStore` | Install durable transcript storage. |
 | `WithConcurrencyLimits` | Set active session and prompt caps. |
 | `WithClaudeBareMode` | Launch Claude with `--bare`. |
 | `WithClaudeSettingSources` | Select Claude setting sources. |
+| `WithClaudeSettingsFile` | Load a settings overlay under the config dir via `--settings` (requires `WithHome`). |
 
 Request helpers include `TextPromptRequest`, `CallForkSession`,
 `WithSessionRawEvents`, `WithSessionOutputSchema`, `SetConfigOptionRequest`,

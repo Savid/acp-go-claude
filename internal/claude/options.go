@@ -29,6 +29,9 @@ type Options struct {
 
 	MCPConfigJSON  string
 	SettingSources []string
+	// SettingsFile is an absolute path passed as --settings, loading an
+	// additional Claude settings layer on top of the base settings.json.
+	SettingsFile string
 
 	InitializeTimeout     time.Duration
 	ControlHandlerTimeout time.Duration

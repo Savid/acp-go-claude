@@ -684,6 +684,13 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		processClaudeHome = materialized.configDir
 	}
 
+	settingsFileArg, err := a.prepareSeededClaudeConfig(claudeHome, processClaudeHome)
+	if err != nil {
+		closeSessionStartResources(materialized)
+
+		return nil, err
+	}
+
 	modelConfig, hasModelConfig, err := modelConfigFromEnv(env)
 	if err != nil {
 		closeSessionStartResources(materialized)
@@ -729,6 +736,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		AddDirs:                 start.AdditionalDirectories,
 		MCPConfigJSON:           mcpConfig,
 		SettingSources:          settingSourceArgs(a.options.SettingSources),
+		SettingsFile:            settingsFileArg,
 		InitializeTimeout:       a.options.InitializeTimeout,
 		ControlHandlerTimeout:   a.options.ControlHandlerTimeout,
 		SessionMirror:           true,

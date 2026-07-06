@@ -8,9 +8,59 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 
 	claudeacp "github.com/savid/acp-go-claude"
 )
+
+// seedFileFlag collects repeatable -seed-file <relpath>=<hostpath> values,
+// reading each host file's contents into a map keyed by the relative path.
+type seedFileFlag struct {
+	files map[string]string
+}
+
+func (s *seedFileFlag) String() string {
+	if s == nil || len(s.files) == 0 {
+		return ""
+	}
+
+	names := make([]string, 0, len(s.files))
+	for name := range s.files {
+		names = append(names, name)
+	}
+
+	slices.Sort(names)
+
+	return strings.Join(names, ",")
+}
+
+func (s *seedFileFlag) Set(value string) error {
+	relPath, hostPath, ok := strings.Cut(value, "=")
+	if !ok {
+		return fmt.Errorf("invalid -seed-file %q: expected <relpath>=<hostpath>", value)
+	}
+
+	relPath = strings.TrimSpace(relPath)
+	hostPath = strings.TrimSpace(hostPath)
+
+	if relPath == "" || hostPath == "" {
+		return fmt.Errorf("invalid -seed-file %q: expected <relpath>=<hostpath>", value)
+	}
+
+	contents, err := os.ReadFile(hostPath)
+	if err != nil {
+		return fmt.Errorf("read seed file %q: %w", hostPath, err)
+	}
+
+	if s.files == nil {
+		s.files = make(map[string]string)
+	}
+
+	s.files[relPath] = string(contents)
+
+	return nil
+}
 
 var serve = claudeacp.Serve
 var exit = os.Exit
@@ -34,6 +84,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	permissionMode := flags.String("claude-permission-mode", "", "default Claude permission mode")
 	systemPrompt := flags.String("claude-system-prompt", "", "default Claude system prompt")
 	hideClaudeAuth := flags.Bool("claude-hide-auth", false, "hide Claude subscription terminal auth methods")
+	seedFiles := &seedFileFlag{}
+	flags.Var(seedFiles, "seed-file", "seed file written into the Claude config dir as <relpath>=<hostpath>; repeatable")
+	settingsFile := flags.String("settings-file", "", "settings overlay relpath under the Claude config dir passed as --settings; requires -home")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
 
@@ -90,6 +143,14 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	if *systemPrompt != "" {
 		serveOptions = append(serveOptions, claudeacp.WithClaudeDefaultSystemPrompt(*systemPrompt))
+	}
+
+	if len(seedFiles.files) > 0 {
+		serveOptions = append(serveOptions, claudeacp.WithSeedFiles(seedFiles.files))
+	}
+
+	if *settingsFile != "" {
+		serveOptions = append(serveOptions, claudeacp.WithClaudeSettingsFile(*settingsFile))
 	}
 
 	serveOptions = append(serveOptions, telemetry.options...)

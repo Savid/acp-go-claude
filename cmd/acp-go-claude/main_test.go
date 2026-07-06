@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 
@@ -52,6 +53,54 @@ func TestRunPassesContractFlags(t *testing.T) {
 	require.Equal(t, "system", got.DefaultSystemPrompt)
 	require.True(t, got.HideAuth)
 	require.NotNil(t, got.Logger)
+}
+
+func TestRunPassesSeedAndSettingsFlags(t *testing.T) {
+	originalServe := serve
+	t.Cleanup(func() { serve = originalServe })
+
+	hostFile := filepath.Join(t.TempDir(), "seed-settings.json")
+	require.NoError(t, os.WriteFile(hostFile, []byte(`{"model":"opus"}`), 0o600))
+
+	var got claudeacp.Options
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...claudeacp.Option) error {
+		for _, opt := range opts {
+			opt(&got)
+		}
+
+		return nil
+	}
+
+	code := run(context.Background(), []string{
+		"-home", "/tmp/claude",
+		"-seed-file", "settings.json=" + hostFile,
+		"-settings-file", "wagie.settings.json",
+	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
+
+	require.Equal(t, 0, code)
+	require.Equal(t, map[string]string{"settings.json": `{"model":"opus"}`}, got.SeedFiles)
+	require.Equal(t, "wagie.settings.json", got.SettingsFile)
+}
+
+func TestSeedFileFlag(t *testing.T) {
+	t.Parallel()
+
+	var empty seedFileFlag
+	require.Empty(t, empty.String())
+
+	hostFile := filepath.Join(t.TempDir(), "host.json")
+	require.NoError(t, os.WriteFile(hostFile, []byte("contents"), 0o600))
+
+	var flag seedFileFlag
+	require.NoError(t, flag.Set("a.json="+hostFile))
+	require.NoError(t, flag.Set("b.json="+hostFile))
+	require.Equal(t, "a.json,b.json", flag.String())
+	require.Equal(t, "contents", flag.files["a.json"])
+
+	require.ErrorContains(t, flag.Set("missing-separator"), "expected <relpath>=<hostpath>")
+	require.ErrorContains(t, flag.Set("=/only/host"), "expected <relpath>=<hostpath>")
+	require.ErrorContains(t, flag.Set("rel="), "expected <relpath>=<hostpath>")
+	require.ErrorContains(t, flag.Set("rel="+filepath.Join(t.TempDir(), "does-not-exist")), "read seed file")
 }
 
 func TestRunVersion(t *testing.T) {

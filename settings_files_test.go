@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,6 +12,50 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestResolveClaudeSettingsFile(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.FromSlash("/tmp/claude-home")
+
+	resolved, err := resolveClaudeSettingsFile(dir, "wagie.settings.json")
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(dir, "wagie.settings.json"), resolved)
+
+	nested, err := resolveClaudeSettingsFile(dir, "overlays/wagie.json")
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(dir, "overlays", "wagie.json"), nested)
+}
+
+func TestResolveClaudeSettingsFileRejectsUnsafePaths(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		key  string
+	}{
+		{name: "empty", key: ""},
+		{name: "absolute", key: "/etc/passwd"},
+		{name: "parent escape", key: "../evil.json"},
+		{name: "current dir", key: "./wagie.json"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			resolved, err := resolveClaudeSettingsFile(filepath.FromSlash("/tmp/claude-home"), tc.key)
+			require.Empty(t, resolved)
+
+			field := settingsFileOptionField
+			if tc.key != "" {
+				field = fmt.Sprintf("%s[%q]", settingsFileOptionField, tc.key)
+			}
+
+			requireExactUnsupportedField(t, err, field)
+		})
+	}
+}
 
 func TestLoadDiscoveredSettingsMergeOrder(t *testing.T) {
 	home := t.TempDir()

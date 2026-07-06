@@ -39,6 +39,7 @@ func TestApplyOptionsBranches(t *testing.T) {
 		WithClaudeHideAuth(true),
 		WithClaudeBareMode(true),
 		WithClaudeSettingSources(SettingSourceProject, SettingSourceLocal),
+		WithClaudeSettingsFile("wagie.settings.json"),
 		WithClaudeAllowSkipPermissionsFlag(true),
 		WithClaudeInitializeTimeout(3 * time.Second),
 		WithClaudeControlHandlerTimeout(4 * time.Second),
@@ -68,6 +69,7 @@ func TestApplyOptionsBranches(t *testing.T) {
 	require.True(t, options.HideAuth)
 	require.True(t, options.BareMode)
 	require.Equal(t, []SettingSource{SettingSourceProject, SettingSourceLocal}, options.SettingSources)
+	require.Equal(t, "wagie.settings.json", options.SettingsFile)
 	require.True(t, options.AllowSkipPermissionsFlag)
 	require.Equal(t, 3*time.Second, options.InitializeTimeout)
 	require.Equal(t, 4*time.Second, options.ControlHandlerTimeout)

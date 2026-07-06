@@ -64,6 +64,10 @@ func BuildArgs(options Options) []string {
 		args = append(args, "--setting-sources="+strings.Join(options.SettingSources, ","))
 	}
 
+	if options.SettingsFile != "" {
+		args = append(args, "--settings", options.SettingsFile)
+	}
+
 	for _, dir := range options.AddDirs {
 		if strings.TrimSpace(dir) != "" {
 			args = append(args, "--add-dir", dir)

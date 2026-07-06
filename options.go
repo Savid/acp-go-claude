@@ -58,6 +58,15 @@ type Options struct {
 	SessionStoreLoadTimeout time.Duration
 	// ConcurrencyLimits controls process-local backpressure.
 	ConcurrencyLimits ConcurrencyLimits
+	// SeedFiles maps paths relative to the resolved Claude config directory to
+	// file contents written into that directory before each Claude CLI session
+	// launches, so the launched CLI reads them as its own config (e.g.
+	// settings.json).
+	SeedFiles map[string]string
+	// SettingsFile is a path relative to the resolved Claude config directory
+	// passed to the Claude CLI as --settings, loading an additional settings
+	// layer on top of the base settings.json. It requires an explicit Home.
+	SettingsFile string
 
 	// DefaultPermissionMode is the initial Claude permission mode.
 	DefaultPermissionMode string
@@ -253,6 +262,18 @@ func WithClaudeSettingSources(sources ...SettingSource) Option {
 	}
 }
 
+// WithClaudeSettingsFile registers a settings-overlay file loaded on top of the
+// base settings.json. relpath is confined to the resolved Claude config
+// directory (the same anchor as WithSeedFiles) and passed to the Claude CLI as
+// --settings <abspath>. It requires an explicit Home: setting it without a
+// resolvable home, an absolute path, a ".." escape, or an empty key fails
+// closed at session start.
+func WithClaudeSettingsFile(relpath string) Option {
+	return func(options *Options) {
+		options.SettingsFile = relpath
+	}
+}
+
 // WithClaudeAllowSkipPermissionsFlag permits adding Claude's skip-permissions capability flag.
 func WithClaudeAllowSkipPermissionsFlag(enabled bool) Option {
 	return func(options *Options) {
@@ -285,5 +306,16 @@ func WithEnv(env map[string]string) Option {
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) {
 		options.ConcurrencyLimits = limits
+	}
+}
+
+// WithSeedFiles registers files written into the session's resolved Claude
+// config directory before the Claude CLI launches. Keys are paths relative to
+// that directory and values are the file contents (e.g. settings.json). Paths
+// are confined to the config directory: absolute paths, ".." escapes, and
+// empty keys fail closed at session start.
+func WithSeedFiles(files map[string]string) Option {
+	return func(options *Options) {
+		options.SeedFiles = cloneStringMap(files)
 	}
 }

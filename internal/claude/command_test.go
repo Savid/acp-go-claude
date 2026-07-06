@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -69,6 +70,19 @@ func TestBuildArgsSettingSources(t *testing.T) {
 	require.NotContains(t, BuildArgs(Options{}), "--setting-sources=")
 	require.Contains(t, BuildArgs(Options{SettingSources: []string{}}), "--setting-sources=")
 	require.Contains(t, BuildArgs(Options{SettingSources: []string{"project"}}), "--setting-sources=project")
+}
+
+func TestBuildArgsSettingsFile(t *testing.T) {
+	t.Parallel()
+
+	require.NotContains(t, BuildArgs(Options{}), "--settings")
+
+	args := BuildArgs(Options{SettingsFile: "/tmp/home/wagie.settings.json"})
+
+	index := slices.Index(args, "--settings")
+	require.GreaterOrEqual(t, index, 0)
+	require.Less(t, index+1, len(args))
+	require.Equal(t, "/tmp/home/wagie.settings.json", args[index+1])
 }
 
 func TestBuildArgsResumeTakesPrecedenceOverSessionID(t *testing.T) {

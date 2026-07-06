@@ -24,6 +24,8 @@ const (
 	settingsFieldEnv             = "env"
 	settingsFieldModel           = "model"
 	settingsFieldPermissions     = "permissions"
+
+	settingsFileOptionField = "settingsFile"
 )
 
 var managedSettingsPath = defaultManagedSettingsPath
@@ -114,6 +116,27 @@ func loadDiscoveredSettings(ctx context.Context, cwd string, claudeHome string, 
 	}
 
 	return merged
+}
+
+// resolveClaudeSettingsFile resolves a settings-overlay relpath to an absolute
+// path under the effective Claude config dir. relpath is confined to dir with
+// the same rules as seed files: absolute paths, ".." escapes, and empty keys
+// fail closed with the uniform unsupported error naming the offending relpath.
+func resolveClaudeSettingsFile(dir string, relpath string) (string, error) {
+	if !validSeedFilePath(relpath) {
+		return "", settingsFileError(relpath)
+	}
+
+	return filepath.Join(dir, filepath.FromSlash(relpath)), nil
+}
+
+func settingsFileError(relpath string) error {
+	field := settingsFileOptionField
+	if relpath != "" {
+		field = fmt.Sprintf("%s[%q]", settingsFileOptionField, relpath)
+	}
+
+	return unsupportedField(field)
 }
 
 func canonicalClaudeHome(path string) (string, error) {

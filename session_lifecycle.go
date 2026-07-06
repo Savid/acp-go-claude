@@ -8,6 +8,10 @@ import (
 
 var sessionCancelFallbackTimeout = 5 * time.Second
 
+// sessionInterruptTimeout bounds the native interrupt. The interrupt runs under
+// a background-derived context so a cancelled caller context cannot abort it.
+var sessionInterruptTimeout = 5 * time.Second
+
 func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
 	turn := s.turnQueue()
 
@@ -91,17 +95,9 @@ func (s *agentSession) Cancel(ctx context.Context) (err error) {
 	s.mu.Lock()
 	turnCancel := s.cancel
 	turnDone := s.turnDone
-
-	if s.cancel != nil || len(s.permissionCancel) > 0 {
-		s.turnCancelled = true
-	}
-
-	permissionCancels := s.cancelPermissionRequestsLocked()
 	s.mu.Unlock()
 
-	for _, cancel := range permissionCancels {
-		cancel()
-	}
+	s.cancelPendingInteractions()
 
 	if s.agent != nil {
 		var finish func(error)
@@ -110,10 +106,35 @@ func (s *agentSession) Cancel(ctx context.Context) (err error) {
 		defer func() { finish(err) }()
 	}
 
-	err = s.client.Interrupt(ctx)
+	interruptCtx, cancelInterrupt := context.WithTimeout(context.WithoutCancel(ctx), sessionInterruptTimeout)
+	defer cancelInterrupt()
+
+	err = s.client.Interrupt(interruptCtx)
 	s.cancelTurnIfInterruptStalls(ctx, turnDone, turnCancel)
 
 	return err
+}
+
+// cancelPendingInteractions marks the turn cancelled and resolves any pending
+// permission and elicitation requests as cancelled. Callers invoke this before
+// native abort so outstanding client requests are answered cancelled first.
+func (s *agentSession) cancelPendingInteractions() {
+	s.mu.Lock()
+	if s.cancel != nil || len(s.permissionCancel) > 0 || len(s.elicitationCancel) > 0 {
+		s.turnCancelled = true
+	}
+
+	permissionCancels := s.cancelPermissionRequestsLocked()
+	elicitationCancels := s.cancelElicitationRequestsLocked()
+	s.mu.Unlock()
+
+	for _, cancel := range permissionCancels {
+		cancel()
+	}
+
+	for _, cancel := range elicitationCancels {
+		cancel()
+	}
 }
 
 func (s *agentSession) cancelTurnIfInterruptStalls(ctx context.Context, done <-chan struct{}, cancel context.CancelFunc) {
@@ -150,6 +171,17 @@ func (s *agentSession) cancelPermissionRequestsLocked() []context.CancelFunc {
 	return permissionCancels
 }
 
+func (s *agentSession) cancelElicitationRequestsLocked() []context.CancelFunc {
+	elicitationCancels := make([]context.CancelFunc, 0, len(s.elicitationCancel))
+	for id, entry := range s.elicitationCancel {
+		elicitationCancels = append(elicitationCancels, entry.cancel)
+
+		delete(s.elicitationCancel, id)
+	}
+
+	return elicitationCancels
+}
+
 // Close closes the underlying Claude process.
 func (s *agentSession) Close(ctx context.Context) (err error) {
 	if s.agent != nil {
@@ -158,6 +190,8 @@ func (s *agentSession) Close(ctx context.Context) (err error) {
 		ctx, finish = s.agent.observe.StartClaudeProcess(ctx, "close")
 		defer func() { finish(err) }()
 	}
+
+	s.cancelPendingInteractions()
 
 	s.mu.Lock()
 	cancel := s.cancel

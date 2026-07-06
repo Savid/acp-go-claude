@@ -596,9 +596,14 @@ func acpModeForPermission(mode string) acp.SessionModeId {
 
 func selectPositionEncoding(encodings []acp.PositionEncodingKind) acp.PositionEncodingKind {
 	for _, encoding := range encodings {
-		switch encoding {
-		case acp.PositionEncodingKindUtf16, acp.PositionEncodingKindUtf32, acp.PositionEncodingKindUtf8:
-			return encoding
+		if encoding == acp.PositionEncodingKindUtf8 {
+			return acp.PositionEncodingKindUtf8
+		}
+	}
+
+	for _, encoding := range encodings {
+		if encoding == acp.PositionEncodingKindUtf16 {
+			return acp.PositionEncodingKindUtf16
 		}
 	}
 

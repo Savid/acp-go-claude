@@ -99,7 +99,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 				}, nil
 			}
 
-			return acp.PromptResponse{}, err
+			return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
 		}
 
 		if err := s.emitRawClaudeMessage(turnCtx, msg); err != nil {

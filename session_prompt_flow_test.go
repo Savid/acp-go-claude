@@ -61,6 +61,33 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		require.ErrorContains(t, err, "raw failed")
 	})
 
+	t.Run("stream read error answers pending permissions cancelled", func(t *testing.T) {
+		session, transport, cleanup := newPromptFlowSession(t)
+		defer cleanup()
+
+		permissionCancelled := make(chan struct{}, 1)
+		session.permissionCancel = map[string]*permissionRequestCancel{
+			"tool": {cancel: func() {
+				select {
+				case permissionCancelled <- struct{}{}:
+				default:
+				}
+			}},
+		}
+
+		transport.queryMsgs = nil
+		transport.onQuery = func() { transport.errs <- errors.New("stream failed") }
+
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		require.ErrorIs(t, err, claude.ErrMessageStreamClosed)
+
+		select {
+		case <-permissionCancelled:
+		case <-time.After(time.Second):
+			t.Fatal("pending permission was not answered cancelled on stream read error")
+		}
+	})
+
 	t.Run("empty mirror frame is handled", func(t *testing.T) {
 		session, transport, cleanup := newPromptFlowSession(t)
 		defer cleanup()

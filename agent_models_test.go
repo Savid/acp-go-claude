@@ -245,7 +245,9 @@ func TestModelSelectionAndModeBranches(t *testing.T) {
 		require.Equal(t, tc.ok, ok)
 	}
 
-	require.Equal(t, acp.PositionEncodingKindUtf32, selectPositionEncoding([]acp.PositionEncodingKind{"bad", acp.PositionEncodingKindUtf32}))
+	require.Equal(t, acp.PositionEncodingKindUtf8, selectPositionEncoding([]acp.PositionEncodingKind{acp.PositionEncodingKindUtf16, acp.PositionEncodingKindUtf8}))
+	require.Equal(t, acp.PositionEncodingKindUtf16, selectPositionEncoding([]acp.PositionEncodingKind{"bad", acp.PositionEncodingKindUtf16}))
+	require.Equal(t, acp.PositionEncodingKindUtf16, selectPositionEncoding([]acp.PositionEncodingKind{"bad", acp.PositionEncodingKindUtf32}))
 	require.Equal(t, acp.PositionEncodingKindUtf16, selectPositionEncoding(nil))
 
 	session := &agentSession{

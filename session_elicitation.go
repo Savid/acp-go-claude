@@ -11,6 +11,43 @@ import (
 	"github.com/savid/acp-go-claude/internal/observer"
 )
 
+type elicitationRequestCancel struct {
+	cancel context.CancelFunc
+}
+
+// registerElicitation wraps ctx in a tracked cancellable context so that
+// session/cancel and teardown can resolve a pending elicitation as cancelled
+// instead of leaving it dangling until the native control-handler timeout.
+func (s *agentSession) registerElicitation(ctx context.Context) (context.Context, context.CancelFunc) {
+	elicitationCtx, cancel := context.WithCancel(ctx)
+	entry := &elicitationRequestCancel{cancel: cancel}
+
+	s.mu.Lock()
+	if s.elicitationCancel == nil {
+		s.elicitationCancel = make(map[int64]*elicitationRequestCancel)
+	}
+
+	s.elicitationSeq++
+	id := s.elicitationSeq
+	s.elicitationCancel[id] = entry
+	turnCancelled := s.turnCancelled
+	s.mu.Unlock()
+
+	if turnCancelled {
+		cancel()
+	}
+
+	return elicitationCtx, func() {
+		s.mu.Lock()
+		if s.elicitationCancel[id] == entry {
+			delete(s.elicitationCancel, id)
+		}
+		s.mu.Unlock()
+
+		cancel()
+	}
+}
+
 func (s *agentSession) handleAskUserQuestion(
 	ctx context.Context,
 	request claude.PermissionRequest,
@@ -45,7 +82,10 @@ func (s *agentSession) handleAskUserQuestion(
 		scope.ToolCallID = acp.ToolCallId(request.ToolUseID)
 	}
 
-	resp, err := conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
+	elicitationCtx, finishElicitation := s.registerElicitation(ctx)
+	defer finishElicitation()
+
+	resp, err := conn.CreateElicitation(elicitationCtx, acp.UnstableCreateElicitationRequest{
 		Form: &acp.UnstableCreateElicitationForm{
 			Message:         askUserQuestionMessage(questions),
 			Mode:            claude.ElicitationModeForm,
@@ -59,6 +99,14 @@ func (s *agentSession) handleAskUserQuestion(
 		},
 	}, scope)
 	if err != nil {
+		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
+			return claude.PermissionDecision{
+				Behavior:  claude.BehaviorDeny,
+				Message:   permissionCancelledMessage,
+				Interrupt: true,
+			}, nil
+		}
+
 		return claude.PermissionDecision{}, err
 	}
 
@@ -348,7 +396,10 @@ func (s *agentSession) createFormElicitation(
 	conn agentClient,
 	request claude.ElicitationRequest,
 ) (claude.ElicitationResponse, error) {
-	resp, err := conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
+	elicitationCtx, finishElicitation := s.registerElicitation(ctx)
+	defer finishElicitation()
+
+	resp, err := conn.CreateElicitation(elicitationCtx, acp.UnstableCreateElicitationRequest{
 		Form: &acp.UnstableCreateElicitationForm{
 			Message:         request.Message,
 			Mode:            claude.ElicitationModeForm,
@@ -357,6 +408,10 @@ func (s *agentSession) createFormElicitation(
 		},
 	}, s.elicitationScope(request))
 	if err != nil {
+		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
+			return claude.ElicitationResponse{Action: claude.ElicitationActionCancel}, nil
+		}
+
 		return claude.ElicitationResponse{}, err
 	}
 
@@ -378,7 +433,10 @@ func (s *agentSession) createURLElicitation(
 		elicitationID = id
 	}
 
-	resp, err := conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
+	elicitationCtx, finishElicitation := s.registerElicitation(ctx)
+	defer finishElicitation()
+
+	resp, err := conn.CreateElicitation(elicitationCtx, acp.UnstableCreateElicitationRequest{
 		Url: &acp.UnstableCreateElicitationUrl{
 			ElicitationId: acp.UnstableElicitationId(elicitationID),
 			Message:       request.Message,
@@ -388,6 +446,10 @@ func (s *agentSession) createURLElicitation(
 		},
 	}, s.elicitationScope(request))
 	if err != nil {
+		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
+			return claude.ElicitationResponse{Action: claude.ElicitationActionCancel}, nil
+		}
+
 		return claude.ElicitationResponse{}, err
 	}
 

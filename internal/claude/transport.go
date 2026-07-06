@@ -32,6 +32,10 @@ var (
 	processExitGracePeriod   = 2 * time.Second
 )
 
+// claudeVersionProbe fails fast when the discovered Claude CLI is too old. It is
+// a variable so tests can substitute the probe.
+var claudeVersionProbe = validateClaudeVersion
+
 // Transport is the JSON-line transport used by the Claude control protocol.
 type Transport interface {
 	Start(ctx context.Context) error
@@ -75,6 +79,10 @@ func (t *ProcessTransport) Start(ctx context.Context) error {
 	path, err := Discover(ctx, t.options.CLIPath, t.options.Env)
 	if err != nil {
 		return err
+	}
+
+	if probeErr := claudeVersionProbe(ctx, path); probeErr != nil {
+		return probeErr
 	}
 
 	args := BuildArgs(t.options)

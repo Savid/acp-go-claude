@@ -119,6 +119,31 @@ func TestLocalAgentDispatcherBranches(t *testing.T) {
 	require.Error(t, lifecycleMetaError(context.Canceled))
 }
 
+func TestStableSessionForkReturnsMethodNotFound(t *testing.T) {
+	t.Parallel()
+
+	agent := NewAgent()
+	conn := &localAgentConnection{agent: agent}
+	conn.initialized.Store(true)
+	ctx := context.Background()
+
+	raw, err := json.Marshal(ForkSessionRequest("parent", t.TempDir()))
+	require.NoError(t, err)
+
+	// The adapter exposes fork only through the namespaced extension method; the
+	// stable ACP session/fork route must be method-not-found (-32601).
+	_, reqErr := conn.handle(ctx, acp.AgentMethodSessionFork, raw)
+	require.NotNil(t, reqErr)
+	require.Equal(t, -32601, reqErr.Code)
+
+	_, extErr := agent.HandleExtensionMethod(ctx, acp.AgentMethodSessionFork, raw)
+	require.Error(t, extErr)
+
+	var extReqErr *acp.RequestError
+	require.ErrorAs(t, extErr, &extReqErr)
+	require.Equal(t, -32601, extReqErr.Code)
+}
+
 func TestLocalAgentConnectionClientBackpressure(t *testing.T) {
 	t.Parallel()
 
@@ -136,7 +161,7 @@ func TestLocalAgentConnectionClientBackpressure(t *testing.T) {
 		require.ErrorAs(t, err, &reqErr)
 		data, ok := reqErr.Data.(map[string]any)
 		require.True(t, ok)
-		require.Equal(t, "client_call", data["limit"])
+		require.Equal(t, "client_calls", data["limit"])
 	}
 
 	requireBackpressure(t, conn.UnstableCompleteElicitation(ctx, acp.UnstableCompleteElicitationNotification{ElicitationId: "e1"}))

@@ -68,7 +68,7 @@ func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
-		return nil, backpressureError("client_call")
+		return nil, backpressureError("client_calls")
 	}
 }
 

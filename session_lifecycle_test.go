@@ -151,6 +151,87 @@ func TestSessionCancelAndCloseEdgeBranches(t *testing.T) {
 	require.ErrorContains(t, err, "close failed")
 }
 
+func TestSessionCancelInterruptDetachedFromCallerContext(t *testing.T) {
+	agent := NewAgent()
+	session, cleanup := newStartedAgentSessionForTest(t, agent, "detached-interrupt")
+	defer cleanup()
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// The native interrupt runs under a bounded background-derived context, so a
+	// cancelled caller context does not abort it.
+	require.NoError(t, session.Cancel(cancelledCtx))
+}
+
+func TestSessionCancelCancelsPendingElicitations(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent()
+	session, cleanup := newStartedAgentSessionForTest(t, agent, "elicit-cancel")
+	defer cleanup()
+
+	permissionCancelled := false
+	elicitationCancelled := false
+	session.permissionCancel = map[string]*permissionRequestCancel{
+		"tool": {cancel: func() { permissionCancelled = true }},
+	}
+	session.elicitationCancel = map[int64]*elicitationRequestCancel{
+		1: {cancel: func() { elicitationCancelled = true }},
+	}
+
+	require.NoError(t, session.Cancel(ctx))
+	require.True(t, permissionCancelled)
+	require.True(t, elicitationCancelled)
+	require.True(t, session.turnCancelled)
+	require.Empty(t, session.permissionCancel)
+	require.Empty(t, session.elicitationCancel)
+}
+
+func TestSessionCloseResolvesPendingInteractionsFirst(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent()
+	session, cleanup := newStartedAgentSessionForTest(t, agent, "close-pending")
+	defer cleanup()
+
+	permissionCancelled := false
+	elicitationCancelled := false
+	session.permissionCancel = map[string]*permissionRequestCancel{
+		"tool": {cancel: func() { permissionCancelled = true }},
+	}
+	session.elicitationCancel = map[int64]*elicitationRequestCancel{
+		1: {cancel: func() { elicitationCancelled = true }},
+	}
+
+	require.NoError(t, session.Close(ctx))
+	require.True(t, permissionCancelled)
+	require.True(t, elicitationCancelled)
+	require.True(t, session.turnCancelled)
+	require.Empty(t, session.permissionCancel)
+	require.Empty(t, session.elicitationCancel)
+}
+
+func TestRegisterElicitationCancellation(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent()
+	session, cleanup := newStartedAgentSessionForTest(t, agent, "elicit-register")
+	defer cleanup()
+
+	elicitationCtx, finish := session.registerElicitation(ctx)
+	require.NoError(t, elicitationCtx.Err())
+	require.Len(t, session.elicitationCancel, 1)
+
+	require.NoError(t, session.Cancel(ctx))
+	require.Error(t, elicitationCtx.Err())
+	require.Empty(t, session.elicitationCancel)
+
+	finish()
+
+	// A registration made after the turn is already cancelled is cancelled at once.
+	preCancelledCtx, preFinish := session.registerElicitation(ctx)
+	defer preFinish()
+	require.Error(t, preCancelledCtx.Err())
+}
+
 type nthDoneContext struct {
 	done       chan struct{}
 	closeAfter int

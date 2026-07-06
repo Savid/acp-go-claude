@@ -182,6 +182,55 @@ func TestDiscoverMissingFromPath(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestParseClaudeVersion(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		output string
+		want   string
+	}{
+		{"2.1.201 (Claude Code)", "2.1.201"},
+		{"claude 2.0.0", "2.0.0"},
+		{"1.2.3-beta.1", "1.2.3"},
+		{"1.2.3+build.5", "1.2.3"},
+		{"", ""},
+		{"no version here", ""},
+	} {
+		require.Equal(t, tc.want, parseClaudeVersion(tc.output), tc.output)
+	}
+}
+
+func TestCompareSemver(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, -1, compareSemver("1.9.9", "2.0.0"))
+	require.Equal(t, 1, compareSemver("2.1.0", "2.0.9"))
+	require.Equal(t, 0, compareSemver("2.0.0", "2.0.0"))
+	require.Equal(t, 1, compareSemver("2.1.201", "2.0.0"))
+	require.Equal(t, 0, compareSemver("2.0", "2.0.0"))
+	require.Equal(t, -1, compareSemver("2", "2.0.1"))
+}
+
+func TestValidateClaudeVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+
+	current := writeShellScript(t, filepath.Join(dir, "current"), "#!/bin/sh\necho '2.1.201 (Claude Code)'\n")
+	require.NoError(t, validateClaudeVersion(context.Background(), current))
+
+	old := writeShellScript(t, filepath.Join(dir, "old"), "#!/bin/sh\necho '1.9.9 (Claude Code)'\n")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), old), "too old")
+
+	unparseable := writeShellScript(t, filepath.Join(dir, "bad"), "#!/bin/sh\necho 'no version'\n")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), unparseable), "could not parse")
+
+	failing := writeShellScript(t, filepath.Join(dir, "fail"), "#!/bin/sh\nexit 1\n")
+	require.Error(t, validateClaudeVersion(context.Background(), failing))
+}
+
 func TestDiscoverFromPath(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses executable mode bits")

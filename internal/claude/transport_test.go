@@ -874,6 +874,30 @@ func writeShellScript(t *testing.T, path string, script string) string {
 	return path
 }
 
+func TestProcessTransportStartProbesVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	// Restore the real probe that TestMain disables for the other process tests.
+	probe := claudeVersionProbe
+	claudeVersionProbe = validateClaudeVersion
+	t.Cleanup(func() { claudeVersionProbe = probe })
+
+	dir := t.TempDir()
+
+	oldScript := writeShellScript(t, filepath.Join(dir, "old-claude"),
+		"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '1.0.0 (Claude Code)'; exit 0; fi\ncat >/dev/null\n")
+	oldTransport := NewProcessTransport(nil, Options{CLIPath: oldScript, Cwd: dir})
+	require.ErrorContains(t, oldTransport.Start(context.Background()), "too old")
+
+	currentScript := writeShellScript(t, filepath.Join(dir, "current-claude"),
+		"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '2.1.0 (Claude Code)'; exit 0; fi\ncat >/dev/null\n")
+	currentTransport := NewProcessTransport(nil, Options{CLIPath: currentScript, Cwd: dir})
+	require.NoError(t, currentTransport.Start(context.Background()))
+	require.NoError(t, currentTransport.Close())
+}
+
 func TestProcessTransportStartMissingBinary(t *testing.T) {
 	t.Parallel()
 

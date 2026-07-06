@@ -6,13 +6,22 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
 const envClaudeCodeNested = "CLAUDECODE"
 
+// minClaudeVersion is the oldest Claude CLI the adapter supports. The adapter's
+// stream-json control protocol (bidirectional control requests, partial-message
+// streaming, session mirror, hook events) requires the Claude Code 2.x line.
+const minClaudeVersion = "2.0.0"
+
 var commandEnviron = os.Environ
+
+var execCommandContext = exec.CommandContext
 
 // BuildArgs returns the Claude CLI arguments for ACP-backed interactive sessions.
 func BuildArgs(options Options) []string {
@@ -173,4 +182,75 @@ func Discover(ctx context.Context, cliPath string, _ map[string]string) (string,
 	}
 
 	return path, nil
+}
+
+// validateClaudeVersion probes the Claude CLI version and fails fast when it is
+// older than minClaudeVersion. The adapter never silently downgrades to an
+// unsupported CLI.
+func validateClaudeVersion(ctx context.Context, path string) error {
+	output, err := execCommandContext(ctx, path, "--version").Output()
+	if err != nil {
+		return fmt.Errorf("check claude CLI version: %w", err)
+	}
+
+	version := parseClaudeVersion(string(output))
+	if version == "" {
+		return fmt.Errorf("check claude CLI version: could not parse %q", strings.TrimSpace(string(output)))
+	}
+
+	if compareSemver(version, minClaudeVersion) < 0 {
+		return fmt.Errorf("claude CLI %s is too old; need >= %s", version, minClaudeVersion)
+	}
+
+	return nil
+}
+
+var claudeVersionRE = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)
+
+func parseClaudeVersion(output string) string {
+	match := claudeVersionRE.FindString(output)
+	if match == "" {
+		return ""
+	}
+
+	if cut, _, ok := strings.Cut(match, "-"); ok {
+		match = cut
+	}
+
+	if cut, _, ok := strings.Cut(match, "+"); ok {
+		match = cut
+	}
+
+	return match
+}
+
+func compareSemver(left string, right string) int {
+	leftParts := semverParts(left)
+	rightParts := semverParts(right)
+
+	for i := range leftParts {
+		switch {
+		case leftParts[i] < rightParts[i]:
+			return -1
+		case leftParts[i] > rightParts[i]:
+			return 1
+		}
+	}
+
+	return 0
+}
+
+func semverParts(value string) [3]int {
+	var out [3]int
+
+	parts := strings.Split(value, ".")
+	for i := range out {
+		if i >= len(parts) {
+			break
+		}
+
+		out[i], _ = strconv.Atoi(parts[i])
+	}
+
+	return out
 }

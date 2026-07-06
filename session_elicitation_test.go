@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -9,6 +10,40 @@ import (
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
+
+func TestElicitationCancelledDuringTurn(t *testing.T) {
+	t.Parallel()
+
+	agent := NewAgent()
+	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{
+		Form: &acp.ElicitationFormCapabilities{},
+		Url:  &acp.ElicitationUrlCapabilities{},
+	}
+	session := &agentSession{agent: agent, id: "session-1", turnCancelled: true}
+	conn := newRecordingAgentClient()
+	conn.elicitErr = context.Canceled
+	agent.setConnection(conn)
+
+	formResp, err := session.createFormElicitation(t.Context(), conn, claude.ElicitationRequest{Mode: claude.ElicitationModeForm})
+	require.NoError(t, err)
+	require.Equal(t, claude.ElicitationActionCancel, formResp.Action)
+
+	urlResp, err := session.createURLElicitation(t.Context(), conn, claude.ElicitationRequest{
+		Mode:          claude.ElicitationModeURL,
+		URL:           "https://example.test",
+		ElicitationID: "e1",
+	})
+	require.NoError(t, err)
+	require.Equal(t, claude.ElicitationActionCancel, urlResp.Action)
+
+	decision, err := session.handleAskUserQuestion(t.Context(), claude.PermissionRequest{
+		ToolName: askUserQuestionTool,
+		Input:    map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, claude.BehaviorDeny, decision.Behavior)
+	require.True(t, decision.Interrupt)
+}
 
 func TestAskUserQuestionHelpers(t *testing.T) {
 	t.Parallel()

@@ -268,7 +268,9 @@ func TestStartSessionResolvesSettingsFileUnderHome(t *testing.T) {
 
 	session, err := agent.startSession(ctx, sessionID, sessionStart{Cwd: cwd})
 	require.NoError(t, err)
-	require.Equal(t, filepath.Join(home, "wagie.settings.json"), captured.SettingsFile)
+	canonicalHome, err := filepath.EvalSymlinks(home)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(canonicalHome, "wagie.settings.json"), captured.SettingsFile)
 
 	require.NoError(t, session.Close(ctx))
 }

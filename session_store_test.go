@@ -93,6 +93,42 @@ func TestInMemorySessionStoreBranches(t *testing.T) {
 	require.Nil(t, cloneStoreEntry(nil))
 }
 
+func TestInMemorySessionStoreReplaceEmptyEntrySurvives(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &InMemorySessionStore{}
+	main := SessionKey{SessionID: "s"}
+	sub := SessionKey{SessionID: "s", Subpath: "sub/a.jsonl"}
+
+	require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{[]byte(`{"a":1}`)}))
+	require.NoError(t, store.Append(ctx, sub, []SessionStoreEntry{[]byte(`{"b":2}`)}))
+
+	// Replace lists the main key plus a subkey with empty (len==0) Entries.
+	// Both survive as live, non-tombstoned keys; only unlisted keys tombstone.
+	require.NoError(t, store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{}},
+		{Key: sub, Entries: []SessionStoreEntry{}},
+	}))
+
+	entries, err := store.Load(ctx, main)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+
+	subEntries, err := store.Load(ctx, sub)
+	require.NoError(t, err)
+	require.Empty(t, subEntries)
+
+	subkeys, err := store.ListSubkeys(ctx, main)
+	require.NoError(t, err)
+	require.Equal(t, []string{"sub/a.jsonl"}, subkeys)
+
+	summaries, err := store.ListSessions(ctx)
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	require.Equal(t, "s", summaries[0].SessionID)
+}
+
 func TestSessionStorePathHelpers(t *testing.T) {
 	t.Parallel()
 

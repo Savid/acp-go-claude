@@ -25,10 +25,12 @@ func TestSessionLifecycleBranches(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.Nil(t, release)
 
-	session.turn = make(chan struct{}, 1)
+	// A second prompt to a busy session (its single turn slot taken) is refused
+	// with session_prompt backpressure; per-session turn capacity is fixed at 1.
+	session.turn = make(chan struct{}, sessionTurnCapacity)
 	session.turn <- struct{}{}
 	release, err = session.acquireTurn(ctx)
-	require.Error(t, err)
+	requireBackpressureLimit(t, err, "session_prompt")
 	require.Nil(t, release)
 
 	session.turn = make(chan struct{}, 2)

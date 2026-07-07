@@ -48,6 +48,9 @@ func TestLifecycleMetaStrictAllowlist(t *testing.T) {
 			metaRawEventKey: map[string]any{metaRawEventEnabledKey: true},
 		},
 		"other": map[string]any{"ignored": true},
+		// The full module path is foreign to the owned "claude" namespace and
+		// MUST be ignored, never rejected.
+		"github.com/savid/acp-go-claude": map[string]any{"ignored": true},
 	}
 	options, err := claudeOptionsFromMeta(valid)
 	require.NoError(t, err)
@@ -145,14 +148,18 @@ func requireExactUnsupportedField(t *testing.T, err error, field string) {
 	}, reqErr.Data)
 }
 
-func requireResourceNotFound(t *testing.T, err error) {
+func requireUnknownSession(t *testing.T, err error) {
 	t.Helper()
 
 	require.Error(t, err)
 	var reqErr *acp.RequestError
 	require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
-	require.Equal(t, -32002, reqErr.Code)
-	require.Equal(t, "Resource not found", reqErr.Message)
+	require.Equal(t, -32602, reqErr.Code)
+	require.Equal(t, "Invalid params", reqErr.Message)
+	require.Equal(t, map[string]any{
+		jsonFieldError: "unknown session",
+		jsonFieldField: acpFieldSessionID,
+	}, reqErr.Data)
 }
 
 func TestInMemorySessionStoreContract(t *testing.T) {
@@ -266,11 +273,11 @@ func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing
 	require.FileExists(t, nativePath)
 
 	_, err = restarted.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
-	requireResourceNotFound(t, err)
+	requireUnknownSession(t, err)
 	require.NoFileExists(t, nativePath)
 
 	_, err = restarted.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
-	requireResourceNotFound(t, err)
+	requireUnknownSession(t, err)
 }
 
 func writeNativeTranscript(t *testing.T, home string, cwd string, sessionID acp.SessionId) string {

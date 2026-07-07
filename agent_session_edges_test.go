@@ -13,6 +13,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestUnknownSessionInvalidParams(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cwd := t.TempDir()
+	sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
+
+	// Session-scoped methods that resolve an active session id.
+	_, sessionErr := NewAgent().session("does-not-exist")
+	requireUnknownSession(t, sessionErr)
+
+	// Resume and load against an id that is not active and not in the store.
+	_, resumeErr := NewAgent(WithSessionStore(NewInMemorySessionStore())).
+		ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
+	requireUnknownSession(t, resumeErr)
+
+	_, loadErr := NewAgent(WithSessionStore(NewInMemorySessionStore())).
+		LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
+	requireUnknownSession(t, loadErr)
+}
+
 func TestNewSessionEdgeBranches(t *testing.T) {
 	ctx := context.Background()
 
@@ -51,7 +72,7 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	require.ErrorContains(t, err, "load failed")
 
 	_, err = NewAgent(WithSessionStore(NewInMemorySessionStore())).ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
-	requireResourceNotFound(t, err)
+	requireUnknownSession(t, err)
 
 	closed := NewAgent(WithHome(t.TempDir()))
 	require.NoError(t, closed.Close())
@@ -62,7 +83,7 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	missingTransport.startErr = claude.ErrSessionNotFound
 	missing, _, _ := newFakeLifecycleAgent(t, missingTransport)
 	_, err = missing.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
-	requireResourceNotFound(t, err)
+	requireUnknownSession(t, err)
 
 	startErrTransport := newFakeClaudeTransport()
 	startErrTransport.startErr = errors.New("start failed")
@@ -117,14 +138,14 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	require.ErrorContains(t, err, "load failed")
 
 	_, err = NewAgent(WithSessionStore(NewInMemorySessionStore())).LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
-	requireResourceNotFound(t, err)
+	requireUnknownSession(t, err)
 
 	badHome := string([]byte{0})
 	_, err = NewAgent(WithHome(badHome)).LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
 	require.Error(t, err)
 
 	_, err = NewAgent(WithHome(t.TempDir())).LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
-	requireResourceNotFound(t, err)
+	requireUnknownSession(t, err)
 
 	store := NewInMemorySessionStore()
 	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{
@@ -155,7 +176,7 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	missingTransport.startErr = claude.ErrSessionNotFound
 	missingStart, _, _ := newFakeLifecycleAgent(t, missingTransport, WithSessionStore(store))
 	_, err = missingStart.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
-	requireResourceNotFound(t, err)
+	requireUnknownSession(t, err)
 
 	genericTransport := newFakeClaudeTransport()
 	genericTransport.startErr = errors.New("load start failed")
@@ -180,7 +201,7 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, envSkipStore.Append(ctx, SessionKey{SessionID: "88888888-8888-4888-8888-888888888888"}, []SessionStoreEntry{[]byte(`{"type":"system"}`)}))
 	envSkip, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(envSkipStore), WithEnv(map[string]string{"CLAUDE_CONFIG_DIR": envNativeHome}))
 	_, err = envSkip.LoadSession(ctx, LoadSessionRequest("88888888-8888-4888-8888-888888888888", cwd))
-	requireResourceNotFound(t, err)
+	requireUnknownSession(t, err)
 
 	activeStore := NewInMemorySessionStore()
 	require.NoError(t, activeStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{[]byte(`{"type":"system"}`)}))
@@ -192,7 +213,7 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 		fingerprint:  sessionStartFingerprint(sessionStart{Cwd: cwd, ResumeID: string(sessionID)}),
 		materialized: &materializedSession{mainPath: filepath.Join(t.TempDir(), "missing.jsonl")},
 		client:       claude.NewClient(nil, claude.Options{}, newFakeClaudeTransport()),
-		turn:         make(chan struct{}, active.maxConcurrentPrompts()),
+		turn:         make(chan struct{}, sessionTurnCapacity),
 	}
 	_, err = active.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
 	require.ErrorContains(t, err, "open transcript")

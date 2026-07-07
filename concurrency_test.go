@@ -11,25 +11,22 @@ func TestConcurrencyLimitBranches(t *testing.T) {
 	t.Parallel()
 
 	require.ErrorContains(t, validateConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}), "active sessions")
-	require.ErrorContains(t, validateConcurrencyLimits(ConcurrencyLimits{MaxConcurrentPrompts: -1}), "prompts")
 	require.ErrorContains(t, validateConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: -1}), "client calls")
 	require.NoError(t, validateConcurrencyLimits(ConcurrencyLimits{}))
 
+	// The remaining limits may be raised above their defaults.
+	require.NoError(t, validateConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 64, MaxConcurrentClientCalls: 32}))
+
 	defaults := NewAgent()
 	require.Equal(t, defaultMaxActiveSessions, defaults.maxActiveSessions())
-	require.Equal(t, defaultMaxConcurrentPrompts, defaults.maxConcurrentPrompts())
 	require.Equal(t, defaultMaxConcurrentClientCalls, defaults.maxConcurrentClientCalls())
 
 	custom := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{
 		MaxActiveSessions:        2,
-		MaxConcurrentPrompts:     3,
 		MaxConcurrentClientCalls: 4,
 	}))
 	require.Equal(t, 2, custom.maxActiveSessions())
-	require.Equal(t, 3, custom.maxConcurrentPrompts())
 	require.Equal(t, 4, custom.maxConcurrentClientCalls())
-	require.Equal(t, 3, (&agentSession{agent: custom}).maxConcurrentPrompts())
-	require.Equal(t, defaultMaxConcurrentPrompts, (&agentSession{}).maxConcurrentPrompts())
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()

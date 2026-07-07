@@ -106,7 +106,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if blocked, blockErr := a.nativeSessionBlocked(ctx, params.SessionId); blockErr != nil {
 		return acp.ResumeSessionResponse{}, blockErr
 	} else if blocked {
-		return acp.ResumeSessionResponse{}, newResourceNotFound(map[string]any{acpFieldSessionID: params.SessionId})
+		return acp.ResumeSessionResponse{}, unknownSessionError()
 	}
 
 	if openErr := a.ensureOpen(); openErr != nil {
@@ -116,7 +116,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	session, err := a.startSession(ctx, params.SessionId, start)
 	if err != nil {
 		if missingClaudeSessionError(err) {
-			return acp.ResumeSessionResponse{}, newResourceNotFound(map[string]any{acpFieldSessionID: params.SessionId})
+			return acp.ResumeSessionResponse{}, unknownSessionError()
 		}
 
 		return acp.ResumeSessionResponse{}, err
@@ -154,7 +154,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if blocked, blockErr := a.nativeSessionBlocked(ctx, params.SessionId); blockErr != nil {
 		return acp.LoadSessionResponse{}, blockErr
 	} else if blocked {
-		return acp.LoadSessionResponse{}, newResourceNotFound(map[string]any{acpFieldSessionID: params.SessionId})
+		return acp.LoadSessionResponse{}, unknownSessionError()
 	}
 
 	saved, err := transcript.Store{ClaudeHome: a.options.Home}.Find(ctx, string(params.SessionId), params.Cwd)
@@ -164,7 +164,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		savedPath = saved.Path
 	} else {
 		if errors.Is(err, os.ErrNotExist) && !a.storeHasSession(ctx, string(params.SessionId), params.Cwd) {
-			return acp.LoadSessionResponse{}, newResourceNotFound(map[string]any{acpFieldSessionID: params.SessionId})
+			return acp.LoadSessionResponse{}, unknownSessionError()
 		}
 
 		if !errors.Is(err, os.ErrNotExist) {
@@ -192,7 +192,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		session, err = a.startSession(ctx, params.SessionId, start)
 		if err != nil {
 			if missingClaudeSessionError(err) {
-				return acp.LoadSessionResponse{}, newResourceNotFound(map[string]any{acpFieldSessionID: params.SessionId})
+				return acp.LoadSessionResponse{}, unknownSessionError()
 			}
 
 			return acp.LoadSessionResponse{}, err
@@ -215,7 +215,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 			a.removeSession(ctx, params.SessionId, session)
 		}
 
-		return acp.LoadSessionResponse{}, newResourceNotFound(map[string]any{acpFieldSessionID: params.SessionId})
+		return acp.LoadSessionResponse{}, unknownSessionError()
 	}
 
 	if replayErr := session.replayTranscript(ctx, replayPath); replayErr != nil {
@@ -432,7 +432,7 @@ func (a *Agent) session(sessionID acp.SessionId) (*agentSession, error) {
 
 	session := a.sessions[sessionID]
 	if session == nil {
-		return nil, acp.NewInvalidParams(map[string]any{acpFieldSessionID: sessionID})
+		return nil, unknownSessionError()
 	}
 
 	return session, nil
@@ -646,8 +646,14 @@ func mcpServerName(server acp.McpServer) string {
 	}
 }
 
-func newResourceNotFound(data any) *acp.RequestError {
-	return &acp.RequestError{Code: -32002, Message: "Resource not found", Data: data}
+// unknownSessionError is returned by every session-scoped method when the
+// session id cannot be resolved (unknown, not in the store, tombstoned, or its
+// native transcript is gone). All such cases share one invalid-params shape.
+func unknownSessionError() *acp.RequestError {
+	return acp.NewInvalidParams(map[string]any{
+		jsonFieldError: "unknown session",
+		jsonFieldField: acpFieldSessionID,
+	})
 }
 
 func missingClaudeSessionError(err error) bool {
@@ -761,7 +767,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	session := &agentSession{
 		agent:                 a,
 		id:                    id,
-		turn:                  make(chan struct{}, a.maxConcurrentPrompts()),
+		turn:                  make(chan struct{}, sessionTurnCapacity),
 		cwd:                   start.Cwd,
 		additionalDirectories: slices.Clone(start.AdditionalDirectories),
 		fingerprint:           sessionStartFingerprint(start),

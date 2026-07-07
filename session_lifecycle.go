@@ -84,7 +84,7 @@ func (s *agentSession) turnQueue() chan struct{} {
 	defer s.mu.Unlock()
 
 	if s.turn == nil {
-		s.turn = make(chan struct{}, s.maxConcurrentPrompts())
+		s.turn = make(chan struct{}, sessionTurnCapacity)
 	}
 
 	return s.turn

@@ -560,7 +560,7 @@ func newPromptFlowSession(t *testing.T) (*agentSession, *fakeClaudeTransport, fu
 		cwd:               t.TempDir(),
 		model:             "sonnet",
 		client:            client,
-		turn:              make(chan struct{}, agent.maxConcurrentPrompts()),
+		turn:              make(chan struct{}, sessionTurnCapacity),
 		contextWindowSize: 200000,
 		mirror:            newSessionMirror(agent.log, nil, t.TempDir()),
 		closeTurnWait:     defaultSessionCloseTurnWait,

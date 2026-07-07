@@ -218,7 +218,7 @@ func newStartedAgentSessionForTest(t *testing.T, agent *Agent, id acp.SessionId)
 		id:            id,
 		cwd:           t.TempDir(),
 		client:        client,
-		turn:          make(chan struct{}, agent.maxConcurrentPrompts()),
+		turn:          make(chan struct{}, sessionTurnCapacity),
 		closeTurnWait: defaultSessionCloseTurnWait,
 	}
 

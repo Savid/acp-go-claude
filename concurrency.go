@@ -9,17 +9,18 @@ import (
 
 const (
 	defaultMaxActiveSessions        = 32
-	defaultMaxConcurrentPrompts     = 1
 	defaultMaxConcurrentClientCalls = 16
+
+	// sessionTurnCapacity fixes per-session prompt admission to a single
+	// in-flight turn. Claude turn state (cancel handle, turn id) is
+	// single-valued, so a second prompt to a busy session is refused with
+	// session_prompt backpressure; the capacity is not configurable.
+	sessionTurnCapacity = 1
 )
 
 func validateConcurrencyLimits(limits ConcurrencyLimits) error {
 	if limits.MaxActiveSessions < 0 {
 		return fmt.Errorf("max active sessions must be non-negative")
-	}
-
-	if limits.MaxConcurrentPrompts < 0 {
-		return fmt.Errorf("max concurrent prompts must be non-negative")
 	}
 
 	if limits.MaxConcurrentClientCalls < 0 {
@@ -35,14 +36,6 @@ func (a *Agent) maxActiveSessions() int {
 	}
 
 	return defaultMaxActiveSessions
-}
-
-func (a *Agent) maxConcurrentPrompts() int {
-	if a.options.ConcurrencyLimits.MaxConcurrentPrompts > 0 {
-		return a.options.ConcurrencyLimits.MaxConcurrentPrompts
-	}
-
-	return defaultMaxConcurrentPrompts
 }
 
 func (a *Agent) maxConcurrentClientCalls() int {
@@ -70,14 +63,6 @@ func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
 	default:
 		return nil, backpressureError("client_calls")
 	}
-}
-
-func (s *agentSession) maxConcurrentPrompts() int {
-	if s.agent != nil && s.agent.options.ConcurrencyLimits.MaxConcurrentPrompts > 0 {
-		return s.agent.options.ConcurrencyLimits.MaxConcurrentPrompts
-	}
-
-	return defaultMaxConcurrentPrompts
 }
 
 func backpressureError(limit string) *acp.RequestError {

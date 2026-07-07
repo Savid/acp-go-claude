@@ -105,7 +105,8 @@ func TestCommandTurnExclusivity(t *testing.T) {
 	ctx := context.Background()
 	session, _, cleanup := newPromptFlowSession(t)
 	defer cleanup()
-	session.agent.options.ConcurrencyLimits.MaxConcurrentPrompts = 2
+	// A command acquires the whole turn exclusively, so with a spare slot free
+	// it is still refused while another prompt holds a slot.
 	session.turn = make(chan struct{}, 2)
 	session.availableCommands = []claude.SlashCommand{{Name: "compact"}}
 	session.turn <- struct{}{}

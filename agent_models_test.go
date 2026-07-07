@@ -177,7 +177,7 @@ func newConfigEdgeSession(t *testing.T, available []claude.AvailableModelInfo) (
 		outputStyle:           "default",
 		availableOutputStyles: []string{"default"},
 		client:                client,
-		turn:                  make(chan struct{}, agent.maxConcurrentPrompts()),
+		turn:                  make(chan struct{}, sessionTurnCapacity),
 	}
 	agent.sessions[session.id] = session
 

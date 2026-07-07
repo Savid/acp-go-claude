@@ -96,7 +96,6 @@ type Options struct {
 // ConcurrencyLimits controls per-agent/session backpressure. Zero fields use defaults.
 type ConcurrencyLimits struct {
 	MaxActiveSessions        int
-	MaxConcurrentPrompts     int
 	MaxConcurrentClientCalls int
 }
 

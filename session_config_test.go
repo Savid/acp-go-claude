@@ -144,7 +144,7 @@ func newStartedConfigTestSession(
 		mode:                  modeDefault,
 		effort:                effortLow,
 		client:                client,
-		turn:                  make(chan struct{}, agent.maxConcurrentPrompts()),
+		turn:                  make(chan struct{}, sessionTurnCapacity),
 	}
 	agent.sessions[sessionID] = session
 

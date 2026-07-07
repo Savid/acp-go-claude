@@ -46,7 +46,6 @@ func TestApplyOptionsBranches(t *testing.T) {
 		WithEnv(env),
 		WithConcurrencyLimits(ConcurrencyLimits{
 			MaxActiveSessions:        2,
-			MaxConcurrentPrompts:     3,
 			MaxConcurrentClientCalls: 4,
 		}),
 	})
@@ -75,7 +74,6 @@ func TestApplyOptionsBranches(t *testing.T) {
 	require.Equal(t, 4*time.Second, options.ControlHandlerTimeout)
 	require.Equal(t, env, options.Env)
 	require.Equal(t, 2, options.ConcurrencyLimits.MaxActiveSessions)
-	require.Equal(t, 3, options.ConcurrencyLimits.MaxConcurrentPrompts)
 	require.Equal(t, 4, options.ConcurrencyLimits.MaxConcurrentClientCalls)
 	require.Equal(t, []string{"project", "local"}, settingSourceArgs(options.SettingSources))
 

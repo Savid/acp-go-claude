@@ -13,14 +13,12 @@ Raw events are opt-in per session, set when creating or loading it:
 
 ```go
 req := acp.NewSessionRequest{
-    Cwd: cwd,
-    Meta: map[string]any{
-        "_meta": map[string]any{
-            "claude": map[string]any{
-                "rawEvent": map[string]any{"enabled": true},
-            },
-        },
-    },
+	Cwd: cwd,
+	Meta: map[string]any{
+		"claude": map[string]any{
+			"rawEvent": map[string]any{"enabled": true},
+		},
+	},
 }
 ```
 

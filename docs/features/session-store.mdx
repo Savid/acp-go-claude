@@ -17,8 +17,8 @@ tests and small hosts:
 store := claudeacp.NewInMemorySessionStore()
 
 err := claudeacp.Serve(ctx, input, output,
-    claudeacp.WithSessionStore(store),
-    claudeacp.WithSessionStoreLoadTimeout(5*time.Second),
+	claudeacp.WithSessionStore(store),
+	claudeacp.WithSessionStoreLoadTimeout(5*time.Second),
 )
 ```
 
@@ -34,8 +34,8 @@ The format constant and key type are stable public identifiers:
 const SessionStoreFormat = "claude-transcript-jsonl-v1"
 
 type SessionKey struct {
-    SessionID string
-    Subpath   string
+	SessionID string
+	Subpath   string
 }
 ```
 

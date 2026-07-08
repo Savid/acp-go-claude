@@ -24,8 +24,8 @@ Build declarations with the request helpers and pass them on the session request
 
 ```go
 servers := []acp.McpServer{
-    claudeacp.StdioMCPServer("tools", "node", []string{"server.js"}, nil),
-    claudeacp.HTTPMCPServer("remote", "https://example.test/mcp", nil),
+	claudeacp.StdioMCPServer("tools", "node", []string{"server.js"}, nil),
+	claudeacp.HTTPMCPServer("remote", "https://example.test/mcp", nil),
 }
 ```
 

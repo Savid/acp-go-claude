@@ -24,10 +24,10 @@ tests:
 
 ```go
 err := claudeacp.Serve(ctx, input, output,
-    claudeacp.WithHome("/tmp/claude-home"),
-    claudeacp.WithEnv(map[string]string{
-        "ANTHROPIC_API_KEY": "sk-...",
-    }),
+	claudeacp.WithHome("/tmp/claude-home"),
+	claudeacp.WithEnv(map[string]string{
+		"ANTHROPIC_API_KEY": "sk-...",
+	}),
 )
 ```
 

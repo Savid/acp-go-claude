@@ -14,11 +14,11 @@ streams:
 
 ```go
 err := claudeacp.Serve(ctx, input, output,
-    claudeacp.WithExecutablePath("/usr/local/bin/claude"),
-    claudeacp.WithHome("/tmp/claude-home"),
-    claudeacp.WithDefaultModel("sonnet"),
-    claudeacp.WithClaudeDefaultPermissionMode("default"),
-    claudeacp.WithSessionStore(store),
+	claudeacp.WithExecutablePath("/usr/local/bin/claude"),
+	claudeacp.WithHome("/tmp/claude-home"),
+	claudeacp.WithDefaultModel("sonnet"),
+	claudeacp.WithClaudeDefaultPermissionMode("default"),
+	claudeacp.WithSessionStore(store),
 )
 ```
 

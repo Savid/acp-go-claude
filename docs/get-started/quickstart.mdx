@@ -40,7 +40,23 @@ This tutorial takes you from nothing to a streamed assistant reply over ACP.
   </Step>
 </Steps>
 
-Both clients drive the same ACP flow a real host would: initialize the agent,
-create a session, prompt it, and render streamed assistant output. From here,
-see [Run modes](/docs/get-started/run-modes) to embed the adapter, or
-[Examples](/docs/get-started/examples) for the resume-from-file client.
+## Verify
+
+The example prints the streamed assistant reply to stdout and exits `0`. A
+greeting line derived from your prompt confirms the full path worked: agent
+initialization, session creation, the prompt turn, and streamed output back
+through ACP.
+
+If you instead launch the raw command for an ACP host to drive, it blocks on
+stdin waiting for JSON-RPC frames and writes ACP frames only to stdout; add
+`-debug` to send diagnostics to stderr:
+
+```sh
+go run ./cmd/acp-go-claude -path "$(command -v claude)" -home /tmp/claude-home -debug
+```
+
+## Next steps
+
+- [Run modes](/docs/get-started/run-modes) — standalone binary versus embedded `Serve`.
+- [Examples](/docs/get-started/examples) — the interactive-chat and resume-from-file clients.
+- [Sessions](/docs/core/sessions) — the session lifecycle behind that first turn.

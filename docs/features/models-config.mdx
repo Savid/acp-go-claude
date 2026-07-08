@@ -1,10 +1,13 @@
 ---
 title: "Models And Config"
-description: "Model metadata and configuration categories"
+description: "Select the model and mode per session, and point Claude Code at a custom endpoint or settings overlay"
 ---
 
-The adapter exposes model metadata under `_meta.claude.models`. Session
-configuration uses typed option categories:
+The adapter exposes model metadata under `_meta.claude.models`.
+
+## Model and mode options
+
+Session configuration uses typed option categories:
 
 | Category | Examples |
 | --- | --- |
@@ -24,9 +27,9 @@ through the environment. Claude Code reads `ANTHROPIC_BASE_URL` (and related
 
 ```go
 err := claudeacp.Serve(ctx, input, output,
-    claudeacp.WithEnv(map[string]string{
-        "ANTHROPIC_BASE_URL": "https://anthropic.internal.example",
-    }),
+	claudeacp.WithEnv(map[string]string{
+		"ANTHROPIC_BASE_URL": "https://anthropic.internal.example",
+	}),
 )
 ```
 
@@ -42,13 +45,13 @@ environment-variable name.
 
 ```go
 err := claudeacp.Serve(ctx, input, output,
-    claudeacp.WithHome("/tmp/claude-home"),
-    claudeacp.WithEnv(map[string]string{
-        "ANTHROPIC_BASE_URL": "https://anthropic.internal.example",
-    }),
-    claudeacp.WithSeedFiles(map[string]string{
-        "settings.json": `{"env":{"ANTHROPIC_BASE_URL":"https://anthropic.internal.example"}}`,
-    }),
+	claudeacp.WithHome("/tmp/claude-home"),
+	claudeacp.WithEnv(map[string]string{
+		"ANTHROPIC_BASE_URL": "https://anthropic.internal.example",
+	}),
+	claudeacp.WithSeedFiles(map[string]string{
+		"settings.json": `{"env":{"ANTHROPIC_BASE_URL":"https://anthropic.internal.example"}}`,
+	}),
 )
 ```
 
@@ -77,11 +80,11 @@ Claude loads that file as an additional settings layer on top of the base
 
 ```go
 err := claudeacp.Serve(ctx, input, output,
-    claudeacp.WithHome("/tmp/claude-home"),
-    claudeacp.WithSeedFiles(map[string]string{
-        "wagie.settings.json": `{"env":{"ANTHROPIC_BASE_URL":"https://anthropic.internal.example"}}`,
-    }),
-    claudeacp.WithClaudeSettingsFile("wagie.settings.json"),
+	claudeacp.WithHome("/tmp/claude-home"),
+	claudeacp.WithSeedFiles(map[string]string{
+		"wagie.settings.json": `{"env":{"ANTHROPIC_BASE_URL":"https://anthropic.internal.example"}}`,
+	}),
+	claudeacp.WithClaudeSettingsFile("wagie.settings.json"),
 )
 ```
 

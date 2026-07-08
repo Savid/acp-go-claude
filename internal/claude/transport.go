@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +22,10 @@ var errMessagesAlreadyStarted = errors.New("claude transport messages already st
 const transportErrorBuffer = 8
 const defaultMaxJSONLineBytes = 10 * 1024 * 1024
 const processWaitTimedOutMessage = "wait for claude process after kill timed out"
+
+// stderrTailLines bounds the ring of recent stderr lines kept so a process exit
+// error can carry the real cause.
+const stderrTailLines = 20
 
 var (
 	processCommandContext    = exec.CommandContext
@@ -61,6 +67,42 @@ type ProcessTransport struct {
 	messagesStarted bool
 	waitOnce        sync.Once
 	waitErr         error
+
+	stderrMu       sync.Mutex
+	stderrTail     []string
+	malformedLines atomic.Uint64
+}
+
+// appendStderr records one stderr line into the bounded tail ring.
+func (t *ProcessTransport) appendStderr(line string) {
+	t.stderrMu.Lock()
+	defer t.stderrMu.Unlock()
+
+	t.stderrTail = append(t.stderrTail, line)
+	if len(t.stderrTail) > stderrTailLines {
+		t.stderrTail = t.stderrTail[len(t.stderrTail)-stderrTailLines:]
+	}
+}
+
+// StderrTail returns the most recent stderr lines joined by newlines.
+func (t *ProcessTransport) StderrTail() string {
+	t.stderrMu.Lock()
+	defer t.stderrMu.Unlock()
+
+	return strings.Join(t.stderrTail, "\n")
+}
+
+// processExitError builds a ProcessExitError enriched with the process exit
+// status and the captured stderr tail.
+func (t *ProcessTransport) processExitError(err error) error {
+	exit := &ProcessExitError{ExitCode: -1, StderrTail: t.StderrTail(), Err: err}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		exit.ExitCode = exitErr.ExitCode()
+	}
+
+	return exit
 }
 
 var _ Transport = (*ProcessTransport)(nil)
@@ -207,7 +249,7 @@ func (t *ProcessTransport) Messages(ctx context.Context) (<-chan map[string]any,
 		defer close(errs)
 		defer func() {
 			if err := t.wait(); err != nil {
-				t.sendError(errs, fmt.Errorf("%w: %w", ErrProcessExited, err))
+				t.sendError(errs, t.processExitError(err))
 			}
 		}()
 		defer t.recoverStdoutReader(ctx, errs)
@@ -228,7 +270,15 @@ func (t *ProcessTransport) Messages(ctx context.Context) (<-chan map[string]any,
 			if len(line) > 0 && line[0] == '{' {
 				var msg map[string]any
 				if err := json.Unmarshal(line, &msg); err != nil {
-					t.sendError(errs, fmt.Errorf("decode claude json line: %w", err))
+					// A single malformed line from a live process must not tear
+					// the session down: skip it, count it, and keep scanning.
+					count := t.malformedLines.Add(1)
+					if t.log != nil {
+						t.log.DebugContext(ctx, "skip malformed claude json line",
+							slog.Int("bytes", len(line)),
+							slog.Uint64("malformed_lines", count),
+						)
+					}
 				} else {
 					msg[rawJSONInternalKey] = string(line)
 
@@ -344,8 +394,9 @@ func (t *ProcessTransport) drainStderr() {
 	reader := bufio.NewReader(t.stderr)
 	for {
 		line, err := reader.ReadString('\n')
-		if line != "" {
-			t.log.Debug("claude stderr", slog.String("line", string(bytes.TrimRight([]byte(line), "\r\n"))))
+		if trimmed := strings.TrimRight(line, "\r\n"); trimmed != "" {
+			t.appendStderr(trimmed)
+			t.log.Debug("claude stderr", slog.String("line", trimmed))
 		}
 
 		if err != nil {

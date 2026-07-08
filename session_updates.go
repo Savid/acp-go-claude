@@ -3,7 +3,6 @@ package claudeacp
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -309,17 +308,21 @@ func normalizeLiveSessionTitle(text string) string {
 	return strings.TrimSpace(string(runes[:liveSessionTitleMaxRunes-3])) + "..."
 }
 
-func (s *agentSession) emitRawClaudeMessage(ctx context.Context, msg claude.Message) error {
+// emitRawClaudeMessage emits one live raw-event notification when raw events are
+// enabled. It never returns an error and never aborts the caller's turn: raw
+// events are non-authoritative debug output, so oversized/unserializable events
+// become markers and emit failures are recorded on the internal observer hook.
+func (s *agentSession) emitRawClaudeMessage(ctx context.Context, msg claude.Message) {
 	raw := rawClaudeMessage(msg)
 	if !s.rawMessages.ShouldEmit(raw) {
-		return nil
+		return
 	}
 
 	s.agent.mu.Lock()
 	if s.agent.closed || s.agent.conn == nil {
 		s.agent.mu.Unlock()
 
-		return nil
+		return
 	}
 
 	conn := s.agent.conn
@@ -336,19 +339,20 @@ func (s *agentSession) emitRawClaudeMessage(ctx context.Context, msg claude.Mess
 		"source":           "claude",
 		rawEventFieldEvent: raw,
 	}
-	if !rawEventWithinLimit(payload) {
-		s.agent.observe.RecordRawMessageEmitFailure(ctx, fmt.Errorf("raw event payload exceeds %d bytes", rawEventMaxBytes))
 
-		return nil
+	// Oversized or unserializable events are never dropped: replace the event
+	// with a fixed marker that consumes the sequence, keeping the per-session
+	// sequence contiguous and self-describing.
+	if marker, replaced := rawEventMarker(payload); replaced {
+		payload[rawEventFieldEvent] = marker
 	}
 
+	// A raw-event emit failure must not abort the prompt turn: raw events are
+	// non-authoritative debug output. Record it on the internal observer hook
+	// and continue.
 	if err := conn.NotifyExtension(ctx, RawEventMethod, payload); err != nil {
 		s.agent.observe.RecordRawMessageEmitFailure(ctx, err)
-
-		return err
 	}
-
-	return nil
 }
 
 func resultOriginKind(result *claude.ResultMessage) string {

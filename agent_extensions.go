@@ -68,6 +68,13 @@ func (a *Agent) handleForkSession(
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
 	})
 	if err != nil {
+		// Forking an unknown or deleted parent returns the same uniform
+		// unknown-session error as every other session-scoped request method,
+		// matching resume and load.
+		if missingClaudeSessionError(err) {
+			return acp.UnstableForkSessionResponse{}, unknownSessionError()
+		}
+
 		return acp.UnstableForkSessionResponse{}, err
 	}
 

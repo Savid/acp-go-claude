@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -28,6 +29,11 @@ func validateConcurrencyLimits(limits ConcurrencyLimits) error {
 	}
 
 	return nil
+}
+
+// turnTimeout is the configured per-turn deadline. Zero means no deadline.
+func (a *Agent) turnTimeout() time.Duration {
+	return a.options.TurnTimeout
 }
 
 func (a *Agent) maxActiveSessions() int {

@@ -144,18 +144,23 @@ func TestRawAndUsageUpdateHelpers(t *testing.T) {
 
 	agent := NewAgent()
 	session := &agentSession{agent: agent, id: "session-1", rawMessages: rawMessageConfig{All: true}}
-	require.NoError(t, session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
+	session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}})
 	conn := newRecordingAgentClient()
 	agent.setConnection(conn)
-	require.NoError(t, session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
+	session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}})
 	require.Len(t, conn.Extensions(), 1)
 	require.Equal(t, RawEventMethod, conn.Extensions()[0].method)
 
+	// A raw-event emit failure never aborts the turn: it returns nil and is
+	// recorded on the internal observer hook.
 	conn.extensionErr = errors.New("extension failed")
-	require.ErrorContains(t, session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}}), "extension failed")
+	session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}})
 	conn.extensionErr = nil
+	// Oversized events are emitted as a marker (consuming a sequence), never dropped.
+	before := len(conn.Extensions())
 	huge := &claude.SystemMessage{Raw: map[string]any{"type": "system", "data": strings.Repeat("x", rawEventMaxBytes)}}
-	require.NoError(t, session.emitRawClaudeMessage(context.Background(), huge))
+	session.emitRawClaudeMessage(context.Background(), huge)
+	require.Len(t, conn.Extensions(), before+1)
 
 	require.Equal(t, "", resultOriginKind(nil))
 	require.Equal(t, originKindTaskNotification, resultOriginKind(&claude.ResultMessage{Origin: map[string]any{"kind": originKindTaskNotification}}))

@@ -24,7 +24,9 @@ func (s *agentSession) setModelAndClampMode(model string) (bool, acp.SessionMode
 	defer s.mu.Unlock()
 
 	s.model = model
-	s.contextWindowSize = contextWindowForAvailableModel(model, s.availableModels)
+	// A model change leaves the context window unknown until the harness reports
+	// one again; never fabricate it from a static catalog.
+	s.contextWindowSize = 0
 
 	nextEffort, effortChanged := reconcileEffortForModel(model, s.availableModels, s.effort)
 	if effortChanged {

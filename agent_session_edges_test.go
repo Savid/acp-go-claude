@@ -324,7 +324,10 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 	}
 	_, err = fatalAgent.Prompt(ctx, TextPromptRequest(sessionID, "hello"))
 	require.Error(t, err)
-	require.Empty(t, fatalAgent.sessions)
+	// A native turn failure leaves the session addressable and retriable: it is
+	// never removed from the map, so a follow-up prompt cannot return the
+	// unknown-session error.
+	require.Contains(t, fatalAgent.sessions, sessionID)
 
 	_, err = NewAgent().CloseSession(ctx, acp.CloseSessionRequest{SessionId: sessionID})
 	require.Error(t, err)

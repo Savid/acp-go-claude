@@ -215,6 +215,9 @@ func TestRawMessageConfigBranches(t *testing.T) {
 	require.Nil(t, rawClaudeMessage(nil))
 	msg := &claude.SystemMessage{Raw: map[string]any{"type": "system"}}
 	require.Equal(t, map[string]any{"type": "system"}, rawClaudeMessage(msg))
-	require.True(t, rawEventWithinLimit(map[string]any{"ok": true}))
-	require.False(t, rawEventWithinLimit(map[string]any{"bad": func() {}}))
+	_, replaced := rawEventMarker(map[string]any{"ok": true})
+	require.False(t, replaced)
+	marker, replaced := rawEventMarker(map[string]any{"bad": func() {}})
+	require.True(t, replaced)
+	require.Equal(t, rawEventReasonUnserializable, marker[rawEventFieldReason])
 }

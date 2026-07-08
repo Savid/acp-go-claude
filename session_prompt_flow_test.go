@@ -50,15 +50,16 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
 	})
 
-	t.Run("raw emit error interrupts", func(t *testing.T) {
+	t.Run("raw emit error does not abort turn", func(t *testing.T) {
 		session, _, cleanup := newPromptFlowSession(t)
 		defer cleanup()
 		session.rawMessages = rawMessageConfig{All: true}
 		conn, ok := session.agent.connection().(*recordingAgentClient)
 		require.True(t, ok)
 		conn.extensionErr = errors.New("raw failed")
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
-		require.ErrorContains(t, err, "raw failed")
+		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		require.NoError(t, err)
+		require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	})
 
 	t.Run("stream read error answers pending permissions cancelled", func(t *testing.T) {
@@ -79,7 +80,9 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		transport.onQuery = func() { transport.errs <- errors.New("stream failed") }
 
 		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
-		require.ErrorIs(t, err, claude.ErrMessageStreamClosed)
+		// The real transport cause is surfaced in the uniform failure, never a
+		// bare stream-closed sentinel.
+		requireTurnFailure(t, err, -32603, failureCauseTransport, "stream failed")
 
 		select {
 		case <-permissionCancelled:
@@ -444,8 +447,9 @@ func TestFinishPromptResultAndDrainEdges(t *testing.T) {
 	rawTransport.messages <- map[string]any{"type": "assistant", "message": map[string]any{"content": []any{
 		map[string]any{"type": "text", "text": "raw"},
 	}}}
-	err = rawDrain.drainSessionMirror(ctx)
-	require.ErrorContains(t, err, "raw drain failed")
+	// A raw-event emit failure never aborts the drain: it is recorded internally
+	// and the drain continues.
+	require.NoError(t, rawDrain.drainSessionMirror(ctx))
 
 	noWorkflow, noWorkflowTransport, noWorkflowCleanup := newPromptFlowSession(t)
 	defer noWorkflowCleanup()
@@ -516,7 +520,9 @@ func TestPromptHelperRemainingBranches(t *testing.T) {
 			"usage": map[string]any{"input_tokens": 1},
 		}},
 	}, &promptLoopState{}))
-	require.Equal(t, largeContextWindow, session.currentContextWindow())
+	// The context window is never fabricated from the model name: it stays the
+	// harness-reported window seeded on the session.
+	require.Equal(t, 200000, session.currentContextWindow())
 
 	tracker := mapper.NewWorkflowTracker()
 	_ = mapper.MessageToUpdatesWithOptions(&claude.SystemMessage{Subtype: "task_progress", Raw: map[string]any{}}, mapper.ToolUpdateOptions{Workflow: tracker})
@@ -541,8 +547,9 @@ func TestPromptHelperRemainingBranches(t *testing.T) {
 	usageErrSession.emitCurrentUsageUpdate(ctx)
 	require.NoError(t, client.Close())
 
-	defaultWindow := (&agentSession{model: "sonnet"}).currentContextWindow()
-	require.Equal(t, defaultContextWindow, defaultWindow)
+	// An unknown context window is 0, never a fabricated default.
+	unknownWindow := (&agentSession{model: "sonnet"}).currentContextWindow()
+	require.Equal(t, 0, unknownWindow)
 }
 
 func newPromptFlowSession(t *testing.T) (*agentSession, *fakeClaudeTransport, func()) {

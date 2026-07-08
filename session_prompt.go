@@ -5,8 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
-	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -60,6 +60,10 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		return acp.PromptResponse{}, err
 	}
 
+	if err := s.ensureClientAlive(ctx); err != nil {
+		return acp.PromptResponse{}, nativeTurnFailure(err)
+	}
+
 	s.mu.Lock()
 	turnCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
@@ -77,6 +81,16 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		cancel()
 	}()
 
+	var timedOut atomic.Bool
+
+	if timeout := s.agent.turnTimeout(); timeout > 0 {
+		timer := time.AfterFunc(timeout, func() {
+			timedOut.Store(true)
+			cancel()
+		})
+		defer timer.Stop()
+	}
+
 	if err := s.client.Query(turnCtx, content); err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -92,19 +106,10 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	for {
 		msg, err := s.client.Receive(turnCtx)
 		if err != nil {
-			if turnCtx.Err() != nil {
-				return acp.PromptResponse{
-					StopReason:    acp.StopReasonCancelled,
-					UserMessageId: params.MessageId,
-				}, nil
-			}
-
-			return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
+			return s.receiveTurnFailure(ctx, turnCtx, params.MessageId, err, timedOut.Load())
 		}
 
-		if err := s.emitRawClaudeMessage(turnCtx, msg); err != nil {
-			return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
-		}
+		s.emitRawClaudeMessage(turnCtx, msg)
 
 		if err := s.checkNativeSessionInvariant(turnCtx, msg); err != nil {
 			return acp.PromptResponse{}, err
@@ -264,7 +269,7 @@ func (s *agentSession) finishPromptResult(
 
 	cancelled := s.wasTurnCancelled()
 	if !cancelled {
-		if err := promptResultError(result, state.lastAssistantErrorKind); err != nil {
+		if err := providerTurnFailure(result, state.lastAssistantErrorKind); err != nil {
 			return acp.PromptResponse{}, false, err
 		}
 	}
@@ -348,9 +353,7 @@ func (s *agentSession) drainSessionMirror(ctx context.Context, options ...mapper
 			return err
 		}
 
-		if err := s.emitRawClaudeMessage(ctx, msg); err != nil {
-			return err
-		}
+		s.emitRawClaudeMessage(ctx, msg)
 
 		if err := s.checkNativeSessionInvariant(ctx, msg); err != nil {
 			return err
@@ -391,9 +394,6 @@ func (s *agentSession) observePromptMessage(ctx context.Context, msg claude.Mess
 	}
 
 	model := streamModel(stream)
-	if modelHasLargeContext(model) {
-		s.setContextWindowSize(largeContextWindow)
-	}
 
 	updates, usage, usageKnown, total := s.streamUsageUpdates(
 		stream,
@@ -436,43 +436,6 @@ func observeAssistantMessage(assistant *claude.AssistantMessage, state *promptLo
 	if assistant.Model != "" && assistant.Model != syntheticModelName {
 		state.lastAssistantModel = assistant.Model
 	}
-}
-
-func promptResultError(result *claude.ResultMessage, assistantErrorKind string) error {
-	if result == nil {
-		return nil
-	}
-
-	if strings.Contains(result.Result, "Please run /login") {
-		return acp.NewAuthRequired(map[string]any{jsonFieldError: result.Result})
-	}
-
-	if result.StopReason == stopReasonMaxTokens || !result.IsError {
-		return nil
-	}
-
-	data := map[string]any{
-		jsonFieldSubtype: result.Subtype,
-	}
-	if result.Result != "" {
-		data[jsonFieldResult] = result.Result
-	}
-
-	if len(result.Errors) > 0 {
-		data["errors"] = append([]string(nil), result.Errors...)
-	}
-
-	if assistantErrorKind != "" {
-		data["errorKind"] = assistantErrorKind
-	}
-
-	return acp.NewInternalError(data)
-}
-
-func fatalClaudeProcessError(err error) bool {
-	return errors.Is(err, claude.ErrMessageStreamClosed) ||
-		errors.Is(err, claude.ErrProcessExited) ||
-		errors.Is(err, claude.ErrClientNotStarted)
 }
 
 func localOnlySlashCommand(prompt []acp.ContentBlock) bool {
@@ -524,7 +487,7 @@ func (s *agentSession) streamUsageUpdates(
 	return []acp.SessionUpdate{{
 		UsageUpdate: &acp.SessionUsageUpdate{
 			Meta: streamUsageMeta(next),
-			Size: s.liveContextWindow(streamModel(msg)),
+			Size: s.currentContextWindow(),
 			Used: total,
 		},
 	}}, next, true, total
@@ -773,23 +736,15 @@ func commonPrefixLength(left string, right string) int {
 	return limit
 }
 
-func (s *agentSession) liveContextWindow(model string) int {
-	if modelHasLargeContext(model) {
-		return largeContextWindow
-	}
-
-	return s.currentContextWindow()
-}
-
+// currentContextWindow returns the context window the Claude harness has
+// reported for this session, or 0 when it is still unknown. It is never
+// fabricated from a static model-name catalog, so usage_update.size is only ever
+// a harness-reported value or 0.
 func (s *agentSession) currentContextWindow() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.contextWindowSize > 0 {
-		return s.contextWindowSize
-	}
-
-	return contextWindowForModel(s.model)
+	return s.contextWindowSize
 }
 
 func (s *agentSession) setContextWindowSize(size int) {
@@ -797,22 +752,6 @@ func (s *agentSession) setContextWindowSize(size int) {
 	defer s.mu.Unlock()
 
 	s.contextWindowSize = size
-}
-
-func contextWindowForModel(model string) int {
-	if modelHasLargeContext(model) {
-		return largeContextWindow
-	}
-
-	return defaultContextWindow
-}
-
-func modelHasLargeContext(model string) bool {
-	parts := strings.FieldsFunc(strings.ToLower(model), func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
-	})
-
-	return slices.Contains(parts, largeContextToken)
 }
 
 func mapValue(value any) map[string]any {

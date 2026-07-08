@@ -152,6 +152,12 @@ type agentSession struct {
 	poisonCause           string
 
 	client *claude.Client
+	// clientOptions holds the fully-built options used to launch the Claude
+	// client so a crashed native process can be relaunched lazily on the next
+	// turn. canRelaunch gates that behavior to real sessions (test sessions that
+	// inject a client directly leave it false).
+	clientOptions claude.Options
+	canRelaunch   bool
 
 	turn              chan struct{}
 	mu                sync.Mutex

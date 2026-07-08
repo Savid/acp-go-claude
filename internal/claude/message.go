@@ -109,6 +109,7 @@ type ResultMessage struct {
 	Origin           map[string]any
 	StopReason       string
 	Result           string
+	Error            string
 	StructuredOutput map[string]any
 	TotalCostUSD     *float64
 	Usage            *Usage
@@ -265,6 +266,7 @@ func parseResult(raw map[string]any, rawJSON string) *ResultMessage {
 		Origin:           mapValue(raw[keyOrigin]),
 		StopReason:       stringValue(raw[keyStopReason]),
 		Result:           stringValue(raw[keyResult]),
+		Error:            stringValue(raw[keyError]),
 		StructuredOutput: mapValue(raw[keyStructuredOutput]),
 		TotalCostUSD:     floatPtr(raw[keyTotalCostUSD]),
 		Usage:            parseUsage(raw["usage"]),

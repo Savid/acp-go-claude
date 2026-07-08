@@ -65,6 +65,28 @@ type Controller struct {
 	messages chan map[string]any
 	done     chan struct{}
 	once     sync.Once
+
+	lastErrMu sync.Mutex
+	lastErr   error
+}
+
+// setLastError records the transport error that stopped routing so Receive can
+// surface the real cause instead of a bare stream-closed sentinel.
+func (c *Controller) setLastError(err error) {
+	c.lastErrMu.Lock()
+	defer c.lastErrMu.Unlock()
+
+	if c.lastErr == nil {
+		c.lastErr = err
+	}
+}
+
+// LastError returns the transport error that stopped routing, if any.
+func (c *Controller) LastError() error {
+	c.lastErrMu.Lock()
+	defer c.lastErrMu.Unlock()
+
+	return c.lastErr
 }
 
 // NewController creates a control protocol controller.
@@ -111,6 +133,7 @@ func (c *Controller) Start(ctx context.Context) {
 				}
 			case err, ok := <-errs:
 				if ok && err != nil {
+					c.setLastError(err)
 					c.log.DebugContext(ctx, "claude transport error", slog.String(keyError, err.Error()))
 				}
 

@@ -74,6 +74,7 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	_, err = permissionLoadErr.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
 	require.ErrorContains(t, err, "load permission rules")
 
+	// A generic native start failure surfaces verbatim.
 	startErr := errors.New("start failed")
 	startFail := newForkTestAgent(t, func() *fakeClaudeTransport {
 		transport := newFakeClaudeTransport()
@@ -83,6 +84,23 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	})
 	_, err = startFail.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
 	require.ErrorIs(t, err, startErr)
+
+	// Forking an unknown or deleted parent returns the uniform unknown-session
+	// invalid-params error, matching resume and load — not a raw -32603.
+	missingParent := newForkTestAgent(t, func() *fakeClaudeTransport {
+		transport := newFakeClaudeTransport()
+		transport.startErr = claude.ErrSessionNotFound
+
+		return transport
+	})
+	_, err = missingParent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
+	var missingReqErr *acp.RequestError
+	require.ErrorAs(t, err, &missingReqErr)
+	require.Equal(t, -32602, missingReqErr.Code)
+	missingData, ok := missingReqErr.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "unknown session", missingData[jsonFieldError])
+	require.Equal(t, acpFieldSessionID, missingData[jsonFieldField])
 
 	limit := NewAgent(WithHome(t.TempDir()), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	limit.setConnection(newRecordingAgentClient())

@@ -225,13 +225,15 @@ func TestProcessTransportMessages(t *testing.T) {
 		got = append(got, msg)
 	}
 
+	// The malformed line is skipped and counted; it never tears the stream down
+	// nor surfaces as an error, so both valid frames are delivered.
 	require.Len(t, got, 2)
 	require.Equal(t, MessageTypeAssistant, got[0][keyType])
 	require.Equal(t, MessageTypeResult, got[1][keyType])
+	require.Equal(t, uint64(1), transport.malformedLines.Load())
 
-	err := <-errs
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "decode claude json line")
+	_, ok := <-errs
+	require.False(t, ok)
 }
 
 func TestProcessTransportRecoverStderrDrainClosesTransport(t *testing.T) {
@@ -441,9 +443,12 @@ func TestProcessTransportMessagesReadAndWaitErrorsDoNotBlock(t *testing.T) {
 		got = append(got, err)
 	}
 
-	require.Len(t, got, 2)
-	require.Contains(t, got[0].Error(), "decode claude json line")
-	require.Contains(t, got[1].Error(), "claude exited")
+	// The malformed line is skipped (not surfaced); only the non-zero process
+	// exit is reported, and it carries the real cause.
+	require.Len(t, got, 1)
+	require.Contains(t, got[0].Error(), "claude exited")
+	require.ErrorIs(t, got[0], ErrProcessExited)
+	require.Equal(t, uint64(1), transport.malformedLines.Load())
 }
 
 func TestProcessTransportMessagesPreservesBurstErrors(t *testing.T) {
@@ -461,10 +466,10 @@ func TestProcessTransportMessagesPreservesBurstErrors(t *testing.T) {
 		got = append(got, err)
 	}
 
-	require.Len(t, got, 4)
-	for _, err := range got {
-		require.Contains(t, err.Error(), "decode claude json line")
-	}
+	// A burst of malformed lines is skipped and counted, never surfaced as
+	// errors that would kill a live session.
+	require.Empty(t, got)
+	require.Equal(t, uint64(4), transport.malformedLines.Load())
 }
 
 func TestProcessTransportMessagesAcceptsLargeJSONLines(t *testing.T) {

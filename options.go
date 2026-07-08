@@ -89,6 +89,9 @@ type Options struct {
 	InitializeTimeout time.Duration
 	// ControlHandlerTimeout bounds one inbound Claude control request.
 	ControlHandlerTimeout time.Duration
+	// TurnTimeout bounds one Claude prompt turn. Zero (the default) means no
+	// deadline. On expiry the turn is aborted and fails with cause "timeout".
+	TurnTimeout time.Duration
 
 	defaultPermissionModeSet bool
 }
@@ -291,6 +294,15 @@ func WithClaudeInitializeTimeout(timeout time.Duration) Option {
 func WithClaudeControlHandlerTimeout(timeout time.Duration) Option {
 	return func(options *Options) {
 		options.ControlHandlerTimeout = timeout
+	}
+}
+
+// WithTurnTimeout bounds one Claude prompt turn. Zero (the default) disables the
+// deadline. On expiry the native turn is aborted and session/prompt fails with a
+// claude_turn_failed error whose cause is "timeout" (never cancelled).
+func WithTurnTimeout(timeout time.Duration) Option {
+	return func(options *Options) {
+		options.TurnTimeout = timeout
 	}
 }
 

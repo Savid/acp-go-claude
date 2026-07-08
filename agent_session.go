@@ -327,18 +327,12 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 	ctx, finish := a.observe.StartPrompt(ctx, params.Meta, session.currentModel())
 	defer func() { finish(promptResultForObserver(resp, err, session.currentModel())) }()
 
+	// A native turn failure (process death, transport, provider, timeout) leaves
+	// the session addressable and retriable: it is not removed from the map, so a
+	// follow-up session/prompt relaunches the native process lazily rather than
+	// returning the unknown-session error. session.Prompt already maps the real
+	// cause into the uniform claude_turn_failed error.
 	resp, err = session.Prompt(ctx, params)
-	if err != nil && fatalClaudeProcessError(err) {
-		a.removeSession(ctx, params.SessionId, session)
-		a.observe.RecordClaudeProcessExit(ctx, "unexpected", err)
-
-		err = acp.NewInternalError(map[string]any{
-			jsonFieldError:   err.Error(),
-			jsonFieldMessage: "The Claude Agent process exited unexpectedly. Please start a new session.",
-		})
-
-		return acp.PromptResponse{}, err
-	}
 
 	return resp, err
 }
@@ -782,6 +776,8 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	options.PermissionHandler = session.handlePermission
 	options.ElicitationHandler = session.handleElicitation
 	options.HookHandler = session.handleHookCallback
+	session.clientOptions = options
+	session.canRelaunch = true
 	session.client = a.newClaudeClient(a.log, options)
 
 	startCtx, finishStart := a.observe.StartClaudeProcess(ctx, "start")
@@ -848,7 +844,10 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		session.effort = effort
 	}
 
-	session.contextWindowSize = contextWindowForAvailableModel(selectedModel.Model, availableModels)
+	// The context window stays unknown (0) until the Claude harness reports one
+	// through get_context_usage or a result frame; it is never fabricated from a
+	// static model-name catalog.
+	session.contextWindowSize = 0
 
 	if settings.FastMode != nil {
 		session.fastMode = *settings.FastMode

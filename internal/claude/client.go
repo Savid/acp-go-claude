@@ -328,6 +328,12 @@ func (c *Client) Receive(ctx context.Context) (Message, error) {
 	select {
 	case raw, ok := <-controller.Messages():
 		if !ok {
+			// Surface the real transport/process cause (exit status, stderr
+			// tail, transport error) rather than a bare stream-closed sentinel.
+			if lastErr := controller.LastError(); lastErr != nil {
+				return nil, lastErr
+			}
+
 			return nil, ErrMessageStreamClosed
 		}
 
@@ -339,6 +345,27 @@ func (c *Client) Receive(ctx context.Context) (Message, error) {
 		return msg, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+// Alive reports whether the client still has a running controller. It returns
+// false once the Claude process died or the client was closed, so callers can
+// relaunch the native process lazily on the next turn.
+func (c *Client) Alive() bool {
+	if c.isClosed() {
+		return false
+	}
+
+	controller := c.activeController()
+	if controller == nil {
+		return false
+	}
+
+	select {
+	case <-controller.Done():
+		return false
+	default:
+		return true
 	}
 }
 

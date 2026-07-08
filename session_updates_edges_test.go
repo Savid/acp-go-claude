@@ -24,7 +24,7 @@ func TestSessionUpdateEdgeBranches(t *testing.T) {
 	require.Equal(t, "session-1", *info.Title)
 	session.rawMessages = rawMessageConfig{All: true}
 	agent.closed = true
-	require.NoError(t, session.emitRawClaudeMessage(ctx, &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
+	session.emitRawClaudeMessage(ctx, &claude.SystemMessage{Raw: map[string]any{"type": "system"}})
 	agent.closed = false
 
 	cloned := cloneUsage(&acp.Usage{CachedWriteTokens: acp.Ptr(1), ThoughtTokens: acp.Ptr(2)})

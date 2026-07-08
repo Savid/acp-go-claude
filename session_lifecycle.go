@@ -90,6 +90,47 @@ func (s *agentSession) turnQueue() chan struct{} {
 	return s.turn
 }
 
+// ensureClientAlive relaunches the native Claude process when it died on a
+// previous turn. The session is never removed on a native failure, so a
+// follow-up prompt lands here and brings the process back up (resuming the
+// native session id) rather than returning the unknown-session error. It is a
+// no-op for sessions that cannot relaunch (e.g. injected test clients) and for
+// clients that are still alive.
+func (s *agentSession) ensureClientAlive(ctx context.Context) error {
+	if !s.canRelaunch {
+		return nil
+	}
+
+	s.mu.Lock()
+	client := s.client
+	s.mu.Unlock()
+
+	if client != nil && client.Alive() {
+		return nil
+	}
+
+	opts := s.clientOptions
+	opts.ResumeID = string(s.id)
+
+	relaunched := s.agent.newClaudeClient(s.agent.log, opts)
+	if err := relaunched.Start(ctx); err != nil {
+		_ = relaunched.Close()
+
+		return err
+	}
+
+	s.mu.Lock()
+	old := s.client
+	s.client = relaunched
+	s.mu.Unlock()
+
+	if old != nil {
+		_ = old.Close()
+	}
+
+	return nil
+}
+
 // Cancel interrupts the active Claude turn.
 func (s *agentSession) Cancel(ctx context.Context) (err error) {
 	s.mu.Lock()

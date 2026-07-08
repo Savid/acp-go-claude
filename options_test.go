@@ -43,6 +43,7 @@ func TestApplyOptionsBranches(t *testing.T) {
 		WithClaudeAllowSkipPermissionsFlag(true),
 		WithClaudeInitializeTimeout(3 * time.Second),
 		WithClaudeControlHandlerTimeout(4 * time.Second),
+		WithTurnTimeout(90 * time.Second),
 		WithEnv(env),
 		WithConcurrencyLimits(ConcurrencyLimits{
 			MaxActiveSessions:        2,
@@ -72,6 +73,7 @@ func TestApplyOptionsBranches(t *testing.T) {
 	require.True(t, options.AllowSkipPermissionsFlag)
 	require.Equal(t, 3*time.Second, options.InitializeTimeout)
 	require.Equal(t, 4*time.Second, options.ControlHandlerTimeout)
+	require.Equal(t, 90*time.Second, options.TurnTimeout)
 	require.Equal(t, env, options.Env)
 	require.Equal(t, 2, options.ConcurrencyLimits.MaxActiveSessions)
 	require.Equal(t, 4, options.ConcurrencyLimits.MaxConcurrentClientCalls)

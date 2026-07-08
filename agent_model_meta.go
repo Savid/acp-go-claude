@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -97,18 +98,15 @@ func modelContextWindowHint(info claude.AvailableModelInfo) int {
 	}
 }
 
-func contextWindowForAvailableModel(model string, available []claude.AvailableModelInfo) int {
-	if info, ok := availableModelInfo(model, available); ok {
-		if contextWindow := modelContextWindowHint(info); contextWindow > 0 {
-			return contextWindow
-		}
-	}
+// modelHasLargeContext reports whether a model name carries the large-context
+// token (used only for the advertised model-capability hint, never for
+// usage_update.size).
+func modelHasLargeContext(model string) bool {
+	parts := strings.FieldsFunc(strings.ToLower(model), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
 
-	if contextWindow := modelContextWindowHint(claude.AvailableModelInfo{Value: model}); contextWindow > 0 {
-		return contextWindow
-	}
-
-	return contextWindowForModel(model)
+	return slices.Contains(parts, largeContextToken)
 }
 
 func modelFamily(info claude.AvailableModelInfo) string {

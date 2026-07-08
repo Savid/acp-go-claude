@@ -15,17 +15,17 @@ func TestPromptResultAndLocalCommandHelpers(t *testing.T) {
 
 	require.True(t, workflowTaskNotificationResultCompletesPrompt(nil))
 	require.False(t, workflowTaskNotificationResultCompletesPrompt(mapper.NewWorkflowTracker()))
-	require.NoError(t, promptResultError(nil, ""))
-	require.NoError(t, promptResultError(&claude.ResultMessage{IsError: true, StopReason: stopReasonMaxTokens}, ""))
-	require.NoError(t, promptResultError(&claude.ResultMessage{IsError: false}, ""))
-	require.Error(t, promptResultError(&claude.ResultMessage{Result: "Please run /login first"}, ""))
-	err := promptResultError(&claude.ResultMessage{IsError: true, Subtype: "error", Result: "failed", Errors: []string{"one"}}, "kind")
+	require.NoError(t, providerTurnFailure(nil, ""))
+	require.NoError(t, providerTurnFailure(&claude.ResultMessage{IsError: true, StopReason: stopReasonMaxTokens}, ""))
+	require.NoError(t, providerTurnFailure(&claude.ResultMessage{IsError: false}, ""))
+	require.Error(t, providerTurnFailure(&claude.ResultMessage{Result: "Please run /login first"}, ""))
+	err := providerTurnFailure(&claude.ResultMessage{IsError: true, Subtype: "error", Result: "failed", Errors: []string{"one"}}, "kind")
 	require.Error(t, err)
 
-	require.True(t, fatalClaudeProcessError(claude.ErrMessageStreamClosed))
-	require.True(t, fatalClaudeProcessError(claude.ErrProcessExited))
-	require.True(t, fatalClaudeProcessError(claude.ErrClientNotStarted))
-	require.False(t, fatalClaudeProcessError(context.Canceled))
+	require.True(t, isNativeProcessExit(claude.ErrMessageStreamClosed))
+	require.True(t, isNativeProcessExit(claude.ErrProcessExited))
+	require.True(t, isNativeProcessExit(claude.ErrClientNotStarted))
+	require.False(t, isNativeProcessExit(context.Canceled))
 	require.False(t, localOnlySlashCommand([]acp.ContentBlock{acp.TextBlock(" /context now")}))
 	require.True(t, localOnlySlashCommand([]acp.ContentBlock{acp.TextBlock("/extra-usage")}))
 	require.True(t, localOnlySlashCommand([]acp.ContentBlock{acp.TextBlock("/heapdump")}))
@@ -55,7 +55,9 @@ func TestStreamUsageAndContextHelpers(t *testing.T) {
 	require.True(t, known)
 	require.Equal(t, 15, total)
 	require.Len(t, updates, 1)
-	require.Equal(t, largeContextWindow, updates[0].UsageUpdate.Size)
+	// usage_update.size is the harness-reported window (contextWindowSize), never
+	// fabricated from the model name.
+	require.Equal(t, 100, updates[0].UsageUpdate.Size)
 	require.Equal(t, "claude-sonnet-4-5-1m", streamModel(start))
 
 	updates, snapshot, known, total = session.streamUsageUpdates(&claude.StreamEventMessage{
@@ -95,10 +97,9 @@ func TestStreamUsageAndContextHelpers(t *testing.T) {
 	require.Equal(t, 200, session.currentContextWindow())
 	require.Nil(t, session.contextUsageUpdates(nil))
 	require.Nil(t, session.contextUsageUpdates(&claude.ContextUsage{}))
-	require.Equal(t, largeContextWindow, session.liveContextWindow("opus-1m"))
-	require.Equal(t, 200, session.liveContextWindow("sonnet"))
-	require.Equal(t, largeContextWindow, contextWindowForModel("claude-sonnet-1m"))
-	require.Equal(t, defaultContextWindow, contextWindowForModel("claude-sonnet"))
+	// An unknown context window is reported as 0, never fabricated from the model
+	// name.
+	require.Equal(t, 0, (&agentSession{model: "claude-sonnet-1m"}).currentContextWindow())
 	require.True(t, modelHasLargeContext("claude-sonnet-4-5-1m"))
 	require.False(t, modelHasLargeContext("claude-sonnet"))
 	require.Equal(t, map[string]any{"a": "b"}, mapValue(map[string]any{"a": "b"}))

@@ -430,8 +430,13 @@ func (t *autoControlTransport) Close() error {
 }
 
 func TestRawEventLimit(t *testing.T) {
-	require.True(t, rawEventWithinLimit(map[string]any{"ok": true}))
-	require.False(t, rawEventWithinLimit(map[string]any{"data": string(make([]byte, rawEventMaxBytes))}))
+	_, replaced := rawEventMarker(map[string]any{"ok": true})
+	require.False(t, replaced)
+
+	marker, replaced := rawEventMarker(map[string]any{"data": string(make([]byte, rawEventMaxBytes))})
+	require.True(t, replaced)
+	require.Equal(t, rawEventReasonOversize, marker[rawEventFieldReason])
+	require.Equal(t, rawEventMaxBytes, marker[rawEventFieldMaxBytes])
 }
 
 func TestSetSessionModeUnsupported(t *testing.T) {

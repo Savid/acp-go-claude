@@ -274,3 +274,29 @@ func TestTurnFailureTimeout(t *testing.T) {
 	_, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "hello"))
 	requireTurnFailure(t, err, -32603, failureCauseTimeout, "")
 }
+
+// T7 — a user cancel and a WithTurnTimeout expiry that coincide resolve
+// deterministically to cancelled: the cancel guard runs strictly before all
+// failure mapping, so the turn is never reported as cause timeout and the
+// timeout failure (a second native abort) never fires.
+func TestTurnFailureCancelWinsOverCoincidentTimeout(t *testing.T) {
+	t.Parallel()
+
+	session, transport, cleanup := newPromptFlowSession(t)
+	defer cleanup()
+
+	session.agent.options.TurnTimeout = time.Millisecond
+	transport.queryMsgs = nil // harness hangs so only the deadline/cancel end the turn
+
+	// onQuery runs synchronously on the prompt goroutine before the receive loop.
+	// Wait past the 1ms deadline so the timeout has provably expired, then fire a
+	// real user cancel: both conditions now hold when the turn stream unblocks.
+	transport.onQuery = func() {
+		time.Sleep(25 * time.Millisecond)
+		require.NoError(t, session.Cancel(context.Background()))
+	}
+
+	resp, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "hello"))
+	require.NoError(t, err, "coincident cancel must never surface a timeout failure")
+	require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
+}

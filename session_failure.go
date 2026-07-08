@@ -68,9 +68,13 @@ func isNativeProcessExit(err error) bool {
 }
 
 // receiveTurnFailure classifies an error observed while reading the turn stream.
-// The cancel guard runs before all failure mapping: a native error observed
-// while the turn is cancelled maps to cancelled, never a failure. A turn timeout
-// is a failure, not a cancel, so it is checked first.
+// The cancel guard runs strictly before all failure mapping — including timeout
+// expiry. A user cancel and a WithTurnTimeout expiry can coincide because both
+// cancel turnCtx, so an explicit user cancel is checked first and wins
+// deterministically: the turn resolves cancelled, cause:"timeout" is never
+// emitted, and the timeout failure path (which would abort the native turn a
+// second time) never runs. Only once no user cancel is in flight does a timeout
+// map to a failure; a bare parent-context cancellation still maps to cancelled.
 func (s *agentSession) receiveTurnFailure(
 	ctx context.Context,
 	turnCtx context.Context,
@@ -78,19 +82,20 @@ func (s *agentSession) receiveTurnFailure(
 	err error,
 	timedOut bool,
 ) (acp.PromptResponse, error) {
+	if s.wasTurnCancelled() {
+		// A user cancel already aborted the native turn; suppress the native error
+		// and resolve cancelled even when a turn timeout expired at the same time.
+		return s.cancelledResponse(messageID), nil
+	}
+
 	if timedOut {
 		return acp.PromptResponse{}, s.turnTimeoutFailure(ctx, s.agent.turnTimeout().String())
 	}
 
 	if turnCtx.Err() != nil {
-		// Cancellation suppresses the native error by design: a cancelled turn is
-		// a successful PromptResponse, not a failure.
-		cancelled := acp.PromptResponse{
-			StopReason:    acp.StopReasonCancelled,
-			UserMessageId: messageID,
-		}
-
-		return cancelled, nil //nolint:nilerr // cancellation intentionally suppresses the native error
+		// Parent-context cancellation suppresses the native error by design: a
+		// cancelled turn is a successful PromptResponse, not a failure.
+		return s.cancelledResponse(messageID), nil //nolint:nilerr // cancellation intentionally suppresses the native error
 	}
 
 	if isNativeProcessExit(err) {
@@ -98,6 +103,15 @@ func (s *agentSession) receiveTurnFailure(
 	}
 
 	return acp.PromptResponse{}, nativeTurnFailure(s.interruptAfterEmitError(ctx, err))
+}
+
+// cancelledResponse builds the successful cancelled PromptResponse echoing the
+// user message id.
+func (s *agentSession) cancelledResponse(messageID *string) acp.PromptResponse {
+	return acp.PromptResponse{
+		StopReason:    acp.StopReasonCancelled,
+		UserMessageId: messageID,
+	}
 }
 
 // turnTimeoutFailure aborts the native turn and returns the timeout failure. A

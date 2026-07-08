@@ -62,17 +62,6 @@ func TestMCPServersToClaudeUnsupported(t *testing.T) {
 
 	_, err = MCPServersToClaude([]acp.McpServer{{}})
 	require.Error(t, err)
-
-	_, err = MCPServersToClaude([]acp.McpServer{{Stdio: &acp.McpServerStdio{Command: "mcp"}}})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "empty name")
-
-	_, err = MCPServersToClaude([]acp.McpServer{
-		{Stdio: &acp.McpServerStdio{Name: "dup", Command: "one"}},
-		{Http: &acp.McpServerHttpInline{Name: "dup", Url: "https://example.com/mcp"}},
-	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "duplicate")
 }
 
 func TestMCPServersToClaudeMarshalError(t *testing.T) {

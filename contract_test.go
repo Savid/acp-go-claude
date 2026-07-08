@@ -471,6 +471,58 @@ func TestValidateMCPServersRejectsSSEAndACP(t *testing.T) {
 	}
 }
 
+func TestValidateMCPServersNameRules(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		servers []acp.McpServer
+		data    map[string]any
+	}{
+		{
+			name:    "empty name",
+			servers: []acp.McpServer{{Stdio: &acp.McpServerStdio{Command: "mcp"}}},
+			data:    map[string]any{"mcpServers[0].name": validationRequired},
+		},
+		{
+			name: "whitespace-only name",
+			servers: []acp.McpServer{
+				{Http: &acp.McpServerHttpInline{Name: "   ", Url: "https://example.com/mcp"}},
+			},
+			data: map[string]any{"mcpServers[0].name": validationRequired},
+		},
+		{
+			name: "empty name at later index",
+			servers: []acp.McpServer{
+				{Stdio: &acp.McpServerStdio{Name: "fs", Command: "mcp"}},
+				{Http: &acp.McpServerHttpInline{Name: "", Url: "https://example.com/mcp"}},
+			},
+			data: map[string]any{"mcpServers[1].name": validationRequired},
+		},
+		{
+			name: "duplicate name reports later entry",
+			servers: []acp.McpServer{
+				{Stdio: &acp.McpServerStdio{Name: "dup", Command: "one"}},
+				{Http: &acp.McpServerHttpInline{Name: "dup", Url: "https://example.com/mcp"}},
+			},
+			data: map[string]any{"mcpServers[1].name": validationDuplicate},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateMCPServers(tc.servers)
+			require.Error(t, err)
+			var reqErr *acp.RequestError
+			require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
+			require.Equal(t, -32602, reqErr.Code)
+			require.Equal(t, "Invalid params", reqErr.Message)
+			require.Equal(t, tc.data, reqErr.Data)
+		})
+	}
+}
+
 func requireAnyMap(t *testing.T, value any) map[string]any {
 	t.Helper()
 

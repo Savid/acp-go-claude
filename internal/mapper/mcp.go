@@ -3,7 +3,6 @@ package mapper
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -17,18 +16,10 @@ func MCPServersToClaude(servers []acp.McpServer) (string, error) {
 	}
 
 	out := make(map[string]any, len(servers))
-	for index, server := range servers {
+	for _, server := range servers {
 		name, config, err := mcpServerToClaude(server)
 		if err != nil {
 			return "", err
-		}
-
-		if strings.TrimSpace(name) == "" {
-			return "", fmt.Errorf("MCP server at index %d has empty name", index)
-		}
-
-		if _, exists := out[name]; exists {
-			return "", fmt.Errorf("duplicate MCP server name %q", name)
 		}
 
 		out[name] = config

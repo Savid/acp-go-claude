@@ -891,10 +891,15 @@ func (a *Agent) mcpConfigForStart(start sessionStart) (string, error) {
 }
 
 func validateMCPServers(servers []acp.McpServer) error {
-	for _, server := range servers {
+	seen := make(map[string]struct{}, len(servers))
+	for index, server := range servers {
+		var name string
+
 		switch {
-		case server.Stdio != nil, server.Http != nil:
-			continue
+		case server.Stdio != nil:
+			name = server.Stdio.Name
+		case server.Http != nil:
+			name = server.Http.Name
 		case server.Sse != nil:
 			return acp.NewInvalidParams(map[string]any{
 				jsonFieldError:    validationUnsupported,
@@ -910,9 +915,25 @@ func validateMCPServers(servers []acp.McpServer) error {
 		default:
 			return acp.NewInvalidParams(map[string]any{jsonFieldError: "empty MCP server"})
 		}
+
+		if strings.TrimSpace(name) == "" {
+			return acp.NewInvalidParams(map[string]any{mcpServerNameField(index): validationRequired})
+		}
+
+		if _, exists := seen[name]; exists {
+			return acp.NewInvalidParams(map[string]any{mcpServerNameField(index): validationDuplicate})
+		}
+
+		seen[name] = struct{}{}
 	}
 
 	return nil
+}
+
+// mcpServerNameField builds the invalid-params data key for the name of the
+// MCP server declaration at the given request index.
+func mcpServerNameField(index int) string {
+	return fmt.Sprintf("mcpServers[%d].name", index)
 }
 
 func (a *Agent) storeHasSession(ctx context.Context, sessionID string, cwd string) bool {

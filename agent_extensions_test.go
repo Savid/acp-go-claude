@@ -39,7 +39,10 @@ func TestHandleForkSessionBranches(t *testing.T) {
 
 	raw = json.RawMessage(`{"sessionId":"parent","cwd":` + strconv.Quote(cwd) + `,"mcpServers":[{}]}`)
 	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
-	require.ErrorContains(t, err, "empty name")
+	var forkNameErr *acp.RequestError
+	require.True(t, errors.As(err, &forkNameErr), "error = %T %[1]v", err)
+	require.Equal(t, -32602, forkNameErr.Code)
+	require.Equal(t, map[string]any{"mcpServers[0].name": validationRequired}, forkNameErr.Data)
 
 	previousStableMCPServers := stableMCPServers
 	stableMCPServers = func([]acp.UnstableMcpServer) ([]acp.McpServer, error) {

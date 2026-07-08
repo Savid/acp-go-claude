@@ -51,6 +51,7 @@ const (
 	permissionPromptTool     = "stdio"
 	validationRequired       = "required"
 	validationUnsupported    = "unsupported"
+	validationDuplicate      = "duplicate"
 
 	listSessionsPageSize = 50
 )

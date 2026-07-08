@@ -1,9 +1,12 @@
 ---
 title: "Updates"
-description: "Session update mapping"
+description: "The exact ACP session updates a Claude turn emits and where each comes from"
 ---
 
-Claude output is streamed as ACP session updates:
+## Update mapping
+
+During a prompt turn, Claude stream frames are translated into ACP session
+updates:
 
 | Update | Source |
 | --- | --- |
@@ -12,7 +15,15 @@ Claude output is streamed as ACP session updates:
 | tool call | Claude tool start/input |
 | tool result | Claude tool result |
 | plan | Claude plan updates |
-| usage | Claude usage counters |
+| available commands | Claude slash-command set (and refreshes) |
+| usage | Claude usage counters (`_meta.claude.usage`) |
 | session info | title and state changes |
 
-Raw events, when enabled, are emitted separately on `_claude/rawEvent`.
+## Related channels
+
+- Raw Claude frames, when enabled, arrive separately on `_claude/rawEvent` and
+  are **not** session updates — see [Raw events](/docs/features/raw-events).
+- A turn *failure* is a JSON-RPC error on `session/prompt`, not an update — see
+  the failure contract in [ACP methods](/docs/reference/acp-methods).
+- Structured-output results are returned in prompt metadata under
+  `_meta.claude.structuredOutput`, not as a session update.

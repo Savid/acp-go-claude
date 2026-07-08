@@ -1,22 +1,56 @@
 ---
 title: "Overview"
-description: "Claude Code as an Agent Client Protocol agent"
+description: "What the Claude Code ACP adapter does and where its responsibility ends"
 ---
 
-`acp-go-claude` runs Claude Code behind an Agent Client Protocol JSON-RPC
-connection. Hosts can launch the `acp-go-claude` binary over stdio or embed the
-Go package and call `claudeacp.Serve`.
+`acp-go-claude` runs Claude Code behind an Agent Client Protocol (ACP)
+JSON-RPC connection. A host either launches the `acp-go-claude` binary and
+speaks ACP over stdio, or embeds the Go package and calls `claudeacp.Serve`.
+Either way the host drives Claude Code through standard ACP methods instead of
+the interactive terminal UI.
 
-The adapter owns protocol mapping, Claude subprocess lifecycle, streaming
-updates, permission prompts, elicitation, model configuration, optional raw
-events, and optional durable session storage. Claude authentication and account
-state stay with the local Claude Code installation.
+## What the adapter owns
 
-Public extension methods are intentionally narrow:
+The adapter is a thin translation layer between ACP and the local `claude` CLI.
+It owns:
+
+- ACP protocol mapping and the Claude subprocess lifecycle (one long-lived
+  Claude Code process per ACP session).
+- Streaming Claude stream-json output into ACP session updates.
+- Permission prompts, elicitation, model and mode configuration, slash-command
+  projection, optional raw events, and optional durable session storage.
+
+## What the adapter does not own
+
+Claude authentication and account state stay with the local Claude Code
+installation selected by `-home` / `WithHome`. The adapter never logs in, logs
+out, or edits Claude account material; ACP `logout` clears only adapter-owned
+session state. Hosts manage credentials through Claude Code itself, not through
+this adapter.
+
+## Extension surface
+
+Public extension methods are intentionally narrow, and all Claude-specific
+metadata lives under the `_meta.claude` namespace:
 
 | Method | Purpose |
 | --- | --- |
 | `_claude/session/fork` | Fork a stored or active session. |
-| `_claude/rawEvent` | Emit opt-in bounded Claude stream events. |
+| `_claude/rawEvent` | Emit opt-in, bounded Claude stream events. |
 
-The public metadata namespace is `_meta.claude`.
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" href="/docs/get-started/quickstart">
+    Run your first ACP turn against Claude Code.
+  </Card>
+  <Card title="Sessions" href="/docs/core/sessions">
+    The session lifecycle and durable-store model.
+  </Card>
+  <Card title="Permissions" href="/docs/features/permissions">
+    How tool-permission decisions flow through ACP.
+  </Card>
+  <Card title="Go API" href="/docs/reference/go-api">
+    Embed the adapter with `Serve` and its options.
+  </Card>
+</CardGroup>

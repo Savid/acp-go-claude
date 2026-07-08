@@ -1,17 +1,50 @@
 ---
 title: "ACP Methods"
-description: "Implemented ACP methods and extensions"
+description: "The implemented ACP methods, extensions, and the turn-failure error contract"
 ---
 
-Core methods include initialize, session create/load/resume/list/delete,
-prompt, cancel, close, authenticate, logout, and configuration methods
-implemented by the ACP SDK connection.
+## Methods
 
-Claude extensions:
+Core methods handled through the ACP SDK connection: initialize, session
+create/load/resume/list/delete, prompt, cancel, close, authenticate, logout, and
+the session configuration methods. Unsupported methods return a uniform JSON-RPC
+method-not-found error.
+
+## Extensions
 
 | Method | Direction |
 | --- | --- |
 | `_claude/session/fork` | client to agent |
 | `_claude/rawEvent` | agent to client |
 
-Unsupported methods return a uniform JSON-RPC method-not-found error.
+## Turn-failure contract
+
+A native turn failure terminates `session/prompt` with a JSON-RPC error and no
+`PromptResponse`; it is never reported as an ACP stop reason. Every failure uses
+one uniform shape so a host can classify it without vendor parsing. The error is
+JSON-RPC code **`-32603`** with a `data` object:
+
+| Field | Value |
+| --- | --- |
+| `error` | `claude_turn_failed` |
+| `cause` | one of the causes below |
+| `message` | the real native cause text (never a placeholder) |
+
+The `cause` vocabulary:
+
+| Cause | Meaning |
+| --- | --- |
+| `process_exit` | The Claude process died; `message` carries the real exit status and a stderr tail. |
+| `transport` | Stream close, malformed frame, or client-lifecycle break. |
+| `provider` | Claude reported an error in its result frame (including auth failures). |
+| `timeout` | A `WithTurnTimeout` deadline expired; the native turn was aborted. |
+
+Provider failures additionally include the result `subtype`, and may include an
+`errors` array and an `errorKind`.
+
+<Note>
+This adapter advertises no ACP auth methods, so an authentication failure is a
+`provider` failure under `-32603` — it never emits the `-32000` auth-required
+variant. A user cancel that races a timeout resolves as a successful `cancelled`
+response, not a failure.
+</Note>

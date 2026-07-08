@@ -1,9 +1,16 @@
 ---
 title: "Go API"
-description: "Public package surface"
+description: "The public package entry point, options, and helpers at a glance"
 ---
 
-Create an agent with `Serve`:
+The full, authoritative API — signatures, types, and doc comments — is on
+[pkg.go.dev](https://pkg.go.dev/github.com/savid/acp-go-claude). This page indexes
+the public surface; it does not restate godoc.
+
+## Entry point
+
+`Serve(ctx, input, output, opts...)` runs the agent over a pair of JSON-RPC
+streams:
 
 ```go
 err := claudeacp.Serve(ctx, input, output,
@@ -15,21 +22,48 @@ err := claudeacp.Serve(ctx, input, output,
 )
 ```
 
-Common options:
+## Process and session options
 
 | Option | Purpose |
 | --- | --- |
-| `WithExecutablePath` | Set the Claude CLI path. |
+| `WithExecutablePath` | Set the Claude CLI path (default: search `PATH`). |
 | `WithHome` | Set `CLAUDE_CONFIG_DIR` for launched Claude processes. |
-| `WithDefaultModel` | Set the default Claude model string. |
-| `WithEnv` | Add environment variables for Claude children. |
-| `WithSeedFiles` | Write files into the resolved Claude config dir before launch (requires `WithHome`). |
+| `WithDefaultModel` | Default Claude model for new sessions. |
+| `WithEnv` | Merge environment variables into every Claude child. |
+| `WithSeedFiles` | Write files into the resolved config dir before launch (requires `WithHome`). |
 | `WithSessionStore` | Install durable transcript storage. |
-| `WithConcurrencyLimits` | Set active session and client-call caps. |
-| `WithClaudeBareMode` | Launch Claude with `--bare`. |
-| `WithClaudeSettingSources` | Select Claude setting sources. |
-| `WithClaudeSettingsFile` | Load a settings overlay under the config dir via `--settings` (requires `WithHome`). |
+| `WithSessionStoreLoadTimeout` | Bound store load/list operations used during resume. |
+| `WithConcurrencyLimits` | Cap active sessions and concurrent client calls. |
+| `WithTurnTimeout` | Bound one prompt turn; expiry fails the turn with cause `timeout` (default: no deadline). |
 
-Request helpers include `TextPromptRequest`, `CallForkSession`,
-`WithSessionRawEvents`, `WithSessionOutputSchema`, `SetConfigOptionRequest`,
-`SetModelRequest`, and `DeleteSessionRequest`.
+## Claude-specific options
+
+| Option | Purpose |
+| --- | --- |
+| `WithClaudeDefaultPermissionMode` | Initial permission mode for new sessions. |
+| `WithClaudeDefaultSystemPrompt` | Default system prompt. |
+| `WithClaudeHideAuth` | Suppress Claude subscription terminal auth methods. |
+| `WithClaudeBareMode` | Launch Claude with `--bare`. |
+| `WithClaudeSettingSources` | Select Claude filesystem setting sources (`--setting-sources`). |
+| `WithClaudeSettingsFile` | Load a settings overlay via `--settings` (requires `WithHome`). |
+| `WithClaudeAllowSkipPermissionsFlag` | Permit Claude's skip-permissions capability flag. |
+| `WithClaudeInitializeTimeout` | Bound the Claude control-protocol initialize request. |
+| `WithClaudeControlHandlerTimeout` | Bound one inbound Claude control request. |
+
+## Identity and observability options
+
+| Option | Purpose |
+| --- | --- |
+| `WithAgentName`, `WithAgentTitle`, `WithAgentVersion` | Values advertised during ACP initialize. |
+| `WithLogger` | Structured diagnostic logger. |
+| `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator` | OpenTelemetry wiring (see [Observability](/docs/operations/observability)). |
+
+## Request helpers and store types
+
+Request builders: `TextPromptRequest`, `CallForkSession`, `WithSessionRawEvents`,
+`WithSessionOutputSchema`, `SetConfigOptionRequest`, `SetModelRequest`,
+`DeleteSessionRequest`, `StdioMCPServer`, `HTTPMCPServer`.
+
+Session-store surface: `SessionStore`, `SessionKey`, `SessionSummary`,
+`SessionStoreReplacement`, `InMemorySessionStore`, and the constants
+`SessionStoreFormat` and `SessionStoreMainSubpath`.

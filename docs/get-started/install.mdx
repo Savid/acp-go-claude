@@ -1,20 +1,39 @@
 ---
 title: "Install"
-description: "Install or build the ACP adapter"
+description: "Install the binary, add the library, or build from a checkout"
 ---
 
-Install from source:
+The adapter ships as both an installable CLI and an importable Go package.
+
+## Install the CLI
+
+Install the standalone ACP subprocess binary:
 
 ```sh
 go install github.com/savid/acp-go-claude/cmd/acp-go-claude@latest
 ```
 
-Build the local checkout:
+The `acp-go-claude` binary speaks ACP over stdin/stdout; an ACP host launches it
+as a subprocess rather than running it as a human-facing chat UI.
+
+## Add the library
+
+To embed the adapter in a Go host, add the module and call `claudeacp.Serve`:
+
+```sh
+go get github.com/savid/acp-go-claude
+```
+
+## Build from a checkout
 
 ```sh
 go build ./cmd/acp-go-claude
 ```
 
-The adapter launches `claude` from `PATH` unless a host provides `-path` or
-`WithExecutablePath`. Use `-home` or `WithHome` to select the Claude config
-directory for launched sessions.
+## Locating the Claude CLI
+
+The adapter launches `claude` from `PATH` unless a host provides `-path`
+(`WithExecutablePath`). Use `-home` (`WithHome`) to select the
+`CLAUDE_CONFIG_DIR` used for launched sessions. The launched CLI must be Claude
+Code **2.0.0 or newer** and already authenticated; the adapter probes its
+version at session start and fails fast on older builds.

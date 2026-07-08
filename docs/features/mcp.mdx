@@ -1,13 +1,26 @@
 ---
 title: "MCP"
-description: "MCP server declarations accepted by the adapter"
+description: "Declare MCP servers on a session and control how they reach Claude Code"
 ---
 
-The adapter accepts stdio and HTTP MCP server declarations from ACP session
-requests and maps them to Claude configuration.
+A host attaches MCP servers to a session by including them in the ACP session
+request. The adapter validates the declarations and forwards them to the Claude
+Code process for that session.
 
-Unsupported MCP transports fail the session request with an explicit invalid
-params error. The adapter does not open ACP-transport MCP channels.
+## Supported transports
+
+| Transport | Support |
+| --- | --- |
+| stdio | Supported. |
+| HTTP | Supported. |
+| ACP-transport | Rejected — the adapter never opens ACP-transport MCP channels. |
+
+Unsupported transports fail the session request with an explicit invalid-params
+error before Claude is launched, so a bad declaration never reaches the CLI.
+
+## Declaring servers
+
+Build declarations with the request helpers and pass them on the session request:
 
 ```go
 servers := []acp.McpServer{
@@ -15,3 +28,17 @@ servers := []acp.McpServer{
     claudeacp.HTTPMCPServer("remote", "https://example.test/mcp", nil),
 }
 ```
+
+## How servers reach Claude
+
+The adapter serializes the accepted servers into a single JSON document and
+launches the session's Claude process with `--mcp-config <json>` plus
+`--strict-mcp-config`. `--strict-mcp-config` makes Claude use **only** the
+servers the host declared for that session and ignore any MCP servers configured
+in the user's own Claude settings.
+
+<Note>
+Because of `--strict-mcp-config`, servers configured in the operator's Claude
+config files are not merged in — the host's per-session declarations are the
+complete MCP set for that session.
+</Note>

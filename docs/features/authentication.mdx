@@ -1,13 +1,38 @@
 ---
 title: "Authentication"
-description: "Claude account ownership"
+description: "Why the adapter advertises no auth methods and how to supply Claude credentials"
 ---
 
-The adapter does not manage Claude Code account state. Claude authentication is
-owned by the local Claude Code installation selected by `-home` or `WithHome`.
+The adapter does not manage Claude Code account state. Authentication is owned by
+the local Claude Code installation selected by `-home` (`WithHome`), so there is
+nothing for a host to log into through ACP.
 
-ACP initialize reports no adapter auth methods. ACP logout only clears
-adapter-owned state and closes adapter sessions.
+## No ACP auth methods
 
-For tests and automation, pass Claude environment variables with `WithEnv` or
-through the process environment used to launch the binary.
+ACP initialize reports an empty `authMethods` list. A host never calls
+`authenticate` against this adapter, and ACP `logout` clears only
+adapter-owned session state — it never touches Claude account material. An
+authentication problem inside Claude surfaces as an ordinary turn failure with
+cause `provider`, not as an ACP auth challenge; see
+[ACP methods](/docs/reference/acp-methods).
+
+## Supplying credentials
+
+Point the adapter at an already-authenticated Claude config directory with
+`-home` (`WithHome`), or pass Claude environment variables for automation and
+tests:
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+    claudeacp.WithHome("/tmp/claude-home"),
+    claudeacp.WithEnv(map[string]string{
+        "ANTHROPIC_API_KEY": "sk-...",
+    }),
+)
+```
+
+Environment variables set with `WithEnv` (or in the process environment used to
+launch the binary) are merged into every launched Claude process. Keep secrets in
+the environment rather than in seeded config files. See
+[Models and config](/docs/features/models-config) for pointing Claude at a
+custom Anthropic-compatible endpoint.

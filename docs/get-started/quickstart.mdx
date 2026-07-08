@@ -1,25 +1,46 @@
 ---
 title: "Quickstart"
-description: "Run a local ACP client against Claude Code"
+description: "Get a first successful ACP turn against Claude Code in a few steps"
 ---
 
-Install the command:
+This tutorial takes you from nothing to a streamed assistant reply over ACP.
 
-```sh
-go install github.com/savid/acp-go-claude/cmd/acp-go-claude@latest
-```
+## Prerequisites
 
-Run the minimal example:
+- A local Claude Code CLI (`claude`) on `PATH`, **version 2.0.0 or newer** and
+  already authenticated. The adapter probes the CLI version at session start and
+  fails fast on anything older.
+- A Go toolchain to build and run the example clients.
 
-```sh
-go run ./examples/minimal-client "Reply with hello from ACP"
-```
+## Steps
 
-Run the interactive example:
+<Steps>
+  <Step title="Clone the repository">
+    The example programs are repo-relative (`go run ./examples/...`), so start
+    from a checkout:
 
-```sh
-go run ./examples/interactive-chat
-```
+    ```sh
+    git clone https://github.com/savid/acp-go-claude && cd acp-go-claude
+    ```
+  </Step>
+  <Step title="Run a single-prompt turn">
+    The minimal client starts the adapter, initializes, opens a session, sends
+    one prompt, and prints the streamed reply:
 
-Both examples start an ACP connection, initialize the agent, create a session,
-send prompts, and print streamed assistant output.
+    ```sh
+    go run ./examples/minimal-client "Reply with hello from ACP"
+    ```
+  </Step>
+  <Step title="Try an interactive session">
+    The interactive client keeps a session open so you can send several prompts:
+
+    ```sh
+    go run ./examples/interactive-chat
+    ```
+  </Step>
+</Steps>
+
+Both clients drive the same ACP flow a real host would: initialize the agent,
+create a session, prompt it, and render streamed assistant output. From here,
+see [Run modes](/docs/get-started/run-modes) to embed the adapter, or
+[Examples](/docs/get-started/examples) for the resume-from-file client.

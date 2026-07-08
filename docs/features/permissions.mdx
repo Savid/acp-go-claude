@@ -1,17 +1,51 @@
 ---
 title: "Permissions"
-description: "Claude permissions through ACP"
+description: "Route Claude tool-permission decisions through ACP and choose the default mode"
 ---
 
-Claude tool permission requests are mapped to ACP permission prompts. The
-adapter preserves session-scoped permission decisions and never silently grants
-tool access.
+When Claude wants to run a tool that needs approval, the adapter raises an ACP
+permission prompt instead of deciding on its own. Decisions are session-scoped
+and never silently granted, so the host stays in control of what Claude may do.
 
-Default permission behavior can be set with:
+## Permission modes
+
+The starting mode for new sessions is set with
+`WithClaudeDefaultPermissionMode` (CLI: `-claude-permission-mode`), and a host
+can change it mid-session through the `mode` config option. The ACP-facing mode
+values are:
+
+| Mode | Behavior |
+| --- | --- |
+| `default` | Prompt for tools that require approval. |
+| `plan` | Planning mode; no edits applied. |
+| `accept_edits` | Auto-accept file edits. |
+| `bypass_permissions` | Skip prompts (only when the CLI build allows it). |
+| `auto` | Model-driven automatic mode (only when the model supports it). |
+| `dont_ask` | Suppress further prompts for the session. |
+
+Set the default at startup:
 
 ```go
-claudeacp.WithClaudeDefaultPermissionMode("default")
+err := claudeacp.Serve(ctx, input, output,
+    claudeacp.WithClaudeDefaultPermissionMode("default"),
+)
 ```
 
-Elicitation is separate from permissions. Tool access decisions use permission
-prompts; user questions use elicitation only when the client supports it.
+## Answering a prompt
+
+Each permission prompt carries the tool request and a set of options; the host
+answers by selecting an option id. The chosen decision is remembered for the rest
+of the session and is copied to a forked session only through intentional fork
+behavior.
+
+<Note>
+Elicitation is a separate channel from permissions. Tool-access decisions always
+use permission prompts; free-form user questions use
+[elicitation](/docs/features/elicitation) and only when the client advertises
+support. Do not treat one as a substitute for the other.
+</Note>
+
+`bypass_permissions` is offered only when the underlying CLI build supports it,
+and enabling Claude's skip-permissions capability flag additionally requires
+`WithClaudeAllowSkipPermissionsFlag`. See [Security](/docs/operations/security)
+for why the permission path is load-bearing.

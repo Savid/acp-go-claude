@@ -1,15 +1,28 @@
 ---
 title: "Sessions"
-description: "ACP session lifecycle"
+description: "The session lifecycle model and how transcripts map to durable keys"
 ---
 
-The adapter implements ACP session create, load, resume, list, prompt, cancel,
-close, and delete flows. Session identifiers are ACP session IDs and are also
-used as the durable store key.
+An ACP session maps one-to-one to a long-lived Claude Code process. The adapter
+creates that process on demand, keeps it alive across prompt turns, and tears it
+down when the session closes.
 
-Forking is exposed only through `_claude/session/fork`.
+## Lifecycle
 
-Durable storage uses:
+The adapter implements the full ACP session surface: create, load, resume, list,
+prompt, cancel, close, and delete. A session identifier is an ACP session id and
+is reused as the durable store key, so a host can address the same session
+across restarts. Forking an existing session is exposed only through the
+`_claude/session/fork` extension method — there is no separate fork ACP method.
+
+Loading and resuming a session rehydrate Claude's own transcript. When the local
+Claude transcript is gone but a host-provided [session
+store](/docs/features/session-store) holds the rows, the adapter materializes
+them into a temporary Claude config directory so the CLI can resume from them.
+
+## Store keys and subpaths
+
+Durable storage is keyed by session id plus a subpath:
 
 ```go
 type SessionKey struct {
@@ -18,5 +31,18 @@ type SessionKey struct {
 }
 ```
 
-The main transcript uses an empty subpath. Additional transcript files use a
-safe relative subpath under the same session ID.
+The main transcript uses the empty subpath (`SessionStoreMainSubpath`).
+Additional files Claude produces for a session — for example subagent
+transcripts — are mirrored under a safe relative subpath sharing the same
+session id, so one session id addresses every transcript file the session
+produces.
+
+## Turn bounds and failures
+
+Each prompt is a *turn*. A turn ends with an ACP `StopReason`, a user cancel, or
+a native failure. Cancelling a turn resolves as a successful `cancelled`
+response, not an error. A turn that never terminates can be bounded with
+`WithTurnTimeout`; on expiry the native turn is aborted and the prompt fails with
+a `claude_turn_failed` error whose cause is `timeout`. See
+[Prompt streaming](/docs/core/prompt-streaming) for how turn output is delivered
+and [ACP methods](/docs/reference/acp-methods) for the failure contract.

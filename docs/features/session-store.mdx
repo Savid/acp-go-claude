@@ -1,25 +1,62 @@
 ---
 title: "Session Store"
-description: "Durable transcript storage contract"
+description: "Wire a durable transcript store so sessions survive beyond the local Claude directory"
 ---
 
-`WithSessionStore` installs a host-owned store. The format constant is:
+By default a session's transcript lives only in the local Claude config
+directory. Provide a `SessionStore` when the host needs sessions to resume from
+its own storage — for example a database or object store on a different machine.
+
+## Wiring a store
+
+Install a store with `WithSessionStore`; bound the reads used during resume with
+`WithSessionStoreLoadTimeout`. A ready-made in-memory implementation ships for
+tests and small hosts:
+
+```go
+store := claudeacp.NewInMemorySessionStore()
+
+err := claudeacp.Serve(ctx, input, output,
+    claudeacp.WithSessionStore(store),
+    claudeacp.WithSessionStoreLoadTimeout(5*time.Second),
+)
+```
+
+The adapter mirrors Claude transcript rows into the store as the turn streams,
+backs `session/list` from it, and hydrates stored rows into a temporary Claude
+config directory when the local transcript is missing.
+
+## The store contract
+
+The format constant and key type are stable public identifiers:
 
 ```go
 const SessionStoreFormat = "claude-transcript-jsonl-v1"
-```
 
-The store key is:
-
-```go
 type SessionKey struct {
     SessionID string
     Subpath   string
 }
 ```
 
-The interface includes `Append`, `Load`, `Replace`, `Delete`, `ListSessions`,
-and `ListSubkeys`. `Replace` supplies a full generation of transcript files for
-one session. `Delete` records removal semantics through the store
-implementation. Session summaries use Unix milliseconds in
-`UpdatedAtUnixMilli`.
+A store implements six methods:
+
+| Method | Role |
+| --- | --- |
+| `Append` | Append transcript rows for a key. |
+| `Load` | Read all rows for a key. |
+| `Replace` | Atomically replace a full generation of a session's files. |
+| `Delete` | Remove a key (and its subkeys for the main key). |
+| `ListSessions` | Enumerate sessions for `session/list`. |
+| `ListSubkeys` | Enumerate a session's non-main subpaths. |
+
+The main transcript uses the empty subpath (`SessionStoreMainSubpath`);
+subagent transcripts mirror under safe relative subpaths of the same session id.
+`Replace` MUST include the main key exactly once. Session summaries report
+`UpdatedAtUnixMilli` in Unix milliseconds.
+
+<Note>
+`WithSessionStoreLoadTimeout` bounds load and list operations during resume. Set
+it when your store can hang (network round-trips), or a slow backend will stall
+`session/load` and `session/resume`.
+</Note>

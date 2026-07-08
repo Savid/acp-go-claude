@@ -1,11 +1,29 @@
 ---
 title: "Elicitation"
-description: "Client capability gated user questions"
+description: "Forward Claude's user-facing questions to clients that opt in during initialize"
 ---
 
-Claude user-question requests are forwarded through ACP elicitation only after
-the client advertises elicitation support during initialize.
+When Claude needs to ask the user a free-form question mid-turn, the adapter can
+forward it to the host as an ACP elicitation request. This is how Claude's
+`AskUserQuestion`-style prompts reach the person driving the session.
 
-When the capability is absent, the adapter does not send elicitation requests to
-the client. Claude receives a bounded failure response so the prompt turn can
-continue or stop according to Claude behavior.
+## Capability gating
+
+Elicitation is only used when the client advertised elicitation support during
+ACP initialize. The adapter checks that capability before sending anything, so a
+client that never opted in is never handed an elicitation request it cannot
+render.
+
+| Client elicitation capability | Adapter behavior |
+| --- | --- |
+| Advertised | Claude's question is forwarded as an ACP elicitation request. |
+| Absent | No request is sent; Claude receives a bounded failure and the turn continues or stops per Claude's own logic. |
+
+<Note>
+Elicitation is not the permission channel. Tool-access approvals always use
+[permission prompts](/docs/features/permissions); elicitation carries free-form
+questions only.
+</Note>
+
+Because behavior depends on the client's advertised capability, test both paths:
+a client that supports elicitation and one that does not.

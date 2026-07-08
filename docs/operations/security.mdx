@@ -1,17 +1,34 @@
 ---
 title: "Security"
-description: "Security boundaries"
+description: "The trust boundaries an operator relies on when running the adapter"
 ---
 
-Claude account material remains in the Claude config directory selected by the
-host. The adapter does not log secrets, prompt text, tool payloads, or raw event
-content by default.
+## Credential boundary
 
-Permission prompts are load-bearing. The adapter does not bypass them and keeps
-permission decisions scoped to the session.
+Claude account material stays in the Claude config directory the host selects
+with `-home` (`WithHome`). The adapter never reads out, logs, or mutates that
+material, and ACP `logout` clears only adapter-owned session state. By default
+the adapter does not log secrets, prompt text, tool payloads, or raw Claude
+event bodies.
 
-Native Claude child processes are started in their own process group and are
-configured to receive a parent-death signal on Unix platforms.
+## Permission enforcement
 
-MCP server declarations are validated before launch. Unsupported transports are
-rejected before Claude is started.
+Permission prompts are load-bearing and are never bypassed. Decisions stay scoped
+to the session that made them and are copied to a forked session only through
+intentional fork behavior. `bypass_permissions` and the skip-permissions
+capability flag are available only when explicitly enabled — see
+[Permissions](/docs/features/permissions).
+
+## Process isolation
+
+Each session's Claude process is started in its own process group and, on Unix
+platforms, is configured to receive a parent-death signal, so a crashed or
+killed adapter does not leave orphaned Claude processes behind.
+
+## Input validation
+
+MCP server declarations are validated before Claude launches; unsupported
+transports are rejected up front and never reach the CLI (see
+[MCP](/docs/features/mcp)). Seed and settings-overlay writes fail closed rather
+than overwrite an operator-authored file — see
+[Models and config](/docs/features/models-config).

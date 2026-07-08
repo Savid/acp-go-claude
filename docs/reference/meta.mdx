@@ -1,14 +1,28 @@
 ---
 title: "Metadata"
-description: "The _meta.claude vocabulary"
+description: "Every key the adapter reads and writes under the _meta.claude namespace"
 ---
 
-The adapter uses only `_meta.claude` for Claude-specific public metadata.
+All Claude-specific public metadata lives under `_meta.claude`. Foreign metadata
+namespaces are preserved untouched for their owners; unknown keys **inside** the
+Claude namespace are rejected on lifecycle requests.
 
-Initialize metadata includes capability descriptors for session fork, raw
-events, session storage, structured output, elicitation, and model metadata.
+## Initialize capabilities
 
-Session options are accepted under:
+Initialize advertises capability descriptors under `_meta.claude`:
+
+| Descriptor | Describes |
+| --- | --- |
+| `fork` | The `_claude/session/fork` extension method. |
+| `elicitation` | Session-scoped elicitation support. |
+| `rawEvent` | The raw-event opt-in (`enabledBy`, `maxBytes`, `defaultEnabled`). |
+| `sessionStore` | Store `format` and key shape. |
+| `structuredOutput` | Where the output schema is supplied and the result is returned. |
+| `models` | Model metadata (see [Models and config](/docs/features/models-config)). |
+
+## Session options
+
+Session-lifecycle requests accept options and raw-event opt-in:
 
 ```json
 {
@@ -29,5 +43,8 @@ Session options are accepted under:
 }
 ```
 
-Unknown keys in the Claude namespace are rejected on lifecycle requests.
-Foreign metadata namespaces are preserved for their owners.
+## Result metadata
+
+Structured-output turns return their result under
+`_meta.claude.structuredOutput`, and usage details are reported under
+`_meta.claude.usage`.

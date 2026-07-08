@@ -37,16 +37,6 @@ func turnFailureError(cause string, message string) *acp.RequestError {
 	})
 }
 
-// authTurnFailureError builds the -32000 variant used when the native cause is
-// an authentication failure. It keeps the uniform data shape.
-func authTurnFailureError(message string) *acp.RequestError {
-	return acp.NewAuthRequired(map[string]any{
-		jsonFieldError:    turnFailedError,
-		failureFieldCause: failureCauseProvider,
-		jsonFieldMessage:  message,
-	})
-}
-
 // nativeTurnFailure classifies an error observed while reading the Claude turn
 // stream into the uniform failure shape. Process death maps to process_exit
 // (with the real exit status and stderr tail); everything else (stream close,
@@ -119,19 +109,19 @@ func (s *agentSession) turnTimeoutFailure(ctx context.Context, timeout string) e
 }
 
 // providerTurnFailure maps a Claude result frame that reports an error into the
-// uniform failure shape. Auth failures keep -32000; every other provider error
-// is -32603 with cause "provider". The singular result error field is parsed so
-// the provider cause is not lost when result is empty.
+// uniform failure shape. Every provider error — including an authentication
+// failure — is -32603 with cause "provider"; this sibling advertises no ACP
+// auth methods, so it never emits the -32000 AuthRequired variant. The singular
+// result error field is parsed so the provider cause is not lost when result is
+// empty.
 func providerTurnFailure(result *claude.ResultMessage, assistantErrorKind string) error {
 	if result == nil {
 		return nil
 	}
 
-	if isProviderAuthError(result) {
-		return authTurnFailureError(providerErrorMessage(result))
-	}
+	authFailure := isProviderAuthError(result)
 
-	if result.StopReason == stopReasonMaxTokens || !result.IsError {
+	if result.StopReason == stopReasonMaxTokens || (!result.IsError && !authFailure) {
 		return nil
 	}
 

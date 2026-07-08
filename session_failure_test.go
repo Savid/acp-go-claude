@@ -93,7 +93,8 @@ func TestEnsureClientAliveRelaunchError(t *testing.T) {
 }
 
 // T1 — a native provider error terminates the turn with a structured failure
-// (never StopReason:end_turn); auth keeps -32000, other provider errors -32603.
+// (never StopReason:end_turn); every provider error — including an auth failure
+// — is -32603 with cause provider (this sibling advertises no ACP auth methods).
 func TestTurnFailureProviderError(t *testing.T) {
 	t.Parallel()
 
@@ -119,7 +120,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 		requireTurnFailure(t, err, -32603, failureCauseProvider, "rate limit exceeded")
 	})
 
-	t.Run("auth failure keeps -32000", func(t *testing.T) {
+	t.Run("auth failure is provider failure", func(t *testing.T) {
 		t.Parallel()
 
 		session, transport, cleanup := newPromptFlowSession(t)
@@ -132,7 +133,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 
 		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
 		require.Empty(t, resp.StopReason)
-		requireTurnFailure(t, err, -32000, failureCauseProvider, "Please run /login")
+		requireTurnFailure(t, err, -32603, failureCauseProvider, "Please run /login")
 	})
 }
 

@@ -43,6 +43,16 @@ Session-lifecycle requests accept options and raw-event opt-in:
 }
 ```
 
+## Update metadata
+
+Session updates derived from a Claude subagent frame carry
+`_meta.claude.parentToolUseId`. Its value is the `toolCallId` of the Agent tool
+call that spawned the subagent, and the tagged update is that subagent's output
+flattened into the ordinary update stream. Message, thought, tool-call, and plan
+updates without the key are the main agent's. The tag is set only on live-turn
+updates; replayed transcripts do not re-emit it, and subagent frames are excluded
+from usage counters.
+
 ## Result metadata
 
 Structured-output turns return their result under

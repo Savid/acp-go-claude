@@ -27,3 +27,6 @@ updates:
   the failure contract in [ACP methods](/docs/reference/acp-methods).
 - Structured-output results are returned in prompt metadata under
   `_meta.claude.structuredOutput`, not as a session update.
+- Subagent output flattens into this same update stream, tagged with
+  `_meta.claude.parentToolUseId`; untagged updates are the main agent — see
+  [Metadata](/docs/reference/meta).

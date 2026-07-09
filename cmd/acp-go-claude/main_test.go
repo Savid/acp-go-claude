@@ -74,12 +74,12 @@ func TestRunPassesSeedAndSettingsFlags(t *testing.T) {
 	code := run(context.Background(), []string{
 		"-home", "/tmp/claude",
 		"-seed-file", "settings.json=" + hostFile,
-		"-settings-file", "wagie.settings.json",
+		"-settings-file", "custom.settings.json",
 	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
 
 	require.Equal(t, 0, code)
 	require.Equal(t, map[string]string{"settings.json": `{"model":"opus"}`}, got.SeedFiles)
-	require.Equal(t, "wagie.settings.json", got.SettingsFile)
+	require.Equal(t, "custom.settings.json", got.SettingsFile)
 }
 
 func TestSeedFileFlag(t *testing.T) {

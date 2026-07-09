@@ -58,12 +58,12 @@ err := claudeacp.Serve(ctx, input, output,
 ### Seed-file provenance guard
 
 Seed writes never overwrite a file the adapter did not create. The adapter
-tracks the files it owns in a per-config-dir manifest (`.wagie-seed-manifest.json`,
+tracks the files it owns in a per-config-dir manifest (`.seed-manifest.json`,
 a JSON array of managed relative paths). Before writing each seed file:
 
 - If the target does not exist, it is written and recorded in the manifest.
 - If the target exists and is already in the manifest, it is overwritten, keeping
-  a `.wagie.bak` copy of the prior bytes when the content changes (identical
+  a `.seed.bak` copy of the prior bytes when the content changes (identical
   bytes are left untouched).
 - If the target exists and is **not** in the manifest — an operator-authored
   file — session start fails closed with the uniform invalid-parameters error
@@ -82,9 +82,9 @@ Claude loads that file as an additional settings layer on top of the base
 err := claudeacp.Serve(ctx, input, output,
 	claudeacp.WithHome("/tmp/claude-home"),
 	claudeacp.WithSeedFiles(map[string]string{
-		"wagie.settings.json": `{"env":{"ANTHROPIC_BASE_URL":"https://anthropic.internal.example"}}`,
+		"custom.settings.json": `{"env":{"ANTHROPIC_BASE_URL":"https://anthropic.internal.example"}}`,
 	}),
-	claudeacp.WithClaudeSettingsFile("wagie.settings.json"),
+	claudeacp.WithClaudeSettingsFile("custom.settings.json"),
 )
 ```
 

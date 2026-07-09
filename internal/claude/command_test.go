@@ -77,12 +77,12 @@ func TestBuildArgsSettingsFile(t *testing.T) {
 
 	require.NotContains(t, BuildArgs(Options{}), "--settings")
 
-	args := BuildArgs(Options{SettingsFile: "/tmp/home/wagie.settings.json"})
+	args := BuildArgs(Options{SettingsFile: "/tmp/home/custom.settings.json"})
 
 	index := slices.Index(args, "--settings")
 	require.GreaterOrEqual(t, index, 0)
 	require.Less(t, index+1, len(args))
-	require.Equal(t, "/tmp/home/wagie.settings.json", args[index+1])
+	require.Equal(t, "/tmp/home/custom.settings.json", args[index+1])
 }
 
 func TestBuildArgsResumeTakesPrecedenceOverSessionID(t *testing.T) {

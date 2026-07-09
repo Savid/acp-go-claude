@@ -179,14 +179,19 @@ func (s *agentSession) cancelPendingInteractions() {
 }
 
 func (s *agentSession) cancelTurnIfInterruptStalls(ctx context.Context, done <-chan struct{}, cancel context.CancelFunc) {
-	if cancel == nil || done == nil || sessionCancelFallbackTimeout <= 0 {
+	// Snapshot the fallback timeout synchronously. The watchdog goroutine below
+	// is fire-and-forget and can outlive the caller, so it must never read this
+	// package-level var directly: tests mutate it, and an async read would race
+	// a later write.
+	fallbackTimeout := sessionCancelFallbackTimeout
+	if cancel == nil || done == nil || fallbackTimeout <= 0 {
 		return
 	}
 
 	go func() {
 		defer recoverAgentGoroutine(ctx, nil, "Claude interrupt fallback")
 
-		timer := time.NewTimer(sessionCancelFallbackTimeout)
+		timer := time.NewTimer(fallbackTimeout)
 		defer timer.Stop()
 
 		select {

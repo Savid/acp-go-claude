@@ -18,13 +18,13 @@ func TestResolveClaudeSettingsFile(t *testing.T) {
 
 	dir := filepath.FromSlash("/tmp/claude-home")
 
-	resolved, err := resolveClaudeSettingsFile(dir, "wagie.settings.json")
+	resolved, err := resolveClaudeSettingsFile(dir, "custom.settings.json")
 	require.NoError(t, err)
-	require.Equal(t, filepath.Join(dir, "wagie.settings.json"), resolved)
+	require.Equal(t, filepath.Join(dir, "custom.settings.json"), resolved)
 
-	nested, err := resolveClaudeSettingsFile(dir, "overlays/wagie.json")
+	nested, err := resolveClaudeSettingsFile(dir, "overlays/custom.json")
 	require.NoError(t, err)
-	require.Equal(t, filepath.Join(dir, "overlays", "wagie.json"), nested)
+	require.Equal(t, filepath.Join(dir, "overlays", "custom.json"), nested)
 }
 
 func TestResolveClaudeSettingsFileRejectsUnsafePaths(t *testing.T) {
@@ -37,7 +37,7 @@ func TestResolveClaudeSettingsFileRejectsUnsafePaths(t *testing.T) {
 		{name: "empty", key: ""},
 		{name: "absolute", key: "/etc/passwd"},
 		{name: "parent escape", key: "../evil.json"},
-		{name: "current dir", key: "./wagie.json"},
+		{name: "current dir", key: "./custom.json"},
 	}
 
 	for _, tc := range cases {

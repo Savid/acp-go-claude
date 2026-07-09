@@ -17,10 +17,10 @@ const (
 
 	// seedManifestFileName tracks the relative paths the wrapper owns inside a
 	// seed root so seed writes never clobber an operator-authored file.
-	seedManifestFileName = ".wagie-seed-manifest.json"
+	seedManifestFileName = ".seed-manifest.json"
 	// seedBackupSuffix names the sidecar copy kept when a managed seed file's
 	// contents change.
-	seedBackupSuffix = ".wagie.bak"
+	seedBackupSuffix = ".seed.bak"
 )
 
 // seedTarget is one resolved seed write with its precomputed disk state.

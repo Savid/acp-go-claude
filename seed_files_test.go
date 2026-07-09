@@ -255,7 +255,7 @@ func TestStartSessionResolvesSettingsFileUnderHome(t *testing.T) {
 
 	agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(),
 		WithHome(home),
-		WithClaudeSettingsFile("wagie.settings.json"),
+		WithClaudeSettingsFile("custom.settings.json"),
 	)
 
 	var captured claude.Options
@@ -270,7 +270,7 @@ func TestStartSessionResolvesSettingsFileUnderHome(t *testing.T) {
 	require.NoError(t, err)
 	canonicalHome, err := filepath.EvalSymlinks(home)
 	require.NoError(t, err)
-	require.Equal(t, filepath.Join(canonicalHome, "wagie.settings.json"), captured.SettingsFile)
+	require.Equal(t, filepath.Join(canonicalHome, "custom.settings.json"), captured.SettingsFile)
 
 	require.NoError(t, session.Close(ctx))
 }
@@ -283,7 +283,7 @@ func TestStartSessionSettingsFileRequiresExplicitHome(t *testing.T) {
 	// WithHome("") clears the default temp home set by newFakeLifecycleAgent.
 	agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(),
 		WithHome(""),
-		WithClaudeSettingsFile("wagie.settings.json"),
+		WithClaudeSettingsFile("custom.settings.json"),
 	)
 
 	session, err := agent.startSession(ctx, sessionID, sessionStart{Cwd: cwd})

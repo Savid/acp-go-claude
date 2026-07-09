@@ -1,50 +1,13 @@
 package main
 
-import (
-	"runtime/debug"
-	"strings"
-)
+// buildVersion is the adapter version. It defaults to "dev" and is overridden
+// at release time via -ldflags "-X main.buildVersion=<version>".
+var buildVersion = "dev"
 
-const (
-	developmentVersion      = "dev"
-	buildInfoVCSModifiedKey = "vcs.modified"
-	buildInfoVCSRevisionKey = "vcs.revision"
-)
-
-var readBuildInfo = debug.ReadBuildInfo
-
-func buildVersion() string {
-	info, ok := readBuildInfo()
-	if !ok {
-		return developmentVersion
+func version() string {
+	if buildVersion == "" {
+		return "dev"
 	}
 
-	if version := strings.TrimSpace(info.Main.Version); version != "" && version != "(devel)" {
-		return version
-	}
-
-	revision, modified := "", false
-
-	for _, setting := range info.Settings {
-		switch setting.Key {
-		case buildInfoVCSRevisionKey:
-			revision = strings.TrimSpace(setting.Value)
-		case buildInfoVCSModifiedKey:
-			modified = setting.Value == "true"
-		}
-	}
-
-	if revision == "" {
-		return developmentVersion
-	}
-
-	if len(revision) > 12 {
-		revision = revision[:12]
-	}
-
-	if modified {
-		return revision + "-dirty"
-	}
-
-	return revision
+	return buildVersion
 }

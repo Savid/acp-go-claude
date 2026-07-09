@@ -94,7 +94,7 @@ func TestEnsureClientAliveRelaunchError(t *testing.T) {
 
 // T1 — a native provider error terminates the turn with a structured failure
 // (never StopReason:end_turn); every provider error — including an auth failure
-// — is -32603 with cause provider (this sibling advertises no ACP auth methods).
+// — is -32603 with cause provider (this adapter advertises no ACP auth methods).
 func TestTurnFailureProviderError(t *testing.T) {
 	t.Parallel()
 
@@ -117,7 +117,13 @@ func TestTurnFailureProviderError(t *testing.T) {
 
 		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
 		require.Empty(t, resp.StopReason)
-		requireTurnFailure(t, err, -32603, failureCauseProvider, "rate limit exceeded")
+		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "rate limit exceeded")
+
+		// The failure data carries only the uniform fields: a non-empty subtype
+		// is surfaced, and the undocumented top-level errors/errorKind are gone.
+		require.Equal(t, "error", data[jsonFieldSubtype])
+		require.NotContains(t, data, "errors")
+		require.NotContains(t, data, "errorKind")
 	})
 
 	t.Run("auth failure is provider failure", func(t *testing.T) {
@@ -133,7 +139,10 @@ func TestTurnFailureProviderError(t *testing.T) {
 
 		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
 		require.Empty(t, resp.StopReason)
-		requireTurnFailure(t, err, -32603, failureCauseProvider, "Please run /login")
+		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "Please run /login")
+
+		// An empty subtype is omitted entirely rather than emitted as "".
+		require.NotContains(t, data, jsonFieldSubtype)
 	})
 }
 

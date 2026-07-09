@@ -78,8 +78,6 @@ const (
 	askFieldQuestions   = "questions"
 
 	jsonSchemaTypeString       = "string"
-	mcpTransportACP            = "acp"
-	mcpTransportSSE            = "sse"
 	originKindTaskNotification = "task-notification"
 	stopReasonMaxTokens        = "max_tokens"
 
@@ -182,12 +180,11 @@ type agentSession struct {
 }
 
 type promptLoopState struct {
-	promptUsage            *acp.Usage
-	lastAssistantErrorKind string
-	lastAssistantModel     string
-	lastStreamUsage        usageSnapshot
-	lastStreamUsageKnown   bool
-	lastEmittedUsageTotal  int
+	promptUsage           *acp.Usage
+	lastAssistantModel    string
+	lastStreamUsage       usageSnapshot
+	lastStreamUsageKnown  bool
+	lastEmittedUsageTotal int
 }
 
 type usageSnapshot struct {

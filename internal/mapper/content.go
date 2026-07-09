@@ -8,6 +8,11 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+// errValueUnsupported is the uniform machine-readable token for prompt content
+// the Claude harness cannot accept; it is surfaced as a -32602 invalid-params
+// error so hosts classify it as a bad request, not a server-internal failure.
+const errValueUnsupported = "unsupported"
+
 // PromptToClaude converts ACP prompt content to Claude stream-json user content.
 func PromptToClaude(prompt []acp.ContentBlock, advertisedCommands []acp.AvailableCommand) ([]map[string]any, error) {
 	blocks := make([]map[string]any, 0, len(prompt))
@@ -50,7 +55,7 @@ func contentBlockToClaude(block acp.ContentBlock, advertisedCommands map[string]
 	case block.Resource != nil:
 		return resourceToClaude(block.Resource.Resource)
 	case block.Audio != nil:
-		return nil, nil, fmt.Errorf("audio prompt content is not supported by Claude Code")
+		return nil, nil, acp.NewInvalidParams(map[string]any{"error": errValueUnsupported, "field": keyPrompt})
 	default:
 		return nil, nil, fmt.Errorf("unsupported empty ACP content block")
 	}

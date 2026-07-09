@@ -12,7 +12,6 @@ const (
 	claudeMetaKey           = "claude"
 	structuredOutputMetaKey = "structuredOutput"
 	usageMetaKey            = "usage"
-	rawMessageTypeKey       = "type"
 	rawMessageOriginKey     = "origin"
 	rawEventFieldEvent      = "event"
 

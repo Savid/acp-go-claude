@@ -65,7 +65,7 @@ func (s *seedFileFlag) Set(value string) error {
 var serve = claudeacp.Serve
 var exit = os.Exit
 var shutdownOpenTelemetry = shutdownTelemetry
-var agentVersion = buildVersion
+var agentVersion = version
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {

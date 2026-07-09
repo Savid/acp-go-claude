@@ -269,7 +269,7 @@ func (s *agentSession) finishPromptResult(
 
 	cancelled := s.wasTurnCancelled()
 	if !cancelled {
-		if err := providerTurnFailure(result, state.lastAssistantErrorKind); err != nil {
+		if err := providerTurnFailure(result); err != nil {
 			return acp.PromptResponse{}, false, err
 		}
 	}
@@ -427,10 +427,6 @@ func (s *agentSession) recordWorkflowFrameErrors(ctx context.Context, tracker *m
 func observeAssistantMessage(assistant *claude.AssistantMessage, state *promptLoopState) {
 	if assistant.ParentToolUseID != "" {
 		return
-	}
-
-	if assistant.ErrorKind != "" {
-		state.lastAssistantErrorKind = assistant.ErrorKind
 	}
 
 	if assistant.Model != "" && assistant.Model != syntheticModelName {

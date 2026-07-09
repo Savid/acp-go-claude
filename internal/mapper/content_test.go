@@ -159,8 +159,13 @@ func TestPromptToClaudeResourceLinks(t *testing.T) {
 func TestPromptToClaudeUnsupported(t *testing.T) {
 	t.Parallel()
 
+	// Audio is rejected as an invalid parameter (-32602) with the uniform
+	// unsupported/field shape, not a bare internal error.
 	_, err := PromptToClaude([]acp.ContentBlock{acp.AudioBlock("abc", "audio/wav")}, nil)
-	require.Error(t, err)
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32602, reqErr.Code)
+	require.Equal(t, map[string]any{"error": errValueUnsupported, "field": keyPrompt}, reqErr.Data)
 
 	_, err = PromptToClaude([]acp.ContentBlock{{}}, nil)
 	require.Error(t, err)

@@ -454,9 +454,26 @@ func TestValidateMCPServersRejectsSSEAndACP(t *testing.T) {
 	tests := []struct {
 		name    string
 		servers []acp.McpServer
+		data    map[string]any
 	}{
-		{name: "sse", servers: []acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "events"}}}},
-		{name: "acp", servers: []acp.McpServer{{Acp: &acp.McpServerAcpInline{Name: "bridge"}}}},
+		{
+			name:    "sse",
+			servers: []acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "events"}}},
+			data: map[string]any{
+				jsonFieldError:  validationUnsupported,
+				jsonFieldField:  "mcpServers[0]",
+				jsonFieldServer: "events",
+			},
+		},
+		{
+			name:    "acp",
+			servers: []acp.McpServer{{Acp: &acp.McpServerAcpInline{Name: "bridge"}}},
+			data: map[string]any{
+				jsonFieldError:  validationUnsupported,
+				jsonFieldField:  "mcpServers[0]",
+				jsonFieldServer: "bridge",
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -467,6 +484,7 @@ func TestValidateMCPServersRejectsSSEAndACP(t *testing.T) {
 			var reqErr *acp.RequestError
 			require.ErrorAs(t, err, &reqErr)
 			require.Equal(t, -32602, reqErr.Code)
+			require.Equal(t, tc.data, reqErr.Data)
 		})
 	}
 }

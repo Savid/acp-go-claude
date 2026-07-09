@@ -17,6 +17,7 @@ import (
 const (
 	ForkSessionMethod = "_claude/session/fork"
 	RawEventMethod    = "_claude/rawEvent"
+	RateLimitsMethod  = "_claude/rateLimits"
 )
 
 const (
@@ -80,6 +81,7 @@ type Agent struct {
 	activeLimitErr     error
 
 	newClaudeClient func(*slog.Logger, claude.Options) *claude.Client
+	queryRateLimits func(context.Context, claude.Options) (claude.RateLimits, error)
 }
 
 var (
@@ -110,6 +112,7 @@ func NewAgent(opts ...Option) *Agent {
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
 			return claude.NewClient(log, options, nil)
 		},
+		queryRateLimits: claude.QueryRateLimits,
 	}
 }
 
@@ -262,6 +265,8 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 	switch method {
 	case ForkSessionMethod:
 		return a.handleForkSession(ctx, params)
+	case RateLimitsMethod:
+		return a.handleRateLimits(ctx, params)
 	default:
 		return nil, acp.NewMethodNotFound(method)
 	}

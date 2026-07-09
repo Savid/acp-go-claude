@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -153,4 +154,111 @@ func newForkTestAgent(t *testing.T, transportFactory func() *fakeClaudeTransport
 	}
 
 	return agent
+}
+
+func TestHandleRateLimits(t *testing.T) {
+	ctx := context.Background()
+
+	agent := NewAgent(
+		WithHome(t.TempDir()),
+		WithExecutablePath("/usr/bin/claude-test"),
+		WithEnv(map[string]string{"CLAUDE_TEST": "1"}),
+	)
+
+	const sessionWindowID = "session"
+
+	var gotOptions claude.Options
+
+	reset := time.Date(2026, time.July, 9, 13, 40, 0, 0, time.UTC)
+	agent.queryRateLimits = func(_ context.Context, options claude.Options) (claude.RateLimits, error) {
+		gotOptions = options
+
+		return claude.RateLimits{Windows: []claude.RateLimitWindow{
+			{ID: sessionWindowID, UsedPercent: 92, ResetsAt: reset},
+			{ID: "week-all-models", UsedPercent: 73.5},
+		}}, nil
+	}
+
+	respAny, err := agent.HandleExtensionMethod(ctx, RateLimitsMethod, nil)
+	require.NoError(t, err)
+
+	resp, ok := respAny.(RateLimitsResponse)
+	require.True(t, ok)
+	require.Equal(t, RateLimitsResponse{Windows: []RateLimitWindow{
+		{ID: sessionWindowID, UsedPercent: 92, ResetsAt: "2026-07-09T13:40:00Z"},
+		{ID: "week-all-models", UsedPercent: 73.5},
+	}}, resp)
+
+	require.Equal(t, "/usr/bin/claude-test", gotOptions.CLIPath)
+	require.NotEmpty(t, gotOptions.ClaudeHome)
+	require.Equal(t, map[string]string{"CLAUDE_TEST": "1"}, gotOptions.Env)
+
+	encoded, err := json.Marshal(resp)
+	require.NoError(t, err)
+	require.JSONEq(
+		t,
+		`{"windows":[
+			{"id":"session","usedPercent":92,"resetsAt":"2026-07-09T13:40:00Z"},
+			{"id":"week-all-models","usedPercent":73.5}
+		]}`,
+		string(encoded),
+	)
+
+	respAny, err = agent.HandleExtensionMethod(ctx, RateLimitsMethod, json.RawMessage(`{}`))
+	require.NoError(t, err)
+	resp, ok = respAny.(RateLimitsResponse)
+	require.True(t, ok)
+	require.Len(t, resp.Windows, 2)
+
+	respAny, err = agent.HandleExtensionMethod(ctx, RateLimitsMethod, json.RawMessage(`null`))
+	require.NoError(t, err)
+	resp, ok = respAny.(RateLimitsResponse)
+	require.True(t, ok)
+	require.Len(t, resp.Windows, 2)
+}
+
+func TestHandleRateLimitsEmptyWindows(t *testing.T) {
+	agent := NewAgent(WithHome(t.TempDir()))
+	agent.queryRateLimits = func(context.Context, claude.Options) (claude.RateLimits, error) {
+		return claude.RateLimits{}, nil
+	}
+
+	respAny, err := agent.HandleExtensionMethod(context.Background(), RateLimitsMethod, nil)
+	require.NoError(t, err)
+
+	resp, ok := respAny.(RateLimitsResponse)
+	require.True(t, ok)
+	require.NotNil(t, resp.Windows)
+	require.Empty(t, resp.Windows)
+
+	encoded, err := json.Marshal(resp)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"windows":[]}`, string(encoded))
+}
+
+func TestHandleRateLimitsErrors(t *testing.T) {
+	ctx := context.Background()
+
+	agent := NewAgent(WithHome(t.TempDir()))
+	agent.queryRateLimits = func(context.Context, claude.Options) (claude.RateLimits, error) {
+		return claude.RateLimits{}, errors.New("probe failed")
+	}
+
+	_, err := agent.HandleExtensionMethod(ctx, RateLimitsMethod, json.RawMessage(`{"unexpected":1}`))
+	require.Error(t, err)
+
+	_, err = agent.HandleExtensionMethod(ctx, RateLimitsMethod, json.RawMessage(`{bad`))
+	require.Error(t, err)
+
+	_, err = agent.HandleExtensionMethod(ctx, RateLimitsMethod, nil)
+	require.ErrorContains(t, err, "probe failed")
+
+	invalidHome := NewAgent(WithHome(string([]byte{0})))
+	_, err = invalidHome.HandleExtensionMethod(ctx, RateLimitsMethod, nil)
+	require.Error(t, err)
+
+	closed := NewAgent(WithHome(t.TempDir()))
+	require.NoError(t, closed.Close())
+	_, err = closed.HandleExtensionMethod(ctx, RateLimitsMethod, nil)
+	require.ErrorIs(t, err, errAgentClosed)
 }

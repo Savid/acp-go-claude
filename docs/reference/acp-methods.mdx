@@ -16,6 +16,31 @@ method-not-found error.
 | --- | --- |
 | `_claude/session/fork` | client to agent |
 | `_claude/rawEvent` | agent to client |
+| `_claude/rateLimits` | client to agent |
+
+### `_claude/rateLimits`
+
+Returns the account's subscription usage as harness-reported percentage
+windows. The adapter runs `claude /usage` non-interactively and parses the
+usage panel; every value is harness-reported, never derived from token counts.
+Params are an empty object. The response:
+
+```json
+{
+  "windows": [
+    { "id": "session", "usedPercent": 92, "resetsAt": "2026-07-09T13:40:00+10:00" },
+    { "id": "week-all-models", "usedPercent": 73, "resetsAt": "2026-07-11T06:00:00+10:00" }
+  ]
+}
+```
+
+Window `id` values are stable slugs of the panel's window labels (for example
+`session`, `week-all-models`, plus a per-model week window). `resetsAt` is
+RFC3339 and omitted when the panel does not report a reset time. `windows` is
+empty when the account reports no subscription usage (for example on API
+billing) — an empty result is not an error. Each call spawns one short-lived
+`claude` probe process, so hosts polling for routing decisions should cache
+results and use `resetsAt` for expiry.
 
 ## Turn-failure contract
 

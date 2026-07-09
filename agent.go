@@ -80,8 +80,12 @@ type Agent struct {
 	permissionCache    map[acp.SessionId]map[string]string
 	activeLimitErr     error
 
-	newClaudeClient func(*slog.Logger, claude.Options) *claude.Client
-	queryRateLimits func(context.Context, claude.Options) (claude.RateLimits, error)
+	rateLimitsCacheMu sync.Mutex
+	rateLimitsCache   rateLimitsCacheEntry
+
+	newClaudeClient    func(*slog.Logger, claude.Options) *claude.Client
+	queryRateLimits    func(context.Context, claude.Options) (claude.RateLimits, error)
+	queryRateLimitsAPI func(context.Context, claude.RateLimitsProbe) (claude.RateLimits, error)
 }
 
 var (
@@ -112,7 +116,8 @@ func NewAgent(opts ...Option) *Agent {
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
 			return claude.NewClient(log, options, nil)
 		},
-		queryRateLimits: claude.QueryRateLimits,
+		queryRateLimits:    claude.QueryRateLimits,
+		queryRateLimitsAPI: claude.QueryRateLimitsAPI,
 	}
 }
 

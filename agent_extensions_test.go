@@ -165,8 +165,6 @@ func TestHandleRateLimits(t *testing.T) {
 		WithEnv(map[string]string{"CLAUDE_TEST": "1"}),
 	)
 
-	const sessionWindowID = "session"
-
 	var gotOptions claude.Options
 
 	reset := time.Date(2026, time.July, 9, 13, 40, 0, 0, time.UTC)
@@ -217,11 +215,28 @@ func TestHandleRateLimits(t *testing.T) {
 	require.Len(t, resp.Windows, 2)
 }
 
-func TestHandleRateLimitsEmptyWindows(t *testing.T) {
-	agent := NewAgent(WithHome(t.TempDir()))
+const sessionWindowID = "session"
+
+// emptyPanelAgent stubs the harness probe to report no windows, the shape a
+// token-authenticated Claude home produces.
+func emptyPanelAgent(t *testing.T, opts ...Option) *Agent {
+	t.Helper()
+
+	agent := NewAgent(append([]Option{WithHome(t.TempDir())}, opts...)...)
 	agent.queryRateLimits = func(context.Context, claude.Options) (claude.RateLimits, error) {
 		return claude.RateLimits{}, nil
 	}
+
+	// Never let a test reach the real Anthropic API.
+	agent.queryRateLimitsAPI = func(context.Context, claude.RateLimitsProbe) (claude.RateLimits, error) {
+		return claude.RateLimits{}, nil
+	}
+
+	return agent
+}
+
+func TestHandleRateLimitsEmptyWindows(t *testing.T) {
+	agent := emptyPanelAgent(t)
 
 	respAny, err := agent.HandleExtensionMethod(context.Background(), RateLimitsMethod, nil)
 	require.NoError(t, err)
@@ -234,6 +249,129 @@ func TestHandleRateLimitsEmptyWindows(t *testing.T) {
 	encoded, err := json.Marshal(resp)
 	require.NoError(t, err)
 	require.JSONEq(t, `{"windows":[]}`, string(encoded))
+}
+
+func TestHandleRateLimitsFallsBackToAPI(t *testing.T) {
+	agent := emptyPanelAgent(t, WithExecutablePath("/usr/bin/claude-test"), WithEnv(map[string]string{"K": "V"}))
+
+	var gotProbe claude.RateLimitsProbe
+
+	agent.queryRateLimitsAPI = func(_ context.Context, probe claude.RateLimitsProbe) (claude.RateLimits, error) {
+		gotProbe = probe
+
+		return claude.RateLimits{Windows: []claude.RateLimitWindow{
+			{ID: sessionWindowID, UsedPercent: 6},
+			{ID: "week-all-models", UsedPercent: 99},
+		}}, nil
+	}
+
+	respAny, err := agent.HandleExtensionMethod(context.Background(), RateLimitsMethod, nil)
+	require.NoError(t, err)
+
+	resp, ok := respAny.(RateLimitsResponse)
+	require.True(t, ok)
+	require.Equal(t, RateLimitsResponse{Windows: []RateLimitWindow{
+		{ID: sessionWindowID, UsedPercent: 6},
+		{ID: "week-all-models", UsedPercent: 99},
+	}}, resp)
+
+	// The probe sees the same executable, home, and env the CLI would launch with.
+	require.Equal(t, "/usr/bin/claude-test", gotProbe.Options.CLIPath)
+	require.NotEmpty(t, gotProbe.Options.ClaudeHome)
+	require.Equal(t, map[string]string{"K": "V"}, gotProbe.Options.Env)
+	require.Equal(t, "acp-go-claude/0.1.0", gotProbe.UserAgent)
+}
+
+// A non-empty harness panel is authoritative; the adapter must not call out.
+func TestHandleRateLimitsSkipsAPIWhenPanelReportsWindows(t *testing.T) {
+	agent := NewAgent(WithHome(t.TempDir()))
+	agent.queryRateLimits = func(context.Context, claude.Options) (claude.RateLimits, error) {
+		return claude.RateLimits{Windows: []claude.RateLimitWindow{{ID: sessionWindowID, UsedPercent: 6}}}, nil
+	}
+	agent.queryRateLimitsAPI = func(context.Context, claude.RateLimitsProbe) (claude.RateLimits, error) {
+		t.Fatal("direct API probe must not run when the harness reports windows")
+
+		return claude.RateLimits{}, nil
+	}
+
+	respAny, err := agent.HandleExtensionMethod(context.Background(), RateLimitsMethod, nil)
+	require.NoError(t, err)
+
+	resp, ok := respAny.(RateLimitsResponse)
+	require.True(t, ok)
+	require.Len(t, resp.Windows, 1)
+}
+
+func TestHandleRateLimitsDirectAPIDisabled(t *testing.T) {
+	agent := emptyPanelAgent(t, WithClaudeDirectAPI(false))
+	agent.queryRateLimitsAPI = func(context.Context, claude.RateLimitsProbe) (claude.RateLimits, error) {
+		t.Fatal("direct API probe must not run when DirectAPI is disabled")
+
+		return claude.RateLimits{}, nil
+	}
+
+	respAny, err := agent.HandleExtensionMethod(context.Background(), RateLimitsMethod, nil)
+	require.NoError(t, err)
+
+	resp, ok := respAny.(RateLimitsResponse)
+	require.True(t, ok)
+	require.Empty(t, resp.Windows)
+}
+
+// The API fallback can bill an inference request, so repeated polls inside the
+// TTL must reuse the memoized result.
+func TestHandleRateLimitsAPIResultIsCached(t *testing.T) {
+	agent := emptyPanelAgent(t)
+
+	calls := 0
+	agent.queryRateLimitsAPI = func(context.Context, claude.RateLimitsProbe) (claude.RateLimits, error) {
+		calls++
+
+		return claude.RateLimits{Windows: []claude.RateLimitWindow{{ID: sessionWindowID, UsedPercent: 6}}}, nil
+	}
+
+	for range 3 {
+		respAny, err := agent.HandleExtensionMethod(context.Background(), RateLimitsMethod, nil)
+		require.NoError(t, err)
+
+		resp, ok := respAny.(RateLimitsResponse)
+		require.True(t, ok)
+		require.Len(t, resp.Windows, 1)
+	}
+
+	require.Equal(t, 1, calls)
+
+	// An expired entry is refetched rather than served stale.
+	agent.rateLimitsCache.fetched = time.Now().Add(-2 * rateLimitsAPITTL)
+
+	_, err := agent.HandleExtensionMethod(context.Background(), RateLimitsMethod, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, calls)
+}
+
+// A failing probe degrades to empty windows: the same answer the harness gives,
+// rather than failing a request that only asked what the quota looks like.
+func TestHandleRateLimitsAPIFailureDegradesToEmptyWindows(t *testing.T) {
+	agent := emptyPanelAgent(t)
+
+	calls := 0
+	agent.queryRateLimitsAPI = func(context.Context, claude.RateLimitsProbe) (claude.RateLimits, error) {
+		calls++
+
+		return claude.RateLimits{}, errors.New("probe exploded")
+	}
+
+	respAny, err := agent.HandleExtensionMethod(context.Background(), RateLimitsMethod, nil)
+	require.NoError(t, err)
+
+	resp, ok := respAny.(RateLimitsResponse)
+	require.True(t, ok)
+	require.Empty(t, resp.Windows)
+
+	// A failure is not cached, so the next poll retries.
+	_, err = agent.HandleExtensionMethod(context.Background(), RateLimitsMethod, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, calls)
 }
 
 func TestHandleRateLimitsErrors(t *testing.T) {

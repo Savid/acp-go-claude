@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -15,6 +16,20 @@ var stableMCPServers = mapper.StableMCPServers
 
 // rateLimitsProbeTimeout bounds one `claude /usage` probe run.
 const rateLimitsProbeTimeout = 60 * time.Second
+
+// rateLimitsAPITimeout bounds one direct Anthropic API usage probe.
+const rateLimitsAPITimeout = 30 * time.Second
+
+// rateLimitsAPITTL bounds how long a direct API result is reused. The API
+// fallback can cost a billable inference request, so a chatty poller must not
+// turn `_claude/rateLimits` into a stream of them.
+const rateLimitsAPITTL = 60 * time.Second
+
+// rateLimitsCacheEntry memoizes the most recent direct API result.
+type rateLimitsCacheEntry struct {
+	limits  claude.RateLimits
+	fetched time.Time
+}
 
 // RateLimitsResponse is the `_claude/rateLimits` response payload. Windows is
 // empty when the harness reports no subscription usage; values are only ever
@@ -48,16 +63,25 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (Rate
 		return RateLimitsResponse{}, err
 	}
 
-	probeCtx, cancel := context.WithTimeout(ctx, rateLimitsProbeTimeout)
-	defer cancel()
-
-	limits, err := a.queryRateLimits(probeCtx, claude.Options{
+	claudeOptions := claude.Options{
 		CLIPath:    a.options.ExecutablePath,
 		ClaudeHome: claudeHome,
 		Env:        a.options.Env,
-	})
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, rateLimitsProbeTimeout)
+	defer cancel()
+
+	limits, err := a.queryRateLimits(probeCtx, claudeOptions)
 	if err != nil {
 		return RateLimitsResponse{}, err
+	}
+
+	// The harness only prints windows for a logged-in, profile-scoped Claude
+	// home. Token-authenticated homes report nothing, so read the account's
+	// usage from the API instead when the adapter is allowed to.
+	if len(limits.Windows) == 0 && a.options.DirectAPI {
+		limits = a.rateLimitsFromAPI(ctx, claudeOptions)
 	}
 
 	windows := make([]RateLimitWindow, 0, len(limits.Windows))
@@ -75,6 +99,37 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (Rate
 	}
 
 	return RateLimitsResponse{Windows: windows}, nil
+}
+
+// rateLimitsFromAPI reads usage windows straight from the Anthropic API,
+// memoizing the result for rateLimitsAPITTL. A failed probe degrades to empty
+// windows rather than failing the request: reporting no windows is the same
+// answer the harness gives, and a misconfigured gateway must not break the
+// extension.
+func (a *Agent) rateLimitsFromAPI(ctx context.Context, options claude.Options) claude.RateLimits {
+	a.rateLimitsCacheMu.Lock()
+	defer a.rateLimitsCacheMu.Unlock()
+
+	if !a.rateLimitsCache.fetched.IsZero() && time.Since(a.rateLimitsCache.fetched) < rateLimitsAPITTL {
+		return a.rateLimitsCache.limits
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, rateLimitsAPITimeout)
+	defer cancel()
+
+	limits, err := a.queryRateLimitsAPI(probeCtx, claude.RateLimitsProbe{
+		Options:   options,
+		UserAgent: a.options.AgentName + "/" + a.options.AgentVersion,
+	})
+	if err != nil {
+		a.log.DebugContext(ctx, "direct rate-limits API probe failed", slog.String(jsonFieldError, err.Error()))
+
+		return claude.RateLimits{}
+	}
+
+	a.rateLimitsCache = rateLimitsCacheEntry{limits: limits, fetched: time.Now()}
+
+	return limits
 }
 
 // validateEmptyParams accepts absent, null, or empty-object params and rejects

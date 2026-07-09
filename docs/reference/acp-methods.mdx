@@ -20,10 +20,10 @@ method-not-found error.
 
 ### `_claude/rateLimits`
 
-Returns the account's subscription usage as harness-reported percentage
-windows. The adapter runs `claude /usage` non-interactively and parses the
-usage panel; every value is harness-reported, never derived from token counts.
-Params are an empty object. The response:
+Returns the account's subscription usage as reported percentage windows. The
+adapter runs `claude /usage` non-interactively and parses the usage panel; every
+value is reported by Claude, never derived from token counts. Params are an
+empty object. The response:
 
 ```json
 {
@@ -36,11 +36,39 @@ Params are an empty object. The response:
 
 Window `id` values are stable slugs of the panel's window labels (for example
 `session`, `week-all-models`, plus a per-model week window). `resetsAt` is
-RFC3339 and omitted when the panel does not report a reset time. `windows` is
-empty when the account reports no subscription usage (for example on API
-billing) — an empty result is not an error. Each call spawns one short-lived
-`claude` probe process, so hosts polling for routing decisions should cache
-results and use `resetsAt` for expiry.
+RFC3339 and omitted when no reset time is reported. `windows` is empty when the
+account reports no subscription usage (for example on API billing) — an empty
+result is not an error. Each call spawns one short-lived `claude` probe process,
+so hosts polling for routing decisions should cache results and use `resetsAt`
+for expiry.
+
+#### Direct API fallback
+
+The `/usage` panel is only populated for a Claude home logged in through
+`claude login`. A home authenticated by `ANTHROPIC_AUTH_TOKEN` or
+`CLAUDE_CODE_OAUTH_TOKEN` prints no windows, because the CLI reads usage only
+for an OAuth session it recognises. When the panel yields no windows and the
+adapter is permitted to make its own outbound calls, it reads the account's
+usage from the Anthropic API instead, in two steps:
+
+1. `GET /api/oauth/usage`, which reports every window. Tokens minted by
+   `claude setup-token` are inference-only and are refused here.
+2. The unified rate-limit response headers on a one-token `POST /v1/messages`
+   request, which report the session and all-models weekly windows. **This is a
+   billable inference request** against the configured account, using the
+   cheapest model (`ANTHROPIC_SMALL_FAST_MODEL`, else
+   `ANTHROPIC_DEFAULT_HAIKU_MODEL`, else `claude-haiku-4-5`).
+
+Both steps target `ANTHROPIC_BASE_URL`, defaulting to `https://api.anthropic.com`.
+When no base URL is set, a token that is not Anthropic-issued (no `sk-ant-`
+prefix) is never sent, so a gateway credential cannot leak to Anthropic. The
+result is memoized for 60 seconds to bound billable probes, and window `id`
+values match the panel's, so the wire shape does not depend on which source
+answered. A failing probe yields empty windows rather than an error.
+
+Pass [`WithClaudeDirectAPI(false)`](/docs/reference/go-api) to forbid the adapter
+from contacting any network service on its own behalf; the method then reports
+only what the harness prints.
 
 ## Turn-failure contract
 

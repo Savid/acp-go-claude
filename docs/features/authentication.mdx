@@ -36,3 +36,17 @@ launch the binary) are merged into every launched Claude process. Keep secrets i
 the environment rather than in seeded config files. See
 [Models and config](/docs/features/models-config) for pointing Claude at a
 custom Anthropic-compatible endpoint.
+
+## Token auth and usage reporting
+
+Claude Code reads subscription usage only for an OAuth session it recognises: a
+config directory logged in through `claude login`, or a
+`CLAUDE_CODE_OAUTH_TOKEN`. A directory authenticated solely by
+`ANTHROPIC_AUTH_TOKEN` runs prompts normally but reports no usage, so the
+harness prints no windows and emits no rate-limit events.
+
+To keep [`_claude/rateLimits`](/docs/reference/acp-methods) useful under token
+auth, the adapter falls back to reading usage from the Anthropic API directly.
+Tokens minted by `claude setup-token` are inference-only, so that fallback may
+have to spend a one-token inference request to read the rate-limit response
+headers. Disable it with `WithClaudeDirectAPI(false)`.

@@ -68,6 +68,14 @@ type Options struct {
 	// layer on top of the base settings.json. It requires an explicit Home.
 	SettingsFile string
 
+	// DirectAPI allows the adapter to make its own outbound calls to the
+	// Anthropic API. It is only consulted by `_claude/rateLimits`, which falls
+	// back to the API when the harness reports no usage windows — that fallback
+	// may issue a billable one-token inference request against the configured
+	// account. Enabled by default; disable it to keep the adapter from
+	// contacting any network service on its own behalf.
+	DirectAPI bool
+
 	// DefaultPermissionMode is the initial Claude permission mode.
 	DefaultPermissionMode string
 	// DefaultSystemPrompt is passed to newly created Claude sessions when non-empty.
@@ -107,6 +115,7 @@ func applyOptions(opts []Option) Options {
 		AgentName:             "acp-go-claude",
 		AgentTitle:            "acp-go-claude",
 		AgentVersion:          "0.1.0",
+		DirectAPI:             true,
 		DefaultPermissionMode: string(modeDefault),
 		SettingSources:        defaultSettingSources(),
 		InitializeTimeout:     time.Minute,
@@ -273,6 +282,18 @@ func WithClaudeSettingSources(sources ...SettingSource) Option {
 func WithClaudeSettingsFile(relpath string) Option {
 	return func(options *Options) {
 		options.SettingsFile = relpath
+	}
+}
+
+// WithClaudeDirectAPI controls whether the adapter may call the Anthropic API
+// itself. It is enabled by default and only affects `_claude/rateLimits`: when
+// the harness reports no usage windows the adapter reads them from the API,
+// which can cost a one-token inference request. Disable it to guarantee the
+// adapter never opens a connection of its own; `_claude/rateLimits` then
+// reports only what the harness prints.
+func WithClaudeDirectAPI(enabled bool) Option {
+	return func(options *Options) {
+		options.DirectAPI = enabled
 	}
 }
 

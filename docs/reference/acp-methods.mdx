@@ -38,8 +38,10 @@ Window `id` values are stable slugs of the panel's window labels (for example
 `session`, `week-all-models`, plus a per-model week window). `resetsAt` is
 RFC3339 and omitted when no reset time is reported. `windows` is empty when the
 account reports no subscription usage (for example on API billing) — an empty
-result is not an error, and a failed probe run also degrades to empty windows
-rather than failing the request. Each call spawns one short-lived `claude`
+result is not an error, and any environment trouble — a failed probe run or an
+unresolvable Claude home — also degrades to empty windows rather than failing
+the request. Only malformed params are rejected; the method never fails for
+home, config, or probe reasons. Each call spawns one short-lived `claude`
 probe process, so hosts polling for routing decisions should cache results and
 use `resetsAt` for expiry.
 

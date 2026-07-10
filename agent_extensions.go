@@ -54,9 +54,14 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (Rate
 		return RateLimitsResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
+	// Home resolution shares the probes' degrade contract: a misconfigured
+	// Claude home leaves nothing to probe, so the request answers with empty
+	// windows — the same answer a failed probe produces — instead of failing.
 	claudeHome, err := canonicalClaudeHome(a.options.Home)
 	if err != nil {
-		return RateLimitsResponse{}, err
+		a.log.DebugContext(ctx, "resolve Claude home failed", slog.String(jsonFieldError, err.Error()))
+
+		return RateLimitsResponse{Windows: make([]RateLimitWindow, 0)}, nil
 	}
 
 	claudeOptions := claude.Options{

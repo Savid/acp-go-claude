@@ -395,9 +395,30 @@ func TestHandleRateLimitsErrors(t *testing.T) {
 	require.True(t, ok)
 	require.Empty(t, resp.Windows)
 
+	// An unresolvable Claude home degrades the same way a failed probe does:
+	// empty windows, no error, and neither probe runs — there is nothing to
+	// probe without a resolved home.
 	invalidHome := NewAgent(WithHome(string([]byte{0})))
-	_, err = invalidHome.HandleExtensionMethod(ctx, RateLimitsMethod, nil)
-	require.Error(t, err)
+	invalidHome.queryRateLimits = func(context.Context, claude.Options) (claude.RateLimits, error) {
+		t.Fatal("usage probe must not run when the Claude home cannot be resolved")
+
+		return claude.RateLimits{}, nil
+	}
+	invalidHome.queryRateLimitsAPI = func(context.Context, claude.RateLimitsProbe) (claude.RateLimits, error) {
+		t.Fatal("direct API probe must not run when the Claude home cannot be resolved")
+
+		return claude.RateLimits{}, nil
+	}
+	result, err = invalidHome.HandleExtensionMethod(ctx, RateLimitsMethod, nil)
+	require.NoError(t, err)
+	resp, ok = result.(RateLimitsResponse)
+	require.True(t, ok)
+	require.NotNil(t, resp.Windows)
+	require.Empty(t, resp.Windows)
+
+	encoded, err := json.Marshal(resp)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"windows":[]}`, string(encoded))
 
 	closed := NewAgent(WithHome(t.TempDir()))
 	require.NoError(t, closed.Close())

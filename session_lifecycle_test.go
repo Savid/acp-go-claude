@@ -90,22 +90,6 @@ func TestSessionLifecycleBranches(t *testing.T) {
 	require.True(t, permissionCancelled)
 	require.Empty(t, session.permissionCancel)
 
-	previousTimeout := sessionCancelFallbackTimeout
-	sessionCancelFallbackTimeout = time.Millisecond
-	t.Cleanup(func() { sessionCancelFallbackTimeout = previousTimeout })
-	done := make(chan struct{})
-	fallbackCancelled := make(chan struct{})
-	session.cancelTurnIfInterruptStalls(ctx, done, func() { close(fallbackCancelled) })
-	select {
-	case <-fallbackCancelled:
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("fallback cancel did not fire")
-	}
-	close(done)
-
-	sessionCancelFallbackTimeout = 0
-	session.cancelTurnIfInterruptStalls(ctx, make(chan struct{}), func() { t.Fatal("unexpected fallback cancel") })
-
 	closeSession, closeCleanup := newStartedAgentSessionForTest(t, agent, "close")
 	defer closeCleanup()
 	closeSession.turn = make(chan struct{}, 1)
@@ -122,16 +106,17 @@ func TestSessionCancelAndCloseEdgeBranches(t *testing.T) {
 	defer cleanup()
 
 	permissionCancelled := false
-	done := make(chan struct{})
-	close(done)
-	session.cancel = func() {}
-	session.turnDone = done
+	turnCancelled := false
+	session.cancel = func() { turnCancelled = true }
 	session.permissionCancel = map[string]*permissionRequestCancel{
 		"tool": {cancel: func() { permissionCancelled = true }},
 	}
 	require.NoError(t, session.Cancel(ctx))
 	require.True(t, permissionCancelled)
 	require.True(t, session.turnCancelled)
+	// Cancel cancels the local turn context synchronously, before the native
+	// interrupt resolves.
+	require.True(t, turnCancelled)
 
 	notStarted := &agentSession{client: claude.NewClient(nil, claude.Options{}, newFakeClaudeTransport())}
 	require.ErrorIs(t, notStarted.Cancel(ctx), claude.ErrClientNotStarted)

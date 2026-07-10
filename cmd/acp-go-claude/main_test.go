@@ -74,7 +74,7 @@ func TestRunPassesSeedAndSettingsFlags(t *testing.T) {
 	code := run(context.Background(), []string{
 		"-home", "/tmp/claude",
 		"-seed-file", "settings.json=" + hostFile,
-		"-settings-file", "custom.settings.json",
+		"-claude-settings-file", "custom.settings.json",
 	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
 
 	require.Equal(t, 0, code)

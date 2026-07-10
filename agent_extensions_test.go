@@ -388,8 +388,12 @@ func TestHandleRateLimitsErrors(t *testing.T) {
 	_, err = agent.HandleExtensionMethod(ctx, RateLimitsMethod, json.RawMessage(`{bad`))
 	require.Error(t, err)
 
-	_, err = agent.HandleExtensionMethod(ctx, RateLimitsMethod, nil)
-	require.ErrorContains(t, err, "probe failed")
+	// A failed usage probe degrades to empty windows instead of failing.
+	result, err := agent.HandleExtensionMethod(ctx, RateLimitsMethod, nil)
+	require.NoError(t, err)
+	resp, ok := result.(RateLimitsResponse)
+	require.True(t, ok)
+	require.Empty(t, resp.Windows)
 
 	invalidHome := NewAgent(WithHome(string([]byte{0})))
 	_, err = invalidHome.HandleExtensionMethod(ctx, RateLimitsMethod, nil)

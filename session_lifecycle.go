@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-var sessionCancelFallbackTimeout = 5 * time.Second
-
 // sessionInterruptTimeout bounds the native interrupt. The interrupt runs under
 // a background-derived context so a cancelled caller context cannot abort it.
 var sessionInterruptTimeout = 5 * time.Second
@@ -131,14 +129,20 @@ func (s *agentSession) ensureClientAlive(ctx context.Context) error {
 	return nil
 }
 
-// Cancel interrupts the active Claude turn.
+// Cancel cancels the active Claude turn. The local turn context is cancelled
+// synchronously so the prompt resolves cancelled deterministically; the native
+// interrupt then runs on its own bounded background context so a cancelled
+// caller context cannot abort it.
 func (s *agentSession) Cancel(ctx context.Context) (err error) {
 	s.mu.Lock()
 	turnCancel := s.cancel
-	turnDone := s.turnDone
 	s.mu.Unlock()
 
 	s.cancelPendingInteractions()
+
+	if turnCancel != nil {
+		turnCancel()
+	}
 
 	if s.agent != nil {
 		var finish func(error)
@@ -150,10 +154,7 @@ func (s *agentSession) Cancel(ctx context.Context) (err error) {
 	interruptCtx, cancelInterrupt := context.WithTimeout(context.WithoutCancel(ctx), sessionInterruptTimeout)
 	defer cancelInterrupt()
 
-	err = s.client.Interrupt(interruptCtx)
-	s.cancelTurnIfInterruptStalls(ctx, turnDone, turnCancel)
-
-	return err
+	return s.client.Interrupt(interruptCtx)
 }
 
 // cancelPendingInteractions marks the turn cancelled and resolves any pending
@@ -176,34 +177,6 @@ func (s *agentSession) cancelPendingInteractions() {
 	for _, cancel := range elicitationCancels {
 		cancel()
 	}
-}
-
-func (s *agentSession) cancelTurnIfInterruptStalls(ctx context.Context, done <-chan struct{}, cancel context.CancelFunc) {
-	// Snapshot the fallback timeout synchronously. The watchdog goroutine below
-	// is fire-and-forget and can outlive the caller, so it must never read this
-	// package-level var directly: tests mutate it, and an async read would race
-	// a later write.
-	fallbackTimeout := sessionCancelFallbackTimeout
-	if cancel == nil || done == nil || fallbackTimeout <= 0 {
-		return
-	}
-
-	go func() {
-		defer recoverAgentGoroutine(ctx, nil, "Claude interrupt fallback")
-
-		timer := time.NewTimer(fallbackTimeout)
-		defer timer.Stop()
-
-		select {
-		case <-done:
-		case <-timer.C:
-			if s.agent != nil {
-				s.agent.log.DebugContext(context.WithoutCancel(ctx), "cancel Claude turn after interrupt timeout")
-			}
-
-			cancel()
-		}
-	}()
 }
 
 func (s *agentSession) cancelPermissionRequestsLocked() []context.CancelFunc {

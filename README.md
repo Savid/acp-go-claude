@@ -128,10 +128,12 @@ make test-integration-cover
 
 `make audit` runs the full local gate: format, lint, build, unit tests,
 coverage, cross-compile, vuln, and docs checks. Live integration tests require a
-local authenticated `claude` CLI. `make test-integration-smoke` runs a curated
-offline subset; `make test-integration-live` sets `ACP_GO_CLAUDE_RUN_INTEGRATION=1`
-and may spend model tokens; `make test-integration-cover` runs the live suite
-against a coverage-instrumented binary. Set `ACP_GO_CLAUDE_MODEL` to override the
+local authenticated `claude` CLI and are double-gated: the `integration` build
+tag plus `ACP_GO_CLAUDE_RUN_INTEGRATION=1`. `make test-integration-smoke` runs
+the integration tier without spending model tokens; tests that spend tokens
+additionally require `ACP_GO_CLAUDE_RUN_LIVE_TOKENS=1`, which only
+`make test-integration-live` sets. `make test-integration-cover` runs the
+integration tier against a coverage-instrumented binary. Set `ACP_GO_CLAUDE_MODEL` to override the
 live model. Live tests always launch Claude with an isolated temp
 `CLAUDE_CONFIG_DIR`; set `ACP_GO_CLAUDE_HOME` to choose the source config copied
 into it. When process env auth is present and `ACP_GO_CLAUDE_HOME` is unset,

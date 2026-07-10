@@ -42,6 +42,11 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 		wantErr string
 	}{
 		{
+			name:    "claude namespace not object",
+			meta:    map[string]any{claudeMetaKey: "bad"},
+			wantErr: "_meta.claude",
+		},
+		{
 			name:    "unknown claude field",
 			meta:    map[string]any{claudeMetaKey: map[string]any{"extra": true}},
 			wantErr: "_meta.claude.extra",
@@ -49,14 +54,14 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 		{
 			name:    "raw event not object",
 			meta:    map[string]any{claudeMetaKey: map[string]any{metaRawEventKey: true}},
-			wantErr: "rawEvent must be an object",
+			wantErr: "_meta.claude.rawEvent",
 		},
 		{
 			name: "raw event enabled not bool",
 			meta: map[string]any{claudeMetaKey: map[string]any{
 				metaRawEventKey: map[string]any{metaRawEventEnabledKey: "yes"},
 			}},
-			wantErr: "enabled must be a boolean",
+			wantErr: "_meta.claude.rawEvent.enabled",
 		},
 		{
 			name: "raw event unknown field",
@@ -68,37 +73,37 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 		{
 			name:    "options not object",
 			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: "bad"}},
-			wantErr: "options must be an object",
+			wantErr: "_meta.claude.options",
 		},
 		{
 			name:    "bare not bool",
 			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaBareKey: "yes"}}},
-			wantErr: "bare must be a boolean",
+			wantErr: "_meta.claude.options.bare",
 		},
 		{
 			name:    "env not object",
 			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: "bad"}}},
-			wantErr: "env must be an object",
+			wantErr: "_meta.claude.options.env",
 		},
 		{
 			name:    "env value not string",
 			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"A": 1}}}},
-			wantErr: "env.A must be a string",
+			wantErr: "_meta.claude.options.env.A",
 		},
 		{
 			name:    "system prompt not string",
 			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaSystemPromptKey: 1}}},
-			wantErr: "systemPrompt must be a string",
+			wantErr: "_meta.claude.options.systemPrompt",
 		},
 		{
 			name:    "model not string",
 			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaModelKey: 1}}},
-			wantErr: "model must be a string",
+			wantErr: "_meta.claude.options.model",
 		},
 		{
 			name:    "permission mode not string",
 			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaPermissionModeKey: 1}}},
-			wantErr: "permissionMode must be a string",
+			wantErr: "_meta.claude.options.permissionMode",
 		},
 		{
 			name:    "permission mode unsupported",
@@ -108,7 +113,7 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 		{
 			name:    "schema not object",
 			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaOutputSchemaKey: "bad"}}},
-			wantErr: "outputSchema must be an object",
+			wantErr: "_meta.claude.options.outputSchema",
 		},
 		{
 			name:    "schema not serializable",

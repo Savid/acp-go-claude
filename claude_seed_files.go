@@ -230,7 +230,7 @@ func resolveSeedFilePath(dir string, name string) (string, error) {
 }
 
 func validSeedFilePath(name string) bool {
-	if name == "" ||
+	if strings.TrimSpace(name) == "" ||
 		filepath.IsAbs(name) ||
 		strings.HasPrefix(name, "/") ||
 		strings.HasPrefix(name, "\\") ||

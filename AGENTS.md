@@ -21,8 +21,8 @@ details live in `internal/`.
   `session_store.go`):
   Claude turn lifecycle, prompts, cancellation, permissions, elicitation,
   usage updates, transcript replay, session storage, and raw event handling.
-- **Configuration** (`model_config.go`, `settings_files.go`): provider/model
-  resolution and Claude settings-file handling.
+- **Configuration** (`claude_model_config.go`, `claude_settings_files.go`):
+  provider/model resolution and Claude settings-file handling.
 - **Claude CLI internals** (`internal/claude`): CLI process management,
   stream-json protocol, control protocol, command construction, event decoding.
 - **Protocol mapping** (`internal/mapper`): ACP-to-Claude mapping for prompts,
@@ -57,9 +57,12 @@ Run live integration tests only when a local Claude CLI is installed and
 authenticated:
 
 ```sh
-ACP_GO_CLAUDE_RUN_INTEGRATION=1 go test -race -tags=integration -timeout=600s -parallel=4 -v ./integration/...
+ACP_GO_CLAUDE_RUN_INTEGRATION=1 ACP_GO_CLAUDE_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
 ```
 
+`ACP_GO_CLAUDE_RUN_INTEGRATION=1` gates the integration tier;
+`ACP_GO_CLAUDE_RUN_LIVE_TOKENS=1` additionally opts in to tests that spend
+model tokens (`make test-integration-smoke` omits it).
 `make test-integration` runs the same live suite. Use
 `make test-integration-cover` for compiled `acp-go-claude` coverage through
 `GOCOVERDIR`. Set `ACP_GO_CLAUDE_MODEL` to override the model used by live

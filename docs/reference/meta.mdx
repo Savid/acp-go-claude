@@ -4,8 +4,10 @@ description: "Every key the adapter reads and writes under the _meta.claude name
 ---
 
 All Claude-specific public metadata lives under `_meta.claude`. Foreign metadata
-namespaces are preserved untouched for their owners; unknown keys **inside** the
-Claude namespace are rejected on lifecycle requests.
+namespaces are preserved untouched for their owners. Inside the Claude
+namespace, lifecycle requests are strict: a non-object `_meta.claude`, an
+unknown key, and a wrong-typed known value are all rejected with an
+invalid-params error naming the offending field.
 
 ## Initialize capabilities
 

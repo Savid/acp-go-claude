@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -65,9 +66,20 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	}
 	newServeAgent = func(...Option) *Agent { return agent }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	require.ErrorIs(t, Serve(ctx, &blockingReader{}, io.Discard), context.Canceled)
+	// EOF input resolves conn.Done first; the deferred agent close then hits
+	// the close-error logging branch.
+	require.NoError(t, Serve(context.Background(), bytes.NewBuffer(nil), io.Discard))
+
+	// A context that is already cancelled fails the pre-select guard before an
+	// agent is even constructed.
+	preCancelled, cancelEarly := context.WithCancel(context.Background())
+	cancelEarly()
+	require.ErrorIs(t, Serve(preCancelled, &blockingReader{}, io.Discard), context.Canceled)
+
+	// A context cancelled while Serve is blocked resolves through the select.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, Serve(ctx, &blockingReader{}, io.Discard), context.DeadlineExceeded)
 }
 
 func TestAgentLifecycleWithFakeClaude(t *testing.T) {

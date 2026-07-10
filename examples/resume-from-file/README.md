@@ -20,4 +20,4 @@ or the current directory. Loading uses normal ACP `session/load`, and the prompt
 uses normal ACP `session/prompt`.
 
 Pass `-prompt "..."` to change the smoke-test turn, `-path` to point at a
-specific `claude` CLI, and `-home` to set the Claude config directory.
+specific `claude` CLI, and `-home` to set the parent root for isolated Claude session state.

@@ -13,8 +13,25 @@ import (
 // error so hosts classify it as a bad request, not a server-internal failure.
 const errValueUnsupported = "unsupported"
 
+// Uniform invalid-params data keys and field paths for prompt-content
+// rejections.
+const (
+	keyErrorField       = "error"
+	keyFieldField       = "field"
+	fieldPromptImage    = "prompt.image"
+	fieldPromptResource = "prompt.resource"
+
+	errMissingImageData    = "missing image data or uri"
+	errMissingResourceData = "missing resource data or uri"
+)
+
 // PromptToClaude converts ACP prompt content to Claude stream-json user content.
+// An empty prompt fails closed with the uniform unsupported-prompt shape.
 func PromptToClaude(prompt []acp.ContentBlock, advertisedCommands []acp.AvailableCommand) ([]map[string]any, error) {
+	if len(prompt) == 0 {
+		return nil, acp.NewInvalidParams(map[string]any{keyErrorField: errValueUnsupported, keyFieldField: keyPrompt})
+	}
+
 	blocks := make([]map[string]any, 0, len(prompt))
 	contextBlocks := make([]map[string]any, 0)
 	advertised := advertisedCommandSet(advertisedCommands)
@@ -49,15 +66,13 @@ func contentBlockToClaude(block acp.ContentBlock, advertisedCommands map[string]
 			return []map[string]any{urlImageBlock(*block.Image.Uri)}, nil, nil
 		}
 
-		return nil, nil, fmt.Errorf("image prompt content requires base64 data or an http(s) URI")
+		return nil, nil, acp.NewInvalidParams(map[string]any{keyFieldField: fieldPromptImage, keyErrorField: errMissingImageData})
 	case block.ResourceLink != nil:
 		return []map[string]any{textBlock(resourceLinkText(*block.ResourceLink))}, nil, nil
 	case block.Resource != nil:
 		return resourceToClaude(block.Resource.Resource)
-	case block.Audio != nil:
-		return nil, nil, acp.NewInvalidParams(map[string]any{"error": errValueUnsupported, "field": keyPrompt})
 	default:
-		return nil, nil, fmt.Errorf("unsupported empty ACP content block")
+		return nil, nil, acp.NewInvalidParams(map[string]any{keyErrorField: errValueUnsupported, keyFieldField: keyPrompt})
 	}
 }
 
@@ -127,10 +142,10 @@ func resourceToClaude(resource acp.EmbeddedResourceResource) ([]map[string]any, 
 			return []map[string]any{base64Block(typeDocument, mimeType, resource.BlobResourceContents.Blob)}, nil, nil
 		}
 
-		return nil, nil, fmt.Errorf("unsupported embedded resource mime type %q", mimeType)
+		return nil, nil, acp.NewInvalidParams(map[string]any{keyErrorField: errValueUnsupported, keyFieldField: fieldPromptResource})
 	}
 
-	return nil, nil, fmt.Errorf("empty embedded resource")
+	return nil, nil, acp.NewInvalidParams(map[string]any{keyFieldField: fieldPromptResource, keyErrorField: errMissingResourceData})
 }
 
 func textBlock(text string) map[string]any {

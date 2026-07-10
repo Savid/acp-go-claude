@@ -123,6 +123,10 @@ func NewAgent(opts ...Option) *Agent {
 
 // Serve runs an ACP agent over the provided streams.
 func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	agent := newServeAgent(opts...)
 	defer func() {
 		if err := agent.Close(); err != nil {
@@ -265,8 +269,14 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 }
 
-// HandleExtensionMethod handles Claude-specific ACP extension methods.
+// HandleExtensionMethod handles Claude-specific ACP extension methods. A
+// closed agent rejects every extension call up front (-32600), before method
+// dispatch and before any parameter validation.
 func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if err := a.ensureOpen(); err != nil {
+		return nil, err
+	}
+
 	switch method {
 	case ForkSessionMethod:
 		return a.handleForkSession(ctx, params)

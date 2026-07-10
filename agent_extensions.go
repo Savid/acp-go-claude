@@ -54,10 +54,6 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (Rate
 		return RateLimitsResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
-	if err := a.ensureOpen(); err != nil {
-		return RateLimitsResponse{}, err
-	}
-
 	claudeHome, err := canonicalClaudeHome(a.options.Home)
 	if err != nil {
 		return RateLimitsResponse{}, err
@@ -72,9 +68,14 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (Rate
 	probeCtx, cancel := context.WithTimeout(ctx, rateLimitsProbeTimeout)
 	defer cancel()
 
+	// A failed probe degrades to empty windows rather than failing the
+	// request: reporting no windows is the same answer the harness gives, and
+	// a broken probe must not break the extension.
 	limits, err := a.queryRateLimits(probeCtx, claudeOptions)
 	if err != nil {
-		return RateLimitsResponse{}, err
+		a.log.DebugContext(ctx, "claude usage probe failed", slog.String(jsonFieldError, err.Error()))
+
+		limits = claude.RateLimits{}
 	}
 
 	// The harness only prints windows for a logged-in, profile-scoped Claude
@@ -188,10 +189,6 @@ func (a *Agent) handleForkSession(
 	permissionRules, err := a.permissionRulesForSession(ctx, params.SessionId)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
-	}
-
-	if openErr := a.ensureOpen(); openErr != nil {
-		return acp.UnstableForkSessionResponse{}, openErr
 	}
 
 	session, err := a.startSession(ctx, acp.SessionId(sessionID), sessionStart{

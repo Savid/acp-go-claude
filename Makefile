@@ -42,13 +42,13 @@ test-cross-compile:
 	GOOS=openbsd GOARCH=amd64 go build ./...
 	GOOS=windows GOARCH=amd64 go build ./...
 
-## test-integration-smoke: compile and run integration tests that can skip without live auth
+## test-integration-smoke: run live integration tests that do not spend model tokens
 test-integration-smoke:
-	go test -tags=integration -timeout=120s -run 'TestNullClaudeRefreshTokens|TestClaudeAccessToken|TestCopyClaudeStateFileUsesSiblingForDefaultHome|TestClaudeSettingsAuthAvailable|TestIsolatedClaudeRuntimeUsesFreshHomeWithProcessAuth|TestIsolatedClaudeRuntimeCopiesExplicitSource' ./integration/...
+	ACP_GO_CLAUDE_RUN_INTEGRATION=1 go test -race -count=1 -tags=integration -timeout=300s -parallel=4 -v ./integration/...
 
-## test-integration-live: run live Claude CLI integration tests
+## test-integration-live: run full live integration tests
 test-integration-live:
-	ACP_GO_CLAUDE_RUN_INTEGRATION=1 go test -race -tags=integration -timeout=600s -parallel=4 -v ./integration/...
+	ACP_GO_CLAUDE_RUN_INTEGRATION=1 ACP_GO_CLAUDE_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
 
 ## test-integration: alias for live integration tests
 test-integration: test-integration-live
@@ -67,7 +67,7 @@ docs-audit:
 	@missing=0; for file in README.md doc.go docs.json example_test.go AGENTS.md docs/overview.mdx docs/core/sessions.mdx docs/core/prompt-streaming.mdx docs/features/authentication.mdx docs/features/elicitation.mdx docs/features/mcp.mdx docs/features/models-config.mdx docs/features/permissions.mdx docs/features/raw-events.mdx docs/features/session-store.mdx docs/get-started/examples.mdx docs/get-started/install.mdx docs/get-started/quickstart.mdx docs/get-started/run-modes.mdx docs/operations/observability.mdx docs/operations/security.mdx docs/reference/acp-methods.mdx docs/reference/cli.mdx docs/reference/go-api.mdx docs/reference/meta.mdx docs/reference/updates.mdx examples/minimal-client/main.go examples/resume-from-file/main.go examples/interactive-chat/main.go; do if [ ! -f "$$file" ]; then echo "missing required docs file: $$file"; missing=1; fi; done; exit $$missing
 	@for flag in -path -home -model -debug -version; do rg -q -- "$$flag" docs/reference/cli.mdx || { echo "missing CLI flag in docs/reference/cli.mdx: $$flag"; exit 1; }; done
 	@for flag in path home model debug version; do rg -q -- "\"$$flag\"" cmd/acp-go-claude/main.go || { echo "missing CLI flag registration in main.go: $$flag"; exit 1; }; done
-	@! rg -n -- '--cli|opencode acp|proxy|compatibility|deprecated|legacy|migration|session/import|sdkMessage|emitRawSDKMessages|setGoal|goals|thoughtLevel|"_meta"\s*:\s*\{[^}]*"mode"|NES|SSE MCP|mcpCapabilities\.acp|\bExportSession\b|\bImportSession\b|\bDeleteSession\b|\bParseConfig\b' README.md doc.go docs.json docs examples cmd/acp-go-claude/*.go AGENTS.md
+	@! rg -n -- '--cli|claude acp|proxy|compatibility|deprecated|legacy|migration|session/import|sdkMessage|emitRawSDKMessages|setGoal|goals|thoughtLevel|"_meta"\s*:\s*\{[^}]*"mode"|NES|SSE MCP|mcpCapabilities\.acp|\bExportSession\b|\bImportSession\b|\bDeleteSession\b|\bParseConfig\b' README.md doc.go docs.json docs examples cmd/acp-go-claude/*.go AGENTS.md
 
 ## clean: remove build artifacts
 clean:

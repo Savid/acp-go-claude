@@ -117,7 +117,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	cwd := flags.String("cwd", "", "session cwd; defaults to the JSONL cwd or current directory")
 	prompt := flags.String("prompt", defaultPrompt, "prompt to send after loading history")
 	claudePath := flags.String("path", "", "path to claude CLI")
-	claudeHome := flags.String("home", "", "Claude config directory")
+	claudeHome := flags.String("home", "", "parent root for isolated Claude session state")
 
 	if err := flags.Parse(args); err != nil {
 		return err

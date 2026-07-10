@@ -913,7 +913,10 @@ func validateMCPServers(servers []acp.McpServer) error {
 				jsonFieldServer: server.Acp.Name,
 			})
 		default:
-			return acp.NewInvalidParams(map[string]any{jsonFieldError: "empty MCP server"})
+			return acp.NewInvalidParams(map[string]any{
+				jsonFieldError: "no_transport",
+				jsonFieldField: fmt.Sprintf("mcpServers[%d]", index),
+			})
 		}
 
 		if strings.TrimSpace(name) == "" {

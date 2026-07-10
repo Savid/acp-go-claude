@@ -161,7 +161,6 @@ type agentSession struct {
 	mu                sync.Mutex
 	permissionSaveMu  sync.Mutex
 	cancel            context.CancelFunc
-	turnDone          <-chan struct{}
 	turnCancelled     bool
 	permissionCancel  map[string]*permissionRequestCancel
 	elicitationCancel map[int64]*elicitationRequestCancel

@@ -74,7 +74,13 @@ func (options ClaudeOptions) Meta() map[string]any {
 
 func claudeOptionsFromMeta(meta map[string]any) (ClaudeOptions, error) {
 	options := ClaudeOptions{}
-	claude, _ := meta[claudeMetaKey].(map[string]any)
+
+	claude, ok := meta[claudeMetaKey].(map[string]any)
+	if !ok {
+		if _, exists := meta[claudeMetaKey]; exists {
+			return ClaudeOptions{}, unsupportedField("_meta." + claudeMetaKey)
+		}
+	}
 
 	if err := validateClaudeLifecycleMeta(claude); err != nil {
 		return ClaudeOptions{}, err
@@ -117,14 +123,14 @@ func validateClaudeLifecycleMeta(claude map[string]any) error {
 func validateRawEventMeta(value any) error {
 	raw, ok := value.(map[string]any)
 	if !ok {
-		return fmt.Errorf("_meta.%s.%s must be an object", claudeMetaKey, metaRawEventKey)
+		return unsupportedField("_meta." + claudeMetaKey + "." + metaRawEventKey)
 	}
 
 	for key, item := range raw {
 		switch key {
 		case metaRawEventEnabledKey:
 			if _, ok := item.(bool); !ok {
-				return fmt.Errorf("_meta.%s.%s.%s must be a boolean", claudeMetaKey, metaRawEventKey, key)
+				return unsupportedField("_meta." + claudeMetaKey + "." + metaRawEventKey + "." + key)
 			}
 		default:
 			return unsupportedField("_meta." + claudeMetaKey + "." + metaRawEventKey + "." + key)
@@ -151,7 +157,7 @@ func parseClaudeOptions(value any) (ClaudeOptions, error) {
 	case map[string]any:
 		return parseClaudeOptionsMap(typed)
 	default:
-		return ClaudeOptions{}, fmt.Errorf("_meta.%s.%s must be an object", claudeMetaKey, metaOptionsKey)
+		return ClaudeOptions{}, unsupportedField("_meta." + claudeMetaKey + "." + metaOptionsKey)
 	}
 }
 
@@ -163,7 +169,7 @@ func parseClaudeOptionsMap(raw map[string]any) (ClaudeOptions, error) {
 		case metaBareKey:
 			bare, ok := value.(bool)
 			if !ok {
-				return ClaudeOptions{}, fmt.Errorf("%s must be a boolean", metaOptionPath(key))
+				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
 			}
 
 			options.Bare = bare
@@ -177,28 +183,28 @@ func parseClaudeOptionsMap(raw map[string]any) (ClaudeOptions, error) {
 		case metaSystemPromptKey:
 			systemPrompt, ok := value.(string)
 			if !ok {
-				return ClaudeOptions{}, fmt.Errorf("%s must be a string", metaOptionPath(key))
+				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
 			}
 
 			options.SystemPrompt = systemPrompt
 		case metaModelKey:
 			model, ok := value.(string)
 			if !ok {
-				return ClaudeOptions{}, fmt.Errorf("%s must be a string", metaOptionPath(key))
+				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
 			}
 
 			options.Model = model
 		case metaPermissionModeKey:
 			permissionMode, ok := value.(string)
 			if !ok {
-				return ClaudeOptions{}, fmt.Errorf("%s must be a string", metaOptionPath(key))
+				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
 			}
 
 			options.PermissionMode = permissionMode
 		case metaOutputSchemaKey:
 			schema, ok := value.(map[string]any)
 			if !ok {
-				return ClaudeOptions{}, fmt.Errorf("%s must be an object", metaOptionPath(key))
+				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
 			}
 
 			options.OutputSchema = cloneAnyMap(schema)
@@ -276,7 +282,7 @@ func stringMapOption(value any, path string) (map[string]string, error) {
 		for key, item := range typed {
 			text, ok := item.(string)
 			if !ok {
-				return nil, fmt.Errorf("%s.%s must be a string", path, key)
+				return nil, unsupportedField(path + "." + key)
 			}
 
 			result[key] = text
@@ -284,7 +290,7 @@ func stringMapOption(value any, path string) (map[string]string, error) {
 
 		return result, nil
 	default:
-		return nil, fmt.Errorf("%s must be an object", path)
+		return nil, unsupportedField(path)
 	}
 }
 

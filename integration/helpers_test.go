@@ -24,6 +24,8 @@ import (
 )
 
 const livePromptRefusalRetries = 1
+const envRunIntegration = "ACP_GO_CLAUDE_RUN_INTEGRATION"
+const envRunLiveTokens = "ACP_GO_CLAUDE_RUN_LIVE_TOKENS" //nolint:gosec // Environment variable name, not a credential value.
 const envClaudeHome = "ACP_GO_CLAUDE_HOME"
 const envAnthropicAuthToken = "ANTHROPIC_AUTH_TOKEN" //nolint:gosec // Environment variable name, not a credential value.
 const envAnthropicAPIKey = "ANTHROPIC_API_KEY"       //nolint:gosec // Environment variable name, not a credential value.
@@ -347,14 +349,25 @@ func (c *recordingClient) resetRecordedOutput() {
 func integrationClaudePath(t *testing.T) string {
 	t.Helper()
 
-	if os.Getenv("ACP_GO_CLAUDE_RUN_INTEGRATION") != "1" {
-		t.Skip("set ACP_GO_CLAUDE_RUN_INTEGRATION=1 to run against the local claude CLI")
+	if os.Getenv(envRunIntegration) != "1" {
+		t.Skipf("set %s=1 to run against the local claude CLI", envRunIntegration)
 	}
 
 	claudePath, err := exec.LookPath("claude")
 	require.NoError(t, err)
 
 	return claudePath
+}
+
+// requireLiveTokens skips a test that spends model tokens unless the caller
+// opted in explicitly. Smoke runs never spend tokens; only
+// `make test-integration-live` sets this variable.
+func requireLiveTokens(t *testing.T) {
+	t.Helper()
+
+	if os.Getenv(envRunLiveTokens) != "1" {
+		t.Skipf("set %s=1 to run live tests that spend model tokens", envRunLiveTokens)
+	}
 }
 
 func integrationClaudeHome(t *testing.T) string {

@@ -12,6 +12,7 @@ import (
 )
 
 func TestClaudeACPAgentBinaryConversation(t *testing.T) {
+	requireLiveTokens(t)
 	parallelWhenPortableClaudeAuth(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)

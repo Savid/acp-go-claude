@@ -67,14 +67,12 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	s.mu.Lock()
 	turnCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
-	s.turnDone = turnCtx.Done()
 	s.turnCancelled = false
 	s.mu.Unlock()
 
 	defer func() {
 		s.mu.Lock()
 		s.cancel = nil
-		s.turnDone = nil
 		s.turnCancelled = false
 		s.mu.Unlock()
 
@@ -92,7 +90,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	}
 
 	if err := s.client.Query(turnCtx, content); err != nil {
-		return acp.PromptResponse{}, err
+		return acp.PromptResponse{}, nativeTurnFailure(err)
 	}
 
 	toolUpdateOptions := mapper.ToolUpdateOptions{

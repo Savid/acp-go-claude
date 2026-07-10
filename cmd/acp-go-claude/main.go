@@ -86,7 +86,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	hideClaudeAuth := flags.Bool("claude-hide-auth", false, "hide Claude subscription terminal auth methods")
 	seedFiles := &seedFileFlag{}
 	flags.Var(seedFiles, "seed-file", "seed file written into the Claude config dir as <relpath>=<hostpath>; repeatable")
-	settingsFile := flags.String("settings-file", "", "settings overlay relpath under the Claude config dir passed as --settings; requires -home")
+	settingsFile := flags.String("claude-settings-file", "", "settings overlay relpath under the Claude config dir passed as --settings; requires -home")
 	debug := flags.Bool("debug", false, "write debug logs to stderr")
 	printVersion := flags.Bool("version", false, "print adapter version and exit")
 

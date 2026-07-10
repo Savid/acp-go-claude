@@ -98,6 +98,7 @@ func TestWriteSeedFilesRejectsUnsafePaths(t *testing.T) {
 		key  string
 	}{
 		{name: "empty", key: ""},
+		{name: "whitespace-only", key: "   "},
 		{name: "absolute", key: "/etc/passwd"},
 		{name: "parent escape", key: "../evil.json"},
 		{name: "nested parent escape", key: "a/../../evil.json"},

@@ -474,6 +474,14 @@ func TestValidateMCPServersRejectsSSEAndACP(t *testing.T) {
 				jsonFieldServer: "bridge",
 			},
 		},
+		{
+			name:    "no transport",
+			servers: []acp.McpServer{{}},
+			data: map[string]any{
+				jsonFieldError: "no_transport",
+				jsonFieldField: "mcpServers[0]",
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 const pinnedGoalProbeClaudeVersion = "2.1.200"
 
 func TestClaudeGoalCommandLiveProbe(t *testing.T) {
+	requireLiveTokens(t)
 	parallelWhenPortableClaudeAuth(t)
 
 	claudePath := integrationClaudePath(t)

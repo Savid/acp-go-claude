@@ -159,33 +159,45 @@ func TestPromptToClaudeResourceLinks(t *testing.T) {
 func TestPromptToClaudeUnsupported(t *testing.T) {
 	t.Parallel()
 
-	// Audio is rejected as an invalid parameter (-32602) with the uniform
-	// unsupported/field shape, not a bare internal error.
+	requireInvalidParams := func(t *testing.T, err error, want map[string]any) {
+		t.Helper()
+
+		var reqErr *acp.RequestError
+		require.ErrorAs(t, err, &reqErr)
+		require.Equal(t, -32602, reqErr.Code)
+		require.Equal(t, want, reqErr.Data)
+	}
+
+	unsupportedPrompt := map[string]any{keyErrorField: errValueUnsupported, keyFieldField: keyPrompt}
+
+	// Unsupported content fails closed as an invalid parameter (-32602) with
+	// the uniform unsupported/field shapes, never a bare internal error.
 	_, err := PromptToClaude([]acp.ContentBlock{acp.AudioBlock("abc", "audio/wav")}, nil)
-	var reqErr *acp.RequestError
-	require.ErrorAs(t, err, &reqErr)
-	require.Equal(t, -32602, reqErr.Code)
-	require.Equal(t, map[string]any{"error": errValueUnsupported, "field": keyPrompt}, reqErr.Data)
+	requireInvalidParams(t, err, unsupportedPrompt)
+
+	// An empty prompt (zero content blocks) is rejected, not forwarded.
+	_, err = PromptToClaude(nil, nil)
+	requireInvalidParams(t, err, unsupportedPrompt)
 
 	_, err = PromptToClaude([]acp.ContentBlock{{}}, nil)
-	require.Error(t, err)
+	requireInvalidParams(t, err, unsupportedPrompt)
 
 	_, err = PromptToClaude([]acp.ContentBlock{
 		acp.ResourceBlock(acp.EmbeddedResourceResource{
 			BlobResourceContents: &acp.BlobResourceContents{Blob: "bin"},
 		}),
 	}, nil)
-	require.Error(t, err)
+	requireInvalidParams(t, err, map[string]any{keyErrorField: errValueUnsupported, keyFieldField: fieldPromptResource})
 
 	_, err = PromptToClaude([]acp.ContentBlock{
 		acp.ResourceBlock(acp.EmbeddedResourceResource{}),
 	}, nil)
-	require.Error(t, err)
+	requireInvalidParams(t, err, map[string]any{keyFieldField: fieldPromptResource, keyErrorField: errMissingResourceData})
 
 	_, err = PromptToClaude([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image"}}}, nil)
-	require.Error(t, err)
+	requireInvalidParams(t, err, map[string]any{keyFieldField: fieldPromptImage, keyErrorField: errMissingImageData})
 
 	fileURI := "file:///tmp/image.png"
 	_, err = PromptToClaude([]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &fileURI}}}, nil)
-	require.Error(t, err)
+	requireInvalidParams(t, err, map[string]any{keyFieldField: fieldPromptImage, keyErrorField: errMissingImageData})
 }

@@ -26,6 +26,16 @@ Two interactive flows are layered on top of the stream:
 Raw Claude stream frames are not sent by default. A host opts in per session with
 `_meta.claude.rawEvent.enabled`; see [Raw events](/docs/features/raw-events).
 
+## Prompt content validation
+
+Prompt content fails closed before the turn starts. An empty prompt (zero
+content blocks), an unsupported block type (audio or an unknown block), an
+image with neither base64 data nor an `http(s)` URI, and an embedded resource
+that is empty or carries an unsupported blob mime type are all rejected with an
+invalid-params (`-32602`) error naming the offending field (`prompt`,
+`prompt.image`, or `prompt.resource`). Nothing is silently dropped and nothing
+is forwarded to Claude.
+
 ## Slash commands
 
 Claude Code advertises its slash commands, and the adapter projects them into ACP

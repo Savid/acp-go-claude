@@ -15,6 +15,7 @@ import (
 )
 
 func TestClaudeCLISessionStoreMirrorAndResume(t *testing.T) {
+	requireLiveTokens(t)
 	parallelWhenPortableClaudeAuth(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

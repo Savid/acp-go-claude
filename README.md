@@ -81,8 +81,9 @@ func main() {
 ```
 
 See the [Go API reference](https://pkg.go.dev/github.com/savid/acp-go-claude)
-for options such as the Claude executable path, config home, default model,
-session storage, permissions, raw events, and OpenTelemetry providers.
+for options such as the Claude executable path, config home, scratch directory,
+default model, session storage, permissions, raw events, and OpenTelemetry
+providers.
 
 ## What It Provides
 

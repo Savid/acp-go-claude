@@ -18,7 +18,8 @@ across restarts. Forking an existing session is exposed only through the
 Loading and resuming a session rehydrate Claude's own transcript. When the local
 Claude transcript is gone but a host-provided [session
 store](/docs/features/session-store) holds the rows, the adapter materializes
-them into a temporary Claude config directory so the CLI can resume from them.
+them into a temporary Claude config directory under the scratch directory
+(default: system temp) so the CLI can resume from them.
 
 ## Store keys and subpaths
 

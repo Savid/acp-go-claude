@@ -37,6 +37,10 @@ type Options struct {
 	ExecutablePath string
 	// Home sets CLAUDE_CONFIG_DIR for launched Claude CLI sessions.
 	Home string
+	// ScratchDir is the parent directory for all ephemeral on-disk
+	// materialization (per-session roots, hydration temp files, probe dirs).
+	// Empty means the system temp directory.
+	ScratchDir string
 	// DefaultModel is passed to newly created Claude sessions when non-empty.
 	DefaultModel string
 	// Env is merged into every launched Claude process environment.
@@ -207,6 +211,16 @@ func WithExecutablePath(path string) Option {
 func WithHome(path string) Option {
 	return func(options *Options) {
 		options.Home = path
+	}
+}
+
+// WithScratchDir sets the parent directory for all ephemeral on-disk
+// materialization (per-session roots, hydration temp files, probe dirs).
+// Empty means the system temp directory. The directory is created 0700
+// when missing.
+func WithScratchDir(dir string) Option {
+	return func(options *Options) {
+		options.ScratchDir = dir
 	}
 }
 

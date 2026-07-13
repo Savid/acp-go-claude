@@ -84,7 +84,12 @@ func (a *Agent) materializeStoreSession(
 		return noMaterializedSession()
 	}
 
-	tmp, err := materializeMkdirTemp("", "acp-go-claude-resume-*")
+	scratchDir, err := ensureScratchParent(a.options.ScratchDir)
+	if err != nil {
+		return nil, err
+	}
+
+	tmp, err := materializeMkdirTemp(scratchDir, "acp-go-claude-resume-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp Claude config dir: %w", err)
 	}

@@ -5,11 +5,42 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestMaterializeStoreSessionUsesScratchDir(t *testing.T) {
+	ctx := context.Background()
+	sessionID := "88888888-8888-4888-8888-888888888888"
+	cwd := t.TempDir()
+	sourceHome := t.TempDir()
+
+	store := NewInMemorySessionStore()
+	require.NoError(t, store.Append(ctx, SessionKey{SessionID: sessionID}, []SessionStoreEntry{
+		[]byte(`{"type":"user","message":{"content":"hello"}}`),
+	}))
+
+	scratch := filepath.Join(t.TempDir(), "nested", "scratch")
+	agent := NewAgent(WithSessionStore(store), WithScratchDir(scratch))
+
+	materialized, err := agent.materializeStoreSession(ctx, sessionID, cwd, sourceHome, nil)
+	require.NoError(t, err)
+	require.NotNil(t, materialized)
+	t.Cleanup(func() { require.NoError(t, materialized.Close()) })
+
+	require.Equal(t, scratch, filepath.Dir(materialized.configDir))
+	require.True(t, strings.HasPrefix(filepath.Base(materialized.configDir), "acp-go-claude-resume-"))
+
+	occupied := filepath.Join(t.TempDir(), "occupied")
+	require.NoError(t, os.WriteFile(occupied, []byte("x"), 0o600))
+
+	blocked := NewAgent(WithSessionStore(store), WithScratchDir(occupied))
+	_, err = blocked.materializeStoreSession(ctx, sessionID, cwd, sourceHome, nil)
+	require.ErrorContains(t, err, "create scratch parent dir")
+}
 
 func TestMaterializeStoreSessionBranches(t *testing.T) {
 	ctx := context.Background()

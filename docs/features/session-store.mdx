@@ -24,7 +24,8 @@ err := claudeacp.Serve(ctx, input, output,
 
 The adapter mirrors Claude transcript rows into the store as the turn streams,
 backs `session/list` from it, and hydrates stored rows into a temporary Claude
-config directory when the local transcript is missing.
+config directory under the scratch directory (default: system temp) when the
+local transcript is missing.
 
 ## The store contract
 

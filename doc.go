@@ -12,8 +12,10 @@
 //
 // Hosts that need durable remote resume can provide [WithSessionStore]. A
 // session store receives Claude transcript mirror rows, can back session/list,
-// and can hydrate Claude JSONL into a temporary Claude config directory for
-// session/load or session/resume when the local Claude transcript is absent.
+// and can hydrate Claude JSONL into a temporary Claude config directory under
+// the scratch directory ([WithScratchDir]; default: the system temp directory)
+// for session/load or session/resume when the local Claude transcript is
+// absent.
 //
 // Hosts that need adapter telemetry can provide OpenTelemetry providers with
 // [WithTracerProvider] and [WithMeterProvider]. The package never configures

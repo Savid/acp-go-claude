@@ -35,6 +35,7 @@ func TestRunPassesContractFlags(t *testing.T) {
 	code := run(context.Background(), []string{
 		"-path", "/bin/claude",
 		"-home", "/tmp/claude",
+		"-scratch-dir", "/tmp/claude-scratch",
 		"-model", "sonnet",
 		"-claude-bare",
 		"-claude-permission-mode", "plan",
@@ -47,6 +48,7 @@ func TestRunPassesContractFlags(t *testing.T) {
 	require.Equal(t, "v1.2.3", got.AgentVersion)
 	require.Equal(t, "/bin/claude", got.ExecutablePath)
 	require.Equal(t, "/tmp/claude", got.Home)
+	require.Equal(t, "/tmp/claude-scratch", got.ScratchDir)
 	require.Equal(t, "sonnet", got.DefaultModel)
 	require.True(t, got.BareMode)
 	require.Equal(t, "plan", got.DefaultPermissionMode)

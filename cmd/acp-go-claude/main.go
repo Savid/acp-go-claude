@@ -79,6 +79,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	claudePath := flags.String("path", "", "path to claude CLI")
 	claudeHome := flags.String("home", "", "Claude config directory")
+	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 	model := flags.String("model", "", "default Claude model")
 	bare := flags.Bool("claude-bare", false, "launch Claude sessions with --bare; requires API-key or apiKeyHelper auth")
 	permissionMode := flags.String("claude-permission-mode", "", "default Claude permission mode")
@@ -126,12 +127,13 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	ctx, stop := signal.NotifyContext(ctx, signals...)
 	defer stop()
 
-	serveOptions := make([]claudeacp.Option, 0, 5+len(telemetry.options))
+	serveOptions := make([]claudeacp.Option, 0, 6+len(telemetry.options))
 
 	serveOptions = append(serveOptions,
 		claudeacp.WithAgentVersion(version),
 		claudeacp.WithExecutablePath(*claudePath),
 		claudeacp.WithHome(*claudeHome),
+		claudeacp.WithScratchDir(*scratchDir),
 		claudeacp.WithDefaultModel(*model),
 		claudeacp.WithClaudeBareMode(*bare),
 		claudeacp.WithClaudeHideAuth(*hideClaudeAuth),

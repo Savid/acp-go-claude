@@ -31,6 +31,7 @@ func TestApplyOptionsBranches(t *testing.T) {
 		WithTracerProvider(tracer),
 		WithExecutablePath("/bin/claude"),
 		WithHome("/tmp/claude-home"),
+		WithScratchDir("/tmp/claude-scratch"),
 		WithSessionStore(store),
 		WithSessionStoreLoadTimeout(2 * time.Second),
 		WithDefaultModel("claude-sonnet"),
@@ -60,6 +61,7 @@ func TestApplyOptionsBranches(t *testing.T) {
 	require.Equal(t, propagator, options.TextMapPropagator)
 	require.Equal(t, "/bin/claude", options.ExecutablePath)
 	require.Equal(t, "/tmp/claude-home", options.Home)
+	require.Equal(t, "/tmp/claude-scratch", options.ScratchDir)
 	require.Same(t, store, options.SessionStore)
 	require.Equal(t, 2*time.Second, options.SessionStoreLoadTimeout)
 	require.Equal(t, "claude-sonnet", options.DefaultModel)

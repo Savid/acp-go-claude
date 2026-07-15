@@ -39,6 +39,14 @@ in the user's own Claude settings. The payload, including HTTP header values,
 never appears in process arguments, and the file is deleted when the session
 closes.
 
+Claude fixes its MCP tool registry at native process startup. For an MCP-bearing
+session, the adapter therefore performs one contained relaunch immediately
+before the first user prompt. This lets a session-bound MCP endpoint expose only a
+readiness tool while the lifecycle request is provisional, then expose its
+authorized tools after the host arms the turn. The same private MCP file is
+reused, all declared external servers remain present, and load/resume sessions
+repeat this one-time refresh before continuation.
+
 <Note>
 Because of `--strict-mcp-config`, servers configured in the operator's Claude
 config files are not merged in — the host's per-session declarations are the

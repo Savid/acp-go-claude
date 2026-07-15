@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
 )
 
@@ -152,6 +153,85 @@ func (s *agentSession) ensureClientAlive(ctx context.Context) error {
 
 	opts := s.clientOptions
 	opts.ResumeID = string(s.id)
+	opts.ForkSession = false
+
+	return s.relaunchClient(ctx, client, nativeRelease, opts)
+}
+
+// refreshMCPRegistry rebuilds Claude's fixed MCP tool registry exactly once,
+// after the host has armed the first user turn and before the model sees that
+// turn. Session establishment may intentionally observe only a provisional
+// runtime_ready surface; the session's private MCP descriptor itself remains
+// unchanged and is reused by the replacement process.
+func (s *agentSession) refreshMCPRegistry(ctx context.Context) error {
+	s.mu.Lock()
+	pending := s.mcpRefreshPending
+	canRelaunch := s.canRelaunch
+	client := s.client
+	nativeRelease := s.nativeRootRelease
+	opts := s.clientOptions
+	s.mu.Unlock()
+
+	if !pending {
+		return nil
+	}
+
+	if !canRelaunch {
+		// Injected unit-test sessions have no process launch contract. Their
+		// transport already represents the effective tool registry.
+		return nil
+	}
+
+	if err := s.relaunchClient(ctx, client, nativeRelease, opts); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.mcpRefreshPending = false
+	s.mu.Unlock()
+
+	return nil
+}
+
+type relaunchConfig struct {
+	model          string
+	modelOverrides map[string]string
+	outputStyle    string
+	effort         string
+	mode           acp.SessionModeId
+}
+
+func (s *agentSession) currentRelaunchConfig() relaunchConfig {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return relaunchConfig{
+		model:          s.model,
+		modelOverrides: cloneStringMap(s.modelOverrides),
+		outputStyle:    s.outputStyle,
+		effort:         s.effort,
+		mode:           s.mode,
+	}
+}
+
+// relaunchClient replaces one proven-quiescent native process without ever
+// holding two native-root admissions at once. A failed or cancelled launch is
+// fully closed before its new admission is returned; an unproven tree poisons
+// relaunch permanently and retains the admission.
+func (s *agentSession) relaunchClient(
+	ctx context.Context,
+	client *claude.Client,
+	nativeRelease func(),
+	opts claude.Options,
+) error {
+	config := s.currentRelaunchConfig()
+	if config.model != "" {
+		opts.Model = claudeModelID(config.model, config.modelOverrides)
+	}
+
+	if permissionMode, ok := permissionModeForACP(config.mode); ok {
+		opts.PermissionMode = permissionMode
+	}
 
 	var previousCloseErr error
 	if client != nil {
@@ -182,19 +262,19 @@ func (s *agentSession) ensureClientAlive(ctx context.Context) error {
 
 	relaunched := s.agent.newClaudeClient(s.agent.log, opts)
 	if err := relaunched.Start(ctx); err != nil {
-		cleanupErr := errors.Join(err, relaunched.Close())
+		return s.cleanupFailedRelaunch(err, relaunched, nativeRelease, previousCloseErr)
+	}
 
-		if !errors.Is(cleanupErr, claude.ErrProcessTreeUnproven) {
-			nativeRelease()
-		} else {
-			// No later path may launch another root under an admission whose
-			// process-tree quiescence could not be proven.
-			s.mu.Lock()
-			s.canRelaunch = false
-			s.mu.Unlock()
+	if config.outputStyle != "" {
+		if err := relaunched.SetOutputStyle(ctx, config.outputStyle); err != nil {
+			return s.cleanupFailedRelaunch(err, relaunched, nativeRelease, previousCloseErr)
 		}
+	}
 
-		return errors.Join(previousCloseErr, cleanupErr)
+	if config.effort != "" {
+		if err := relaunched.SetEffort(ctx, config.effort); err != nil {
+			return s.cleanupFailedRelaunch(err, relaunched, nativeRelease, previousCloseErr)
+		}
 	}
 
 	s.mu.Lock()
@@ -203,6 +283,29 @@ func (s *agentSession) ensureClientAlive(ctx context.Context) error {
 	s.mu.Unlock()
 
 	return previousCloseErr
+}
+
+func (s *agentSession) cleanupFailedRelaunch(
+	cause error,
+	relaunched *claude.Client,
+	nativeRelease func(),
+	previousCloseErr error,
+) error {
+	cleanupErr := errors.Join(cause, relaunched.Close())
+
+	if !errors.Is(cleanupErr, claude.ErrProcessTreeUnproven) {
+		if nativeRelease != nil {
+			nativeRelease()
+		}
+	} else {
+		// No later path may launch another root under an admission whose
+		// process-tree quiescence could not be proven.
+		s.mu.Lock()
+		s.canRelaunch = false
+		s.mu.Unlock()
+	}
+
+	return errors.Join(previousCloseErr, cleanupErr)
 }
 
 // Cancel cancels the active Claude turn. The local turn context is cancelled

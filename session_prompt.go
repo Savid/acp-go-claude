@@ -65,6 +65,10 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		return acp.PromptResponse{}, err
 	}
 
+	if err := s.refreshMCPRegistry(ctx); err != nil {
+		return acp.PromptResponse{}, nativeTurnFailure(err)
+	}
+
 	if err := s.ensureClientAlive(ctx); err != nil {
 		return acp.PromptResponse{}, nativeTurnFailure(err)
 	}

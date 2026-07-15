@@ -817,6 +817,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		scratchRootRelease:    scratchRelease,
 		mirror:                newSessionMirror(a.log, a.options.SessionStore, processClaudeHome),
 		rawMessages:           start.RawMessages,
+		mcpRefreshPending:     len(start.McpServers) > 0,
 	}
 	options.PermissionHandler = session.handlePermission
 	options.ElicitationHandler = session.handleElicitation

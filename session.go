@@ -156,6 +156,11 @@ type agentSession struct {
 	// inject a client directly leave it false).
 	clientOptions claude.Options
 	canRelaunch   bool
+	// mcpRefreshPending is true until the first MCP-bearing user turn has
+	// relaunched Claude while that turn's host authority is armed. Claude fixes
+	// its MCP tool registry at process startup, while a session-bound proxy may
+	// deliberately expose only a readiness tool during session establishment.
+	mcpRefreshPending bool
 
 	turn               chan struct{}
 	cancelMu           sync.Mutex

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
@@ -231,6 +232,117 @@ func TestClaudeRelaunchReleasesOldTreeBeforeFreshAdmission(t *testing.T) {
 	require.Equal(t, 1, releases)
 	require.NoError(t, session.Close(t.Context()))
 	require.Equal(t, 2, releases)
+}
+
+func TestClaudeFirstMCPPromptRefreshesFixedRegistryOnce(t *testing.T) {
+	acquires := 0
+	releases := 0
+	var (
+		launchOptions []claude.Options
+		transports    []*fakeClaudeTransport
+	)
+	agent := NewAgent(
+		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
+		WithDefaultModel("sonnet"),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				acquires++
+
+				return func() { releases++ }, nil
+			},
+		}),
+	)
+	agent.setConnection(newRecordingAgentClient())
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		transport := newFakeClaudeTransport()
+		launchOptions = append(launchOptions, options)
+		transports = append(transports, transport)
+
+		return claude.NewClient(log, options, transport)
+	}
+
+	response, err := agent.NewSession(t.Context(), NewSessionRequest(
+		t.TempDir(),
+		WithSessionMCPServers(
+			HTTPMCPServer("wagie", "http://127.0.0.1:1/mcp", map[string]string{"Authorization": "Bearer test"}),
+			StdioMCPServer("playwright", "playwright-mcp", []string{"--headless"}, nil),
+		),
+	))
+	require.NoError(t, err)
+	require.Len(t, launchOptions, 1)
+	require.NotEmpty(t, launchOptions[0].MCPConfigPath)
+
+	prompt := TextPromptRequest(response.SessionId, "turn-1", "hello")
+	result, err := agent.Prompt(t.Context(), prompt)
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, result.StopReason)
+	require.Len(t, launchOptions, 2)
+	require.Equal(t, launchOptions[0].MCPConfigPath, launchOptions[1].MCPConfigPath)
+	require.Empty(t, launchOptions[1].ResumeID, "a new pre-prompt session must keep its session-id launch semantics")
+	require.False(t, launchOptions[1].ForkSession)
+	require.Equal(t, "sonnet", launchOptions[1].Model)
+	require.Equal(t, 2, acquires)
+	require.Equal(t, 1, releases, "the provisional tree must be released before replacement admission")
+	require.Len(t, transports, 2)
+
+	result, err = agent.Prompt(t.Context(), TextPromptRequest(response.SessionId, "turn-2", "again"))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, result.StopReason)
+	require.Len(t, launchOptions, 2, "the authorized registry refresh must occur only once")
+
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: response.SessionId})
+	require.NoError(t, err)
+	require.Equal(t, 2, releases)
+}
+
+func TestClaudeCancelledMCPRefreshUnwindsAndRetries(t *testing.T) {
+	acquires := 0
+	releases := 0
+	launches := 0
+	agent := NewAgent(
+		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				acquires++
+
+				return func() { releases++ }, nil
+			},
+		}),
+	)
+	agent.setConnection(newRecordingAgentClient())
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		launches++
+		transport := newFakeClaudeTransport()
+		if launches == 2 {
+			transport.startErr = context.Canceled
+		}
+
+		return claude.NewClient(log, options, transport)
+	}
+
+	response, err := agent.NewSession(t.Context(), NewSessionRequest(
+		t.TempDir(),
+		WithSessionMCPServers(HTTPMCPServer("wagie", "http://127.0.0.1:1/mcp", nil)),
+	))
+	require.NoError(t, err)
+
+	_, err = agent.Prompt(t.Context(), TextPromptRequest(response.SessionId, "turn-1", "hello"))
+	requireTurnFailure(t, err, -32603, failureCauseTransport, context.Canceled.Error())
+	require.Equal(t, 2, acquires)
+	require.Equal(t, 2, releases, "both the provisional and failed replacement admissions must unwind")
+
+	result, err := agent.Prompt(t.Context(), TextPromptRequest(response.SessionId, "turn-2", "retry"))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, result.StopReason)
+	require.Equal(t, 3, launches)
+	require.Equal(t, 3, acquires)
+	require.Equal(t, 2, releases)
+
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: response.SessionId})
+	require.NoError(t, err)
+	require.Equal(t, 3, releases)
 }
 
 func TestClaudeRelaunchFailsClosed(t *testing.T) {

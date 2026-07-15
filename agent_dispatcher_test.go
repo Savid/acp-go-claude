@@ -141,6 +141,41 @@ func TestLocalAgentDispatcherBranches(t *testing.T) {
 	require.Error(t, lifecycleMetaError(context.Canceled))
 }
 
+func TestLocalAgentDispatcherRejectsClosedBeforeDispatchOrDecode(t *testing.T) {
+	t.Parallel()
+
+	agent := NewAgent()
+	require.NoError(t, agent.Close())
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		initialized bool
+		method      string
+		params      json.RawMessage
+	}{
+		{name: "before initialization gate", method: acp.AgentMethodSessionList},
+		{name: "initialize", method: acp.AgentMethodInitialize, params: json.RawMessage(`{bad`)},
+		{name: "unknown stable method", initialized: true, method: "unknown"},
+		{name: "unknown extension method", initialized: true, method: "_unknown"},
+		{name: "known malformed params", initialized: true, method: acp.AgentMethodAuthenticate, params: json.RawMessage(`{bad`)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			conn := &localAgentConnection{agent: agent}
+			conn.initialized.Store(tc.initialized)
+
+			_, reqErr := conn.handle(ctx, tc.method, tc.params)
+			require.NotNil(t, reqErr)
+			require.Equal(t, -32600, reqErr.Code)
+			require.Equal(t, map[string]any{jsonFieldError: errAgentClosed.Error()}, reqErr.Data)
+		})
+	}
+}
+
 func TestStableSessionForkReturnsMethodNotFound(t *testing.T) {
 	t.Parallel()
 

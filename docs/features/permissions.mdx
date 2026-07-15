@@ -19,8 +19,8 @@ values are:
 | `default` | Prompt for tools that require approval. |
 | `plan` | Planning mode; no edits applied. |
 | `accept_edits` | Auto-accept file edits. |
-| `bypass_permissions` | Skip prompts (only when the CLI build allows it). |
-| `auto` | Model-driven automatic mode (only when the model supports it). |
+| `bypass_permissions` | Skip prompts; hidden and rejected while running as root unless `IS_SANDBOX` is set. |
+| `auto` | Model-driven automatic mode; advertised and accepted only when the selected model's native metadata reports `supportsAutoMode`. |
 | `dont_ask` | Suppress further prompts for the session. |
 
 Set the default at startup:
@@ -45,7 +45,10 @@ use permission prompts; free-form user questions use
 support. Do not treat one as a substitute for the other.
 </Note>
 
-`bypass_permissions` is offered only when the underlying CLI build supports it,
-and enabling Claude's skip-permissions capability flag additionally requires
-`WithClaudeAllowSkipPermissionsFlag`. See [Security](/docs/operations/security)
-for why the permission path is load-bearing.
+`bypass_permissions` is environment-qualified: the adapter omits and rejects it
+when running as root unless `IS_SANDBOX` is set. Enabling Claude's separate
+skip-permissions capability flag additionally requires
+`WithClaudeAllowSkipPermissionsFlag`. `auto` is model-qualified: changing to a
+model that does not report native `supportsAutoMode` removes that choice and
+rejects attempts to select it. See [Security](/docs/operations/security) for why
+the permission path is load-bearing.

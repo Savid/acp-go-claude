@@ -3,9 +3,13 @@ title: "Sessions"
 description: "The session lifecycle model and how transcripts map to durable keys"
 ---
 
-An ACP session maps one-to-one to a long-lived Claude Code process. The adapter
-creates that process on demand, keeps it alive across prompt turns, and tears it
-down when the session closes.
+An ACP session owns at most one live Claude Code process. The adapter creates
+that process on demand, keeps it alive across prompt turns, and tears it down
+when the session closes. An MCP-bearing lifecycle first launches a provisional
+process, then replaces it once immediately before the first user turn so Claude
+rebuilds its startup-fixed MCP registry under the armed turn's authority. The
+old contained process tree is fully closed and its runtime admission released
+before the replacement is admitted, so the two roots never overlap.
 
 ## Lifecycle
 

@@ -14,8 +14,9 @@ the interactive terminal UI.
 The adapter is a thin translation layer between ACP and the local `claude` CLI.
 It owns:
 
-- ACP protocol mapping and the Claude subprocess lifecycle (one long-lived
-  Claude Code process per ACP session).
+- ACP protocol mapping and the Claude subprocess lifecycle (at most one live
+  Claude Code process per ACP session; MCP-bearing sessions replace one
+  provisional process before their first turn).
 - Streaming Claude stream-json output into ACP session updates.
 - Permission prompts, elicitation, model and mode configuration, slash-command
   projection, optional raw events, and optional durable session storage.

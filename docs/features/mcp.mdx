@@ -47,6 +47,12 @@ authorized tools after the host arms the turn. The same private MCP file is
 reused, all declared external servers remain present, and load/resume sessions
 repeat this one-time refresh before continuation.
 
+The provisional process is closed completely before the replacement process is
+admitted; there is never a two-root overlap. Cancellation or launch failure
+leaves the refresh pending so a later turn retries it instead of continuing
+with a stale registry. Once the authorized replacement starts successfully, it
+is the session's long-lived process and the refresh is not repeated.
+
 <Note>
 Because of `--strict-mcp-config`, servers configured in the operator's Claude
 config files are not merged in — the host's per-session declarations are the

@@ -80,8 +80,9 @@ type Agent struct {
 	permissionCache    map[acp.SessionId]map[string]string
 	activeLimitErr     error
 
-	rateLimitsCacheMu sync.Mutex
-	rateLimitsCache   rateLimitsCacheEntry
+	rateLimitsCacheMu   sync.Mutex
+	rateLimitsCache     rateLimitsCacheEntry
+	descendantProcesses *runtimeProcessSnapshotTracker
 
 	newClaudeClient    func(*slog.Logger, claude.Options) *claude.Client
 	queryRateLimits    func(context.Context, claude.Options) (claude.RateLimits, error)
@@ -107,15 +108,16 @@ func NewAgent(opts ...Option) *Agent {
 	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
 
 	return &Agent{
-		options:          options,
-		log:              log,
-		observe:          observe,
-		sessions:         make(map[acp.SessionId]*agentSession),
-		store:            NewInMemorySessionStore(),
-		deleted:          make(map[acp.SessionId]struct{}),
-		positionEncoding: acp.PositionEncodingKindUtf16,
-		permissionCache:  make(map[acp.SessionId]map[string]string),
-		activeLimitErr:   validateConcurrencyLimits(options.ConcurrencyLimits),
+		options:             options,
+		log:                 log,
+		observe:             observe,
+		sessions:            make(map[acp.SessionId]*agentSession),
+		store:               NewInMemorySessionStore(),
+		deleted:             make(map[acp.SessionId]struct{}),
+		positionEncoding:    acp.PositionEncodingKindUtf16,
+		permissionCache:     make(map[acp.SessionId]map[string]string),
+		activeLimitErr:      validateConcurrencyLimits(options.ConcurrencyLimits),
+		descendantProcesses: newRuntimeProcessSnapshotTracker(options.RuntimeResourceHooks),
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
 			return claude.NewClient(log, options, nil)
 		},

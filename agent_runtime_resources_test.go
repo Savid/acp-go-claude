@@ -219,6 +219,9 @@ func TestClaudeRelaunchReleasesOldTreeBeforeFreshAdmission(t *testing.T) {
 	}))
 	agent.setConnection(newRecordingAgentClient())
 	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		require.NotNil(t, options.ObserveProcessInventory)
+		require.NotNil(t, options.ObserveProcessQuiesced)
+
 		return claude.NewClient(log, options, newFakeClaudeTransport())
 	}
 

@@ -935,9 +935,11 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 	}
 
 	commandContext := processCommandContext
+	startContained := processStartContained
 	getwd := processGetwd
 	t.Cleanup(func() {
 		processCommandContext = commandContext
+		processStartContained = startContained
 		processGetwd = getwd
 	})
 
@@ -974,6 +976,23 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 	}
 	transport = NewProcessTransport(nil, Options{CLIPath: "/bin/sh", Cwd: t.TempDir()})
 	require.Error(t, transport.Start(context.Background()))
+
+	processCommandContext = commandContext
+	var inventories []func() (int, bool)
+	processStartContained = func(*exec.Cmd) (*processContainment, error) {
+		return nil, errors.Join(ErrProcessTreeUnproven, errors.New("containment cleanup failed"))
+	}
+	transport = NewProcessTransport(nil, Options{
+		CLIPath: "/bin/sh",
+		Cwd:     t.TempDir(),
+		ObserveProcessInventory: func(_ context.Context, inventory func() (int, bool)) {
+			inventories = append(inventories, inventory)
+		},
+	})
+	require.ErrorIs(t, transport.Start(context.Background()), ErrProcessTreeUnproven)
+	require.Len(t, inventories, 1)
+	_, exact := inventories[0]()
+	require.False(t, exact)
 }
 
 func TestProcessTransportStart(t *testing.T) {
@@ -983,16 +1002,31 @@ func TestProcessTransportStart(t *testing.T) {
 	script := filepath.Join(dir, "fake-claude")
 	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o755))
 
+	var (
+		snapshotCount     int
+		snapshotAvailable bool
+		snapshotCalls     int
+		quiesced          int
+	)
 	transport := NewProcessTransport(nil, Options{
 		CLIPath: script,
 		Cwd:     dir,
+		ObserveProcessInventory: func(_ context.Context, inventory func() (int, bool)) {
+			snapshotCount, snapshotAvailable = inventory()
+			snapshotCalls++
+		},
+		ObserveProcessQuiesced: func(context.Context) { quiesced++ },
 	})
 	require.NoError(t, transport.Start(context.Background()))
+	require.Equal(t, 1, snapshotCalls)
+	require.Zero(t, snapshotCount)
+	require.False(t, snapshotAvailable)
 	require.Equal(t, dir, transport.cmd.Dir)
 	require.NotNil(t, transport.stdin)
 	require.NotNil(t, transport.stdout)
 	require.NotNil(t, transport.stderr)
 	require.NoError(t, transport.Close())
+	require.Equal(t, 1, quiesced)
 
 	transport = NewProcessTransport(nil, Options{CLIPath: script})
 	require.NoError(t, transport.Start(context.Background()))

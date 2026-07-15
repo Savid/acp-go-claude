@@ -38,6 +38,13 @@ type Options struct {
 	// ObserveStartupStage receives exact spawn/readiness durations. It is
 	// observational only and must not influence startup control flow.
 	ObserveStartupStage func(context.Context, string, time.Duration, error)
+	// ObserveProcessInventory registers a live contained tree and a function
+	// that returns its current exact absolute process count when the platform
+	// backend can prove one.
+	ObserveProcessInventory func(context.Context, func() (int, bool))
+	// ObserveProcessQuiesced reports that containment proved this transport's
+	// complete process tree empty.
+	ObserveProcessQuiesced func(context.Context)
 
 	PermissionHandler  PermissionHandler
 	ElicitationHandler ElicitationHandler

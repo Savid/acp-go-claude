@@ -153,13 +153,34 @@ func TestProcessTransportQuiescenceProofFailures(t *testing.T) {
 		processContainmentClose = oldClose
 	})
 
-	transport := &ProcessTransport{tree: &processContainment{processGroupID: 123}}
+	quiesced := 0
+	var inventories []func() (int, bool)
+	transport := &ProcessTransport{
+		tree: &processContainment{processGroupID: 123},
+		options: Options{
+			ObserveProcessInventory: func(_ context.Context, inventory func() (int, bool)) {
+				inventories = append(inventories, inventory)
+			},
+			ObserveProcessQuiesced: func(context.Context) {
+				quiesced++
+			},
+		},
+	}
 	syscallKill = func(int, syscall.Signal) error { return errors.New("probe failed") }
 	require.ErrorIs(t, transport.quiesceProcessTree(), ErrProcessTreeUnproven)
+	require.Zero(t, quiesced, "unproven containment must not report zero descendants")
+	require.Len(t, inventories, 1)
+	_, exact := inventories[0]()
+	require.False(t, exact, "unproven containment must invalidate its local inventory")
 
 	syscallKill = func(int, syscall.Signal) error { return syscall.ESRCH }
 	processContainmentClose = func(*processContainment) error { return errors.New("close failed") }
 	require.ErrorContains(t, transport.quiesceProcessTree(), "close Claude process containment")
+	require.Equal(t, 1, quiesced, "proved quiescence remains exact even if handle cleanup fails")
+
+	count, exact := transport.tree.processSnapshot()
+	require.Zero(t, count)
+	require.False(t, exact, "Unix process groups cannot provide an atomic absolute inventory")
 }
 
 func TestProcessTransportCloseKillsUnixProcessGroup(t *testing.T) {

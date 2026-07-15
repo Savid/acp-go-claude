@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,4 +52,79 @@ func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {
 	}, observer.New(observer.Config{}))
 	_, err = rejected.ReserveScratchRoot(t.Context(), RuntimeResourcePrompt)
 	require.ErrorIs(t, err, wantErr)
+}
+
+func TestRuntimeProcessSnapshotTrackerAggregatesOnlyCompleteInventories(t *testing.T) {
+	var snapshots []int
+	tracker := newRuntimeProcessSnapshotTracker(RuntimeResourceHooks{
+		ObserveProcessSnapshot: func(_ context.Context, kind RuntimeProcessKind, count int) {
+			require.Equal(t, RuntimeProcessProviderDescendant, kind)
+			snapshots = append(snapshots, count)
+		},
+	})
+	first := tracker.newSource()
+	second := tracker.newSource()
+	unknown := tracker.newSource()
+
+	firstCount := 1
+	first.started(t.Context(), func() (int, bool) { return firstCount, true })
+	firstCount = 4
+	second.started(t.Context(), func() (int, bool) { return 2, true })
+	unknown.started(t.Context(), func() (int, bool) { return 0, false })
+	firstCount = 5
+	first.started(t.Context(), func() (int, bool) { return firstCount, true })
+	require.Equal(t, []int{1, 6}, snapshots, "every boundary must re-query all active inventories")
+
+	unknown.quiesced(t.Context())
+	second.quiesced(t.Context())
+	first.quiesced(t.Context())
+	require.Equal(t, []int{1, 6, 7, 5, 0}, snapshots)
+
+	unproven := tracker.newSource()
+	unproven.started(t.Context(), func() (int, bool) { return 3, true })
+	unknown.started(t.Context(), func() (int, bool) { return 0, false })
+	unproven.quiesced(t.Context())
+	require.Equal(t, []int{1, 6, 7, 5, 0, 3}, snapshots, "an unproven tree must retain unknown inventory and prevent zero")
+}
+
+func TestRuntimeProcessSnapshotTrackerSerializesConcurrentLifecycles(t *testing.T) {
+	var snapshots []int
+	tracker := newRuntimeProcessSnapshotTracker(RuntimeResourceHooks{
+		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
+			snapshots = append(snapshots, count)
+		},
+	})
+
+	var group sync.WaitGroup
+	for range 64 {
+		source := tracker.newSource()
+		group.Go(func() {
+			source.started(t.Context(), func() (int, bool) { return 1, true })
+			source.quiesced(t.Context())
+		})
+	}
+	group.Wait()
+
+	require.NotEmpty(t, snapshots)
+	require.Equal(t, 0, snapshots[len(snapshots)-1])
+}
+
+func TestRuntimeProcessSnapshotTrackerAllowsReentrantQuiescence(t *testing.T) {
+	var (
+		snapshots []int
+		source    *runtimeProcessSnapshotSource
+	)
+	tracker := newRuntimeProcessSnapshotTracker(RuntimeResourceHooks{
+		ObserveProcessSnapshot: func(ctx context.Context, _ RuntimeProcessKind, count int) {
+			snapshots = append(snapshots, count)
+			if count == 1 {
+				source.quiesced(ctx)
+			}
+		},
+	})
+	source = tracker.newSource()
+
+	source.started(t.Context(), func() (int, bool) { return 1, true })
+
+	require.Equal(t, []int{1, 0}, snapshots)
 }

@@ -756,6 +756,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	}
 
 	defaultModel := firstNonEmptyString(start.MetaOptions.Model, a.options.DefaultModel)
+	processSnapshotSource := a.descendantProcesses.newSource()
 
 	options := claude.Options{
 		CLIPath:                 a.options.ExecutablePath,
@@ -784,7 +785,9 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 				observe(stageCtx, RuntimeResourceSession, RuntimeStartupStage(stage), elapsed, stageErr)
 			}
 		},
-		SessionMirror: true,
+		ObserveProcessInventory: processSnapshotSource.started,
+		ObserveProcessQuiesced:  processSnapshotSource.quiesced,
+		SessionMirror:           true,
 		Hooks: claude.Hooks{
 			claude.HookEventPostToolUse: {
 				{

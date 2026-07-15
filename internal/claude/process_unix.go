@@ -107,6 +107,8 @@ func (c *processContainment) signal(signal syscall.Signal) error {
 
 func (*processContainment) close() error { return nil }
 
+func (*processContainment) processSnapshot() (int, bool) { return 0, false }
+
 func configureProcessCommandPlatform(cmd *exec.Cmd) {
 	cmd.SysProcAttr = processSysProcAttr()
 	cmd.Cancel = func() error {

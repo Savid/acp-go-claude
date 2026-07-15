@@ -33,6 +33,7 @@ const stderrTailLines = 20
 
 var (
 	processCommandContext    = exec.CommandContext
+	processStartContained    = startContainedProcess
 	processAfterDecode       = func() {}
 	processGetwd             = os.Getwd
 	processTerminate         = terminateProcess
@@ -164,8 +165,12 @@ func (t *ProcessTransport) Start(ctx context.Context) error {
 		return fmt.Errorf("create stderr pipe: %w", err)
 	}
 
-	tree, err := startContainedProcess(cmd)
+	tree, err := processStartContained(cmd)
 	if err != nil {
+		if errors.Is(err, ErrProcessTreeUnproven) && t.options.ObserveProcessInventory != nil {
+			t.options.ObserveProcessInventory(ctx, unavailableProcessInventory)
+		}
+
 		return fmt.Errorf("start claude: %w", err)
 	}
 
@@ -174,6 +179,10 @@ func (t *ProcessTransport) Start(ctx context.Context) error {
 	t.stdin = stdin
 	t.stdout = stdout
 	t.stderr = stderr
+
+	if t.options.ObserveProcessInventory != nil {
+		t.options.ObserveProcessInventory(ctx, tree.processSnapshot)
+	}
 
 	return nil
 }
@@ -500,7 +509,15 @@ func (t *ProcessTransport) quiesceProcessTree() error {
 	}
 
 	if err := t.tree.quiesce(processShutdownWaitDelay); err != nil {
+		if t.options.ObserveProcessInventory != nil {
+			t.options.ObserveProcessInventory(context.Background(), unavailableProcessInventory)
+		}
+
 		return fmt.Errorf("%w: %v", ErrProcessTreeUnproven, err)
+	}
+
+	if t.options.ObserveProcessQuiesced != nil {
+		t.options.ObserveProcessQuiesced(context.Background())
 	}
 
 	if err := processContainmentClose(t.tree); err != nil {
@@ -511,6 +528,8 @@ func (t *ProcessTransport) quiesceProcessTree() error {
 
 	return nil
 }
+
+func unavailableProcessInventory() (int, bool) { return 0, false }
 
 func (t *ProcessTransport) waitForShutdown(waitErr <-chan error, shutdown bool) error {
 	if processShutdownWaitDelay <= 0 {

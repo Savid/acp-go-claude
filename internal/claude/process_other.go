@@ -23,6 +23,8 @@ func (*processContainment) quiesce(time.Duration) error {
 
 func (*processContainment) close() error { return nil }
 
+func (*processContainment) processSnapshot() (int, bool) { return 0, false }
+
 func configureProcessCommandPlatform(cmd *exec.Cmd) {
 	cmd.Cancel = func() error {
 		_, err := killProcess(cmd)

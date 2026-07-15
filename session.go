@@ -157,16 +157,21 @@ type agentSession struct {
 	clientOptions claude.Options
 	canRelaunch   bool
 
-	turn              chan struct{}
-	mu                sync.Mutex
-	permissionSaveMu  sync.Mutex
-	cancel            context.CancelFunc
-	turnCancelled     bool
-	permissionCancel  map[string]*permissionRequestCancel
-	elicitationCancel map[int64]*elicitationRequestCancel
-	elicitationSeq    int64
-	permissionRules   map[string]string
-	materialized      *materializedSession
+	turn               chan struct{}
+	cancelMu           sync.Mutex
+	mu                 sync.Mutex
+	permissionSaveMu   sync.Mutex
+	cancel             context.CancelFunc
+	turnCancelled      bool
+	turnNonce          string
+	permissionCancel   map[string]*permissionRequestCancel
+	elicitationCancel  map[int64]*elicitationRequestCancel
+	elicitationSeq     int64
+	permissionRules    map[string]string
+	materialized       *materializedSession
+	mcpConfigDir       string
+	nativeRootRelease  func()
+	scratchRootRelease func()
 	// Started sessions always have a mirror; storeless mirrors still parse
 	// mirror rows and simply skip transcript persistence.
 	mirror           *sessionMirror

@@ -30,10 +30,7 @@ func TestClaudeCLISessionStoreMirrorAndResume(t *testing.T) {
 	require.NoError(t, err)
 
 	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
-		return conn.Prompt(ctx, acp.PromptRequest{
-			SessionId: session.SessionId,
-			Prompt:    []acp.ContentBlock{acp.TextBlock("Reply with exactly ACP_STORE_OK and no punctuation.")},
-		})
+		return conn.Prompt(ctx, claudeacp.TextPromptRequest(session.SessionId, "turn-store-new", "Reply with exactly ACP_STORE_OK and no punctuation."))
 	})
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	require.Contains(t, client.text(), "ACP_STORE_OK")
@@ -55,10 +52,7 @@ func TestClaudeCLISessionStoreMirrorAndResume(t *testing.T) {
 	require.NoError(t, err)
 
 	resp = promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
-		return conn.Prompt(ctx, acp.PromptRequest{
-			SessionId: session.SessionId,
-			Prompt:    []acp.ContentBlock{acp.TextBlock("Reply with exactly ACP_STORE_RESUME_OK and no punctuation.")},
-		})
+		return conn.Prompt(ctx, claudeacp.TextPromptRequest(session.SessionId, "turn-store-resume", "Reply with exactly ACP_STORE_RESUME_OK and no punctuation."))
 	})
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	require.Contains(t, client.text(), "ACP_STORE_RESUME_OK")

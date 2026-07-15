@@ -65,8 +65,8 @@ func BuildArgs(options Options) []string {
 		args = append(args, "--json-schema", compactJSON(options.JSONSchema))
 	}
 
-	if options.MCPConfigJSON != "" {
-		args = append(args, "--mcp-config", options.MCPConfigJSON, "--strict-mcp-config")
+	if options.MCPConfigPath != "" {
+		args = append(args, "--mcp-config", options.MCPConfigPath, "--strict-mcp-config")
 	}
 
 	if options.SettingSources != nil {

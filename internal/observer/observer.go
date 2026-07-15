@@ -76,6 +76,7 @@ type Config struct {
 type Observer struct {
 	propagator propagation.TextMapPropagator
 	tracer     trace.Tracer
+	runtime    *runtimeObserver
 
 	acpRequestCount    metric.Int64Counter
 	acpRequestDuration metric.Float64Histogram
@@ -174,6 +175,7 @@ func New(config Config) *Observer {
 		propagator: propagator,
 		tracer:     tracerProvider.Tracer(InstrumentationName, tracerOptions...),
 	}
+	observer.runtime = newRuntimeObserver(meter, "acp_go_claude")
 
 	observer.acpRequestCount = mustInt64Counter(meter, "acp_go_claude.acp.request.count", "ACP requests.")
 	observer.acpRequestDuration = mustFloat64Histogram(meter, "acp_go_claude.acp.request.duration", "ACP request duration.")

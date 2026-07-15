@@ -324,7 +324,7 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 		turn:   make(chan struct{}, 1),
 		client: claude.NewClient(nil, claude.Options{}, newFakeClaudeTransport()),
 	}
-	_, err = fatalAgent.Prompt(ctx, TextPromptRequest(sessionID, "hello"))
+	_, err = fatalAgent.Prompt(ctx, TextPromptRequest(sessionID, "test-turn", "hello"))
 	require.Error(t, err)
 	// A native turn failure leaves the session addressable and retriable: it is
 	// never removed from the map, so a follow-up prompt cannot return the
@@ -768,4 +768,14 @@ func TestStartSessionEdgeBranches(t *testing.T) {
 	modeApplyErrAgent, _, _ := newFakeLifecycleAgent(t, modeApplyErrTransport, WithClaudeDefaultPermissionMode("auto"))
 	_, err = modeApplyErrAgent.startSession(ctx, sessionID, sessionStart{Cwd: cwd, MetaOptions: ClaudeOptions{Model: "opus"}})
 	require.ErrorContains(t, err, "set default mode failed")
+}
+
+func TestSessionCloseReportsMCPConfigRemovalError(t *testing.T) {
+	agent := NewAgent()
+	session, cleanup := newStartedAgentSessionForTest(t, agent, "session-close-mcp")
+	defer cleanup()
+	parentFile := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(parentFile, []byte("x"), 0o600))
+	session.mcpConfigDir = filepath.Join(parentFile, "mcp")
+	require.Error(t, session.Close(t.Context()))
 }

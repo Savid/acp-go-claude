@@ -87,7 +87,7 @@ func TestEnsureClientAliveRelaunchError(t *testing.T) {
 	require.NoError(t, session.client.Close())
 	require.False(t, session.client.Alive())
 
-	_, err = agent.Prompt(ctx, TextPromptRequest(sid, "hello"))
+	_, err = agent.Prompt(ctx, TextPromptRequest(sid, "test-turn", "hello"))
 	requireTurnFailure(t, err, -32603, failureCauseTransport, "relaunch failed")
 	require.Contains(t, agent.sessions, sid)
 }
@@ -115,7 +115,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 			"error":    "rate limit exceeded",
 		}}
 
-		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.Empty(t, resp.StopReason)
 		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "rate limit exceeded")
 
@@ -137,7 +137,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 			"result": "Please run /login to authenticate",
 		}}
 
-		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.Empty(t, resp.StopReason)
 		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "Please run /login")
 
@@ -163,7 +163,7 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 		}
 	}
 
-	_, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "hello"))
+	_, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "test-turn", "hello"))
 	data := requireTurnFailure(t, err, -32603, failureCauseProcessExit, "anthropic api: connection reset by peer")
 	message, _ := data[jsonFieldMessage].(string)
 	require.NotContains(t, message, "Please start a new session")
@@ -202,7 +202,7 @@ func TestTurnFailureProcessDeathRelaunch(t *testing.T) {
 		}
 	}
 
-	_, err = agent.Prompt(ctx, TextPromptRequest(sid, "hello"))
+	_, err = agent.Prompt(ctx, TextPromptRequest(sid, "test-turn", "hello"))
 	data := requireTurnFailure(t, err, -32603, failureCauseProcessExit, "fatal: out of memory")
 	exitMessage, _ := data[jsonFieldMessage].(string)
 	require.Contains(t, exitMessage, "status 9")
@@ -213,7 +213,7 @@ func TestTurnFailureProcessDeathRelaunch(t *testing.T) {
 	require.Contains(t, agent.sessions, sid)
 
 	launchesBefore := len(transports)
-	resp, err := agent.Prompt(ctx, TextPromptRequest(sid, "again"))
+	resp, err := agent.Prompt(ctx, TextPromptRequest(sid, "test-turn", "again"))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	require.Greater(t, len(transports), launchesBefore, "the native process must be relaunched lazily")
@@ -231,7 +231,7 @@ func TestTurnFailureMalformedFrameNotFatal(t *testing.T) {
 	// An assistant frame without its message object cannot be parsed.
 	transport.queryMsgs = []map[string]any{{"type": "assistant"}}
 
-	_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+	_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 	data := requireTurnFailure(t, err, -32603, failureCauseTransport, "")
 	message, _ := data[jsonFieldMessage].(string)
 	require.NotContains(t, message, "Please start a new session")
@@ -244,7 +244,7 @@ func TestTurnFailureMalformedFrameNotFatal(t *testing.T) {
 		"stop_reason": "end_turn",
 	}}
 
-	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "again"))
+	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "again"))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 }
@@ -264,7 +264,7 @@ func TestTurnFailureCancelNotConflated(t *testing.T) {
 		transport.errs <- errors.New("native boom")
 	}
 
-	resp, err := session.Prompt(promptCtx, TextPromptRequest(session.id, "hello"))
+	resp, err := session.Prompt(promptCtx, TextPromptRequest(session.id, "test-turn", "hello"))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
 }
@@ -280,7 +280,7 @@ func TestTurnFailureTimeout(t *testing.T) {
 	session.agent.options.TurnTimeout = 50 * time.Millisecond
 	transport.queryMsgs = nil // harness hangs: no result, no error
 
-	_, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "hello"))
+	_, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "test-turn", "hello"))
 	requireTurnFailure(t, err, -32603, failureCauseTimeout, "")
 }
 
@@ -305,7 +305,7 @@ func TestTurnFailureCancelWinsOverCoincidentTimeout(t *testing.T) {
 		require.NoError(t, session.Cancel(context.Background()))
 	}
 
-	resp, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "hello"))
+	resp, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "test-turn", "hello"))
 	require.NoError(t, err, "coincident cancel must never surface a timeout failure")
 	require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
 }

@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -11,6 +12,41 @@ import (
 
 // Option configures the Claude ACP agent.
 type Option func(*Options)
+
+// RuntimeResourceKind identifies the lifecycle scope consuming a host-managed resource.
+type RuntimeResourceKind string
+
+const (
+	RuntimeResourceRuntime   RuntimeResourceKind = "runtime"
+	RuntimeResourceSession   RuntimeResourceKind = "session"
+	RuntimeResourcePrompt    RuntimeResourceKind = "prompt"
+	RuntimeResourceDiscovery RuntimeResourceKind = "discovery"
+)
+
+type RuntimeProcessKind string
+
+const (
+	RuntimeProcessHomeLockSupervisor RuntimeProcessKind = "home_lock_supervisor"
+	RuntimeProcessProviderDescendant RuntimeProcessKind = "provider_descendant"
+)
+
+type RuntimeStartupStage string
+
+const (
+	RuntimeStartupSpawn         RuntimeStartupStage = "spawn"
+	RuntimeStartupReadiness     RuntimeStartupStage = "readiness"
+	RuntimeStartupConfiguration RuntimeStartupStage = "configuration"
+	RuntimeStartupSession       RuntimeStartupStage = "session"
+)
+
+// RuntimeResourceHooks lets an embedding host enforce native-root and scratch-root limits.
+type RuntimeResourceHooks struct {
+	AcquireNativeRoot      func(context.Context, RuntimeResourceKind) (func(), error)
+	ReserveScratchRoot     func(context.Context, RuntimeResourceKind) (func(), error)
+	ObserveProcess         func(context.Context, RuntimeProcessKind, int64)
+	ObserveProcessSnapshot func(context.Context, RuntimeProcessKind, int)
+	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
+}
 
 // SettingSource selects one Claude Code filesystem settings source.
 type SettingSource string
@@ -103,7 +139,8 @@ type Options struct {
 	ControlHandlerTimeout time.Duration
 	// TurnTimeout bounds one Claude prompt turn. Zero (the default) means no
 	// deadline. On expiry the turn is aborted and fails with cause "timeout".
-	TurnTimeout time.Duration
+	TurnTimeout          time.Duration
+	RuntimeResourceHooks RuntimeResourceHooks
 
 	defaultPermissionModeSet bool
 }
@@ -221,6 +258,13 @@ func WithHome(path string) Option {
 func WithScratchDir(dir string) Option {
 	return func(options *Options) {
 		options.ScratchDir = dir
+	}
+}
+
+// WithRuntimeResourceHooks installs host-facing native-root and scratch-root admission hooks.
+func WithRuntimeResourceHooks(hooks RuntimeResourceHooks) Option {
+	return func(options *Options) {
+		options.RuntimeResourceHooks = hooks
 	}
 }
 

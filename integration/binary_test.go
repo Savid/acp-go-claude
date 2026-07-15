@@ -24,10 +24,7 @@ func TestClaudeACPAgentBinaryConversation(t *testing.T) {
 	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}})
 	require.NoError(t, err)
 
-	resp, err := conn.Prompt(ctx, acp.PromptRequest{
-		SessionId: session.SessionId,
-		Prompt:    []acp.ContentBlock{acp.TextBlock("Reply with exactly ACP_BINARY_OK and no punctuation.")},
-	})
+	resp, err := conn.Prompt(ctx, claudeacp.TextPromptRequest(session.SessionId, "turn-binary", "Reply with exactly ACP_BINARY_OK and no punctuation."))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	require.Contains(t, client.text(), "ACP_BINARY_OK")

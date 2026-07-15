@@ -22,6 +22,12 @@ err := claudeacp.Serve(ctx, input, output,
 )
 ```
 
+`Serve` closes the agent before it returns. If shutdown fails, that close error
+takes precedence over EOF or context cancellation. In particular,
+`errors.Is(err, claudeacp.ErrProcessTreeUnproven)` means the adapter could not
+prove every native Claude descendant exited; an embedding host must keep that
+runtime and its resources quarantined.
+
 ## Process and session options
 
 | Option | Purpose |
@@ -36,6 +42,7 @@ err := claudeacp.Serve(ctx, input, output,
 | `WithSessionStoreLoadTimeout` | Bound store load/list operations used during resume. |
 | `WithConcurrencyLimits` | Cap active sessions and concurrent client calls. |
 | `WithTurnTimeout` | Bound one prompt turn; expiry fails the turn with cause `timeout` (default: no deadline). |
+| `WithRuntimeResourceHooks` | Let an embedding host admit native roots and reserve adapter scratch roots before they are created. |
 
 ## Claude-specific options
 
@@ -77,6 +84,21 @@ then reports only what the harness prints.
 Request builders: `TextPromptRequest`, `CallForkSession`, `WithSessionRawEvents`,
 `WithSessionOutputSchema`, `SetConfigOptionRequest`, `SetModelRequest`,
 `DeleteSessionRequest`, `StdioMCPServer`, `HTTPMCPServer`.
+
+`PromptRequest(sessionID, turnNonce, blocks...)` and
+`TextPromptRequest(sessionID, turnNonce, text)` require a fresh, unguessable
+nonce for every turn. Use the same nonce with
+`CancelRequest(sessionID, turnNonce)` while that turn is active.
+
+`RuntimeResourceHooks` has `AcquireNativeRoot`, `ReserveScratchRoot`,
+`ObserveProcess`, `ObserveProcessSnapshot`, and `ObserveStartupStage`
+callbacks. Admission callbacks receive one of `runtime`, `session`, `prompt`,
+or `discovery` and return an idempotently wrapped release function. Native-root
+release happens only after the native controller has stopped; scratch release
+happens after deletion. Claude is lockless and emits no home-lock-supervisor
+count. Absolute descendant snapshots are emitted only when containment proves
+them; startup stages are `spawn`, `readiness`, `configuration`, and `session`
+where applicable. A nil callback keeps standalone use unbounded.
 
 Session-store surface: `SessionStore`, `SessionKey`, `SessionSummary`,
 `SessionStoreReplacement`, `InMemorySessionStore`, and the constants

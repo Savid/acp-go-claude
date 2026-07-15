@@ -1,12 +1,27 @@
-//go:build !unix
+//go:build !unix && !windows
 
 package claude
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
+	"time"
 )
+
+type processContainment struct{}
+
+func startContainedProcess(*exec.Cmd) (*processContainment, error) {
+	return nil, fmt.Errorf("claude runtime containment is unsupported on %s", runtime.GOOS)
+}
+
+func (*processContainment) quiesce(time.Duration) error {
+	return errors.New("claude runtime containment is unavailable")
+}
+
+func (*processContainment) close() error { return nil }
 
 func configureProcessCommandPlatform(cmd *exec.Cmd) {
 	cmd.Cancel = func() error {

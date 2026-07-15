@@ -56,7 +56,7 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	transport := newFakeClaudeTransport()
 	sessionClient := claude.NewClient(nil, claude.Options{}, transport)
 	require.NoError(t, sessionClient.Start(context.Background()))
-	transport.closeErr = errors.New("close failed")
+	transport.closeErr = errors.Join(errors.New("close failed"), claude.ErrProcessTreeUnproven)
 	agent.sessions["session-1"] = &agentSession{
 		agent:         agent,
 		id:            acp.SessionId("session-1"),
@@ -66,9 +66,11 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	}
 	newServeAgent = func(...Option) *Agent { return agent }
 
-	// EOF input resolves conn.Done first; the deferred agent close then hits
-	// the close-error logging branch.
-	require.NoError(t, Serve(context.Background(), bytes.NewBuffer(nil), io.Discard))
+	// EOF input resolves conn.Done first; the deferred agent close must preserve
+	// the stronger process-tree proof failure.
+	err := Serve(context.Background(), bytes.NewBuffer(nil), io.Discard)
+	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	require.ErrorIs(t, ErrProcessTreeUnproven, claude.ErrProcessTreeUnproven)
 
 	// A context that is already cancelled fails the pre-select guard before an
 	// agent is even constructed.
@@ -103,12 +105,10 @@ func TestAgentLifecycleWithFakeClaude(t *testing.T) {
 	require.NotNil(t, agent.activeSessionForStart(newResp.SessionId, sessionStart{Cwd: session.cwd, RawMessages: rawMessageConfig{All: true}}))
 
 	messageID := "message-1"
-	promptResp, err := agent.Prompt(ctx, acp.PromptRequest{
-		SessionId: newResp.SessionId,
-		MessageId: &messageID,
-		Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
-		Meta:      map[string]any{"trace": "prompt"},
-	})
+	promptRequest := TextPromptRequest(newResp.SessionId, "turn-1", "hello")
+	promptRequest.MessageId = &messageID
+	promptRequest.Meta["trace"] = "prompt"
+	promptResp, err := agent.Prompt(ctx, promptRequest)
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, promptResp.StopReason)
 	require.NotNil(t, promptResp.Usage)
@@ -140,7 +140,7 @@ func TestAgentLifecycleWithFakeClaude(t *testing.T) {
 	require.NoError(t, agent.Cancel(ctx, acp.CancelNotification{SessionId: newResp.SessionId}))
 	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: newResp.SessionId})
 	require.NoError(t, err)
-	_, err = agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "after close"))
+	_, err = agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "test-turn", "after close"))
 	require.Error(t, err)
 }
 

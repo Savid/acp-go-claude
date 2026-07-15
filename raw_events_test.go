@@ -13,6 +13,7 @@ import (
 )
 
 type rawEventPayload struct {
+	Meta      map[string]any `json:"_meta"` //nolint:tagliatelle // ACP wire format.
 	SessionId string         `json:"sessionId"`
 	Sequence  int            `json:"sequence"`
 	Source    string         `json:"source"`
@@ -63,7 +64,7 @@ func normalMessage() *claude.SystemMessage {
 func TestRawEventOversizeMarker(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
+	ctx := withTurnRoute(context.Background(), "turn-raw")
 	session, conn := newRawEventSession(t, "session-1", true)
 
 	session.emitRawClaudeMessage(ctx, oversizedMessage())
@@ -73,6 +74,9 @@ func TestRawEventOversizeMarker(t *testing.T) {
 	require.Equal(t, "session-1", events[0].SessionId)
 	require.Equal(t, 1, events[0].Sequence)
 	require.Equal(t, "claude", events[0].Source)
+	require.Equal(t, map[string]any{routeMetaKey: map[string]any{
+		routeFieldVer: float64(routeVersion), routeFieldTurn: "turn-raw",
+	}}, events[0].Meta)
 	require.Equal(t, true, events[0].Event[rawEventFieldTruncated])
 	require.Equal(t, rawEventReasonOversize, events[0].Event[rawEventFieldReason])
 	require.EqualValues(t, rawEventMaxBytes, events[0].Event[rawEventFieldMaxBytes])

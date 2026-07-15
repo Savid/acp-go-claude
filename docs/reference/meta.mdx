@@ -22,6 +22,29 @@ Initialize advertises capability descriptors under `_meta.claude`:
 | `structuredOutput` | Where the output schema is supplied and the result is returned. |
 | `models` | Model metadata (see [Models and config](/docs/features/models-config)). |
 
+Initialize also advertises the reserved route envelope separately from the
+Claude namespace:
+
+```json
+{"acp-go.dev/route":{"versions":[1]}}
+```
+
+Every `session/prompt` and every cancellation of an active turn MUST carry
+exactly `_meta["acp-go.dev/route"] = {"version":1,"turnNonce":"..."}`.
+Missing, extra, wrong-typed, unsupported-version, and stale values are rejected.
+The nonce is fresh and unguessable for each turn.
+
+Every live-turn `session/update` and `_claude/rawEvent` notification carries the
+same exact `{version, turnNonce}` object in its notification `_meta`; raw-event
+payloads also carry their structural `sessionId`. Lifecycle and load-history
+updates are not turn-scoped and therefore do not carry a turn envelope.
+
+Outbound form and URL elicitation requests preserve their native metadata and
+add a route object containing `version`, `sessionId`, `turnNonce`, and exactly
+one of `toolCallId` or `requestId`. A native request that already owns the
+reserved key is rejected rather than overwritten. Permission requests remain
+correlated by their structural ACP session and tool-call fields.
+
 ## Session options
 
 Session-lifecycle requests accept options and raw-event opt-in:

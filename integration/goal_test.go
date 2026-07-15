@@ -37,12 +37,11 @@ func TestClaudeGoalCommandLiveProbe(t *testing.T) {
 	require.NoError(t, err)
 
 	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
-		return conn.Prompt(ctx, acp.PromptRequest{
-			SessionId: session.SessionId,
-			Prompt: []acp.ContentBlock{acp.TextBlock(
-				"/goal Reply exactly ACP_GOAL_PROBE_OK and no punctuation when this goal is satisfied.",
-			)},
-		})
+		return conn.Prompt(ctx, claudeacp.TextPromptRequest(
+			session.SessionId,
+			"turn-goal",
+			"/goal Reply exactly ACP_GOAL_PROBE_OK and no punctuation when this goal is satisfied.",
+		))
 	})
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	require.Contains(t, client.text(), "ACP_GOAL_PROBE_OK")

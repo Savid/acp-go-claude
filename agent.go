@@ -103,10 +103,13 @@ func NewAgent(opts ...Option) *Agent {
 		log = slog.Default()
 	}
 
+	observe := observer.New(observer.Config{MeterProvider: options.MeterProvider, Propagator: options.TextMapPropagator, TracerProvider: options.TracerProvider, Version: options.AgentVersion})
+	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
+
 	return &Agent{
 		options:          options,
 		log:              log,
-		observe:          observer.New(observer.Config{MeterProvider: options.MeterProvider, Propagator: options.TextMapPropagator, TracerProvider: options.TracerProvider, Version: options.AgentVersion}),
+		observe:          observe,
 		sessions:         make(map[acp.SessionId]*agentSession),
 		store:            NewInMemorySessionStore(),
 		deleted:          make(map[acp.SessionId]struct{}),
@@ -122,15 +125,16 @@ func NewAgent(opts ...Option) *Agent {
 }
 
 // Serve runs an ACP agent over the provided streams.
-func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) error {
+func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (serveErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	agent := newServeAgent(opts...)
 	defer func() {
-		if err := agent.Close(); err != nil {
-			agent.log.DebugContext(context.Background(), "close Claude ACP agent failed", slog.String(jsonFieldError, err.Error()))
+		if closeErr := agent.Close(); closeErr != nil {
+			agent.log.DebugContext(context.Background(), "close Claude ACP agent failed", slog.String(jsonFieldError, closeErr.Error()))
+			serveErr = closeErr
 		}
 	}()
 
@@ -210,6 +214,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 		AuthMethods: []acp.AuthMethod{},
 		AgentCapabilities: acp.AgentCapabilities{
 			Meta: map[string]any{
+				routeMetaKey: map[string]any{"versions": []int{routeVersion}},
 				claudeMetaKey: map[string]any{
 					"fork": map[string]any{
 						"unstable":        true,

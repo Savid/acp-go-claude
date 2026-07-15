@@ -474,7 +474,7 @@ func (s *agentSession) elicitationMeta(request claude.ElicitationRequest) map[st
 }
 
 func (s *agentSession) elicitationScope(request claude.ElicitationRequest) elicitationScope {
-	scope := elicitationScope{SessionID: s.id}
+	scope := elicitationScope{SessionID: s.id, TurnNonce: s.currentTurnNonce()}
 	if request.ToolUseID != "" {
 		scope.ToolCallID = acp.ToolCallId(request.ToolUseID)
 	}

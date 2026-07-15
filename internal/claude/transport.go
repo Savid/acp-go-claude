@@ -19,6 +19,10 @@ import (
 
 var errMessagesAlreadyStarted = errors.New("claude transport messages already started")
 
+// ErrProcessTreeUnproven means a launched Claude process tree could not be
+// proven quiescent. Callers that hold native-root admission must retain it.
+var ErrProcessTreeUnproven = errors.New("claude process tree quiescence is unproven")
+
 const transportErrorBuffer = 8
 const defaultMaxJSONLineBytes = 10 * 1024 * 1024
 const processWaitTimedOutMessage = "wait for claude process after kill timed out"
@@ -33,6 +37,7 @@ var (
 	processGetwd             = os.Getwd
 	processTerminate         = terminateProcess
 	processKill              = killProcess
+	processContainmentClose  = func(tree *processContainment) error { return tree.close() }
 	maxJSONLineBytes         = defaultMaxJSONLineBytes
 	processShutdownWaitDelay = 5 * time.Second
 	processExitGracePeriod   = 2 * time.Second
@@ -56,6 +61,7 @@ type ProcessTransport struct {
 	options Options
 
 	cmd    *exec.Cmd
+	tree   *processContainment
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr io.ReadCloser
@@ -158,11 +164,13 @@ func (t *ProcessTransport) Start(ctx context.Context) error {
 		return fmt.Errorf("create stderr pipe: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
+	tree, err := startContainedProcess(cmd)
+	if err != nil {
 		return fmt.Errorf("start claude: %w", err)
 	}
 
 	t.cmd = cmd
+	t.tree = tree
 	t.stdin = stdin
 	t.stdout = stdout
 	t.stderr = stderr
@@ -458,10 +466,10 @@ func (t *ProcessTransport) shutdownProcess(stdinClosed bool) error {
 		select {
 		case err := <-waitErr:
 			if expectedShutdownProcessExit(err, true) {
-				return nil
+				err = nil
 			}
 
-			return err
+			return errors.Join(err, t.quiesceProcessTree())
 		case <-timer.C:
 		}
 	}
@@ -480,7 +488,28 @@ func (t *ProcessTransport) shutdownProcess(stdinClosed bool) error {
 		closeErr = errors.Join(closeErr, err)
 	}
 
-	return closeErr
+	return errors.Join(closeErr, t.quiesceProcessTree())
+}
+
+func (t *ProcessTransport) quiesceProcessTree() error {
+	if t.tree == nil {
+		// ProcessTransport.Start always installs containment. A nil tree is only
+		// possible for package-internal tests that construct a transport around
+		// an already-started command.
+		return nil
+	}
+
+	if err := t.tree.quiesce(processShutdownWaitDelay); err != nil {
+		return fmt.Errorf("%w: %v", ErrProcessTreeUnproven, err)
+	}
+
+	if err := processContainmentClose(t.tree); err != nil {
+		return fmt.Errorf("close Claude process containment: %w", err)
+	}
+
+	t.tree = nil
+
+	return nil
 }
 
 func (t *ProcessTransport) waitForShutdown(waitErr <-chan error, shutdown bool) error {

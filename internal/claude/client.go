@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -93,11 +94,15 @@ func (c *Client) Start(ctx context.Context) error {
 	// Start and initialize.
 	runCtx, cancel := context.WithCancel(context.Background())
 
+	spawnStarted := time.Now()
 	if err := c.transport.Start(runCtx); err != nil {
+		c.observeStartupStage(ctx, "spawn", spawnStarted, err)
 		cancel()
 
 		return err
 	}
+
+	c.observeStartupStage(ctx, "spawn", spawnStarted, nil)
 
 	controller := NewController(c.log, c.transport)
 	controller.SetHandlerTimeout(c.options.ControlHandlerTimeout)
@@ -111,9 +116,9 @@ func (c *Client) Start(ctx context.Context) error {
 		c.stateMu.Unlock()
 		cancel()
 
-		c.closeTransportDebug(ctx, "client closed during start")
+		closeErr := c.closeTransportDebug(ctx, "client closed during start")
 
-		return ErrClientClosed
+		return errors.Join(ErrClientClosed, closeErr)
 	}
 
 	c.controller = controller
@@ -125,14 +130,17 @@ func (c *Client) Start(ctx context.Context) error {
 		timeout = defaultInitializeTimeout
 	}
 
+	readinessStarted := time.Now()
 	resp, err := controller.SendRequest(ctx, "initialize", map[string]any{"hooks": c.options.Hooks.toPayload()}, timeout)
+	c.observeStartupStage(ctx, "readiness", readinessStarted, err)
+
 	if err != nil {
 		cancel()
 
-		c.closeTransportDebug(ctx, "initialize failed")
+		closeErr := c.closeTransportDebug(ctx, "initialize failed")
 		c.clearController(controller)
 
-		return fmt.Errorf("initialize claude control protocol: %w", err)
+		return errors.Join(fmt.Errorf("initialize claude control protocol: %w", err), closeErr)
 	}
 
 	c.setInitializeInfo(parseInitializeInfo(resp.Response[keyResponse]))
@@ -140,10 +148,20 @@ func (c *Client) Start(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) closeTransportDebug(ctx context.Context, reason string) {
+func (c *Client) observeStartupStage(ctx context.Context, stage string, started time.Time, err error) {
+	if c.options.ObserveStartupStage != nil {
+		c.options.ObserveStartupStage(ctx, stage, time.Since(started), err)
+	}
+}
+
+func (c *Client) closeTransportDebug(ctx context.Context, reason string) error {
 	if err := c.transport.Close(); err != nil {
 		c.log.DebugContext(ctx, "close Claude transport failed", slog.String("reason", reason), slog.String("error", err.Error()))
+
+		return err
 	}
+
+	return nil
 }
 
 func (c *Client) activeController() *Controller {

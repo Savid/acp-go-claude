@@ -66,8 +66,9 @@ func TestRequestBuilderClones(t *testing.T) {
 	require.Equal(t, acp.SessionId("s"), DeleteSessionRequest("s").SessionId)
 	require.Equal(t, acp.SessionConfigValueId("high"), SetConfigOptionRequest("s", configEffort, "high").ValueId.Value)
 	require.Equal(t, acp.SessionConfigValueId("sonnet"), SetModelRequest("s", "sonnet").ValueId.Value)
-	require.Len(t, PromptRequest("s", acp.TextBlock("hello")).Prompt, 1)
-	require.Equal(t, "hello", TextPromptRequest("s", "hello").Prompt[0].Text.Text)
+	require.Len(t, PromptRequest("s", "turn-1", acp.TextBlock("hello")).Prompt, 1)
+	require.Equal(t, "hello", TextPromptRequest("s", "test-turn", "hello").Prompt[0].Text.Text)
+	require.Equal(t, turnRouteMeta("turn-cancel"), CancelRequest("s", "turn-cancel").Meta)
 
 	list := ListSessionsRequest(WithListSessionsCwd("/repo"), WithListSessionsCursor("c"), WithListSessionsMeta(map[string]any{"a": "b"}))
 	require.Equal(t, "/repo", *list.Cwd)

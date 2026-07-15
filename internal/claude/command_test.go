@@ -26,7 +26,7 @@ func TestBuildArgs(t *testing.T) {
 		Bare:                    true,
 		SettingSources:          []string{"user", "project", "local"},
 		AddDirs:                 []string{"/repo", ""},
-		MCPConfigJSON:           `{"mcpServers":{}}`,
+		MCPConfigPath:           "/tmp/acp-go-claude-mcp.json",
 		JSONSchema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{"ok": map[string]any{"type": "boolean"}},
@@ -47,7 +47,7 @@ func TestBuildArgs(t *testing.T) {
 		"--model", "claude-test",
 		"--system-prompt", "system",
 		"--json-schema", `{"properties":{"ok":{"type":"boolean"}},"type":"object"}`,
-		"--mcp-config", `{"mcpServers":{}}`,
+		"--mcp-config", "/tmp/acp-go-claude-mcp.json",
 		"--strict-mcp-config",
 		"--setting-sources=user,project,local",
 		"--add-dir", "/repo",

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -219,7 +220,9 @@ func runLoadedSession(
 
 	fmt.Fprintln(stdout, "== resume smoke test ==")
 
-	resp, err := conn.Prompt(ctx, claudeacp.TextPromptRequest(id, prompt))
+	turnNonce := newTurnNonce()
+
+	resp, err := conn.Prompt(ctx, claudeacp.TextPromptRequest(id, turnNonce, prompt))
 	if err != nil {
 		return err
 	}
@@ -227,6 +230,10 @@ func runLoadedSession(
 	fmt.Fprintf(stdout, "\n\nstop reason: %s\n", resp.StopReason)
 
 	return nil
+}
+
+func newTurnNonce() string {
+	return rand.Text()
 }
 
 func readTranscriptJSONL(path string) ([]claudeacp.SessionStoreEntry, string, string, error) {

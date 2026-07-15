@@ -31,11 +31,13 @@ servers := []acp.McpServer{
 
 ## How servers reach Claude
 
-The adapter serializes the accepted servers into a single JSON document and
-launches the session's Claude process with `--mcp-config <json>` plus
+The adapter serializes the accepted servers into a mode-`0600` file under the
+adapter-owned session scratch and launches Claude with `--mcp-config <path>` plus
 `--strict-mcp-config`. `--strict-mcp-config` makes Claude use **only** the
 servers the host declared for that session and ignore any MCP servers configured
-in the user's own Claude settings.
+in the user's own Claude settings. The payload, including HTTP header values,
+never appears in process arguments, and the file is deleted when the session
+closes.
 
 <Note>
 Because of `--strict-mcp-config`, servers configured in the operator's Claude

@@ -3,12 +3,53 @@ package claudeacp
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"time"
+
+	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 // sessionInterruptTimeout bounds the native interrupt. The interrupt runs under
 // a background-derived context so a cancelled caller context cannot abort it.
 var sessionInterruptTimeout = 5 * time.Second
+var sessionRemoveAll = os.RemoveAll
+
+// finalizeSessionRuntimeResources returns admissions only after the resource
+// they account for is gone. A failed process-tree proof retains both the
+// native admission and every adapter-owned scratch root because that tree may
+// still be using them. Other close errors do not obscure a successful proof.
+func finalizeSessionRuntimeResources(
+	runtimeErr error,
+	nativeRelease func(),
+	mcpConfigDir string,
+	materialized *materializedSession,
+	scratchRelease func(),
+) error {
+	if errors.Is(runtimeErr, claude.ErrProcessTreeUnproven) {
+		return runtimeErr
+	}
+
+	if nativeRelease != nil {
+		nativeRelease()
+	}
+
+	var mcpRemoveErr error
+	if mcpConfigDir != "" {
+		mcpRemoveErr = sessionRemoveAll(mcpConfigDir)
+	}
+
+	var materializedRemoveErr error
+	if materialized != nil {
+		materializedRemoveErr = materialized.Close()
+	}
+
+	if mcpRemoveErr == nil && materializedRemoveErr == nil && scratchRelease != nil {
+		scratchRelease()
+	}
+
+	return errors.Join(runtimeErr, mcpRemoveErr, materializedRemoveErr)
+}
 
 func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
 	turn := s.turnQueue()
@@ -95,13 +136,15 @@ func (s *agentSession) turnQueue() chan struct{} {
 // no-op for sessions that cannot relaunch (e.g. injected test clients) and for
 // clients that are still alive.
 func (s *agentSession) ensureClientAlive(ctx context.Context) error {
-	if !s.canRelaunch {
+	s.mu.Lock()
+	canRelaunch := s.canRelaunch
+	client := s.client
+	nativeRelease := s.nativeRootRelease
+	s.mu.Unlock()
+
+	if !canRelaunch {
 		return nil
 	}
-
-	s.mu.Lock()
-	client := s.client
-	s.mu.Unlock()
 
 	if client != nil && client.Alive() {
 		return nil
@@ -110,23 +153,56 @@ func (s *agentSession) ensureClientAlive(ctx context.Context) error {
 	opts := s.clientOptions
 	opts.ResumeID = string(s.id)
 
-	relaunched := s.agent.newClaudeClient(s.agent.log, opts)
-	if err := relaunched.Start(ctx); err != nil {
-		_ = relaunched.Close()
+	var previousCloseErr error
+	if client != nil {
+		previousCloseErr = client.Close()
+		if errors.Is(previousCloseErr, claude.ErrProcessTreeUnproven) {
+			s.mu.Lock()
+			s.canRelaunch = false
+			s.mu.Unlock()
 
-		return err
+			return fmt.Errorf("prove previous Claude process tree quiescent: %w", previousCloseErr)
+		}
+	}
+
+	if nativeRelease != nil {
+		nativeRelease()
 	}
 
 	s.mu.Lock()
-	old := s.client
-	s.client = relaunched
+	if s.client == client {
+		s.nativeRootRelease = nil
+	}
 	s.mu.Unlock()
 
-	if old != nil {
-		_ = old.Close()
+	nativeRelease, err := acquireNativeRoot(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if err != nil {
+		return err
 	}
 
-	return nil
+	relaunched := s.agent.newClaudeClient(s.agent.log, opts)
+	if err := relaunched.Start(ctx); err != nil {
+		cleanupErr := errors.Join(err, relaunched.Close())
+
+		if !errors.Is(cleanupErr, claude.ErrProcessTreeUnproven) {
+			nativeRelease()
+		} else {
+			// No later path may launch another root under an admission whose
+			// process-tree quiescence could not be proven.
+			s.mu.Lock()
+			s.canRelaunch = false
+			s.mu.Unlock()
+		}
+
+		return errors.Join(previousCloseErr, cleanupErr)
+	}
+
+	s.mu.Lock()
+	s.client = relaunched
+	s.nativeRootRelease = nativeRelease
+	s.mu.Unlock()
+
+	return previousCloseErr
 }
 
 // Cancel cancels the active Claude turn. The local turn context is cancelled
@@ -134,6 +210,38 @@ func (s *agentSession) ensureClientAlive(ctx context.Context) error {
 // interrupt then runs on its own bounded background context so a cancelled
 // caller context cannot abort it.
 func (s *agentSession) Cancel(ctx context.Context) (err error) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	return s.cancelNative(ctx)
+}
+
+// cancelRouted validates the active turn and keeps its native interrupt fenced
+// from turn completion and admission of the next turn.
+func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) error {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+
+	s.mu.Lock()
+	activeNonce := s.turnNonce
+	active := s.cancel != nil && activeNonce != ""
+	s.mu.Unlock()
+
+	if active {
+		route, err := parseInboundTurnRoute(meta)
+		if err != nil {
+			return err
+		}
+
+		if route.turnNonce != activeNonce {
+			return routeInvalid("stale route turnNonce")
+		}
+	}
+
+	return s.cancelNative(ctx)
+}
+
+func (s *agentSession) cancelNative(ctx context.Context) (err error) {
 	s.mu.Lock()
 	turnCancel := s.cancel
 	s.mu.Unlock()
@@ -155,6 +263,13 @@ func (s *agentSession) Cancel(ctx context.Context) (err error) {
 	defer cancelInterrupt()
 
 	return s.client.Interrupt(interruptCtx)
+}
+
+func (s *agentSession) currentTurnNonce() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.turnNonce
 }
 
 // cancelPendingInteractions marks the turn cancelled and resolves any pending
@@ -233,9 +348,13 @@ func (s *agentSession) Close(ctx context.Context) (err error) {
 		releaseTurn()
 	}
 
-	if s.materialized != nil {
-		err = errors.Join(err, s.materialized.Close())
-	}
+	err = finalizeSessionRuntimeResources(
+		err,
+		s.nativeRootRelease,
+		s.mcpConfigDir,
+		s.materialized,
+		s.scratchRootRelease,
+	)
 
 	if s.agent != nil {
 		s.agent.observe.RecordClaudeProcessExit(ctx, "closed", err)

@@ -28,7 +28,8 @@ func TestLocalAgentConnectionClientMethods(t *testing.T) {
 	})
 
 	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 2}))
-	clientConn := acp.NewClientSideConnection(&recordingClient{}, c2aW, a2cR)
+	recording := &recordingClient{}
+	clientConn := acp.NewClientSideConnection(recording, c2aW, a2cR)
 	conn := newLocalAgentConnection(agent, a2cW, c2aR)
 	agent.setConnection(conn)
 
@@ -38,13 +39,34 @@ func TestLocalAgentConnectionClientMethods(t *testing.T) {
 
 	require.NoError(t, conn.UnstableCompleteElicitation(ctx, acp.UnstableCompleteElicitationNotification{ElicitationId: "e1"}))
 	_, err = conn.UnstableCreateElicitation(ctx, acp.UnstableCreateElicitationRequest{Form: &acp.UnstableCreateElicitationForm{Message: "m", Mode: "form"}})
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "sessionId and turnNonce")
 	_, err = conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{}, elicitationScope{})
 	require.ErrorContains(t, err, "form or url")
-	requestIDStr := acp.RequestIdStr("r1")
-	requestID := acp.RequestId{Str: &requestIDStr}
-	_, err = conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{Url: &acp.UnstableCreateElicitationUrl{ElicitationId: "e2", Message: "m", Mode: "url", Url: "https://example.test", Meta: map[string]any{"u": "m"}}}, elicitationScope{SessionID: "s", ToolCallID: "tool-1", RequestID: &requestID})
+	requestID := "r1"
+	_, err = conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{Url: &acp.UnstableCreateElicitationUrl{ElicitationId: "e2", Message: "m", Mode: "url", Url: "https://example.test", Meta: map[string]any{"u": "m"}}}, elicitationScope{SessionID: "s", TurnNonce: "turn-1", RequestID: &requestID})
 	require.NoError(t, err)
+	_, err = conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{Form: &acp.UnstableCreateElicitationForm{Message: "approve", Mode: "form", Meta: map[string]any{"f": "m"}}}, elicitationScope{SessionID: "s", TurnNonce: "turn-2", ToolCallID: "tool-1"})
+	require.NoError(t, err)
+	elicitations := recording.Elicitations()
+	require.Len(t, elicitations, 2)
+	require.Equal(t, map[string]any{
+		"u": "m",
+		routeMetaKey: map[string]any{
+			routeFieldVer:  float64(1),
+			routeFieldID:   "s",
+			routeFieldTurn: "turn-1",
+			"requestId":    "r1",
+		},
+	}, elicitations[0].Url.Meta)
+	require.Equal(t, map[string]any{
+		"f": "m",
+		routeMetaKey: map[string]any{
+			routeFieldVer:  float64(1),
+			routeFieldID:   "s",
+			routeFieldTurn: "turn-2",
+			"toolCallId":   "tool-1",
+		},
+	}, elicitations[1].Form.Meta)
 	_, err = conn.ReadTextFile(ctx, acp.ReadTextFileRequest{Path: "/tmp/file"})
 	require.Error(t, err)
 	_, err = conn.WriteTextFile(ctx, acp.WriteTextFileRequest{Path: "/tmp/file", Content: "body"})
@@ -166,8 +188,8 @@ func TestLocalAgentConnectionClientBackpressure(t *testing.T) {
 
 	requireBackpressure(t, conn.UnstableCompleteElicitation(ctx, acp.UnstableCompleteElicitationNotification{ElicitationId: "e1"}))
 	_, err = conn.UnstableCreateElicitation(ctx, acp.UnstableCreateElicitationRequest{Form: &acp.UnstableCreateElicitationForm{Message: "m", Mode: "form"}})
-	requireBackpressure(t, err)
-	_, err = conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{Url: &acp.UnstableCreateElicitationUrl{ElicitationId: "e2", Message: "m", Mode: "url", Url: "https://example.test"}}, elicitationScope{})
+	require.ErrorContains(t, err, "sessionId and turnNonce")
+	_, err = conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{Url: &acp.UnstableCreateElicitationUrl{ElicitationId: "e2", Message: "m", Mode: "url", Url: "https://example.test"}}, elicitationScope{SessionID: "s", TurnNonce: "turn-1"})
 	requireBackpressure(t, err)
 	_, err = conn.ReadTextFile(ctx, acp.ReadTextFileRequest{Path: "/tmp/file"})
 	requireBackpressure(t, err)

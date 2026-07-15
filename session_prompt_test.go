@@ -46,7 +46,7 @@ func TestSessionPromptDenyInvokeCommands(t *testing.T) {
 			}
 
 			before := len(transport.Sent())
-			resp, err := session.Prompt(ctx, TextPromptRequest(session.id, tc.prompt))
+			resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", tc.prompt))
 			if tc.wantDenied {
 				require.Empty(t, resp)
 				requireInvalidCommandAlternative(t, err, tc.wantAlt)
@@ -74,7 +74,7 @@ func TestSuppressedCommandsPassThroughAsText(t *testing.T) {
 	}
 
 	for _, prompt := range []string{"/cost", "/heapdump"} {
-		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, prompt))
+		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", prompt))
 		require.NoError(t, err)
 		require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 		require.Equal(t, prompt, lastSentUserText(t, transport))
@@ -89,13 +89,13 @@ func TestMCPPromptRewriteUsesAdvertisedCommandsSnapshot(t *testing.T) {
 	defer cleanup()
 	session.availableCommands = []claude.SlashCommand{{Name: "server:name (MCP)", Description: "Run MCP command"}}
 
-	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "/mcp:server:name args"))
+	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "/mcp:server:name args"))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	require.Equal(t, "/mcp:server:name args", lastSentUserText(t, transport))
 
 	session.advertisedCommands = []acp.AvailableCommand{{Name: "mcp:server:name"}}
-	resp, err = session.Prompt(ctx, TextPromptRequest(session.id, "/mcp:server:name args"))
+	resp, err = session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "/mcp:server:name args"))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	require.Equal(t, "/server:name (MCP) args", lastSentUserText(t, transport))
@@ -113,10 +113,10 @@ func TestCommandTurnExclusivity(t *testing.T) {
 	session.availableCommands = []claude.SlashCommand{{Name: "compact"}}
 	session.turn <- struct{}{}
 
-	_, err := session.Prompt(ctx, TextPromptRequest(session.id, "/compact now"))
+	_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "/compact now"))
 	requireBackpressureLimit(t, err, "session_prompt")
 
-	_, err = session.Prompt(ctx, TextPromptRequest(session.id, "/clear now"))
+	_, err = session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "/clear now"))
 	requireBackpressureLimit(t, err, "session_prompt")
 }
 
@@ -132,7 +132,7 @@ func TestPromptPoisonAfterAcquireTurn(t *testing.T) {
 		session.mu.Unlock()
 	}
 
-	_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+	_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 	require.ErrorContains(t, err, "poisoned after prompt acquire")
 }
 
@@ -194,7 +194,7 @@ func TestReloadSkillsRediscoveryEmitsDynamicCommandUpdate(t *testing.T) {
 		},
 	}
 
-	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "/"+commandReloadSkills))
+	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "/"+commandReloadSkills))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 
@@ -225,7 +225,7 @@ func TestReloadPluginsRediscoveryEmitsDynamicCommandUpdate(t *testing.T) {
 		},
 	}
 
-	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "/"+commandReloadPlugins))
+	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "/"+commandReloadPlugins))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 
@@ -275,7 +275,7 @@ func TestReloadSkillsRefreshErrors(t *testing.T) {
 			transport.queryMsgs = tc.queryMsgs
 			transport.controlErr = map[string]error{"initialize": errors.New("refresh failed")}
 
-			_, err := session.Prompt(ctx, TextPromptRequest(session.id, "/"+commandReloadSkills))
+			_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "/"+commandReloadSkills))
 			require.ErrorContains(t, err, "refresh claude control initialize")
 		})
 	}
@@ -332,7 +332,7 @@ func TestInvariantGuardPoisonsSession(t *testing.T) {
 
 			require.NoError(t, session.emitAvailableCommandsUpdate(ctx, true))
 
-			_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+			_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 			require.ErrorContains(t, err, tc.wantCause)
 
 			conn, ok := session.agent.connection().(*recordingAgentClient)
@@ -342,7 +342,7 @@ func TestInvariantGuardPoisonsSession(t *testing.T) {
 			require.Len(t, updates[0].AvailableCommands, 1)
 			require.Empty(t, updates[1].AvailableCommands)
 
-			_, err = session.Prompt(ctx, TextPromptRequest(session.id, "again"))
+			_, err = session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "again"))
 			require.ErrorContains(t, err, tc.wantCause)
 
 			_, err = session.agent.SetSessionConfigOption(ctx, SetModelRequest(session.id, "opus"))
@@ -429,7 +429,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		session, transport, cleanup := newPromptFlowSession(t)
 		defer cleanup()
 		transport.sendErr = errors.New("query failed")
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.ErrorContains(t, err, "query failed")
 	})
 
@@ -437,14 +437,14 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		session, _, cleanup := newPromptFlowSession(t)
 		defer cleanup()
 		session.turn <- struct{}{}
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.Error(t, err)
 	})
 
 	t.Run("prompt mapping error", func(t *testing.T) {
 		session, _, cleanup := newPromptFlowSession(t)
 		defer cleanup()
-		_, err := session.Prompt(ctx, acp.PromptRequest{SessionId: session.id, Prompt: []acp.ContentBlock{acp.AudioBlock("abc", "audio/wav")}})
+		_, err := session.Prompt(ctx, PromptRequest(session.id, "test-turn", acp.AudioBlock("abc", "audio/wav")))
 		var reqErr *acp.RequestError
 		require.ErrorAs(t, err, &reqErr)
 		require.Equal(t, -32602, reqErr.Code)
@@ -457,7 +457,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		promptCtx, cancel := context.WithCancel(ctx)
 		transport.queryMsgs = nil
 		transport.onQuery = cancel
-		resp, err := session.Prompt(promptCtx, TextPromptRequest(session.id, "hello"))
+		resp, err := session.Prompt(promptCtx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.NoError(t, err)
 		require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
 	})
@@ -469,7 +469,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		conn, ok := session.agent.connection().(*recordingAgentClient)
 		require.True(t, ok)
 		conn.extensionErr = errors.New("raw failed")
-		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.NoError(t, err)
 		require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	})
@@ -491,7 +491,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		transport.queryMsgs = nil
 		transport.onQuery = func() { transport.errs <- errors.New("stream failed") }
 
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		// The real transport cause is surfaced in the uniform failure, never a
 		// bare stream-closed sentinel.
 		requireTurnFailure(t, err, -32603, failureCauseTransport, "stream failed")
@@ -510,7 +510,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			{"type": "transcript_mirror", "filePath": "/tmp/ignored.jsonl"},
 			{"type": "result", "subtype": "success", "is_error": false, "stop_reason": "end_turn"},
 		}
-		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.NoError(t, err)
 		require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	})
@@ -530,7 +530,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			"filePath": filepath.Join(projects, "project", "11111111-1111-4111-8111-111111111111.jsonl"),
 			"entries":  []any{map[string]any{"type": "user"}},
 		}}
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.ErrorIs(t, err, errSessionMirrorAppend)
 	})
 
@@ -540,7 +540,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		conn, ok := session.agent.connection().(*recordingAgentClient)
 		require.True(t, ok)
 		conn.sessionUpdateErr = errors.New("usage failed")
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.ErrorContains(t, err, "usage failed")
 	})
 
@@ -555,7 +555,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			"subtype": systemStatus,
 			"status":  systemStatusCompacting,
 		}}
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.ErrorContains(t, err, "compact failed")
 	})
 
@@ -571,7 +571,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 				map[string]any{"type": "text", "text": "mapped"},
 			}},
 		}}
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.ErrorContains(t, err, "mapped update failed")
 	})
 
@@ -602,7 +602,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 				},
 			},
 		}
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.ErrorContains(t, err, "hook failed")
 	})
 
@@ -633,7 +633,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			return previousFinish(s, turnCtx, interruptCtx, params, result, state, toolUpdateOptions, localOnlyCommand)
 		}
 		t.Cleanup(func() { finishPromptResultCall = previousFinish })
-		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.NoError(t, err)
 		require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 		require.Equal(t, 2, calls)
@@ -654,7 +654,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		) (acp.PromptResponse, bool, error) {
 			return acp.PromptResponse{}, false, errors.New("finish failed")
 		}
-		_, err = errorSession.Prompt(ctx, TextPromptRequest(errorSession.id, "hello"))
+		_, err = errorSession.Prompt(ctx, TextPromptRequest(errorSession.id, "test-turn", "hello"))
 		require.ErrorContains(t, err, "finish failed")
 		finishPromptResultCall = previousFinish
 	})
@@ -667,7 +667,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			"subtype":   systemSubtypeSessionStateChanged,
 			systemState: systemStateIdle,
 		}}
-		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.NoError(t, err)
 		require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	})
@@ -685,7 +685,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			session.turnCancelled = true
 			session.mu.Unlock()
 		}
-		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.NoError(t, err)
 		require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
 	})
@@ -701,7 +701,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			"subtype":   systemSubtypeSessionStateChanged,
 			systemState: systemStateIdle,
 		}}
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.ErrorContains(t, err, "idle update failed")
 	})
 
@@ -727,7 +727,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 				"entries":  []any{map[string]any{"type": "user"}},
 			},
 		}
-		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "hello"))
+		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.ErrorIs(t, err, errSessionMirrorAppend)
 	})
 
@@ -742,7 +742,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			"result":      "context text",
 			"usage":       map[string]any{"input_tokens": 1},
 		}}
-		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "/context"))
+		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "/context"))
 		require.NoError(t, err)
 		require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 		conn, ok := session.agent.connection().(*recordingAgentClient)
@@ -768,7 +768,7 @@ func TestFinishPromptResultAndDrainEdges(t *testing.T) {
 	}, mapper.ToolUpdateOptions{Workflow: tracker})
 	require.NotNil(t, updates)
 
-	resp, done, err := session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "hello"), &claude.ResultMessage{
+	resp, done, err := session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "test-turn", "hello"), &claude.ResultMessage{
 		Origin: map[string]any{"kind": originKindTaskNotification},
 		Usage:  &claude.Usage{InputTokens: 1},
 	}, state, mapper.ToolUpdateOptions{Workflow: tracker}, false)
@@ -779,7 +779,7 @@ func TestFinishPromptResultAndDrainEdges(t *testing.T) {
 	session.logUnknownStopReason(ctx, &claude.ResultMessage{StopReason: "future"})
 
 	transport.controlErr = map[string]error{"get_context_usage": errors.New("usage failed")}
-	_, done, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "hello"), &claude.ResultMessage{
+	_, done, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "test-turn", "hello"), &claude.ResultMessage{
 		Usage: &claude.Usage{InputTokens: 1},
 	}, &promptLoopState{}, mapper.ToolUpdateOptions{}, false)
 	require.NoError(t, err)
@@ -789,13 +789,13 @@ func TestFinishPromptResultAndDrainEdges(t *testing.T) {
 	conn, ok := session.agent.connection().(*recordingAgentClient)
 	require.True(t, ok)
 	conn.sessionUpdateErr = errors.New("result usage failed")
-	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "hello"), &claude.ResultMessage{
+	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "test-turn", "hello"), &claude.ResultMessage{
 		Usage: &claude.Usage{InputTokens: 1},
 	}, &promptLoopState{}, mapper.ToolUpdateOptions{}, false)
 	require.ErrorContains(t, err, "result usage failed")
 	conn.sessionUpdateErr = nil
 
-	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "hello"), &claude.ResultMessage{
+	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "test-turn", "hello"), &claude.ResultMessage{
 		IsError: true,
 		Subtype: "error",
 		Result:  "failed",
@@ -804,7 +804,7 @@ func TestFinishPromptResultAndDrainEdges(t *testing.T) {
 
 	transport.context = map[string]any{}
 	conn.sessionUpdateErr = errors.New("local result failed")
-	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "/context"), &claude.ResultMessage{
+	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "test-turn", "/context"), &claude.ResultMessage{
 		Result: "local text",
 	}, &promptLoopState{}, mapper.ToolUpdateOptions{}, true)
 	require.ErrorContains(t, err, "local result failed")
@@ -812,7 +812,7 @@ func TestFinishPromptResultAndDrainEdges(t *testing.T) {
 
 	transport.context = map[string]any{}
 	conn.sessionUpdateErr = errors.New("live info failed")
-	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "hello"), &claude.ResultMessage{}, &promptLoopState{}, mapper.ToolUpdateOptions{}, false)
+	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "test-turn", "hello"), &claude.ResultMessage{}, &promptLoopState{}, mapper.ToolUpdateOptions{}, false)
 	require.ErrorContains(t, err, "live info failed")
 	conn.sessionUpdateErr = nil
 
@@ -828,7 +828,7 @@ func TestFinishPromptResultAndDrainEdges(t *testing.T) {
 		"filePath": filepath.Join(projects, "project", "11111111-1111-4111-8111-111111111111.jsonl"),
 		"entries":  []any{map[string]any{"type": "user"}},
 	}
-	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "hello"), &claude.ResultMessage{}, &promptLoopState{}, mapper.ToolUpdateOptions{}, false)
+	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "test-turn", "hello"), &claude.ResultMessage{}, &promptLoopState{}, mapper.ToolUpdateOptions{}, false)
 	require.ErrorIs(t, err, errSessionMirrorAppend)
 
 	transport.messages <- map[string]any{"type": "assistant", "message": map[string]any{"content": []any{
@@ -894,7 +894,7 @@ func TestFinishPromptResultEmitErrorBranches(t *testing.T) {
 	defer localCleanup()
 	localTransport.context = map[string]any{}
 	localSession.agent.setConnection(newFailingSessionUpdateClient(errors.New("local result failed")))
-	_, _, err := localSession.finishPromptResult(ctx, ctx, TextPromptRequest(localSession.id, "/context"), &claude.ResultMessage{
+	_, _, err := localSession.finishPromptResult(ctx, ctx, TextPromptRequest(localSession.id, "test-turn", "/context"), &claude.ResultMessage{
 		Result: "local text",
 	}, &promptLoopState{}, mapper.ToolUpdateOptions{}, true)
 	require.ErrorContains(t, err, "local result failed")
@@ -903,7 +903,7 @@ func TestFinishPromptResultEmitErrorBranches(t *testing.T) {
 	defer liveCleanup()
 	liveTransport.context = map[string]any{}
 	liveSession.agent.setConnection(newFailingSessionUpdateClient(errors.New("live info failed")))
-	_, _, err = liveSession.finishPromptResult(ctx, ctx, TextPromptRequest(liveSession.id, "hello"), &claude.ResultMessage{}, &promptLoopState{}, mapper.ToolUpdateOptions{}, false)
+	_, _, err = liveSession.finishPromptResult(ctx, ctx, TextPromptRequest(liveSession.id, "test-turn", "hello"), &claude.ResultMessage{}, &promptLoopState{}, mapper.ToolUpdateOptions{}, false)
 	require.ErrorContains(t, err, "live info failed")
 }
 

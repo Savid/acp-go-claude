@@ -13,7 +13,7 @@ import (
 func TestScopedElicitationParams(t *testing.T) {
 	t.Parallel()
 
-	requestID := acp.RequestId{Str: acp.Ptr(acp.RequestIdStr("request-1"))}
+	requestID := "request-1"
 	raw, err := scopedElicitationParams(acp.UnstableCreateElicitationRequest{
 		Url: &acp.UnstableCreateElicitationUrl{
 			ElicitationId: "elicit-1",
@@ -21,12 +21,14 @@ func TestScopedElicitationParams(t *testing.T) {
 			Mode:          "url",
 			Url:           "https://example.com",
 		},
-	}, elicitationScope{RequestID: &requestID})
+	}, elicitationScope{SessionID: "session-1", TurnNonce: "turn-1", RequestID: &requestID})
 	require.NoError(t, err)
 
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(raw, &payload))
-	require.Equal(t, "request-1", payload["requestId"])
+	meta := requireAnyMap(t, payload["_meta"])
+	route := requireAnyMap(t, meta[routeMetaKey])
+	require.Equal(t, "request-1", route["requestId"])
 	require.Equal(t, "url", payload["mode"])
 	require.Equal(t, "https://example.com", payload["url"])
 
@@ -35,11 +37,13 @@ func TestScopedElicitationParams(t *testing.T) {
 			Message: "Approve?",
 			Mode:    "form",
 		},
-	}, elicitationScope{SessionID: "session-1", ToolCallID: "tool-1"})
+	}, elicitationScope{SessionID: "session-1", TurnNonce: "turn-2", ToolCallID: "tool-1"})
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &payload))
-	require.Equal(t, "session-1", payload["sessionId"])
-	require.Equal(t, "tool-1", payload["toolCallId"])
+	meta = requireAnyMap(t, payload["_meta"])
+	route = requireAnyMap(t, meta[routeMetaKey])
+	require.Equal(t, "session-1", route["sessionId"])
+	require.Equal(t, "tool-1", route["toolCallId"])
 	require.Equal(t, "form", payload["mode"])
 
 	_, err = scopedElicitationParams(acp.UnstableCreateElicitationRequest{}, elicitationScope{})

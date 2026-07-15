@@ -18,6 +18,11 @@ var finishPromptResultCall = (*agentSession).finishPromptResult
 
 // Prompt sends one turn to Claude and streams updates.
 func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+	route, err := parseInboundTurnRoute(params.Meta)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+
 	if poisonErr := s.poisonedError(); poisonErr != nil {
 		return acp.PromptResponse{}, poisonErr
 	}
@@ -64,16 +69,24 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		return acp.PromptResponse{}, nativeTurnFailure(err)
 	}
 
+	s.cancelMu.Lock()
 	s.mu.Lock()
 	turnCtx, cancel := context.WithCancel(ctx)
+	turnCtx = withTurnRoute(turnCtx, route.turnNonce)
 	s.cancel = cancel
 	s.turnCancelled = false
+	s.turnNonce = route.turnNonce
 	s.mu.Unlock()
+	s.cancelMu.Unlock()
 
 	defer func() {
+		s.cancelMu.Lock()
+		defer s.cancelMu.Unlock()
+
 		s.mu.Lock()
 		s.cancel = nil
 		s.turnCancelled = false
+		s.turnNonce = ""
 		s.mu.Unlock()
 
 		cancel()

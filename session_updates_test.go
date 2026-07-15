@@ -25,8 +25,10 @@ func TestSessionUpdateEmitAndInfoHelpers(t *testing.T) {
 
 	conn := newRecordingAgentClient()
 	agent.setConnection(conn)
-	require.NoError(t, session.emitUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}))
+	turnCtx := withTurnRoute(context.Background(), "turn-1")
+	require.NoError(t, session.emitUpdates(turnCtx, []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}))
 	require.Len(t, conn.Updates(), 1)
+	require.Equal(t, turnRouteMeta("turn-1"), conn.Updates()[0].Meta)
 
 	conn.sessionUpdateErr = errors.New("update failed")
 	require.ErrorContains(t, session.emitOptionalUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}), "update failed")

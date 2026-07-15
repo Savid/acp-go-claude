@@ -44,6 +44,7 @@ func (s *agentSession) emitUpdates(ctx context.Context, updates []acp.SessionUpd
 
 	for _, update := range updates {
 		if err := conn.SessionUpdate(ctx, acp.SessionNotification{
+			Meta:      turnRouteMetaFromContext(ctx),
 			SessionId: s.id,
 			Update:    update,
 		}); err != nil {
@@ -336,8 +337,11 @@ func (s *agentSession) emitRawClaudeMessage(ctx context.Context, msg claude.Mess
 	payload := map[string]any{
 		acpFieldSessionID:  s.id,
 		"sequence":         sequence,
-		"source":           "claude",
+		"source":           claudeMetaKey,
 		rawEventFieldEvent: raw,
+	}
+	if meta := turnRouteMetaFromContext(ctx); meta != nil {
+		payload["_meta"] = meta
 	}
 
 	// Oversized or unserializable events are never dropped: replace the event

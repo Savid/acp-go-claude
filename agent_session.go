@@ -21,6 +21,8 @@ import (
 	"github.com/savid/acp-go-claude/internal/transcript"
 )
 
+var mapMCPServersToClaude = mapper.MCPServersToClaude
+
 // NewSession creates and starts a Claude CLI session.
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (resp acp.NewSessionResponse, err error) {
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/new")
@@ -324,6 +326,11 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.
 		return acp.PromptResponse{}, err
 	}
 
+	_, err = parseInboundTurnRoute(params.Meta)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+
 	ctx, finish := a.observe.StartPrompt(ctx, params.Meta, session.currentModel())
 	defer func() { finish(promptResultForObserver(resp, err, session.currentModel())) }()
 
@@ -347,7 +354,7 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 		return err
 	}
 
-	err = session.Cancel(ctx)
+	err = session.cancelRouted(ctx, params.Meta)
 
 	return err
 }
@@ -654,7 +661,35 @@ func missingClaudeSessionError(err error) bool {
 	return errors.Is(err, claude.ErrSessionNotFound) || errors.Is(err, claude.ErrQueryClosed)
 }
 
-func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessionStart) (*agentSession, error) {
+func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessionStart) (_ *agentSession, err error) { //nolint:gocyclo // Session startup owns the complete resource unwind graph.
+	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		materialized  *materializedSession
+		mcpConfigDir  string
+		nativeRelease func()
+		cleanupClient *claude.Client
+	)
+
+	cleanupNeeded := true
+	defer func() {
+		if !cleanupNeeded {
+			return
+		}
+
+		var closeErr error
+		if cleanupClient != nil {
+			closeErr = cleanupClient.Close()
+		}
+
+		err = finalizeSessionRuntimeResources(
+			errors.Join(err, closeErr), nativeRelease, mcpConfigDir, materialized, scratchRelease,
+		)
+	}()
+
 	claudeHome, err := canonicalClaudeHome(a.options.Home)
 	if err != nil {
 		return nil, err
@@ -674,7 +709,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	env = mergeEnv(env, start.MetaOptions.Env)
 	env = a.observe.InjectTraceEnv(ctx, env)
 
-	materialized, err := a.materializeStoreSession(ctx, start.ResumeID, start.Cwd, claudeHome, env)
+	materialized, err = a.materializeStoreSession(ctx, start.ResumeID, start.Cwd, claudeHome, env)
 	if err != nil {
 		return nil, err
 	}
@@ -686,15 +721,19 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 
 	settingsFileArg, err := a.prepareSeededClaudeConfig(claudeHome, processClaudeHome)
 	if err != nil {
-		closeSessionStartResources(materialized)
+		return nil, err
+	}
 
+	configurationStarted := time.Now()
+	mcpConfigPath, mcpConfigDir, err := writeSessionMCPConfig(a.options.ScratchDir, mcpConfig)
+	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession, RuntimeStartupConfiguration, configurationStarted, err)
+
+	if err != nil {
 		return nil, err
 	}
 
 	modelConfig, hasModelConfig, err := modelConfigFromEnv(env)
 	if err != nil {
-		closeSessionStartResources(materialized)
-
 		return nil, err
 	}
 
@@ -734,12 +773,18 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		PermissionPromptTool:    permissionPromptTool,
 		AllowSkipPermissionsArg: a.options.AllowSkipPermissionsFlag && bypassPermissionsAvailable(),
 		AddDirs:                 start.AdditionalDirectories,
-		MCPConfigJSON:           mcpConfig,
+		MCPConfigPath:           mcpConfigPath,
 		SettingSources:          settingSourceArgs(a.options.SettingSources),
 		SettingsFile:            settingsFileArg,
 		InitializeTimeout:       a.options.InitializeTimeout,
 		ControlHandlerTimeout:   a.options.ControlHandlerTimeout,
-		SessionMirror:           true,
+		ObserveStartupStage: func(stageCtx context.Context, stage string, elapsed time.Duration, stageErr error) {
+			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
+			if observe != nil {
+				observe(stageCtx, RuntimeResourceSession, RuntimeStartupStage(stage), elapsed, stageErr)
+			}
+		},
+		SessionMirror: true,
 		Hooks: claude.Hooks{
 			claude.HookEventPostToolUse: {
 				{
@@ -753,8 +798,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 
 	permissionRules, err := a.permissionRulesForStart(ctx, id, start)
 	if err != nil {
-		closeSessionStartResources(materialized)
-
 		return nil, err
 	}
 
@@ -770,6 +813,8 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		mode:                  acpModeForPermission(permissionMode),
 		permissionRules:       permissions.Clone(permissionRules),
 		materialized:          materialized,
+		mcpConfigDir:          mcpConfigDir,
+		scratchRootRelease:    scratchRelease,
 		mirror:                newSessionMirror(a.log, a.options.SessionStore, processClaudeHome),
 		rawMessages:           start.RawMessages,
 	}
@@ -780,24 +825,21 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	session.canRelaunch = true
 	session.client = a.newClaudeClient(a.log, options)
 
+	nativeRelease, err = acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
+	if err != nil {
+		return nil, err
+	}
+
+	session.nativeRootRelease = nativeRelease
+	cleanupClient = session.client
+
 	startCtx, finishStart := a.observe.StartClaudeProcess(ctx, "start")
 	startErr := session.client.Start(startCtx)
 	finishStart(startErr)
 
 	if startErr != nil {
-		closeSessionStartResources(materialized)
-
 		return nil, startErr
 	}
-
-	started := true
-	defer func() {
-		if started {
-			_ = session.client.Close()
-
-			closeSessionStartResources(materialized)
-		}
-	}()
 
 	info := session.client.InitializeInfo()
 	availableModels := info.Models
@@ -866,7 +908,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		}
 	}
 
-	started = false
+	cleanupNeeded = false
 
 	return session, nil
 }
@@ -882,7 +924,7 @@ func (a *Agent) mcpConfigForStart(start sessionStart) (string, error) {
 		return "", err
 	}
 
-	mcpConfig, err := mapper.MCPServersToClaude(start.McpServers)
+	mcpConfig, err := mapMCPServersToClaude(start.McpServers)
 	if err != nil {
 		return "", err
 	}

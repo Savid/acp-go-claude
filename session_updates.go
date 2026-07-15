@@ -22,6 +22,14 @@ var (
 const liveSessionTitleMaxRunes = 256
 
 func (s *agentSession) emitUpdates(ctx context.Context, updates []acp.SessionUpdate) error {
+	return s.emitUpdatesWithAssistantIdentity(ctx, updates, "")
+}
+
+func (s *agentSession) emitUpdatesWithAssistantIdentity(
+	ctx context.Context,
+	updates []acp.SessionUpdate,
+	messageID string,
+) error {
 	if len(updates) == 0 {
 		return nil
 	}
@@ -44,7 +52,7 @@ func (s *agentSession) emitUpdates(ctx context.Context, updates []acp.SessionUpd
 
 	for _, update := range updates {
 		if err := conn.SessionUpdate(ctx, acp.SessionNotification{
-			Meta:      turnRouteMetaFromContext(ctx),
+			Meta:      assistantIdentityNotificationMeta(ctx, messageID),
 			SessionId: s.id,
 			Update:    update,
 		}); err != nil {
@@ -53,6 +61,36 @@ func (s *agentSession) emitUpdates(ctx context.Context, updates []acp.SessionUpd
 	}
 
 	return nil
+}
+
+func assistantIdentityNotificationMeta(ctx context.Context, messageID string) map[string]any {
+	meta := turnRouteMetaFromContext(ctx)
+	if messageID == "" {
+		return meta
+	}
+
+	meta = cloneAnyMap(meta)
+	if meta == nil {
+		meta = make(map[string]any, 1)
+	}
+
+	meta[claudeMetaKey] = map[string]any{"messageId": messageID}
+
+	return meta
+}
+
+// emitNativeMessageIdentity publishes the finalized main-assistant transcript
+// UUID without fabricating visible assistant content. The empty session-info
+// update is only a carrier; the durable correlation belongs to the routed
+// notification envelope.
+func (s *agentSession) emitNativeMessageIdentity(ctx context.Context, messageID string) error {
+	if messageID == "" {
+		return nil
+	}
+
+	return s.emitUpdatesWithAssistantIdentity(ctx, []acp.SessionUpdate{{
+		SessionInfoUpdate: &acp.SessionSessionInfoUpdate{},
+	}}, messageID)
 }
 
 func (s *agentSession) emitOptionalUpdates(ctx context.Context, updates []acp.SessionUpdate) error {

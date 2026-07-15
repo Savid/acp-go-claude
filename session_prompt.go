@@ -171,30 +171,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		}
 
 		if promptFinishedBySystemIdle(msg) {
-			stopReason := acp.StopReasonEndTurn
-			if s.wasTurnCancelled() {
-				stopReason = acp.StopReasonCancelled
-			}
-
-			if err := s.emitLiveSessionInfoUpdate(turnCtx, params.Prompt); err != nil {
-				return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
-			}
-
-			if err := s.drainSessionMirror(turnCtx, toolUpdateOptions); err != nil {
-				return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
-			}
-
-			s.startLateMirrorProcessor(ctx, toolUpdateOptions)
-
-			if err := s.refreshCommandsAfterPromptCommand(turnCtx, commandName); err != nil {
-				return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
-			}
-
-			return acp.PromptResponse{
-				StopReason:    stopReason,
-				Usage:         state.promptUsage,
-				UserMessageId: params.MessageId,
-			}, nil
+			return s.finishPromptSystemIdle(turnCtx, ctx, params, state, toolUpdateOptions, commandName)
 		}
 
 		updates := mapper.MessageToUpdatesWithOptions(msg, toolUpdateOptions)
@@ -204,6 +181,47 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 			return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
 		}
 	}
+}
+
+func (s *agentSession) finishPromptSystemIdle(
+	turnCtx context.Context,
+	interruptCtx context.Context,
+	params acp.PromptRequest,
+	state *promptLoopState,
+	toolUpdateOptions mapper.ToolUpdateOptions,
+	commandName string,
+) (acp.PromptResponse, error) {
+	stopReason := acp.StopReasonEndTurn
+	if s.wasTurnCancelled() {
+		stopReason = acp.StopReasonCancelled
+	}
+
+	if err := s.emitCompletedNativeMessageIdentity(
+		turnCtx, state.lastAssistantMessageID, stopReason == acp.StopReasonCancelled,
+	); err != nil {
+		return acp.PromptResponse{}, s.interruptAfterEmitError(interruptCtx, err)
+	}
+
+	if err := s.emitLiveSessionInfoUpdate(turnCtx, params.Prompt); err != nil {
+		return acp.PromptResponse{}, s.interruptAfterEmitError(interruptCtx, err)
+	}
+
+	if err := s.drainSessionMirror(turnCtx, toolUpdateOptions); err != nil {
+		return acp.PromptResponse{}, s.interruptAfterEmitError(interruptCtx, err)
+	}
+
+	s.startLateMirrorProcessor(interruptCtx, toolUpdateOptions)
+
+	if err := s.refreshCommandsAfterPromptCommand(turnCtx, commandName); err != nil {
+		return acp.PromptResponse{}, s.interruptAfterEmitError(interruptCtx, err)
+	}
+
+	return acp.PromptResponse{
+		Meta:          assistantIdentityMeta(state.lastAssistantMessageID),
+		StopReason:    stopReason,
+		Usage:         state.promptUsage,
+		UserMessageId: params.MessageId,
+	}, nil
 }
 
 func (s *agentSession) acquirePromptTurn(ctx context.Context, exclusive bool) (func(), error) {
@@ -291,6 +309,12 @@ func (s *agentSession) finishPromptResult(
 		}
 	}
 
+	if err := s.emitCompletedNativeMessageIdentity(
+		turnCtx, state.lastAssistantMessageID, cancelled,
+	); err != nil {
+		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
+	}
+
 	if err := s.emitLiveSessionInfoUpdate(turnCtx, params.Prompt); err != nil {
 		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
 	}
@@ -304,6 +328,7 @@ func (s *agentSession) finishPromptResult(
 	s.logUnknownStopReason(turnCtx, result)
 
 	return acp.PromptResponse{
+		Meta:          assistantIdentityMeta(state.lastAssistantMessageID),
 		StopReason:    mapper.StopReason(result, cancelled),
 		Usage:         state.promptUsage,
 		UserMessageId: params.MessageId,
@@ -443,6 +468,34 @@ func observeAssistantMessage(assistant *claude.AssistantMessage, state *promptLo
 	if assistant.Model != "" && assistant.Model != syntheticModelName {
 		state.lastAssistantModel = assistant.Model
 	}
+
+	if assistant.MessageID != "" {
+		state.lastAssistantMessageID = assistant.MessageID
+	}
+}
+
+func assistantIdentityMeta(messageID string) map[string]any {
+	if messageID == "" {
+		return nil
+	}
+
+	return map[string]any{
+		claudeMetaKey: map[string]any{
+			"messageId": messageID,
+		},
+	}
+}
+
+func (s *agentSession) emitCompletedNativeMessageIdentity(
+	ctx context.Context,
+	messageID string,
+	cancelled bool,
+) error {
+	if cancelled {
+		return nil
+	}
+
+	return s.emitNativeMessageIdentity(ctx, messageID)
 }
 
 func localOnlySlashCommand(prompt []acp.ContentBlock) bool {

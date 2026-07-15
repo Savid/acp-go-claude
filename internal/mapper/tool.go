@@ -39,6 +39,7 @@ const (
 	keyLimit            = "limit"
 	keyLines            = "lines"
 	keyMultiline        = "multiline"
+	keyMessageID        = "messageId"
 	keyEdits            = "edits"
 	keyNotebookPath     = "notebook_path"
 	keyNewSource        = "new_source"
@@ -102,11 +103,12 @@ const (
 
 // ToolUpdateOptions carries client/session context for tool-call mapping.
 type ToolUpdateOptions struct {
-	Cwd                    string
-	SupportsTerminalOutput bool
-	ToolUses               map[string]claude.ToolUseBlock
-	ParentToolUseID        string
-	Workflow               *WorkflowTracker
+	Cwd                     string
+	SupportsTerminalOutput  bool
+	ReplayAssistantIdentity bool
+	ToolUses                map[string]claude.ToolUseBlock
+	ParentToolUseID         string
+	Workflow                *WorkflowTracker
 }
 
 // ToolInfo describes ACP-facing metadata for a Claude tool call.
@@ -324,7 +326,18 @@ func assistantUpdates(msg *claude.AssistantMessage, options ToolUpdateOptions) [
 		}
 	}
 
+	if checkpointableAssistantMessage(msg, options.ReplayAssistantIdentity) {
+		for _, update := range updates {
+			setAssistantMessageID(updateMeta(update), msg.MessageID)
+		}
+	}
+
 	return updates
+}
+
+func checkpointableAssistantMessage(msg *claude.AssistantMessage, replay bool) bool {
+	return msg.MessageID != "" && msg.ParentToolUseID == "" &&
+		(replay || msg.StopReason != "" && msg.StopReason != stopReasonToolUse)
 }
 
 func assistantUnknownBlockUpdate(block claude.UnknownBlock) (acp.SessionUpdate, bool) {
@@ -1353,6 +1366,20 @@ func setParentToolUseID(meta map[string]any, parentToolUseID string) {
 	}
 
 	claudeMeta["parentToolUseId"] = parentToolUseID
+}
+
+func setAssistantMessageID(meta map[string]any, messageID string) {
+	if meta == nil || messageID == "" {
+		return
+	}
+
+	claudeMeta, _ := meta[keyClaude].(map[string]any)
+	if claudeMeta == nil {
+		claudeMeta = make(map[string]any)
+		meta[keyClaude] = claudeMeta
+	}
+
+	claudeMeta[keyMessageID] = messageID
 }
 
 func imageData(raw map[string]any) (string, string) {

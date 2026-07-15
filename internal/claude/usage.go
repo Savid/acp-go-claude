@@ -90,10 +90,8 @@ func parseUsageWindows(panel string, now time.Time) []RateLimitWindow {
 	windows := make([]RateLimitWindow, 0, len(matches))
 
 	for _, match := range matches {
-		usedPercent, err := strconv.ParseFloat(match[2], 64)
-		if err != nil {
-			continue
-		}
+		// usageWindowRE admits only a decimal number in this capture.
+		usedPercent, _ := strconv.ParseFloat(match[2], 64)
 
 		windows = append(windows, RateLimitWindow{
 			ID:          usageWindowID(match[1]),

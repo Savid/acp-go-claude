@@ -91,8 +91,10 @@ func (m *UserMessage) RawJSON() string            { return m.RawJSONText }
 // AssistantMessage is a parsed assistant message.
 type AssistantMessage struct {
 	Content         []ContentBlock
+	MessageID       string
 	Model           string
 	ParentToolUseID string
+	StopReason      string
 	ErrorKind       string
 	Raw             map[string]any
 	RawJSONText     string
@@ -251,8 +253,10 @@ func parseAssistant(raw map[string]any, rawJSON string) (*AssistantMessage, erro
 
 	return &AssistantMessage{
 		Content:         content,
+		MessageID:       stringValue(raw["uuid"]),
 		Model:           stringValue(messageData[keyModel]),
 		ParentToolUseID: stringValue(raw[keyParentToolID]),
+		StopReason:      stringValue(messageData[keyStopReason]),
 		ErrorKind:       stringValue(raw[keyError]),
 		Raw:             raw,
 		RawJSONText:     rawJSON,

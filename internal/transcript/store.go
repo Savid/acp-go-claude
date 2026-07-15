@@ -139,7 +139,10 @@ func ReplayUpdates(path string) ([]acp.SessionUpdate, bool, error) {
 
 	truncated := false
 
-	options := mapper.ToolUpdateOptions{ToolUses: make(map[string]claude.ToolUseBlock)}
+	options := mapper.ToolUpdateOptions{
+		ReplayAssistantIdentity: true,
+		ToolUses:                make(map[string]claude.ToolUseBlock),
+	}
 
 	skippedLines := 0
 

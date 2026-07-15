@@ -29,6 +29,10 @@ func TestSessionUpdateEmitAndInfoHelpers(t *testing.T) {
 	require.NoError(t, session.emitUpdates(turnCtx, []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}))
 	require.Len(t, conn.Updates(), 1)
 	require.Equal(t, turnRouteMeta("turn-1"), conn.Updates()[0].Meta)
+	identityMeta := assistantIdentityNotificationMeta(context.Background(), "message-1")
+	identityClaudeMeta, ok := identityMeta[claudeMetaKey].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "message-1", identityClaudeMeta["messageId"])
 
 	conn.sessionUpdateErr = errors.New("update failed")
 	require.ErrorContains(t, session.emitOptionalUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}), "update failed")

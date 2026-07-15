@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestClaudeCLISessionStoreMirrorAndResume(t *testing.T) {
+func TestClaudeCLISessionStoreMirrorLoadReplayAndResume(t *testing.T) {
 	requireLiveTokens(t)
 	parallelWhenPortableClaudeAuth(t)
 
@@ -34,6 +34,9 @@ func TestClaudeCLISessionStoreMirrorAndResume(t *testing.T) {
 	})
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
 	require.Contains(t, client.text(), "ACP_STORE_OK")
+	terminalMessageID := claudeMessageID(resp.Meta)
+	require.NotEmpty(t, terminalMessageID)
+	require.Equal(t, terminalMessageID, lastClaudeNotificationMessageID(client.notificationSnapshot()))
 
 	require.Eventually(t, func() bool {
 		return store.hasMainSession(string(session.SessionId))
@@ -44,12 +47,13 @@ func TestClaudeCLISessionStoreMirrorAndResume(t *testing.T) {
 
 	client = &recordingClient{}
 	conn = connectLiveAgent(t, ctx, client, acp.InitializeRequest{}, claudeacp.WithSessionStore(store))
-	_, err = conn.ResumeSession(ctx, acp.ResumeSessionRequest{
+	_, err = conn.LoadSession(ctx, acp.LoadSessionRequest{
 		SessionId:  session.SessionId,
 		Cwd:        cwd,
 		McpServers: []acp.McpServer{},
 	})
 	require.NoError(t, err)
+	require.Equal(t, terminalMessageID, lastClaudeMessageID(client.updateSnapshot()))
 
 	resp = promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
 		return conn.Prompt(ctx, claudeacp.TextPromptRequest(session.SessionId, "turn-store-resume", "Reply with exactly ACP_STORE_RESUME_OK and no punctuation."))
@@ -59,6 +63,36 @@ func TestClaudeCLISessionStoreMirrorAndResume(t *testing.T) {
 
 	_, err = conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
+}
+
+func claudeMessageID(meta map[string]any) string {
+	claudeMeta, _ := meta["claude"].(map[string]any)
+	messageID, _ := claudeMeta["messageId"].(string)
+
+	return messageID
+}
+
+func lastClaudeMessageID(updates []acp.SessionUpdate) string {
+	for _, update := range slices.Backward(updates) {
+		if update.AgentMessageChunk == nil {
+			continue
+		}
+		if messageID := claudeMessageID(update.AgentMessageChunk.Meta); messageID != "" {
+			return messageID
+		}
+	}
+
+	return ""
+}
+
+func lastClaudeNotificationMessageID(notifications []acp.SessionNotification) string {
+	for _, notification := range slices.Backward(notifications) {
+		if messageID := claudeMessageID(notification.Meta); messageID != "" {
+			return messageID
+		}
+	}
+
+	return ""
 }
 
 type recordingSessionStore struct {

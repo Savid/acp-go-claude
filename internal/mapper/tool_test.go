@@ -211,6 +211,36 @@ func TestMessageToUpdates(t *testing.T) {
 	require.Equal(t, "```\nfailed\n```", updates[3].ToolCallUpdate.Content[0].Content.Content.Text.Text)
 
 	updates = MessageToUpdatesWithOptions(&claude.AssistantMessage{
+		MessageID:  "22222222-2222-4222-8222-222222222222",
+		StopReason: "tool_use",
+		Content:    []claude.ContentBlock{claude.TextBlock{Text: "before tool"}},
+	}, ToolUpdateOptions{})
+	require.Len(t, updates, 1)
+	require.Empty(t, updates[0].AgentMessageChunk.Meta)
+
+	updates = MessageToUpdatesWithOptions(&claude.AssistantMessage{
+		MessageID:  "33333333-3333-4333-8333-333333333333",
+		StopReason: "end_turn",
+		Content:    []claude.ContentBlock{claude.TextBlock{Text: "done"}},
+	}, ToolUpdateOptions{})
+	require.Len(t, updates, 1)
+	claudeMeta, ok := updates[0].AgentMessageChunk.Meta[keyClaude].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "33333333-3333-4333-8333-333333333333", claudeMeta[keyMessageID])
+
+	updates = MessageToUpdatesWithOptions(&claude.AssistantMessage{
+		MessageID:       "44444444-4444-4444-8444-444444444444",
+		ParentToolUseID: "parent-1",
+		StopReason:      "end_turn",
+		Content:         []claude.ContentBlock{claude.TextBlock{Text: "subagent"}},
+	}, ToolUpdateOptions{})
+	require.Len(t, updates, 1)
+	claudeMeta, ok = updates[0].AgentMessageChunk.Meta[keyClaude].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "parent-1", claudeMeta["parentToolUseId"])
+	require.NotContains(t, claudeMeta, keyMessageID)
+
+	updates = MessageToUpdatesWithOptions(&claude.AssistantMessage{
 		Content: []claude.ContentBlock{
 			claude.TextBlock{Text: "<local-command-stdout>ok</local-command-stdout>"},
 			claude.ThinkingBlock{},
@@ -700,6 +730,8 @@ func TestToolMappingHelpers(t *testing.T) {
 	require.NotNil(t, updateMeta(acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{}}))
 	require.Nil(t, updateMeta(acp.SessionUpdate{}))
 	setParentToolUseID(nil, "parent")
+	setAssistantMessageID(nil, "message")
+	setAssistantMessageID(map[string]any{}, "")
 	meta := map[string]any{keyClaude: map[string]any{}}
 	setParentToolUseID(meta, "parent")
 	claudeMeta, ok := meta[keyClaude].(map[string]any)

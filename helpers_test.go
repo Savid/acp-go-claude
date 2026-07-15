@@ -278,9 +278,11 @@ func newFakeClaudeTransport() *fakeClaudeTransport {
 			},
 			{
 				"type": "assistant",
+				"uuid": "33333333-3333-4333-8333-333333333333",
 				"message": map[string]any{
-					"model":   "sonnet",
-					"content": []any{map[string]any{"type": "text", "text": "hello"}},
+					"model":       "sonnet",
+					"stop_reason": "end_turn",
+					"content":     []any{map[string]any{"type": "text", "text": "hello"}},
 				},
 			},
 			{

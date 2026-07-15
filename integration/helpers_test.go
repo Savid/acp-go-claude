@@ -49,6 +49,7 @@ type recordingClient struct {
 	commands               []acp.AvailableCommand
 	usageUpdates           []acp.SessionUsageUpdate
 	updates                []acp.SessionUpdate
+	notifications          []acp.SessionNotification
 	permissions            []acp.RequestPermissionRequest
 	permission             acp.PermissionOptionId
 	elicitations           []acp.UnstableCreateElicitationRequest
@@ -126,6 +127,7 @@ func (c *recordingClient) SessionUpdate(_ context.Context, params acp.SessionNot
 	defer c.mu.Unlock()
 
 	c.updates = append(c.updates, params.Update)
+	c.notifications = append(c.notifications, params)
 
 	switch {
 	case params.Update.AvailableCommandsUpdate != nil:
@@ -293,6 +295,13 @@ func (c *recordingClient) updateSnapshot() []acp.SessionUpdate {
 	defer c.mu.Unlock()
 
 	return append([]acp.SessionUpdate(nil), c.updates...)
+}
+
+func (c *recordingClient) notificationSnapshot() []acp.SessionNotification {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]acp.SessionNotification(nil), c.notifications...)
 }
 
 func (c *recordingClient) extensionSnapshot() []recordedExtension {

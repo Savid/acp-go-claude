@@ -27,6 +27,10 @@ updates:
   the failure contract in [ACP methods](/docs/reference/acp-methods).
 - Structured-output results are returned in prompt metadata under
   `_meta.claude.structuredOutput`, not as a session update.
+- A terminal empty session-info notification and the successful prompt
+  response carry the same durable transcript UUID under
+  `_meta.claude.messageId`; load replay preserves the identity on the saved
+  assistant update for native checkpoint reconciliation.
 - Subagent output flattens into this same update stream, tagged with
   `_meta.claude.parentToolUseId`; untagged updates are the main agent — see
   [Metadata](/docs/reference/meta).

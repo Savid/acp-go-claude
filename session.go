@@ -184,11 +184,12 @@ type agentSession struct {
 }
 
 type promptLoopState struct {
-	promptUsage           *acp.Usage
-	lastAssistantModel    string
-	lastStreamUsage       usageSnapshot
-	lastStreamUsageKnown  bool
-	lastEmittedUsageTotal int
+	promptUsage            *acp.Usage
+	lastAssistantMessageID string
+	lastAssistantModel     string
+	lastStreamUsage        usageSnapshot
+	lastStreamUsageKnown   bool
+	lastEmittedUsageTotal  int
 }
 
 type usageSnapshot struct {

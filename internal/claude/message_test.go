@@ -17,7 +17,8 @@ func TestParseAssistantMessage(t *testing.T) {
 		"parent_tool_use_id": "parent-1",
 		"error":              "rate_limit",
 		"message": map[string]any{
-			"model": "claude-test",
+			"model":       "claude-test",
+			"stop_reason": "end_turn",
 			"content": []any{
 				map[string]any{"type": "text", "text": "hello"},
 				map[string]any{"type": "thinking", "thinking": "work", "signature": "sig"},
@@ -34,7 +35,9 @@ func TestParseAssistantMessage(t *testing.T) {
 	assistant, ok := msg.(*AssistantMessage)
 	require.True(t, ok)
 	require.Equal(t, "claude-test", assistant.Model)
+	require.Equal(t, "uuid-1", assistant.MessageID)
 	require.Equal(t, "parent-1", assistant.ParentToolUseID)
+	require.Equal(t, "end_turn", assistant.StopReason)
 	require.Equal(t, "rate_limit", assistant.ErrorKind)
 	require.Len(t, assistant.Content, 4)
 

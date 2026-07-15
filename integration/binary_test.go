@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	claudeacp "github.com/savid/acp-go-claude"
 	"github.com/stretchr/testify/require"
 )
 

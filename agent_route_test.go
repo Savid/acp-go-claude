@@ -26,6 +26,7 @@ func TestRouteEnvelopeHardCutover(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	require.Equal(t, "decoded-turn", decoded.turnNonce)
+	require.False(t, routeVersionIsOne("1"))
 
 	for _, meta := range []map[string]any{
 		nil,

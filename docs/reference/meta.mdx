@@ -70,6 +70,16 @@ Session-lifecycle requests accept options and raw-event opt-in:
 
 ## Update metadata
 
+The terminal main-agent `session/update` notification carries
+`_meta.claude.messageId` on its notification envelope. Its value is Claude's
+durable transcript-entry UUID for that assistant message, not the Anthropic
+API's `msg_*` identifier. The update uses an empty session-info payload so it
+does not fabricate visible assistant content. The successful `session/prompt`
+response repeats the same field. `session/load` replay restores the field on
+the saved assistant update, so a host can use it as the native turn checkpoint
+and compare it with restored state. Intermediate `tool_use` assistant messages
+and subagent updates do not publish a checkpoint identity.
+
 Session updates derived from a Claude subagent frame carry
 `_meta.claude.parentToolUseId`. Its value is the `toolCallId` of the Agent tool
 call that spawned the subagent, and the tagged update is that subagent's output
@@ -80,6 +90,7 @@ from usage counters.
 
 ## Result metadata
 
-Structured-output turns return their result under
+Successful prompt responses carry the terminal transcript UUID under
+`_meta.claude.messageId`. Structured-output turns return their result under
 `_meta.claude.structuredOutput`, and usage details are reported under
 `_meta.claude.usage`.

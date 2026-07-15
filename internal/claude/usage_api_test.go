@@ -34,6 +34,8 @@ func routeHTTP(t *testing.T, server *httptest.Server) {
 }
 
 func TestResolveAPIAccess(t *testing.T) {
+	require.Equal(t, map[string]string{"A": "1"}, environMap([]string{"bad", "=empty", "A=1"}))
+
 	tests := []struct {
 		name    string
 		env     map[string]string

@@ -101,6 +101,71 @@ func TestMCPPromptRewriteUsesAdvertisedCommandsSnapshot(t *testing.T) {
 	require.Equal(t, "/server:name (MCP) args", lastSentUserText(t, transport))
 }
 
+func TestPromptPublishesDurableTerminalAssistantIdentity(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	session, transport, cleanup := newPromptFlowSession(t)
+	defer cleanup()
+	transport.queryMsgs = []map[string]any{
+		{
+			"type": "assistant",
+			"uuid": "22222222-2222-4222-8222-222222222222",
+			"message": map[string]any{
+				"stop_reason": "tool_use",
+				"content": []any{map[string]any{
+					"type": "text", "text": "before tool",
+				}},
+			},
+		},
+		{
+			"type": "assistant",
+			"uuid": "33333333-3333-4333-8333-333333333333",
+			"message": map[string]any{
+				"stop_reason": "end_turn",
+				"content": []any{map[string]any{
+					"type": "text", "text": "done",
+				}},
+			},
+		},
+		{"type": "result", "subtype": "success", "is_error": false, "stop_reason": "end_turn"},
+	}
+
+	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
+	require.NoError(t, err)
+	responseClaudeMeta, ok := resp.Meta[claudeMetaKey].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "33333333-3333-4333-8333-333333333333", responseClaudeMeta["messageId"])
+
+	conn, ok := session.agent.connection().(*recordingAgentClient)
+	require.True(t, ok)
+	var messages []*acp.SessionUpdateAgentMessageChunk
+	for _, notification := range conn.Updates() {
+		if notification.Update.AgentMessageChunk != nil {
+			messages = append(messages, notification.Update.AgentMessageChunk)
+		}
+	}
+	require.Len(t, messages, 2)
+	require.Empty(t, messages[0].Meta)
+	terminalClaudeMeta, ok := messages[1].Meta[claudeMetaKey].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "33333333-3333-4333-8333-333333333333", terminalClaudeMeta["messageId"])
+
+	var checkpointNotification *acp.SessionNotification
+	for _, notification := range conn.Updates() {
+		claudeMeta, metaOK := notification.Meta[claudeMetaKey].(map[string]any)
+		if metaOK && claudeMeta["messageId"] != nil {
+			notificationCopy := notification
+			checkpointNotification = &notificationCopy
+		}
+	}
+	require.NotNil(t, checkpointNotification)
+	require.NotNil(t, checkpointNotification.Update.SessionInfoUpdate)
+	checkpointClaudeMeta, ok := checkpointNotification.Meta[claudeMetaKey].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "33333333-3333-4333-8333-333333333333", checkpointClaudeMeta["messageId"])
+}
+
 func TestCommandTurnExclusivity(t *testing.T) {
 	t.Parallel()
 
@@ -795,12 +860,38 @@ func TestFinishPromptResultAndDrainEdges(t *testing.T) {
 	require.ErrorContains(t, err, "result usage failed")
 	conn.sessionUpdateErr = nil
 
+	conn.sessionUpdateErr = errors.New("native identity failed")
+	_, err = session.finishPromptSystemIdle(
+		ctx,
+		ctx,
+		TextPromptRequest(session.id, "test-turn", "hello"),
+		&promptLoopState{lastAssistantMessageID: "33333333-3333-4333-8333-333333333333"},
+		mapper.ToolUpdateOptions{},
+		"",
+	)
+	require.ErrorContains(t, err, "native identity failed")
+	conn.sessionUpdateErr = nil
+
 	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "test-turn", "hello"), &claude.ResultMessage{
 		IsError: true,
 		Subtype: "error",
 		Result:  "failed",
 	}, &promptLoopState{}, mapper.ToolUpdateOptions{}, false)
 	require.Error(t, err)
+
+	transport.context = map[string]any{}
+	conn.sessionUpdateErr = errors.New("result native identity failed")
+	_, _, err = session.finishPromptResult(
+		ctx,
+		ctx,
+		TextPromptRequest(session.id, "test-turn", "hello"),
+		&claude.ResultMessage{},
+		&promptLoopState{lastAssistantMessageID: "33333333-3333-4333-8333-333333333333"},
+		mapper.ToolUpdateOptions{},
+		false,
+	)
+	require.ErrorContains(t, err, "result native identity failed")
+	conn.sessionUpdateErr = nil
 
 	transport.context = map[string]any{}
 	conn.sessionUpdateErr = errors.New("local result failed")

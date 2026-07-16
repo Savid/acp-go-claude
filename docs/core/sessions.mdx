@@ -24,6 +24,9 @@ rows in the [session store](/docs/features/session-store). The adapter
 materializes those rows into an isolated temporary Claude config directory
 under the scratch directory (default: system temp) so the CLI can restore them.
 A residual native transcript is never adopted when the store has no session.
+Missing store rows do not make an already-active binding residual:
+store-authoritative load fails unknown without deleting that binding's native
+transcript, and its bound prompt route remains usable.
 
 ## Store keys and subpaths
 

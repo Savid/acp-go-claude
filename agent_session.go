@@ -943,7 +943,7 @@ func mcpServerNameField(index int) string {
 
 func (a *Agent) storedSessionEntries(ctx context.Context, sessionID acp.SessionId) ([]SessionStoreEntry, error) {
 	if a.isDeleted(sessionID) {
-		a.retryDeleteNativeTranscript(ctx, sessionID)
+		a.retryDeleteResidualNativeTranscript(ctx, sessionID)
 
 		return nil, unknownSessionError()
 	}
@@ -957,9 +957,24 @@ func (a *Agent) storedSessionEntries(ctx context.Context, sessionID acp.SessionI
 		return entries, nil
 	}
 
-	a.retryDeleteNativeTranscript(ctx, sessionID)
+	a.retryDeleteResidualNativeTranscript(ctx, sessionID)
 
 	return nil, unknownSessionError()
+}
+
+// retryDeleteResidualNativeTranscript removes only inactive native cache state.
+// An active binding remains usable through its bound route even when a
+// store-authoritative load or changed-fingerprint resume fails unknown.
+func (a *Agent) retryDeleteResidualNativeTranscript(ctx context.Context, sessionID acp.SessionId) {
+	a.mu.Lock()
+	active := a.sessions[sessionID] != nil
+	a.mu.Unlock()
+
+	if active {
+		return
+	}
+
+	a.retryDeleteNativeTranscript(ctx, sessionID)
 }
 
 func (a *Agent) isDeleted(sessionID acp.SessionId) bool {

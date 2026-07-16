@@ -126,6 +126,17 @@ func turnRouteMeta(turnNonce string) map[string]any {
 	return map[string]any{routeMetaKey: map[string]any{routeFieldVer: routeVersion, routeFieldTurn: turnNonce}}
 }
 
+// requestTurnRouteMeta validates untrusted caller input used by the exported
+// request builders. Internal turn scopes have already passed inbound route
+// validation and continue to use turnRouteMeta directly.
+func requestTurnRouteMeta(turnNonce string) map[string]any {
+	if strings.TrimSpace(turnNonce) == "" || len(turnNonce) > routeTurnNonceMaxBytes {
+		return nil
+	}
+
+	return turnRouteMeta(turnNonce)
+}
+
 func withTurnRoute(ctx context.Context, turnNonce string) context.Context {
 	return context.WithValue(ctx, turnRouteContextKey{}, turnNonce)
 }

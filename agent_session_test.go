@@ -243,6 +243,33 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	require.Empty(t, replayErrAgent.sessions)
 }
 
+func TestActiveSessionMissingStoreLoadPreservesNativeTranscriptAndPrompt(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	cwd := t.TempDir()
+	transport := newFakeClaudeTransport()
+	agent, _, _ := newFakeLifecycleAgent(t, transport, WithHome(home))
+
+	newResp, err := agent.NewSession(ctx, NewSessionRequest(cwd))
+	require.NoError(t, err)
+	active := agent.sessions[newResp.SessionId]
+	nativePath := writeNativeTranscript(t, home, cwd, newResp.SessionId)
+
+	_, err = agent.LoadSession(ctx, LoadSessionRequest(newResp.SessionId, cwd))
+	requireUnknownSession(t, err)
+	require.Same(t, active, agent.sessions[newResp.SessionId])
+	require.FileExists(t, nativePath)
+	require.Zero(t, transport.CloseCalls())
+
+	promptResp, err := agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "after-failed-load", "still bound"))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, promptResp.StopReason)
+	require.Same(t, active, agent.sessions[newResp.SessionId])
+	require.FileExists(t, nativePath)
+
+	require.NoError(t, agent.Close())
+}
+
 func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()

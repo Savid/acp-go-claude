@@ -30,8 +30,11 @@ authoritative rows into an isolated temporary Claude config directory under the
 scratch directory (default: system temp).
 
 Claude's native transcript is a process cache, not a discovery or restore
-authority. A native transcript whose session id has no main store rows is
-ignored, removed when addressed, and reported as an unknown session.
+authority. An inactive native transcript whose session id has no main store
+rows is ignored, removed when addressed, and reported as an unknown session.
+If the same id is still actively bound in this Agent, a store-authoritative
+load still reports unknown but leaves that live binding and its native
+transcript untouched; prompts on the already-bound route remain usable.
 
 ## The store contract
 

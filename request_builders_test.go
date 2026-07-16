@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -98,6 +99,47 @@ func TestRequestBuilderClones(t *testing.T) {
 	require.NotNil(t, unstable[1].Http)
 	require.NotNil(t, unstable[2].Sse)
 	require.NotNil(t, unstable[3].Acp)
+}
+
+func TestTurnRequestBuildersFailClosedOnInvalidNonce(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name  string
+		nonce string
+		valid bool
+	}{
+		{name: "empty"},
+		{name: "blank", nonce: " \t\n"},
+		{name: "exact maximum", nonce: strings.Repeat("n", routeTurnNonceMaxBytes), valid: true},
+		{name: "oversized", nonce: strings.Repeat("n", routeTurnNonceMaxBytes+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			prompt := PromptRequest("session", test.nonce, acp.TextBlock("hello"))
+			textPrompt := TextPromptRequest("session", test.nonce, "hello")
+			cancel := CancelRequest("session", test.nonce)
+
+			if !test.valid {
+				require.Nil(t, prompt.Meta)
+				require.Nil(t, textPrompt.Meta)
+				require.Nil(t, cancel.Meta)
+
+				_, err := parseInboundTurnRoute(prompt.Meta)
+				require.Error(t, err)
+
+				return
+			}
+
+			expected := turnRouteMeta(test.nonce)
+			require.Equal(t, expected, prompt.Meta)
+			require.Equal(t, expected, textPrompt.Meta)
+			require.Equal(t, expected, cancel.Meta)
+			_, err := parseInboundTurnRoute(prompt.Meta)
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestRequestBuilderHelperBranches(t *testing.T) {

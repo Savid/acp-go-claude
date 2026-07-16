@@ -90,7 +90,9 @@ Request builders: `TextPromptRequest`, `CallForkSession`, `WithSessionRawEvents`
 `PromptRequest(sessionID, turnNonce, blocks...)` and
 `TextPromptRequest(sessionID, turnNonce, text)` require a fresh, unguessable
 nonce of at most 4096 bytes for every turn. Use the same nonce with
-`CancelRequest(sessionID, turnNonce)` while that turn is active.
+`CancelRequest(sessionID, turnNonce)` while that turn is active. A blank nonce
+or one larger than 4096 bytes leaves the builder's route metadata nil, so the
+receiving agent rejects the request or cancellation fail-closed.
 
 `RuntimeResourceHooks` has `AcquireNativeRoot`, `ReserveScratchRoot`,
 `ObserveProcess`, `ObserveProcessSnapshot`, and `ObserveStartupStage`

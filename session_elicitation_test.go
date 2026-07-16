@@ -2,6 +2,7 @@ package claudeacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -159,6 +160,91 @@ func TestHandleAskUserQuestion(t *testing.T) {
 		Input: map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
 	})
 	require.ErrorContains(t, err, "elicit failed")
+}
+
+func TestHandleAskUserQuestionRoutesActiveTurn(t *testing.T) {
+	request := claude.PermissionRequest{
+		ToolName:  askUserQuestionTool,
+		ToolUseID: "ask-1",
+		Input: map[string]any{askFieldQuestions: []any{
+			map[string]any{askFieldID: "q", askFieldQuestion: "Question?"},
+		}},
+	}
+
+	t.Run("active turn", func(t *testing.T) {
+		agent := NewAgent()
+		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+		conn := newRoutedElicitationClient()
+		agent.setConnection(conn)
+		session := &agentSession{agent: agent, id: "session-1", turnNonce: "turn-current"}
+
+		decision, err := session.handleAskUserQuestion(t.Context(), request)
+		require.NoError(t, err)
+		require.Equal(t, claude.BehaviorAllow, decision.Behavior)
+
+		routed := conn.RoutedElicitations()
+		require.Len(t, routed, 1)
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(routed[0], &payload))
+		route := requireAnyMap(t, requireAnyMap(t, payload[jsonFieldMeta])[routeMetaKey])
+		require.Equal(t, map[string]any{
+			routeFieldVer:  float64(routeVersion),
+			routeFieldID:   "session-1",
+			routeFieldTurn: "turn-current",
+			"toolCallId":   "ask-1",
+		}, route)
+	})
+
+	t.Run("no active turn", func(t *testing.T) {
+		agent := NewAgent()
+		agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+		conn := newRoutedElicitationClient()
+		agent.setConnection(conn)
+		session := &agentSession{agent: agent, id: "session-1"}
+
+		_, err := session.handleAskUserQuestion(t.Context(), request)
+		require.ErrorContains(t, err, "route metadata requires sessionId and turnNonce")
+		require.Empty(t, conn.RoutedElicitations())
+		require.Empty(t, conn.Elicitations())
+	})
+}
+
+type routedElicitationClient struct {
+	*recordingAgentClient
+	routed []json.RawMessage
+}
+
+func newRoutedElicitationClient() *routedElicitationClient {
+	client := newRecordingAgentClient()
+	accept := acp.NewUnstableCreateElicitationResponseAccept()
+	accept.Accept.Content = map[string]any{"q": "Yes"}
+	client.elicitResponse = &accept
+
+	return &routedElicitationClient{recordingAgentClient: client}
+}
+
+func (c *routedElicitationClient) CreateElicitation(
+	ctx context.Context,
+	request acp.UnstableCreateElicitationRequest,
+	scope elicitationScope,
+) (acp.UnstableCreateElicitationResponse, error) {
+	raw, err := scopedElicitationParams(request, scope)
+	if err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
+
+	c.mu.Lock()
+	c.routed = append(c.routed, append(json.RawMessage(nil), raw...))
+	c.mu.Unlock()
+
+	return c.recordingAgentClient.CreateElicitation(ctx, request, scope)
+}
+
+func (c *routedElicitationClient) RoutedElicitations() []json.RawMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]json.RawMessage(nil), c.routed...)
 }
 
 func TestClientElicitationCapabilityGating(t *testing.T) {

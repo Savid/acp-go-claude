@@ -25,8 +25,8 @@ updates:
   are **not** session updates — see [Raw events](/docs/features/raw-events).
 - A turn *failure* is a JSON-RPC error on `session/prompt`, not an update — see
   the failure contract in [ACP methods](/docs/reference/acp-methods).
-- Structured-output results are returned in prompt metadata under
-  `_meta.claude.structuredOutput`, not as a session update.
+- Structured-output results are emitted on the turn's `usage_update` metadata
+  under `_meta.claude.structuredOutput`, never on the prompt response.
 - A terminal empty session-info notification and the successful prompt
   response carry the same durable transcript UUID under
   `_meta.claude.messageId`; load replay preserves the identity on the saved

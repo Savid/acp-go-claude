@@ -19,8 +19,7 @@ Initialize advertises capability descriptors under `_meta.claude`:
 | `elicitation` | Session-scoped elicitation support. |
 | `rawEvent` | The raw-event opt-in (`enabledBy`, `maxBytes`, `defaultEnabled`). |
 | `sessionStore` | Store `format` and key shape. |
-| `structuredOutput` | Where the output schema is supplied and the result is returned. |
-| `models` | Model metadata (see [Models and config](/docs/features/models-config)). |
+| `structuredOutput` | Where the output schema is supplied and the result is emitted. |
 
 Initialize also advertises the reserved route envelope separately from the
 Claude namespace:
@@ -68,6 +67,17 @@ Session-lifecycle requests accept options and raw-event opt-in:
 }
 ```
 
+## Model metadata
+
+Session-lifecycle response metadata exposes the selected model under
+`_meta.claude.modelId`, its current effort variant under
+`_meta.claude.variant`, and the selectable variants under
+`_meta.claude.availableVariants`. Individual model options in the session
+configuration carry their native facts under
+`_meta.claude.supportedEffortLevels`, `_meta.claude.supportsAutoMode`, and
+`_meta.claude.contextWindow` when those values are known. See
+[Models and config](/docs/features/models-config).
+
 ## Update metadata
 
 The terminal main-agent `session/update` notification carries
@@ -91,6 +101,7 @@ from usage counters.
 ## Result metadata
 
 Successful prompt responses carry the terminal transcript UUID under
-`_meta.claude.messageId`. Structured-output turns return their result under
-`_meta.claude.structuredOutput`, and usage details are reported under
-`_meta.claude.usage`.
+`_meta.claude.messageId`. Structured-output turns emit their result on the
+turn's `usage_update` under `_meta.claude.structuredOutput`; the same update
+reports token details under `_meta.claude.usage`. Prompt responses do not carry
+the structured-output result.

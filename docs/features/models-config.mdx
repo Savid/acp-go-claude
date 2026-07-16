@@ -3,7 +3,13 @@ title: "Models And Config"
 description: "Select the model and mode per session, and point Claude Code at a custom endpoint or settings overlay"
 ---
 
-The adapter exposes model metadata under `_meta.claude.models`.
+Session-lifecycle responses expose the selected model under
+`_meta.claude.modelId`, its current effort variant under
+`_meta.claude.variant`, and selectable variants under
+`_meta.claude.availableVariants`. Each model option may additionally carry
+`_meta.claude.supportedEffortLevels`, `_meta.claude.supportsAutoMode`, and
+`_meta.claude.contextWindow` when Claude reports or the adapter can identify
+those facts.
 
 ## Model and mode options
 

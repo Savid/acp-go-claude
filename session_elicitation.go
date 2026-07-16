@@ -77,7 +77,7 @@ func (s *agentSession) handleAskUserQuestion(
 		}, nil
 	}
 
-	scope := elicitationScope{SessionID: s.id}
+	scope := elicitationScope{SessionID: s.id, TurnNonce: s.currentTurnNonce()}
 	if request.ToolUseID != "" {
 		scope.ToolCallID = acp.ToolCallId(request.ToolUseID)
 	}

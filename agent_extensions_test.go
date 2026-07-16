@@ -106,6 +106,19 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	require.Equal(t, "unknown session", missingData[jsonFieldError])
 	require.Equal(t, acpFieldSessionID, missingData[jsonFieldField])
 
+	nativeParentID := acp.SessionId("11111111-1111-4111-8111-111111111111")
+	nativeHome := t.TempDir()
+	nativePath := writeNativeTranscript(t, nativeHome, cwd, nativeParentID)
+	nativeOnly := NewAgent(WithHome(nativeHome))
+	nativeOnly.setConnection(newRecordingAgentClient())
+	installFakeClaudeClient(nativeOnly, newFakeClaudeTransport())
+	nativeRaw, err := json.Marshal(ForkSessionRequest(nativeParentID, cwd))
+	require.NoError(t, err)
+	_, err = nativeOnly.HandleExtensionMethod(ctx, ForkSessionMethod, nativeRaw)
+	requireUnknownSession(t, err)
+	require.NoFileExists(t, nativePath)
+	require.NoError(t, nativeOnly.Close())
+
 	limit := NewAgent(WithHome(t.TempDir()), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	limit.setConnection(newRecordingAgentClient())
 	limit.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
@@ -133,6 +146,23 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	require.NotEmpty(t, resp.SessionId)
 	require.NotEmpty(t, resp.ConfigOptions)
 	require.Contains(t, success.sessions, resp.SessionId)
+
+	storedParentID := acp.SessionId("22222222-2222-4222-8222-222222222222")
+	store := NewInMemorySessionStore()
+	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(storedParentID)}, []SessionStoreEntry{
+		[]byte(`{"type":"user","message":{"content":"stored parent"}}`),
+	}))
+	stored := NewAgent(WithHome(t.TempDir()), WithSessionStore(store))
+	stored.setConnection(newRecordingAgentClient())
+	installFakeClaudeClient(stored, newFakeClaudeTransport())
+	storedRaw, err := json.Marshal(ForkSessionRequest(storedParentID, cwd))
+	require.NoError(t, err)
+	storedRespAny, err := stored.HandleExtensionMethod(ctx, ForkSessionMethod, storedRaw)
+	require.NoError(t, err)
+	storedResp, ok := storedRespAny.(acp.UnstableForkSessionResponse)
+	require.True(t, ok)
+	require.NotNil(t, stored.sessions[storedResp.SessionId].materialized)
+	require.NoError(t, stored.Close())
 }
 
 func newForkTestAgent(t *testing.T, transportFactory func() *fakeClaudeTransport) *Agent {

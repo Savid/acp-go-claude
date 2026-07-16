@@ -40,8 +40,8 @@ accidentally release the quarantined admission.
 | `WithDefaultModel` | Default Claude model for new sessions. |
 | `WithEnv` | Merge environment variables into every Claude child. |
 | `WithSeedFiles` | Write files into the resolved config dir before launch (requires `WithHome`). |
-| `WithSessionStore` | Install durable transcript storage. |
-| `WithSessionStoreLoadTimeout` | Bound store load/list operations used during resume. |
+| `WithSessionStore` | Replace the default in-memory session authority with a host store. |
+| `WithSessionStoreLoadTimeout` | Bound store reads used during restore and listing. |
 | `WithConcurrencyLimits` | Cap active sessions and concurrent client calls. |
 | `WithTurnTimeout` | Bound one prompt turn; expiry fails the turn with cause `timeout` (default: no deadline). |
 | `WithRuntimeResourceHooks` | Let an embedding host admit native roots and reserve adapter scratch roots before they are created. |

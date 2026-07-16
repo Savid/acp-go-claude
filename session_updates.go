@@ -538,6 +538,22 @@ func optionalIntSum(left *int, right *int) *int {
 
 func (s *agentSession) replayTranscript(ctx context.Context, path string) error {
 	updates, truncated, err := transcript.ReplayUpdates(path)
+
+	return s.emitReplayUpdates(ctx, updates, truncated, err)
+}
+
+func (s *agentSession) replayTranscriptEntries(ctx context.Context, entries []SessionStoreEntry) error {
+	updates, truncated, err := transcript.ReplayEntries(entries)
+
+	return s.emitReplayUpdates(ctx, updates, truncated, err)
+}
+
+func (s *agentSession) emitReplayUpdates(
+	ctx context.Context,
+	updates []acp.SessionUpdate,
+	truncated bool,
+	err error,
+) error {
 	if err != nil {
 		return err
 	}

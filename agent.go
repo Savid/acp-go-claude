@@ -299,6 +299,8 @@ type sessionStart struct {
 	AdditionalDirectories []string
 	McpServers            []acp.McpServer
 	ResumeID              string
+	StoreEntries          []SessionStoreEntry
+	ActiveSessionResume   bool
 	ForkSession           bool
 	PermissionRules       map[string]string
 	MetaOptions           ClaudeOptions

@@ -50,6 +50,17 @@ func (a *Agent) materializeStoreSession(
 	sourceClaudeHome string,
 	env map[string]string,
 ) (materialized *materializedSession, err error) {
+	return a.materializeStoreSessionWithEntries(ctx, sessionID, cwd, sourceClaudeHome, env, nil)
+}
+
+func (a *Agent) materializeStoreSessionWithEntries(
+	ctx context.Context,
+	sessionID string,
+	cwd string,
+	sourceClaudeHome string,
+	env map[string]string,
+	storeEntries []SessionStoreEntry,
+) (materialized *materializedSession, err error) {
 	if sessionID == "" {
 		return noMaterializedSession()
 	}
@@ -69,15 +80,12 @@ func (a *Agent) materializeStoreSession(
 	store := a.sessionStore()
 	mainKey := SessionKey{SessionID: sessionID}
 
-	if nativeTranscriptExists, existsErr := claudeNativeTranscriptExists(sourceClaudeHome, env, projectKey, sessionID); existsErr != nil {
-		return nil, existsErr
-	} else if nativeTranscriptExists {
-		return noMaterializedSession()
-	}
-
-	entries, err := a.loadStoreEntries(ctx, store, mainKey)
-	if err != nil {
-		return nil, err
+	entries := storeEntries
+	if entries == nil {
+		entries, err = a.loadStoreEntries(ctx, store, mainKey)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if len(entries) == 0 {
@@ -260,25 +268,6 @@ func writeJSONFile(path string, value any) error {
 	}
 
 	return materializeWriteFile(path, append(data, '\n'), 0o600)
-}
-
-func claudeNativeTranscriptExists(sourceClaudeHome string, env map[string]string, projectKey string, sessionID string) (bool, error) {
-	source := sourceClaudeConfigDir(sourceClaudeHome, env)
-	if source == "" || projectKey == "" || sessionID == "" {
-		return false, nil
-	}
-
-	path := filepath.Join(source, "projects", projectKey, sessionID+".jsonl")
-	info, statErr := materializeStat(path)
-
-	switch {
-	case statErr == nil:
-		return !info.IsDir(), nil
-	case os.IsNotExist(statErr):
-		return false, nil
-	default:
-		return false, fmt.Errorf("stat native Claude transcript: %w", statErr)
-	}
 }
 
 func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, env map[string]string) error {

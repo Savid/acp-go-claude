@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -126,12 +127,34 @@ func ReplayUpdates(path string) ([]acp.SessionUpdate, bool, error) {
 
 	defer file.Close()
 
-	transcriptToolUses, err := collectTranscriptToolUses(file)
+	return replayUpdates(path, file)
+}
+
+// ReplayEntries converts store-authoritative transcript rows into ACP session
+// updates without consulting Claude's local transcript cache.
+func ReplayEntries(entries []json.RawMessage) ([]acp.SessionUpdate, bool, error) {
+	var transcript bytes.Buffer
+
+	for _, entry := range entries {
+		trimmed := bytes.TrimSpace(entry)
+		if len(trimmed) == 0 {
+			continue
+		}
+
+		transcript.Write(trimmed)
+		transcript.WriteByte('\n')
+	}
+
+	return replayUpdates("session store", bytes.NewReader(transcript.Bytes()))
+}
+
+func replayUpdates(source string, reader io.ReadSeeker) ([]acp.SessionUpdate, bool, error) {
+	transcriptToolUses, err := collectTranscriptToolUses(reader)
 	if err != nil {
 		return nil, false, fmt.Errorf("read transcript tool uses: %w", err)
 	}
 
-	if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
+	if _, seekErr := reader.Seek(0, io.SeekStart); seekErr != nil {
 		return nil, false, fmt.Errorf("rewind transcript: %w", seekErr)
 	}
 
@@ -146,13 +169,13 @@ func ReplayUpdates(path string) ([]acp.SessionUpdate, bool, error) {
 
 	skippedLines := 0
 
-	err = readTranscriptLines(file, func(line transcriptLine) error {
+	err = readTranscriptLines(reader, func(line transcriptLine) error {
 		entry, skipped := decodeLine(line.Text)
 		if skipped {
 			skippedLines++
 
 			if line.Final {
-				logTornTranscriptLine(path, line.Offset)
+				logTornTranscriptLine(source, line.Offset)
 			}
 		}
 
@@ -181,7 +204,7 @@ func ReplayUpdates(path string) ([]acp.SessionUpdate, bool, error) {
 		return nil
 	})
 
-	logSkippedTranscriptLines(path, skippedLines)
+	logSkippedTranscriptLines(source, skippedLines)
 
 	if err != nil && !errors.Is(err, errReplayTruncated) {
 		return nil, false, fmt.Errorf("read transcript: %w", err)

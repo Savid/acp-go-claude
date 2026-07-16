@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -58,6 +59,21 @@ func TestStoreListFindAndReplay(t *testing.T) {
 	require.Equal(t, "USD", updates[3].UsageUpdate.Cost.Currency)
 	require.Equal(t, 200000, updates[3].UsageUpdate.Size)
 	require.Equal(t, 13, updates[3].UsageUpdate.Used)
+}
+
+func TestReplayEntriesUsesStoreRows(t *testing.T) {
+	t.Parallel()
+
+	updates, truncated, err := ReplayEntries([]json.RawMessage{
+		json.RawMessage(`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":"stored prompt"}}`),
+		json.RawMessage(`   `),
+		json.RawMessage(`{"type":"assistant","uuid":"33333333-3333-4333-8333-333333333333","cwd":"/repo","message":{"content":[{"type":"text","text":"stored answer"}]}}`),
+	})
+	require.NoError(t, err)
+	require.False(t, truncated)
+	require.Len(t, updates, 2)
+	require.Equal(t, "stored prompt", updates[0].UserMessageChunk.Content.Text.Text)
+	require.Equal(t, "stored answer", updates[1].AgentMessageChunk.Content.Text.Text)
 }
 
 func TestStoreListAllSortsAndDedupes(t *testing.T) {

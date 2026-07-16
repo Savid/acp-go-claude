@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,7 +17,6 @@ import (
 	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/savid/acp-go-claude/internal/observer"
 	"github.com/savid/acp-go-claude/internal/permissions"
-	"github.com/savid/acp-go-claude/internal/transcript"
 )
 
 var mapMCPServersToClaude = mapper.MCPServersToClaude
@@ -105,15 +103,16 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return resp, nil
 	}
 
-	if blocked, blockErr := a.nativeSessionBlocked(ctx, params.SessionId); blockErr != nil {
-		return acp.ResumeSessionResponse{}, blockErr
-	} else if blocked {
-		return acp.ResumeSessionResponse{}, unknownSessionError()
-	}
-
 	if openErr := a.ensureOpen(); openErr != nil {
 		return acp.ResumeSessionResponse{}, openErr
 	}
+
+	storeEntries, storeErr := a.storedSessionEntries(ctx, params.SessionId)
+	if storeErr != nil {
+		return acp.ResumeSessionResponse{}, storeErr
+	}
+
+	start.StoreEntries = storeEntries
 
 	session, err := a.startSession(ctx, params.SessionId, start)
 	if err != nil {
@@ -153,25 +152,13 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, validationErr
 	}
 
-	if blocked, blockErr := a.nativeSessionBlocked(ctx, params.SessionId); blockErr != nil {
-		return acp.LoadSessionResponse{}, blockErr
-	} else if blocked {
-		return acp.LoadSessionResponse{}, unknownSessionError()
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.LoadSessionResponse{}, openErr
 	}
 
-	saved, err := transcript.Store{ClaudeHome: a.options.Home}.Find(ctx, string(params.SessionId), params.Cwd)
-
-	savedPath := ""
-	if err == nil {
-		savedPath = saved.Path
-	} else {
-		if errors.Is(err, os.ErrNotExist) && !a.storeHasSession(ctx, string(params.SessionId), params.Cwd) {
-			return acp.LoadSessionResponse{}, unknownSessionError()
-		}
-
-		if !errors.Is(err, os.ErrNotExist) {
-			return acp.LoadSessionResponse{}, err
-		}
+	storeEntries, err := a.storedSessionEntries(ctx, params.SessionId)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
 	}
 
 	start := sessionStart{
@@ -179,6 +166,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		McpServers:            params.McpServers,
 		AdditionalDirectories: additionalDirectories,
 		ResumeID:              string(params.SessionId),
+		StoreEntries:          storeEntries,
 		MetaOptions:           metaOptions,
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
 	}
@@ -187,10 +175,6 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	startedSession := false
 
 	if session == nil {
-		if openErr := a.ensureOpen(); openErr != nil {
-			return acp.LoadSessionResponse{}, openErr
-		}
-
 		session, err = a.startSession(ctx, params.SessionId, start)
 		if err != nil {
 			if missingClaudeSessionError(err) {
@@ -207,20 +191,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		startedSession = true
 	}
 
-	replayPath := savedPath
-	if session.materialized != nil && session.materialized.mainPath != "" {
-		replayPath = session.materialized.mainPath
-	}
-
-	if replayPath == "" {
-		if startedSession {
-			a.removeSession(ctx, params.SessionId, session)
-		}
-
-		return acp.LoadSessionResponse{}, unknownSessionError()
-	}
-
-	if replayErr := session.replayTranscript(ctx, replayPath); replayErr != nil {
+	if replayErr := session.replayTranscriptEntries(ctx, storeEntries); replayErr != nil {
 		if startedSession {
 			a.removeSession(ctx, params.SessionId, session)
 		}
@@ -238,7 +209,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	return resp, nil
 }
 
-// ListSessions lists active sessions and saved Claude transcript sessions.
+// ListSessions lists active sessions and sessions held by the authoritative store.
 func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (resp acp.ListSessionsResponse, err error) {
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/list")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
@@ -264,42 +235,17 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		active = append(active, session.sessionInfo(id))
 	}
 
-	a.retryDeletedNativeTranscripts(ctx)
-
-	var saved []transcript.Session
-	if a.nativeSessionFallbackEnabled() {
-		saved, err = transcript.Store{ClaudeHome: a.options.Home}.List(ctx, params.Cwd, nil)
-		if err != nil {
-			return acp.ListSessionsResponse{}, err
-		}
-	}
-
 	storeSessions, err := a.listStoreSessions(ctx, params)
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
 
-	sessions := make([]acp.SessionInfo, 0, len(active)+len(saved)+len(storeSessions))
-	seen := make(map[acp.SessionId]struct{}, len(active)+len(saved)+len(storeSessions))
+	sessions := make([]acp.SessionInfo, 0, len(active)+len(storeSessions))
+	seen := make(map[acp.SessionId]struct{}, len(active)+len(storeSessions))
 
 	for _, session := range active {
 		sessions = append(sessions, session)
 		seen[session.SessionId] = struct{}{}
-	}
-
-	for _, session := range saved {
-		if a.isDeleted(session.Info.SessionId) {
-			a.retryDeleteNativeTranscript(ctx, session.Info.SessionId)
-
-			continue
-		}
-
-		if _, ok := seen[session.Info.SessionId]; ok {
-			continue
-		}
-
-		sessions = append(sessions, session.Info)
-		seen[session.Info.SessionId] = struct{}{}
 	}
 
 	for _, session := range storeSessions {
@@ -648,8 +594,8 @@ func mcpServerName(server acp.McpServer) string {
 }
 
 // unknownSessionError is returned by every session-scoped method when the
-// session id cannot be resolved (unknown, not in the store, tombstoned, or its
-// native transcript is gone). All such cases share one invalid-params shape.
+// session id cannot be resolved (not active, not in the store, or tombstoned).
+// All such cases share one invalid-params shape.
 func unknownSessionError() *acp.RequestError {
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: "unknown session",
@@ -662,6 +608,10 @@ func missingClaudeSessionError(err error) bool {
 }
 
 func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessionStart) (_ *agentSession, err error) { //nolint:gocyclo // Session startup owns the complete resource unwind graph.
+	if start.ResumeID != "" && len(start.StoreEntries) == 0 && !start.ActiveSessionResume {
+		return nil, unknownSessionError()
+	}
+
 	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
 	if err != nil {
 		return nil, err
@@ -709,7 +659,12 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	env = mergeEnv(env, start.MetaOptions.Env)
 	env = a.observe.InjectTraceEnv(ctx, env)
 
-	materialized, err = a.materializeStoreSession(ctx, start.ResumeID, start.Cwd, claudeHome, env)
+	if len(start.StoreEntries) > 0 {
+		materialized, err = a.materializeStoreSessionWithEntries(
+			ctx, start.ResumeID, start.Cwd, claudeHome, env, start.StoreEntries,
+		)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -819,7 +774,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		materialized:          materialized,
 		mcpConfigDir:          mcpConfigDir,
 		scratchRootRelease:    scratchRelease,
-		mirror:                newSessionMirror(a.log, a.options.SessionStore, processClaudeHome),
+		mirror:                newSessionMirror(a.log, a.sessionStore(), processClaudeHome),
 		rawMessages:           start.RawMessages,
 		mcpRefreshPending:     len(start.McpServers) > 0,
 	}
@@ -986,39 +941,25 @@ func mcpServerNameField(index int) string {
 	return fmt.Sprintf("mcpServers[%d].name", index)
 }
 
-func (a *Agent) storeHasSession(ctx context.Context, sessionID string, cwd string) bool {
-	entries, err := a.loadStoreEntries(ctx, a.sessionStore(), SessionKey{SessionID: sessionID})
-
-	return err == nil && len(entries) > 0
-}
-
-func (a *Agent) nativeSessionFallbackEnabled() bool {
-	return a.options.SessionStore == nil
-}
-
-func (a *Agent) nativeSessionBlocked(ctx context.Context, sessionID acp.SessionId) (bool, error) {
+func (a *Agent) storedSessionEntries(ctx context.Context, sessionID acp.SessionId) ([]SessionStoreEntry, error) {
 	if a.isDeleted(sessionID) {
 		a.retryDeleteNativeTranscript(ctx, sessionID)
 
-		return true, nil
-	}
-
-	if a.nativeSessionFallbackEnabled() {
-		return false, nil
+		return nil, unknownSessionError()
 	}
 
 	entries, err := a.loadStoreEntries(ctx, a.sessionStore(), SessionKey{SessionID: string(sessionID)})
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	if len(entries) > 0 {
-		return false, nil
+		return entries, nil
 	}
 
 	a.retryDeleteNativeTranscript(ctx, sessionID)
 
-	return true, nil
+	return nil, unknownSessionError()
 }
 
 func (a *Agent) isDeleted(sessionID acp.SessionId) bool {
@@ -1028,20 +969,6 @@ func (a *Agent) isDeleted(sessionID acp.SessionId) bool {
 	_, ok := a.deleted[sessionID]
 
 	return ok
-}
-
-func (a *Agent) retryDeletedNativeTranscripts(ctx context.Context) {
-	a.mu.Lock()
-
-	ids := make([]acp.SessionId, 0, len(a.deleted))
-	for id := range a.deleted {
-		ids = append(ids, id)
-	}
-	a.mu.Unlock()
-
-	for _, id := range ids {
-		a.retryDeleteNativeTranscript(ctx, id)
-	}
 }
 
 func (a *Agent) retryDeleteNativeTranscript(ctx context.Context, sessionID acp.SessionId) {

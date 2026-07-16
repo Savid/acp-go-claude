@@ -103,10 +103,15 @@ func TestMaterializeStoreSessionBranches(t *testing.T) {
 
 	nativePath := filepath.Join(sourceHome, "projects", projectKey, sessionID+".jsonl")
 	require.NoError(t, os.MkdirAll(filepath.Dir(nativePath), 0o755))
-	require.NoError(t, os.WriteFile(nativePath, []byte(`{}`), 0o600))
-	none, err = agent.materializeStoreSession(ctx, sessionID, cwd, sourceHome, nil)
+	require.NoError(t, os.WriteFile(nativePath, []byte(`{"type":"assistant","message":{"content":"native-only"}}`), 0o600))
+	materialized, err = agent.materializeStoreSession(ctx, sessionID, cwd, sourceHome, nil)
 	require.NoError(t, err)
-	require.Nil(t, none)
+	require.NotNil(t, materialized)
+	mainData, err = os.ReadFile(materialized.mainPath)
+	require.NoError(t, err)
+	require.Equal(t, "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n", string(mainData))
+	require.NotContains(t, string(mainData), "native-only")
+	require.NoError(t, materialized.Close())
 }
 
 func TestMaterializeStoreSessionErrors(t *testing.T) {
@@ -148,7 +153,7 @@ func TestMaterializeStoreSessionErrors(t *testing.T) {
 	require.ErrorContains(t, writeJSONFile(filepath.Join(blocker, "child.json"), map[string]any{"ok": true}), "create metadata dir")
 }
 
-func TestNativeTranscriptAndConfigDirHelpers(t *testing.T) {
+func TestConfigDirAndNativeTranscriptDeleteHelpers(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
 	envHome := t.TempDir()
@@ -173,22 +178,9 @@ func TestNativeTranscriptAndConfigDirHelpers(t *testing.T) {
 	sessionID := "33333333-3333-4333-8333-333333333333"
 	projectKey := "project"
 	source := t.TempDir()
-	exists, err := claudeNativeTranscriptExists(source, nil, "", sessionID)
-	require.NoError(t, err)
-	require.False(t, exists)
-	exists, err = claudeNativeTranscriptExists(source, nil, projectKey, "")
-	require.NoError(t, err)
-	require.False(t, exists)
-	exists, err = claudeNativeTranscriptExists(source, nil, projectKey, sessionID)
-	require.NoError(t, err)
-	require.False(t, exists)
-
 	path := filepath.Join(source, "projects", projectKey, sessionID+".jsonl")
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0o600))
-	exists, err = claudeNativeTranscriptExists(source, nil, projectKey, sessionID)
-	require.NoError(t, err)
-	require.True(t, exists)
 
 	require.NoError(t, deleteNativeTranscriptImpl(context.Background(), source, "bad"))
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -214,7 +206,6 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 
 	originalMkdirTemp := materializeMkdirTemp
 	originalWriteFile := materializeWriteFile
-	originalStat := materializeStat
 	originalReadFile := materializeReadFile
 	originalGlob := materializeGlob
 	originalRemove := materializeRemove
@@ -223,7 +214,6 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 	t.Cleanup(func() {
 		materializeMkdirTemp = originalMkdirTemp
 		materializeWriteFile = originalWriteFile
-		materializeStat = originalStat
 		materializeReadFile = originalReadFile
 		materializeGlob = originalGlob
 		materializeRemove = originalRemove
@@ -241,13 +231,6 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 	_, err = agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
 	require.ErrorContains(t, err, "write failed")
 	materializeWriteFile = originalWriteFile
-
-	materializeStat = func(string) (os.FileInfo, error) { return nil, errors.New("stat failed") }
-	_, err = claudeNativeTranscriptExists(t.TempDir(), nil, "project", sessionID)
-	require.ErrorContains(t, err, "stat native Claude transcript")
-	_, err = agent.materializeStoreSession(ctx, sessionID, cwd, t.TempDir(), nil)
-	require.ErrorContains(t, err, "stat native Claude transcript")
-	materializeStat = originalStat
 
 	emptyStoreAgent := NewAgent(WithSessionStore(NewInMemorySessionStore()))
 	none, err := emptyStoreAgent.materializeStoreSession(ctx, sessionID, cwd, "", nil)

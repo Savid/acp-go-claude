@@ -46,7 +46,7 @@ Every serve-mode flag has an option equivalent:
 | `-claude-permission-mode` | `WithClaudeDefaultPermissionMode` |
 | `-claude-system-prompt` | `WithClaudeDefaultSystemPrompt` |
 
-Embed-only options carry no flag. Use `WithSessionStore` when the host wants
-session storage outside the local Claude project directory, plus `WithTurnTimeout`,
-`WithConcurrencyLimits`, and the OpenTelemetry providers. See the
-[Go API reference](/docs/reference/go-api) for the full catalog.
+Embed-only options carry no flag. Use `WithSessionStore` to replace the default
+in-memory session authority when sessions must survive the agent process, plus
+`WithTurnTimeout`, `WithConcurrencyLimits`, and the OpenTelemetry providers.
+See the [Go API reference](/docs/reference/go-api) for the full catalog.

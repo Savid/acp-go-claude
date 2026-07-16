@@ -19,11 +19,11 @@ is reused as the durable store key, so a host can address the same session
 across restarts. Forking an existing session is exposed only through the
 `_claude/session/fork` extension method — there is no separate fork ACP method.
 
-Loading and resuming a session rehydrate Claude's own transcript. When the local
-Claude transcript is gone but a host-provided [session
-store](/docs/features/session-store) holds the rows, the adapter materializes
-them into a temporary Claude config directory under the scratch directory
-(default: system temp) so the CLI can resume from them.
+Loading, resuming, and forking an inactive session require authoritative main
+rows in the [session store](/docs/features/session-store). The adapter
+materializes those rows into an isolated temporary Claude config directory
+under the scratch directory (default: system temp) so the CLI can restore them.
+A residual native transcript is never adopted when the store has no session.
 
 ## Store keys and subpaths
 

@@ -92,9 +92,9 @@ type Options struct {
 	// If nil, W3C trace context plus baggage propagation is used.
 	TextMapPropagator propagation.TextMapPropagator
 
-	// SessionStore mirrors Claude transcript writes and backs store restores.
+	// SessionStore replaces the default in-memory authority for transcript discovery and restore.
 	SessionStore SessionStore
-	// SessionStoreLoadTimeout bounds store load/list operations used for resume.
+	// SessionStoreLoadTimeout bounds store reads used for restore and listing.
 	SessionStoreLoadTimeout time.Duration
 	// ConcurrencyLimits controls process-local backpressure.
 	ConcurrencyLimits ConcurrencyLimits
@@ -268,14 +268,14 @@ func WithRuntimeResourceHooks(hooks RuntimeResourceHooks) Option {
 	}
 }
 
-// WithSessionStore configures external Claude transcript storage.
+// WithSessionStore replaces the default in-memory session authority with a host store.
 func WithSessionStore(store SessionStore) Option {
 	return func(options *Options) {
 		options.SessionStore = store
 	}
 }
 
-// WithSessionStoreLoadTimeout bounds session store reads used during resume.
+// WithSessionStoreLoadTimeout bounds session store reads used during restore and listing.
 func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
 	return func(options *Options) {
 		options.SessionStoreLoadTimeout = timeout

@@ -182,8 +182,8 @@ type agentSession struct {
 	mcpConfigDir       string
 	nativeRootRelease  func()
 	scratchRootRelease func()
-	// Started sessions always have a mirror; storeless mirrors still parse
-	// mirror rows and simply skip transcript persistence.
+	// Started sessions always mirror transcript rows into the agent's
+	// authoritative session store.
 	mirror           *sessionMirror
 	rawMessages      rawMessageConfig
 	rawEventSequence int64

@@ -96,7 +96,8 @@ providers.
 - Permission modes, permission prompts, plan mode, elicitation, and
   `AskUserQuestion` bridging.
 - MCP stdio and HTTP server declarations.
-- Optional durable mirroring through a host-provided `SessionStore`.
+- Store-authoritative transcript mirroring, in-memory by default and replaceable
+  with a host-provided `SessionStore` for cross-process durability.
 - Optional raw Claude stream-json extension notifications.
 - OpenTelemetry spans, metrics, trace propagation, and structured logs without
   recording prompt or tool secrets by default.

@@ -1,17 +1,18 @@
 ---
 title: "Session Store"
-description: "Wire a durable transcript store so sessions survive beyond the local Claude directory"
+description: "Configure the authoritative transcript store used for session restore and discovery"
 ---
 
-By default a session's transcript lives only in the local Claude config
-directory. Provide a `SessionStore` when the host needs sessions to resume from
-its own storage — for example a database or object store on a different machine.
+Every agent has a `SessionStore`. By default it is a private in-memory store, so
+sessions remain restorable only for that agent instance. Provide a host store
+when session authority must survive process restarts or move between machines —
+for example a database or object store.
 
 ## Wiring a store
 
-Install a store with `WithSessionStore`; bound the reads used during resume with
-`WithSessionStoreLoadTimeout`. A ready-made in-memory implementation ships for
-tests and small hosts:
+Replace the default store with `WithSessionStore`; bound restore and list reads
+with `WithSessionStoreLoadTimeout`. A ready-made in-memory implementation ships
+for tests and small hosts:
 
 ```go
 store := claudeacp.NewInMemorySessionStore()
@@ -22,10 +23,15 @@ err := claudeacp.Serve(ctx, input, output,
 )
 ```
 
-The adapter mirrors Claude transcript rows into the store as the turn streams,
-backs `session/list` from it, and hydrates stored rows into a temporary Claude
-config directory under the scratch directory (default: system temp) when the
-local transcript is missing.
+The adapter mirrors Claude transcript rows into the store as the turn streams
+and uses the store as the sole authority for `session/list`, `session/load`,
+`session/resume`, and inactive-session fork. Restore always hydrates the
+authoritative rows into an isolated temporary Claude config directory under the
+scratch directory (default: system temp).
+
+Claude's native transcript is a process cache, not a discovery or restore
+authority. A native transcript whose session id has no main store rows is
+ignored, removed when addressed, and reported as an unknown session.
 
 ## The store contract
 
@@ -57,7 +63,7 @@ subagent transcripts mirror under safe relative subpaths of the same session id.
 `UpdatedAtUnixMilli` in Unix milliseconds.
 
 <Note>
-`WithSessionStoreLoadTimeout` bounds load and list operations during resume. Set
-it when your store can hang (network round-trips), or a slow backend will stall
-`session/load` and `session/resume`.
+`WithSessionStoreLoadTimeout` bounds store reads used by restore and listing.
+Set it when your store can hang (network round-trips), or a slow backend will
+stall `session/load`, `session/resume`, fork, and `session/list`.
 </Note>

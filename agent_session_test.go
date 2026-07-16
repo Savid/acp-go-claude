@@ -27,11 +27,11 @@ func TestUnknownSessionInvalidParams(t *testing.T) {
 	requireUnknownSession(t, sessionErr)
 
 	// Resume and load against an id that is not active and not in the store.
-	_, resumeErr := NewAgent(WithSessionStore(NewInMemorySessionStore())).
+	_, resumeErr := NewAgent().
 		ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
 	requireUnknownSession(t, resumeErr)
 
-	_, loadErr := NewAgent(WithSessionStore(NewInMemorySessionStore())).
+	_, loadErr := NewAgent().
 		LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
 	requireUnknownSession(t, loadErr)
 }
@@ -54,6 +54,7 @@ func TestNewSessionEdgeBranches(t *testing.T) {
 	resp, err := agent.NewSession(ctx, NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
 	require.Contains(t, agent.sessions, resp.SessionId)
+	require.Same(t, agent.store, agent.sessions[resp.SessionId].mirror.store)
 }
 
 func TestResumeSessionEdgeBranches(t *testing.T) {
@@ -83,13 +84,15 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 
 	missingTransport := newFakeClaudeTransport()
 	missingTransport.startErr = claude.ErrSessionNotFound
-	missing, _, _ := newFakeLifecycleAgent(t, missingTransport)
+	missingStore := NewInMemorySessionStore()
+	require.NoError(t, missingStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	missing, _, _ := newFakeLifecycleAgent(t, missingTransport, WithSessionStore(missingStore))
 	_, err = missing.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
 	requireUnknownSession(t, err)
 
 	startErrTransport := newFakeClaudeTransport()
 	startErrTransport.startErr = errors.New("start failed")
-	startErrAgent, _, _ := newFakeLifecycleAgent(t, startErrTransport)
+	startErrAgent, _, _ := newFakeLifecycleAgent(t, startErrTransport, WithSessionStore(missingStore))
 	_, err = startErrAgent.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
 	require.ErrorContains(t, err, "start failed")
 
@@ -102,19 +105,23 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	activeConn.sessionUpdateErr = nil
 	require.NoError(t, active.Close())
 
-	resumed, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+	resumed, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(missingStore))
 	resp, err := resumed.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
 	require.NoError(t, err)
 	require.NotEmpty(t, resp.ConfigOptions)
 	require.NoError(t, resumed.Close())
 
-	emitFail, emitConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+	emitStore := NewInMemorySessionStore()
+	require.NoError(t, emitStore.Append(ctx, SessionKey{SessionID: "22222222-2222-4222-8222-222222222222"}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	emitFail, emitConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(emitStore))
 	emitConn.sessionUpdateErr = errors.New("resume update failed")
 	resp, err = emitFail.ResumeSession(ctx, ResumeSessionRequest("22222222-2222-4222-8222-222222222222", cwd))
 	require.NoError(t, err)
 	require.NotEmpty(t, resp.ConfigOptions)
 
-	backpressure, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
+	backpressureStore := NewInMemorySessionStore()
+	require.NoError(t, backpressureStore.Append(ctx, SessionKey{SessionID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	backpressure, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(backpressureStore), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	existing, cleanup := newStartedAgentSessionForTest(t, backpressure, "existing")
 	defer cleanup()
 	backpressure.sessions[existing.id] = existing
@@ -143,7 +150,9 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	requireUnknownSession(t, err)
 
 	badHome := string([]byte{0})
-	_, err = NewAgent(WithHome(badHome)).LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
+	badHomeStore := NewInMemorySessionStore()
+	require.NoError(t, badHomeStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	_, err = NewAgent(WithHome(badHome), WithSessionStore(badHomeStore)).LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
 	require.Error(t, err)
 
 	_, err = NewAgent(WithHome(t.TempDir())).LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
@@ -153,18 +162,25 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{
 		[]byte(`{"type":"user","cwd":"` + filepath.ToSlash(cwd) + `","message":{"content":"hello"}}`),
 	}))
-	loaded, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(store))
+	countedStore := &mainLoadCountingStore{SessionStore: store}
+	loaded, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(countedStore))
 	resp, err := loaded.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
 	require.NoError(t, err)
 	require.NotEmpty(t, resp.ConfigOptions)
+	require.Equal(t, 1, countedStore.loads)
 	require.NoError(t, loaded.Close())
 
 	nativeHome := t.TempDir()
-	writeNativeTranscript(t, nativeHome, cwd, "99999999-9999-4999-8999-999999999999")
+	nativeID := acp.SessionId("99999999-9999-4999-8999-999999999999")
+	nativePath := writeNativeTranscript(t, nativeHome, cwd, nativeID)
 	nativeLoaded, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithHome(nativeHome))
-	resp, err = nativeLoaded.LoadSession(ctx, LoadSessionRequest("99999999-9999-4999-8999-999999999999", cwd))
-	require.NoError(t, err)
-	require.NotEmpty(t, resp.ConfigOptions)
+	_, err = nativeLoaded.LoadSession(ctx, LoadSessionRequest(nativeID, cwd))
+	requireUnknownSession(t, err)
+	require.NoFileExists(t, nativePath)
+	nativePath = writeNativeTranscript(t, nativeHome, cwd, nativeID)
+	_, err = nativeLoaded.ResumeSession(ctx, ResumeSessionRequest(nativeID, cwd))
+	requireUnknownSession(t, err)
+	require.NoFileExists(t, nativePath)
 	require.NoError(t, nativeLoaded.Close())
 
 	closedStore := NewInMemorySessionStore()
@@ -203,36 +219,8 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, envSkipStore.Append(ctx, SessionKey{SessionID: "88888888-8888-4888-8888-888888888888"}, []SessionStoreEntry{[]byte(`{"type":"system"}`)}))
 	envSkip, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(envSkipStore), WithEnv(map[string]string{"CLAUDE_CONFIG_DIR": envNativeHome}))
 	_, err = envSkip.LoadSession(ctx, LoadSessionRequest("88888888-8888-4888-8888-888888888888", cwd))
-	requireUnknownSession(t, err)
-
-	activeStore := NewInMemorySessionStore()
-	require.NoError(t, activeStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{[]byte(`{"type":"system"}`)}))
-	active, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(activeStore))
-	active.sessions[sessionID] = &agentSession{
-		agent:        active,
-		id:           sessionID,
-		cwd:          cwd,
-		fingerprint:  sessionStartFingerprint(sessionStart{Cwd: cwd, ResumeID: string(sessionID)}),
-		materialized: &materializedSession{mainPath: filepath.Join(t.TempDir(), "missing.jsonl")},
-		client:       claude.NewClient(nil, claude.Options{}, newFakeClaudeTransport()),
-		turn:         make(chan struct{}, sessionTurnCapacity),
-	}
-	_, err = active.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
-	require.ErrorContains(t, err, "open transcript")
-
-	previousCopy := copyClaudeConfigFiles
-	copyClaudeConfigFiles = func(dst string, _ string, _ map[string]string) error {
-		projectKey, keyErr := projectKeyForDirectory(cwd)
-		require.NoError(t, keyErr)
-
-		return os.Remove(filepath.Join(dst, "projects", projectKey, string(sessionID)+".jsonl"))
-	}
-	t.Cleanup(func() { copyClaudeConfigFiles = previousCopy })
-	startedReplayErr, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(store))
-	_, err = startedReplayErr.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
-	require.ErrorContains(t, err, "open transcript")
-	require.Empty(t, startedReplayErr.sessions)
-	copyClaudeConfigFiles = previousCopy
+	require.NoError(t, err)
+	require.NotNil(t, envSkip.sessions["88888888-8888-4888-8888-888888888888"].materialized)
 
 	emptyUpdateStore := NewInMemorySessionStore()
 	require.NoError(t, emptyUpdateStore.Append(ctx, SessionKey{SessionID: "44444444-4444-4444-8444-444444444444"}, []SessionStoreEntry{
@@ -243,6 +231,16 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	loadResp, err := emitFail.LoadSession(ctx, LoadSessionRequest("44444444-4444-4444-8444-444444444444", cwd))
 	require.NoError(t, err)
 	require.NotEmpty(t, loadResp.ConfigOptions)
+
+	replayErrStore := NewInMemorySessionStore()
+	require.NoError(t, replayErrStore.Append(ctx, SessionKey{SessionID: "55555555-5555-4555-8555-555555555555"}, []SessionStoreEntry{
+		[]byte(`{"type":"user","message":{"content":"replay me"}}`),
+	}))
+	replayErrAgent, replayErrConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(replayErrStore))
+	replayErrConn.sessionUpdateErr = errors.New("replay update failed")
+	_, err = replayErrAgent.LoadSession(ctx, LoadSessionRequest("55555555-5555-4555-8555-555555555555", cwd))
+	require.ErrorContains(t, err, "replay update failed")
+	require.Empty(t, replayErrAgent.sessions)
 }
 
 func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
@@ -254,8 +252,9 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 	require.ErrorContains(t, err, "absolute")
 
 	badHome := string([]byte{0})
-	_, err = NewAgent(WithHome(badHome)).ListSessions(ctx, ListSessionsRequest())
-	require.Error(t, err)
+	badHomeResp, err := NewAgent(WithHome(badHome)).ListSessions(ctx, ListSessionsRequest())
+	require.NoError(t, err)
+	require.Empty(t, badHomeResp.Sessions)
 
 	cursor := "bad"
 	_, err = NewAgent(WithSessionStore(NewInMemorySessionStore())).ListSessions(ctx, acp.ListSessionsRequest{Cursor: &cursor})
@@ -300,7 +299,7 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 	nativeListAgent := NewAgent(WithHome(nativeHome))
 	nativeResp, err := nativeListAgent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
 	require.NoError(t, err)
-	require.Len(t, nativeResp.Sessions, 1)
+	require.Empty(t, nativeResp.Sessions)
 	activeNative, activeNativeCleanup := newStartedAgentSessionForTest(t, nativeListAgent, nativeID)
 	defer activeNativeCleanup()
 	activeNative.cwd = cwd
@@ -499,38 +498,33 @@ func TestAgentSessionHelperBranches(t *testing.T) {
 	closeSessionStartResources(&materializedSession{})
 }
 
-func TestNativeSessionBlockedAndStoreHasSession(t *testing.T) {
+func TestStoredSessionEntries(t *testing.T) {
 	ctx := context.Background()
 	sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
 	store := NewInMemorySessionStore()
 	agent := NewAgent(WithSessionStore(store))
 
-	require.True(t, NewAgent().nativeSessionFallbackEnabled())
-	blocked, err := NewAgent().nativeSessionBlocked(ctx, sessionID)
-	require.NoError(t, err)
-	require.False(t, blocked)
-
-	require.False(t, agent.storeHasSession(ctx, string(sessionID), "/tmp/project"))
-	blocked, err = agent.nativeSessionBlocked(ctx, sessionID)
-	require.NoError(t, err)
-	require.True(t, blocked)
+	_, err := NewAgent().storedSessionEntries(ctx, sessionID)
+	requireUnknownSession(t, err)
+	_, err = agent.storedSessionEntries(ctx, sessionID)
+	requireUnknownSession(t, err)
 
 	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
-	require.True(t, agent.storeHasSession(ctx, string(sessionID), "/tmp/project"))
-	blocked, err = agent.nativeSessionBlocked(ctx, sessionID)
+	entries, err := agent.storedSessionEntries(ctx, sessionID)
 	require.NoError(t, err)
-	require.False(t, blocked)
+	require.Len(t, entries, 1)
 
 	agent.deleted[sessionID] = struct{}{}
-	blocked, err = agent.nativeSessionBlocked(ctx, sessionID)
-	require.NoError(t, err)
-	require.True(t, blocked)
+	previousDeleteNativeTranscript := deleteNativeTranscript
+	deleteNativeTranscript = func(context.Context, string, string) error { return errors.New("cleanup failed") }
+	t.Cleanup(func() { deleteNativeTranscript = previousDeleteNativeTranscript })
+	_, err = agent.storedSessionEntries(ctx, sessionID)
+	requireUnknownSession(t, err)
+	deleteNativeTranscript = previousDeleteNativeTranscript
 
 	errAgent := NewAgent(WithSessionStore(&faultSessionStore{SessionStore: NewInMemorySessionStore(), loadErr: errors.New("load failed")}))
-	blocked, err = errAgent.nativeSessionBlocked(ctx, sessionID)
+	_, err = errAgent.storedSessionEntries(ctx, sessionID)
 	require.ErrorContains(t, err, "load failed")
-	require.False(t, blocked)
-	require.False(t, errAgent.storeHasSession(ctx, string(sessionID), "/tmp/project"))
 }
 
 func TestListStoreSessionsTitleAndPaginationBranches(t *testing.T) {
@@ -647,6 +641,19 @@ func newStartedAgentSessionForTest(t *testing.T, agent *Agent, id acp.SessionId)
 	return session, func() { _ = client.Close() }
 }
 
+type mainLoadCountingStore struct {
+	SessionStore
+	loads int
+}
+
+func (s *mainLoadCountingStore) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error) {
+	if key.Subpath == SessionStoreMainSubpath {
+		s.loads++
+	}
+
+	return s.SessionStore.Load(ctx, key)
+}
+
 func TestStartSessionEdgeBranches(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
@@ -657,10 +664,19 @@ func TestStartSessionEdgeBranches(t *testing.T) {
 	_, err := NewAgent(WithHome(homeFile)).startSession(ctx, sessionID, sessionStart{Cwd: cwd})
 	require.ErrorContains(t, err, "not a directory")
 
-	materializeErrStore := &faultSessionStore{SessionStore: NewInMemorySessionStore(), loadErr: errors.New("load failed")}
-	materializeErrAgent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(materializeErrStore))
-	_, err = materializeErrAgent.startSession(ctx, sessionID, sessionStart{Cwd: cwd, ResumeID: string(sessionID)})
-	require.ErrorContains(t, err, "load failed")
+	unauthorizedResume, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+	_, err = unauthorizedResume.startSession(ctx, sessionID, sessionStart{Cwd: cwd, ResumeID: string(sessionID)})
+	requireUnknownSession(t, err)
+
+	blockedScratch := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(blockedScratch, []byte("x"), 0o600))
+	materializeErrAgent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithScratchDir(blockedScratch))
+	_, err = materializeErrAgent.startSession(ctx, sessionID, sessionStart{
+		Cwd:          cwd,
+		ResumeID:     string(sessionID),
+		StoreEntries: []SessionStoreEntry{[]byte(`{"type":"user"}`)},
+	})
+	require.ErrorContains(t, err, "create scratch parent dir")
 
 	modelConfigErr, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithEnv(map[string]string{envClaudeModelConfig: "[]"}))
 	_, err = modelConfigErr.startSession(ctx, sessionID, sessionStart{Cwd: cwd})

@@ -243,7 +243,7 @@ func TestDeleteSessionTombstoneHidesNativeTranscriptAndSurfacesCleanupError(t *t
 	listResp, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
 	require.NoError(t, err)
 	require.Empty(t, listResp.Sessions)
-	require.GreaterOrEqual(t, deleteCalls, 2)
+	require.Equal(t, 1, deleteCalls)
 }
 
 func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing.T) {

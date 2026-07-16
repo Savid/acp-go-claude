@@ -196,11 +196,26 @@ func (a *Agent) handleForkSession(
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
+	var storeEntries []SessionStoreEntry
+
+	a.mu.Lock()
+	parentActive := a.sessions[params.SessionId] != nil
+	a.mu.Unlock()
+
+	if !parentActive {
+		storeEntries, err = a.storedSessionEntries(ctx, params.SessionId)
+		if err != nil {
+			return acp.UnstableForkSessionResponse{}, err
+		}
+	}
+
 	session, err := a.startSession(ctx, acp.SessionId(sessionID), sessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: additionalDirectories,
 		McpServers:            mcpServers,
 		ResumeID:              string(params.SessionId),
+		StoreEntries:          storeEntries,
+		ActiveSessionResume:   parentActive,
 		ForkSession:           true,
 		PermissionRules:       permissionRules,
 		MetaOptions:           metaOptions,

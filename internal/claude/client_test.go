@@ -57,6 +57,31 @@ func TestClientQueryAfterClose(t *testing.T) {
 	require.Empty(t, transport.sentPayloads())
 }
 
+func TestClientCloseRetainsContainmentProofFailure(t *testing.T) {
+	t.Parallel()
+
+	transport := newFakeTransport()
+	transport.closeErr = ErrProcessTreeUnproven
+	client := NewClient(nil, Options{}, transport)
+
+	require.ErrorIs(t, client.Close(), ErrProcessTreeUnproven)
+	transport.closeErr = nil
+	require.ErrorIs(t, client.Close(), ErrProcessTreeUnproven,
+		"a repeated close must not forget an earlier failed quiescence proof")
+	require.Equal(t, 1, transport.closeCalls())
+}
+
+func TestClientCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	transport := newFakeTransport()
+	client := NewClient(nil, Options{}, transport)
+
+	require.NoError(t, client.Close())
+	require.NoError(t, client.Close())
+	require.Equal(t, 1, transport.closeCalls())
+}
+
 func TestClientControlCallbackContextSnapshotsExactQueryTurn(t *testing.T) {
 	t.Parallel()
 

@@ -308,10 +308,10 @@ func (s *agentSession) cleanupFailedRelaunch(
 	return errors.Join(previousCloseErr, cleanupErr)
 }
 
-// Cancel cancels the active Claude turn. The local turn context is cancelled
-// synchronously so the prompt resolves cancelled deterministically; the native
-// interrupt then runs on its own bounded background context so a cancelled
-// caller context cannot abort it.
+// Cancel cancels the active Claude turn. Settlement is fenced by cancelMu: the
+// local turn wakes immediately, but neither Cancel nor Prompt may return until
+// the native process tree has been closed and proved quiescent. A later prompt
+// lazily relaunches Claude and resumes the same native session id.
 func (s *agentSession) Cancel(ctx context.Context) (err error) {
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
@@ -347,9 +347,11 @@ func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) er
 func (s *agentSession) cancelNative(ctx context.Context) (err error) {
 	s.mu.Lock()
 	turnCancel := s.cancel
+	client := s.client
+	active := turnCancel != nil || len(s.permissionCancel) > 0 || len(s.elicitationCancel) > 0
 	s.mu.Unlock()
 
-	s.cancelPendingInteractions()
+	s.cancelPendingInteractions(true)
 
 	if turnCancel != nil {
 		turnCancel()
@@ -365,7 +367,60 @@ func (s *agentSession) cancelNative(ctx context.Context) (err error) {
 	interruptCtx, cancelInterrupt := context.WithTimeout(context.WithoutCancel(ctx), sessionInterruptTimeout)
 	defer cancelInterrupt()
 
-	return s.client.Interrupt(interruptCtx)
+	var interruptErr error
+	if client == nil {
+		interruptErr = claude.ErrClientNotStarted
+	} else {
+		interruptErr = client.Interrupt(interruptCtx)
+	}
+
+	var closeErr error
+	if active {
+		closeErr = s.closeNativeClient(client)
+	}
+
+	s.mu.Lock()
+	if errors.Is(closeErr, claude.ErrProcessTreeUnproven) {
+		s.turnContainmentErr = closeErr
+	} else {
+		s.turnContainmentErr = nil
+	}
+	s.mu.Unlock()
+
+	return errors.Join(interruptErr, closeErr)
+}
+
+// closeNativeClient terminates the complete native process tree and returns its
+// admission only after transport containment proves that tree quiescent. An
+// unproven tree permanently disables relaunch and retains its admission.
+func (s *agentSession) closeNativeClient(client *claude.Client) error {
+	if client == nil {
+		return nil
+	}
+
+	closeErr := client.Close()
+	if errors.Is(closeErr, claude.ErrProcessTreeUnproven) {
+		s.mu.Lock()
+		s.canRelaunch = false
+		s.mu.Unlock()
+
+		return closeErr
+	}
+
+	var nativeRelease func()
+
+	s.mu.Lock()
+	if s.client == client {
+		nativeRelease = s.nativeRootRelease
+		s.nativeRootRelease = nil
+	}
+	s.mu.Unlock()
+
+	if nativeRelease != nil {
+		nativeRelease()
+	}
+
+	return closeErr
 }
 
 func (s *agentSession) currentTurnNonce() string {
@@ -378,9 +433,9 @@ func (s *agentSession) currentTurnNonce() string {
 // cancelPendingInteractions marks the turn cancelled and resolves any pending
 // permission and elicitation requests as cancelled. Callers invoke this before
 // native abort so outstanding client requests are answered cancelled first.
-func (s *agentSession) cancelPendingInteractions() {
+func (s *agentSession) cancelPendingInteractions(markTurnCancelled bool) {
 	s.mu.Lock()
-	if s.cancel != nil || len(s.permissionCancel) > 0 || len(s.elicitationCancel) > 0 {
+	if markTurnCancelled && (s.cancel != nil || len(s.permissionCancel) > 0 || len(s.elicitationCancel) > 0) {
 		s.turnCancelled = true
 	}
 
@@ -428,7 +483,7 @@ func (s *agentSession) Close(ctx context.Context) (err error) {
 		defer func() { finish(err) }()
 	}
 
-	s.cancelPendingInteractions()
+	s.cancelPendingInteractions(true)
 
 	s.mu.Lock()
 	cancel := s.cancel

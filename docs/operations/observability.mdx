@@ -32,5 +32,8 @@ full shape; use the `cause` to route the investigation:
 <Note>
 A user cancel that coincides with a `WithTurnTimeout` expiry resolves as a
 successful `cancelled` response, not a `timeout` failure. If you expect timeouts
-but see cancellations, the client is cancelling first.
+but see cancellations, the client is cancelling first. Both outcomes wait for
+native process-tree quiescence. A `transport` failure mentioning an unproven
+Claude process tree means the adapter retained the runtime admission and
+disabled lazy relaunch; investigate the contained processes before recovery.
 </Note>

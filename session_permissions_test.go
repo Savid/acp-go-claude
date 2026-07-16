@@ -265,6 +265,14 @@ func TestExitPlanModePermission(t *testing.T) {
 	conn.permission = acp.PermissionOptionId(modeDefault)
 	agent.setConnection(conn)
 	turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+
+	pendingErrorConn := newRecordingAgentClient()
+	pendingErrorConn.sessionUpdateErr = errors.New("pending exit update failed")
+	agent.setConnection(pendingErrorConn)
+	_, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-pending-error"})
+	require.ErrorContains(t, err, "pending exit update failed")
+	agent.setConnection(conn)
+
 	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-1", Input: map[string]any{"plan": "done"}})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorAllow, decision.Behavior)

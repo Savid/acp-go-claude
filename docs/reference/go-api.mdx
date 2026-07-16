@@ -26,7 +26,9 @@ err := claudeacp.Serve(ctx, input, output,
 takes precedence over EOF or context cancellation. In particular,
 `errors.Is(err, claudeacp.ErrProcessTreeUnproven)` means the adapter could not
 prove every native Claude descendant exited; an embedding host must keep that
-runtime and its resources quarantined.
+runtime and its resources quarantined. Close is idempotent, and this proof
+failure remains sticky across repeated calls so later cleanup cannot
+accidentally release the quarantined admission.
 
 ## Process and session options
 

@@ -242,6 +242,7 @@ type fakeClaudeTransport struct {
 	queryMsgs  []map[string]any
 	onQuery    func()
 	sent       []any
+	closeCalls int
 
 	messages chan map[string]any
 	errs     chan error
@@ -368,7 +369,19 @@ func (t *fakeClaudeTransport) Messages(context.Context) (<-chan map[string]any, 
 }
 
 func (t *fakeClaudeTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.closeCalls++
+
 	return t.closeErr
+}
+
+func (t *fakeClaudeTransport) CloseCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.closeCalls
 }
 
 func (t *fakeClaudeTransport) Sent() []any {

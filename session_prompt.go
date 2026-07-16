@@ -17,7 +17,10 @@ import (
 var finishPromptResultCall = (*agentSession).finishPromptResult
 
 // Prompt sends one turn to Claude and streams updates.
-func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+func (s *agentSession) Prompt(
+	ctx context.Context,
+	params acp.PromptRequest,
+) (response acp.PromptResponse, promptErr error) {
 	route, err := parseInboundTurnRoute(params.Meta)
 	if err != nil {
 		return acp.PromptResponse{}, err
@@ -73,6 +76,8 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		return acp.PromptResponse{}, nativeTurnFailure(err)
 	}
 
+	var timedOut atomic.Bool
+
 	s.cancelMu.Lock()
 	s.resetPublishedToolCalls()
 	s.mu.Lock()
@@ -80,6 +85,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	turnCtx = withTurnRoute(turnCtx, route.turnNonce)
 	s.cancel = cancel
 	s.turnCancelled = false
+	s.turnContainmentErr = nil
 	s.turnNonce = route.turnNonce
 	s.mu.Unlock()
 	s.cancelMu.Unlock()
@@ -88,23 +94,39 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		s.cancelMu.Lock()
 		defer s.cancelMu.Unlock()
 
+		response, promptErr = s.settlePromptTurn(
+			ctx,
+			turnCtx,
+			params.MessageId,
+			timedOut.Load(),
+			response,
+			promptErr,
+		)
+
 		s.mu.Lock()
 		s.cancel = nil
 		s.turnCancelled = false
+		s.turnContainmentErr = nil
 		s.turnNonce = ""
 		s.mu.Unlock()
 
 		cancel()
 	}()
 
-	var timedOut atomic.Bool
-
 	if timeout := s.agent.turnTimeout(); timeout > 0 {
+		timeoutDone := make(chan struct{})
+
 		timer := time.AfterFunc(timeout, func() {
+			defer close(timeoutDone)
+
 			timedOut.Store(true)
 			cancel()
 		})
-		defer timer.Stop()
+		defer func() {
+			if !timer.Stop() {
+				<-timeoutDone
+			}
+		}()
 	}
 
 	defer s.client.EndQuery(route.turnNonce)
@@ -863,7 +885,10 @@ func (s *agentSession) interruptAfterEmitError(ctx context.Context, err error) e
 	interruptCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 
-	_ = s.Cancel(interruptCtx)
+	cancelErr := s.Cancel(interruptCtx)
+	if errors.Is(cancelErr, claude.ErrProcessTreeUnproven) {
+		return errors.Join(err, cancelErr)
+	}
 
 	return err
 }

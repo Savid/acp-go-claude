@@ -21,6 +21,8 @@ type Client struct {
 	controller *Controller
 	cancel     context.CancelFunc
 	closed     bool
+	closeOnce  sync.Once
+	closeErr   error
 
 	infoMu         sync.RWMutex
 	initializeInfo InitializeInfo
@@ -530,20 +532,22 @@ func (c *Client) GetContextUsage(ctx context.Context) (*ContextUsage, error) {
 
 // Close terminates the Claude process.
 func (c *Client) Close() error {
-	c.stateMu.Lock()
-	c.closed = true
-	cancel := c.cancel
-	c.stateMu.Unlock()
+	c.closeOnce.Do(func() {
+		c.stateMu.Lock()
+		c.closed = true
+		cancel := c.cancel
+		c.stateMu.Unlock()
 
-	if cancel != nil {
-		cancel()
-	}
+		if cancel != nil {
+			cancel()
+		}
 
-	if c.transport == nil {
-		return nil
-	}
+		if c.transport != nil {
+			c.closeErr = c.transport.Close()
+		}
+	})
 
-	return c.transport.Close()
+	return c.closeErr
 }
 
 func (c *Client) handleCanUseTool(ctx context.Context, req *ControlRequest) (map[string]any, error) {

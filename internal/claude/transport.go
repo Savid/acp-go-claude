@@ -69,6 +69,7 @@ type ProcessTransport struct {
 
 	mu              sync.Mutex
 	closeOnce       sync.Once
+	closeErr        error
 	stderrWG        sync.WaitGroup
 	closed          bool
 	messagesStarted bool
@@ -424,8 +425,6 @@ func (t *ProcessTransport) drainStderr() {
 
 // Close terminates the Claude process.
 func (t *ProcessTransport) Close() error {
-	var closeErr error
-
 	t.closeOnce.Do(func() {
 		t.mu.Lock()
 		t.closed = true
@@ -433,7 +432,7 @@ func (t *ProcessTransport) Close() error {
 		stdinClosed := false
 
 		if t.stdin != nil {
-			closeErr = t.stdin.Close()
+			t.closeErr = t.stdin.Close()
 			stdinClosed = true
 		}
 
@@ -444,14 +443,14 @@ func (t *ProcessTransport) Close() error {
 
 		if t.cmd != nil && t.cmd.Process != nil {
 			if err := t.shutdownProcess(stdinClosed); err != nil {
-				closeErr = errors.Join(closeErr, err)
+				t.closeErr = errors.Join(t.closeErr, err)
 			}
 		}
 
 		t.stderrWG.Wait()
 	})
 
-	return closeErr
+	return t.closeErr
 }
 
 func configureProcessCommand(cmd *exec.Cmd) {

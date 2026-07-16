@@ -443,6 +443,76 @@ func TestClaudeRelaunchFailsClosed(t *testing.T) {
 		require.Equal(t, 1, releases, "replacement admission must remain held")
 		require.False(t, session.canRelaunch)
 	})
+
+	for _, tc := range []struct {
+		name        string
+		outputStyle string
+		effort      string
+	}{
+		{name: "replacement output style fails", outputStyle: "concise"},
+		{name: "replacement effort fails", effort: "high"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			releases := 0
+			agent := NewAgent(WithRuntimeResourceHooks(RuntimeResourceHooks{
+				AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+					return func() { releases++ }, nil
+				},
+			}))
+			agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+				transport := newFakeClaudeTransport()
+				transport.controlErr = map[string]error{"apply_flag_settings": errors.New("reapply failed")}
+
+				return claude.NewClient(log, options, transport)
+			}
+			session := &agentSession{
+				agent:             agent,
+				id:                "session-1",
+				client:            deadClaudeClient(t, nil),
+				canRelaunch:       true,
+				nativeRootRelease: func() { releases++ },
+				outputStyle:       tc.outputStyle,
+				effort:            tc.effort,
+			}
+
+			err := session.ensureClientAlive(t.Context())
+			require.ErrorContains(t, err, "reapply failed")
+			require.Equal(t, 2, releases)
+		})
+	}
+}
+
+func TestClaudeCancelQuarantinesUnprovenTreeAdmission(t *testing.T) {
+	releases := 0
+	session := closeErrorAgentSession(
+		t,
+		errors.Join(errors.New("containment probe failed"), claude.ErrProcessTreeUnproven),
+		func() { releases++ },
+	)
+	session.cancel = func() {}
+	session.canRelaunch = true
+
+	err := session.Cancel(t.Context())
+	require.ErrorIs(t, err, claude.ErrProcessTreeUnproven)
+	require.Zero(t, releases, "an unproven native tree must retain its admission")
+	require.False(t, session.canRelaunch, "an unproven native tree must disable lazy relaunch")
+
+	// Close is deliberately repeatable, but the original proof failure remains
+	// sticky so a later cleanup cannot accidentally release the quarantined slot.
+	err = session.Close(t.Context())
+	require.ErrorIs(t, err, claude.ErrProcessTreeUnproven)
+	require.Zero(t, releases)
+
+	interruptSession := closeErrorAgentSession(
+		t,
+		errors.Join(errors.New("containment probe failed"), claude.ErrProcessTreeUnproven),
+		nil,
+	)
+	interruptSession.cancel = func() {}
+	originalErr := errors.New("emit failed")
+	err = interruptSession.interruptAfterEmitError(t.Context(), originalErr)
+	require.ErrorIs(t, err, originalErr)
+	require.ErrorIs(t, err, claude.ErrProcessTreeUnproven)
 }
 
 func deadClaudeClient(t *testing.T, closeErr error) *claude.Client {

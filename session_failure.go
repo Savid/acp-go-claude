@@ -89,7 +89,7 @@ func (s *agentSession) receiveTurnFailure(
 	}
 
 	if timedOut {
-		return acp.PromptResponse{}, s.turnTimeoutFailure(ctx, s.agent.turnTimeout().String())
+		return acp.PromptResponse{}, s.turnTimeoutFailure(s.agent.turnTimeout().String())
 	}
 
 	if turnCtx.Err() != nil {
@@ -114,12 +114,65 @@ func (s *agentSession) cancelledResponse(messageID *string) acp.PromptResponse {
 	}
 }
 
-// turnTimeoutFailure aborts the native turn and returns the timeout failure. A
-// timeout is a failure, not a user cancel, so it never maps to cancelled.
-func (s *agentSession) turnTimeoutFailure(ctx context.Context, timeout string) error {
-	_ = s.interruptAfterEmitError(ctx, nil)
-
+// turnTimeoutFailure returns the timeout failure. Prompt's settlement fence
+// has already closed and proved the native process tree quiescent before this
+// error is allowed to return.
+func (s *agentSession) turnTimeoutFailure(timeout string) error {
 	return turnFailureError(failureCauseTimeout, fmt.Sprintf("claude turn exceeded %s", timeout))
+}
+
+// settlePromptTurn runs with cancelMu held by Prompt's deferred turn cleanup.
+// It is the single settlement fence for explicit cancellation, parent-context
+// cancellation, and WithTurnTimeout expiry: no response can return while a
+// native descendant remains live or its quiescence proof failed.
+func (s *agentSession) settlePromptTurn(
+	ctx context.Context,
+	turnCtx context.Context,
+	messageID *string,
+	timedOut bool,
+	response acp.PromptResponse,
+	promptErr error,
+) (acp.PromptResponse, error) {
+	s.mu.Lock()
+	cancelled := s.turnCancelled
+	containmentErr := s.turnContainmentErr
+	s.mu.Unlock()
+
+	if cancelled {
+		if containmentErr != nil {
+			return acp.PromptResponse{}, nativeTurnFailure(containmentErr)
+		}
+
+		if promptErr == nil {
+			return s.cancelledResponse(messageID), nil
+		}
+
+		return response, promptErr
+	}
+
+	if timedOut {
+		abortErr := s.cancelNative(ctx)
+		if errors.Is(abortErr, claude.ErrProcessTreeUnproven) {
+			return acp.PromptResponse{}, nativeTurnFailure(abortErr)
+		}
+
+		return acp.PromptResponse{}, s.turnTimeoutFailure(s.agent.turnTimeout().String())
+	}
+
+	if turnCtx.Err() != nil {
+		abortErr := s.cancelNative(ctx)
+		if errors.Is(abortErr, claude.ErrProcessTreeUnproven) {
+			return acp.PromptResponse{}, nativeTurnFailure(abortErr)
+		}
+
+		if promptErr != nil {
+			return response, promptErr
+		}
+
+		return s.cancelledResponse(messageID), nil
+	}
+
+	return response, promptErr
 }
 
 // providerTurnFailure maps a Claude result frame that reports an error into the

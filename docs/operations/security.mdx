@@ -25,6 +25,13 @@ Each session's Claude process is started in its own process group and, on Unix
 platforms, is configured to receive a parent-death signal, so a crashed or
 killed adapter does not leave orphaned Claude processes behind.
 
+Turn cancellation is also process-tree contained. A native interrupt response
+is advisory; the adapter then closes the per-session tree and does not settle
+the cancel, timeout, or caller-context cancellation until every descendant is
+proved gone. The next prompt starts a fresh Claude process with
+`--resume <session-id>`. Failed quiescence proof disables that relaunch and
+retains the runtime admission instead of making an unsafe capacity claim.
+
 ## Input validation
 
 MCP server declarations are validated before Claude launches; unsupported

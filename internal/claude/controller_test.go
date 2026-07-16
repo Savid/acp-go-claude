@@ -21,6 +21,7 @@ type fakeTransport struct {
 	sendErr  error
 	closeErr error
 	closed   bool
+	closes   int
 }
 
 func newFakeTransport() *fakeTransport {
@@ -50,8 +51,16 @@ func (f *fakeTransport) Close() error {
 	defer f.mu.Unlock()
 
 	f.closed = true
+	f.closes++
 
 	return f.closeErr
+}
+
+func (f *fakeTransport) closeCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.closes
 }
 
 func (f *fakeTransport) sentPayloads() []any {

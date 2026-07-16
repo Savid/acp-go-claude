@@ -1,12 +1,21 @@
 package claudeacp
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
@@ -120,6 +129,9 @@ func TestSessionCancelAndCloseEdgeBranches(t *testing.T) {
 
 	notStarted := &agentSession{client: claude.NewClient(nil, claude.Options{}, newFakeClaudeTransport())}
 	require.ErrorIs(t, notStarted.Cancel(ctx), claude.ErrClientNotStarted)
+	require.ErrorIs(t, (&agentSession{cancel: func() {}}).Cancel(ctx), claude.ErrClientNotStarted)
+	require.NoError(t, (&agentSession{}).closeNativeClient(nil))
+	require.NoError(t, (&agentSession{mcpRefreshPending: true}).refreshMCPRegistry(ctx))
 
 	closeSession, closeCleanup := newStartedAgentSessionForTest(t, agent, "close-edge")
 	defer closeCleanup()
@@ -149,6 +161,20 @@ func TestSessionCancelInterruptDetachedFromCallerContext(t *testing.T) {
 	// The native interrupt runs under a bounded background-derived context, so a
 	// cancelled caller context does not abort it.
 	require.NoError(t, session.Cancel(cancelledCtx))
+}
+
+func TestSessionCancelClosesNativeClientBeforeReturn(t *testing.T) {
+	agent := NewAgent()
+	transport := newFakeClaudeTransport()
+	client := claude.NewClient(nil, claude.Options{}, transport)
+	require.NoError(t, client.Start(t.Context()))
+	t.Cleanup(func() { _ = client.Close() })
+	session := &agentSession{agent: agent, id: "contained-cancel", client: client}
+	session.cancel = func() {}
+
+	require.NoError(t, session.Cancel(t.Context()))
+	require.Equal(t, 1, transport.CloseCalls())
+	require.False(t, session.client.Alive(), "Cancel returned before the native client was closed")
 }
 
 func TestSessionCancelCancelsPendingElicitations(t *testing.T) {
@@ -250,4 +276,305 @@ func (c *nthDoneContext) Err() error {
 
 func (c *nthDoneContext) Value(any) any {
 	return nil
+}
+
+const processContainmentHelperArg = "--acp-go-claude-containment-helper"
+
+// TestCancelContainsActualNativeDescendants exercises the complete adapter
+// cancellation path against a real OS process tree. The protocol stand-in
+// deliberately acknowledges interrupt without stopping its zsh -> sleep tool
+// descendants; only transport containment can make this test pass.
+func TestCancelContainsActualNativeDescendants(t *testing.T) {
+	fixture := newActualProcessFixture(t)
+	agent, sessionID := fixture.agent, fixture.session.id
+
+	promptResult := make(chan struct {
+		response acp.PromptResponse
+		err      error
+	}, 1)
+	go func() {
+		response, promptErr := agent.Prompt(
+			context.Background(),
+			TextPromptRequest(sessionID, "turn-cancel", "run the long tool"),
+		)
+		promptResult <- struct {
+			response acp.PromptResponse
+			err      error
+		}{response: response, err: promptErr}
+	}()
+
+	childPID := fixture.waitForChild(t)
+	require.NoError(t, agent.Cancel(t.Context(), CancelRequest(sessionID, "turn-cancel")))
+	require.False(t, unixProcessExists(childPID),
+		"session/cancel returned while the native tool descendant was still alive")
+
+	select {
+	case result := <-promptResult:
+		require.NoError(t, result.err)
+		require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled prompt did not settle")
+	}
+
+	response, err := agent.Prompt(
+		t.Context(),
+		TextPromptRequest(sessionID, "turn-resume", "continue after cancellation"),
+	)
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+
+	launchArgs, err := os.ReadFile(fixture.argsFile)
+	require.NoError(t, err)
+	lastLaunch := strings.TrimSpace(string(launchArgs))
+	require.Contains(t, lastLaunch, "--resume "+string(sessionID))
+	require.NotContains(t, lastLaunch, "--fork-session")
+}
+
+func TestTimeoutContainsActualNativeDescendants(t *testing.T) {
+	fixture := newActualProcessFixture(t, WithTurnTimeout(500*time.Millisecond))
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := fixture.agent.Prompt(
+			context.Background(),
+			TextPromptRequest(fixture.session.id, "turn-timeout", "run the long tool"),
+		)
+		result <- err
+	}()
+
+	childPID := fixture.waitForChild(t)
+	select {
+	case err := <-result:
+		requireTurnFailure(t, err, -32603, failureCauseTimeout, "")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed-out prompt did not settle")
+	}
+	require.False(t, unixProcessExists(childPID),
+		"timeout settled while the native tool descendant was still alive")
+}
+
+func TestParentCancelContainsActualNativeDescendants(t *testing.T) {
+	fixture := newActualProcessFixture(t)
+	promptCtx, cancelPrompt := context.WithCancel(context.Background())
+
+	result := make(chan struct {
+		response acp.PromptResponse
+		err      error
+	}, 1)
+	go func() {
+		response, err := fixture.agent.Prompt(
+			promptCtx,
+			TextPromptRequest(fixture.session.id, "turn-parent-cancel", "run the long tool"),
+		)
+		result <- struct {
+			response acp.PromptResponse
+			err      error
+		}{response: response, err: err}
+	}()
+
+	childPID := fixture.waitForChild(t)
+	cancelPrompt()
+
+	select {
+	case settled := <-result:
+		require.NoError(t, settled.err)
+		require.Equal(t, acp.StopReasonCancelled, settled.response.StopReason)
+	case <-time.After(5 * time.Second):
+		t.Fatal("parent-cancelled prompt did not settle")
+	}
+	require.False(t, unixProcessExists(childPID),
+		"parent cancellation settled while the native tool descendant was still alive")
+}
+
+type actualProcessFixture struct {
+	agent    *Agent
+	session  *agentSession
+	pidFile  string
+	argsFile string
+}
+
+func newActualProcessFixture(t *testing.T, agentOptions ...Option) actualProcessFixture {
+	t.Helper()
+	if os.PathSeparator == '\\' {
+		t.Skip("actual process-group containment test requires Unix signals")
+	}
+
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	launchFile := filepath.Join(dir, "launch-count")
+	argsFile := filepath.Join(dir, "launch-args")
+	executable, err := os.Executable()
+	require.NoError(t, err)
+
+	wrapper := filepath.Join(dir, "claude")
+	wrapperBody := fmt.Sprintf(
+		"#!/bin/sh\nexec %s -test.run '^TestClaudeProcessContainmentHelper$' -- %s \"$@\"\n",
+		strconv.Quote(executable), processContainmentHelperArg,
+	)
+	require.NoError(t, os.WriteFile(wrapper, []byte(wrapperBody), 0o700))
+
+	agent := NewAgent(agentOptions...)
+	agent.setConnection(newRecordingAgentClient())
+	sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
+	options := claude.Options{
+		CLIPath:   wrapper,
+		Cwd:       dir,
+		SessionID: string(sessionID),
+		Env: map[string]string{
+			"ACP_TEST_CHILD_PID":    pidFile,
+			"ACP_TEST_LAUNCH_COUNT": launchFile,
+			"ACP_TEST_LAUNCH_ARGS":  argsFile,
+		},
+	}
+	client := agent.newClaudeClient(agent.log, options)
+	require.NoError(t, client.Start(t.Context()))
+
+	session := &agentSession{
+		agent:             agent,
+		id:                sessionID,
+		cwd:               dir,
+		client:            client,
+		clientOptions:     options,
+		canRelaunch:       true,
+		turn:              make(chan struct{}, sessionTurnCapacity),
+		mirror:            newSessionMirror(agent.log, nil, dir),
+		closeTurnWait:     defaultSessionCloseTurnWait,
+		contextWindowSize: 200000,
+	}
+	agent.mu.Lock()
+	agent.sessions[sessionID] = session
+	agent.mu.Unlock()
+	t.Cleanup(func() { _ = session.Close(context.Background()) })
+
+	return actualProcessFixture{agent: agent, session: session, pidFile: pidFile, argsFile: argsFile}
+}
+
+func (f actualProcessFixture) waitForChild(t *testing.T) int {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(f.pidFile)
+
+		return statErr == nil
+	}, 5*time.Second, 10*time.Millisecond)
+	childPID := readProcessTestPID(t, f.pidFile)
+	require.True(t, unixProcessExists(childPID))
+
+	return childPID
+}
+
+func readProcessTestPID(t *testing.T, path string) int {
+	t.Helper()
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	require.NoError(t, err)
+
+	return pid
+}
+
+func unixProcessExists(pid int) bool {
+	return exec.Command("sh", "-c", "kill -0 \"$1\"", "sh", strconv.Itoa(pid)).Run() == nil
+}
+
+// TestClaudeProcessContainmentHelper is executed through a shell wrapper as a
+// provider-free Claude control-protocol stand-in. Its first launch leaks an
+// interrupt-ignoring native tool descendant; its resumed launch completes.
+func TestClaudeProcessContainmentHelper(t *testing.T) {
+	args := helperArgumentsAfterSeparator(os.Args)
+	if len(args) == 0 || args[0] != processContainmentHelperArg {
+		return
+	}
+	args = args[1:]
+
+	if len(args) == 1 && args[0] == "--version" {
+		fmt.Println("2.1.210 (Claude Code)")
+		os.Exit(0)
+	}
+
+	launch := incrementProcessTestLaunch(os.Getenv("ACP_TEST_LAUNCH_COUNT"))
+	_ = os.WriteFile(os.Getenv("ACP_TEST_LAUNCH_ARGS"), []byte(strings.Join(args, " ")), 0o600)
+
+	scanner := bufio.NewScanner(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	for scanner.Scan() {
+		var message map[string]any
+		if json.Unmarshal(scanner.Bytes(), &message) != nil {
+			continue
+		}
+
+		switch message["type"] {
+		case "control_request":
+			request, _ := message["request"].(map[string]any)
+			subtype, _ := request["subtype"].(string)
+			payload := map[string]any{}
+
+			switch subtype {
+			case "initialize":
+				payload = map[string]any{
+					"models": []any{map[string]any{"value": "sonnet", "displayName": "Sonnet"}},
+				}
+			case "get_context_usage":
+				payload = map[string]any{"totalTokens": 1, "maxTokens": 200000}
+			}
+
+			_ = encoder.Encode(map[string]any{
+				"type": "control_response",
+				"response": map[string]any{
+					"request_id": message["request_id"],
+					"subtype":    "success",
+					"response":   payload,
+				},
+			})
+		case "user":
+			if launch == 1 {
+				shell := "zsh"
+				if _, err := exec.LookPath(shell); err != nil {
+					shell = "sh"
+				}
+
+				child := exec.Command(shell, "-c", "trap '' TERM; sleep 180")
+				if child.Start() == nil {
+					_ = os.WriteFile(
+						os.Getenv("ACP_TEST_CHILD_PID"),
+						[]byte(strconv.Itoa(child.Process.Pid)),
+						0o600,
+					)
+				}
+
+				continue
+			}
+
+			_ = encoder.Encode(map[string]any{
+				"type":        "result",
+				"subtype":     "success",
+				"is_error":    false,
+				"stop_reason": "end_turn",
+			})
+		}
+	}
+
+	os.Exit(0)
+}
+
+func helperArgumentsAfterSeparator(args []string) []string {
+	for index, arg := range args {
+		if arg == "--" {
+			return args[index+1:]
+		}
+	}
+
+	return nil
+}
+
+func incrementProcessTestLaunch(path string) int {
+	launch := 0
+	if raw, err := os.ReadFile(path); err == nil {
+		launch, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+	}
+
+	launch++
+	_ = os.WriteFile(path, []byte(strconv.Itoa(launch)), 0o600)
+
+	return launch
 }

@@ -171,6 +171,7 @@ type agentSession struct {
 	permissionSaveMu   sync.Mutex
 	cancel             context.CancelFunc
 	turnCancelled      bool
+	turnContainmentErr error
 	turnNonce          string
 	publishedToolCalls map[acp.ToolCallId]struct{}
 	permissionCancel   map[string]*permissionRequestCancel

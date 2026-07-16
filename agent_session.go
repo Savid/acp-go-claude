@@ -779,6 +779,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		SettingsFile:            settingsFileArg,
 		InitializeTimeout:       a.options.InitializeTimeout,
 		ControlHandlerTimeout:   a.options.ControlHandlerTimeout,
+		ControlHandlerContext:   withTurnRoute,
 		ObserveStartupStage: func(stageCtx context.Context, stage string, elapsed time.Duration, stageErr error) {
 			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
 			if observe != nil {

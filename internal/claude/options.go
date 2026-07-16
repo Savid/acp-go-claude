@@ -35,6 +35,10 @@ type Options struct {
 
 	InitializeTimeout     time.Duration
 	ControlHandlerTimeout time.Duration
+	// ControlHandlerContext stamps the exact active query turn onto one inbound
+	// control-handler context. The client captures the turn at callback admission
+	// so a handler that outlives its query cannot be rebound to a later turn.
+	ControlHandlerContext func(context.Context, string) context.Context
 	// ObserveStartupStage receives exact spawn/readiness durations. It is
 	// observational only and must not influence startup control flow.
 	ObserveStartupStage func(context.Context, string, time.Duration, error)

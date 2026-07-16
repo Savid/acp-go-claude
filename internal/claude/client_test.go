@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type controlTurnTestContextKey struct{}
+
 func startClientForTest(t *testing.T, client *Client) {
 	t.Helper()
 
@@ -30,7 +32,7 @@ func TestClientStartAndQuery(t *testing.T) {
 	startClientForTest(t, client)
 	require.Equal(t, 2*time.Second, client.activeController().handlerTimeout)
 
-	require.NoError(t, client.Query(context.Background(), []map[string]any{{"type": "text", "text": "hi"}}))
+	require.NoError(t, client.Query(context.Background(), "turn-1", []map[string]any{{"type": "text", "text": "hi"}}))
 	require.Eventually(t, func() bool {
 		return len(transport.sentPayloads()) >= 2
 	}, time.Second, 10*time.Millisecond)
@@ -48,11 +50,44 @@ func TestClientQueryAfterClose(t *testing.T) {
 	client := NewClient(nil, Options{}, transport)
 
 	require.NoError(t, client.Close())
-	err := client.Query(context.Background(), []map[string]any{{"type": "text", "text": "hi"}})
+	err := client.Query(context.Background(), "turn-1", []map[string]any{{"type": "text", "text": "hi"}})
 
 	require.ErrorIs(t, err, ErrClientClosed)
 	require.True(t, transport.isClosed())
 	require.Empty(t, transport.sentPayloads())
+}
+
+func TestClientControlCallbackContextSnapshotsExactQueryTurn(t *testing.T) {
+	t.Parallel()
+
+	handledTurn := ""
+	client := NewClient(nil, Options{
+		ControlHandlerContext: func(ctx context.Context, turnNonce string) context.Context {
+			return context.WithValue(ctx, controlTurnTestContextKey{}, turnNonce)
+		},
+		PermissionHandler: func(ctx context.Context, _ PermissionRequest) (PermissionDecision, error) {
+			handledTurn, _ = ctx.Value(controlTurnTestContextKey{}).(string)
+
+			return PermissionDecision{Behavior: BehaviorAllow}, nil
+		},
+	}, newFakeTransport())
+
+	require.NoError(t, client.Query(t.Context(), "turn-old", "old prompt"))
+	_, err := client.handleCanUseTool(t.Context(), &ControlRequest{Request: map[string]any{}})
+	require.NoError(t, err)
+	require.Equal(t, "turn-old", handledTurn)
+	oldCallbackCtx := client.controlHandlerContext(t.Context())
+	require.Equal(t, "turn-old", oldCallbackCtx.Value(controlTurnTestContextKey{}))
+
+	require.NoError(t, client.Query(t.Context(), "turn-current", "current prompt"))
+	client.EndQuery("turn-old")
+	currentCallbackCtx := client.controlHandlerContext(t.Context())
+	require.Equal(t, "turn-current", currentCallbackCtx.Value(controlTurnTestContextKey{}))
+	require.Equal(t, "turn-old", oldCallbackCtx.Value(controlTurnTestContextKey{}))
+
+	client.EndQuery("turn-current")
+	outsideCtx := client.controlHandlerContext(t.Context())
+	require.Nil(t, outsideCtx.Value(controlTurnTestContextKey{}))
 }
 
 func TestClientStartErrors(t *testing.T) {

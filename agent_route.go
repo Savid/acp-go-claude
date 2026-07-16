@@ -125,12 +125,41 @@ func withTurnRoute(ctx context.Context, turnNonce string) context.Context {
 	return context.WithValue(ctx, turnRouteContextKey{}, turnNonce)
 }
 
-func turnRouteMetaFromContext(ctx context.Context) map[string]any {
+func turnNonceFromContext(ctx context.Context) string {
 	if ctx == nil {
-		return nil
+		return ""
 	}
 
 	turnNonce, _ := ctx.Value(turnRouteContextKey{}).(string)
+
+	return turnNonce
+}
+
+// activeControlCallbackContext accepts only a callback admitted for the exact
+// active prompt turn. The callback context owns its captured nonce; this never
+// consults the session nonce as a fallback and therefore cannot rebind an old
+// callback to a newer turn.
+func (s *agentSession) activeControlCallbackContext(ctx context.Context) (context.Context, bool) {
+	if ctx == nil || ctx.Err() != nil {
+		return ctx, false
+	}
+
+	callbackNonce := turnNonceFromContext(ctx)
+
+	s.mu.Lock()
+	activeNonce := s.turnNonce
+	active := s.cancel != nil && activeNonce != ""
+	s.mu.Unlock()
+
+	if !active || callbackNonce == "" || callbackNonce != activeNonce {
+		return ctx, false
+	}
+
+	return withTurnRoute(ctx, activeNonce), true
+}
+
+func turnRouteMetaFromContext(ctx context.Context) map[string]any {
+	turnNonce := turnNonceFromContext(ctx)
 	if turnNonce == "" {
 		return nil
 	}

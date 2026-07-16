@@ -24,6 +24,9 @@ type Client struct {
 
 	infoMu         sync.RWMutex
 	initializeInfo InitializeInfo
+
+	controlTurnMu    sync.RWMutex
+	controlTurnNonce string
 }
 
 // InitializeInfo describes metadata returned by Claude's control initialize response.
@@ -317,11 +320,16 @@ func parseAvailableModels(value any) []AvailableModelInfo {
 	return models
 }
 
-// Query sends user content to Claude.
-func (c *Client) Query(ctx context.Context, content any) error {
+// Query sends user content to Claude and binds inbound control callbacks to
+// turnNonce until EndQuery clears that exact turn.
+func (c *Client) Query(ctx context.Context, turnNonce string, content any) error {
 	if c.isClosed() {
 		return ErrClientClosed
 	}
+
+	c.controlTurnMu.Lock()
+	c.controlTurnNonce = turnNonce
+	c.controlTurnMu.Unlock()
 
 	payload := map[string]any{
 		keyType: MessageTypeUser,
@@ -334,6 +342,30 @@ func (c *Client) Query(ctx context.Context, content any) error {
 	}
 
 	return c.transport.Send(ctx, payload)
+}
+
+// EndQuery clears callback routing only when turnNonce still names the bound
+// query. An older prompt's deferred cleanup therefore cannot clear a newer
+// query's callback route.
+func (c *Client) EndQuery(turnNonce string) {
+	c.controlTurnMu.Lock()
+	defer c.controlTurnMu.Unlock()
+
+	if c.controlTurnNonce == turnNonce {
+		c.controlTurnNonce = ""
+	}
+}
+
+func (c *Client) controlHandlerContext(ctx context.Context) context.Context {
+	c.controlTurnMu.RLock()
+	turnNonce := c.controlTurnNonce
+	c.controlTurnMu.RUnlock()
+
+	if turnNonce == "" || c.options.ControlHandlerContext == nil {
+		return ctx
+	}
+
+	return c.options.ControlHandlerContext(ctx, turnNonce)
 }
 
 // Receive waits for the next parsed Claude message.
@@ -515,6 +547,8 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) handleCanUseTool(ctx context.Context, req *ControlRequest) (map[string]any, error) {
+	ctx = c.controlHandlerContext(ctx)
+
 	input, _ := req.Request["input"].(map[string]any)
 	request := PermissionRequest{
 		Input: input,
@@ -541,6 +575,8 @@ func (c *Client) handleCanUseTool(ctx context.Context, req *ControlRequest) (map
 }
 
 func (c *Client) handleElicitation(ctx context.Context, req *ControlRequest) (map[string]any, error) {
+	ctx = c.controlHandlerContext(ctx)
+
 	if c.options.ElicitationHandler == nil {
 		return ElicitationResponse{Action: ElicitationActionDecline}.toPayload(), nil
 	}
@@ -571,6 +607,8 @@ func (c *Client) handleElicitation(ctx context.Context, req *ControlRequest) (ma
 }
 
 func (c *Client) handleHookCallback(ctx context.Context, req *ControlRequest) (map[string]any, error) {
+	ctx = c.controlHandlerContext(ctx)
+
 	input, _ := req.Request[keyInput].(map[string]any)
 	responseMap, _ := input["tool_response"].(map[string]any)
 

@@ -260,6 +260,16 @@ func (s *agentSession) handleExitPlanMode(
 		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: "ACP client is unavailable"}, nil
 	}
 
+	turnCtx, active := s.activeControlCallbackContext(ctx)
+	if !active {
+		return claude.PermissionDecision{
+			Behavior: claude.BehaviorDeny,
+			Message:  "ExitPlanMode callback is outside the active turn",
+		}, nil
+	}
+
+	ctx = turnCtx
+
 	toolCallID := request.ToolUseID
 	if toolCallID == "" {
 		toolCallID = request.ToolName
@@ -307,6 +317,16 @@ func (s *agentSession) handleExitPlanMode(
 			Message:  "User rejected request to exit plan mode.",
 		}, nil
 	}
+
+	turnCtx, active = s.activeControlCallbackContext(ctx)
+	if !active {
+		return claude.PermissionDecision{
+			Behavior: claude.BehaviorDeny,
+			Message:  "ExitPlanMode callback is outside the active turn",
+		}, nil
+	}
+
+	ctx = turnCtx
 
 	s.setMode(selectedMode)
 

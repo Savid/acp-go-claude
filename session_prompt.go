@@ -106,7 +106,9 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 		defer timer.Stop()
 	}
 
-	if err := s.client.Query(turnCtx, content); err != nil {
+	defer s.client.EndQuery(route.turnNonce)
+
+	if err := s.client.Query(turnCtx, route.turnNonce, content); err != nil {
 		return acp.PromptResponse{}, nativeTurnFailure(err)
 	}
 

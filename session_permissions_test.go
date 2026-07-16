@@ -4,11 +4,48 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
+
+const permissionControlTurnNonce = "permission-turn-0123456789abcdef"
+
+type blockingExitPlanClient struct {
+	*recordingAgentClient
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *blockingExitPlanClient) RequestPermission(
+	ctx context.Context,
+	_ acp.RequestPermissionRequest,
+) (acp.RequestPermissionResponse, error) {
+	close(c.entered)
+	select {
+	case <-c.release:
+		return acp.RequestPermissionResponse{
+			Outcome: acp.NewRequestPermissionOutcomeSelected(acp.PermissionOptionId(modeDefault)),
+		}, nil
+	case <-ctx.Done():
+		return acp.RequestPermissionResponse{}, ctx.Err()
+	}
+}
+
+func activatePermissionControlTurn(t *testing.T, session *agentSession, turnNonce string) context.Context {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	session.mu.Lock()
+	session.cancel = cancel
+	session.turnNonce = turnNonce
+	session.mu.Unlock()
+
+	return withTurnRoute(ctx, turnNonce)
+}
 
 func TestPermissionRulePersistenceHelpers(t *testing.T) {
 	var savedRules map[string]string
@@ -214,7 +251,8 @@ func TestExitPlanModePermission(t *testing.T) {
 	conn := newRecordingAgentClient()
 	conn.permission = acp.PermissionOptionId(modeDefault)
 	agent.setConnection(conn)
-	decision, err = session.handleExitPlanMode(context.Background(), claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-1", Input: map[string]any{"plan": "done"}})
+	turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-1", Input: map[string]any{"plan": "done"}})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorAllow, decision.Behavior)
 	require.Equal(t, modeDefault, session.mode)
@@ -222,9 +260,127 @@ func TestExitPlanModePermission(t *testing.T) {
 
 	conn.permission = acp.PermissionOptionId(modePlan)
 	session.mode = modePlan
-	decision, err = session.handleExitPlanMode(context.Background(), claude.PermissionRequest{ToolName: exitPlanModeTool})
+	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorDeny, decision.Behavior)
+}
+
+func TestExitPlanModeControlCallbackRequiresExactActiveRoute(t *testing.T) {
+	newSession := func() (*agentSession, *recordingAgentClient) {
+		agent := NewAgent()
+		conn := newRecordingAgentClient()
+		conn.permission = acp.PermissionOptionId(modeDefault)
+		agent.setConnection(conn)
+
+		return &agentSession{
+			agent: agent,
+			id:    "session-1",
+			mode:  modePlan,
+			model: "sonnet",
+		}, conn
+	}
+	request := claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-1"}
+
+	t.Run("current route", func(t *testing.T) {
+		session, conn := newSession()
+		turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+
+		decision, err := session.handleExitPlanMode(turnCtx, request)
+		require.NoError(t, err)
+		require.Equal(t, claude.BehaviorAllow, decision.Behavior)
+		updates := conn.Updates()
+		require.Len(t, updates, 1)
+		require.Equal(t, turnRouteMeta(permissionControlTurnNonce), updates[0].Meta)
+	})
+
+	t.Run("missing callback route", func(t *testing.T) {
+		session, conn := newSession()
+		activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+
+		decision, err := session.handleExitPlanMode(t.Context(), request)
+		require.NoError(t, err)
+		require.Equal(t, claude.BehaviorDeny, decision.Behavior)
+		require.Contains(t, decision.Message, "outside the active turn")
+		require.Equal(t, modePlan, session.mode)
+		require.Empty(t, conn.Updates())
+	})
+
+	t.Run("stale callback route", func(t *testing.T) {
+		session, conn := newSession()
+		activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+
+		decision, err := session.handleExitPlanMode(
+			withTurnRoute(t.Context(), "stale-turn-0123456789abcdef"),
+			request,
+		)
+		require.NoError(t, err)
+		require.Equal(t, claude.BehaviorDeny, decision.Behavior)
+		require.Equal(t, modePlan, session.mode)
+		require.Empty(t, conn.Updates())
+	})
+
+	t.Run("callback becomes stale while awaiting permission", func(t *testing.T) {
+		agent := NewAgent()
+		conn := &blockingExitPlanClient{
+			recordingAgentClient: newRecordingAgentClient(),
+			entered:              make(chan struct{}),
+			release:              make(chan struct{}),
+		}
+		agent.setConnection(conn)
+		session := &agentSession{agent: agent, id: "session-1", mode: modePlan, model: "sonnet"}
+		turnCtx := activatePermissionControlTurn(t, session, "turn-old-0123456789abcdef")
+		decisionCh := make(chan claude.PermissionDecision, 1)
+		errCh := make(chan error, 1)
+
+		go func() {
+			decision, err := session.handleExitPlanMode(turnCtx, request)
+			decisionCh <- decision
+			errCh <- err
+		}()
+
+		select {
+		case <-conn.entered:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for ExitPlanMode permission request")
+		}
+
+		session.mu.Lock()
+		session.turnNonce = "turn-new-0123456789abcdef"
+		session.cancel = func() {}
+		session.mu.Unlock()
+		close(conn.release)
+
+		require.NoError(t, <-errCh)
+		require.Equal(t, claude.BehaviorDeny, (<-decisionCh).Behavior)
+		require.Equal(t, modePlan, session.mode)
+		require.Empty(t, conn.Updates())
+	})
+
+	t.Run("outside turn", func(t *testing.T) {
+		session, conn := newSession()
+
+		decision, err := session.handleExitPlanMode(
+			withTurnRoute(t.Context(), permissionControlTurnNonce),
+			request,
+		)
+		require.NoError(t, err)
+		require.Equal(t, claude.BehaviorDeny, decision.Behavior)
+		require.Equal(t, modePlan, session.mode)
+		require.Empty(t, conn.Updates())
+	})
+
+	t.Run("cancelled callback", func(t *testing.T) {
+		session, conn := newSession()
+		turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+		cancelledCtx, cancel := context.WithCancel(turnCtx)
+		cancel()
+
+		decision, err := session.handleExitPlanMode(cancelledCtx, request)
+		require.NoError(t, err)
+		require.Equal(t, claude.BehaviorDeny, decision.Behavior)
+		require.Equal(t, modePlan, session.mode)
+		require.Empty(t, conn.Updates())
+	})
 }
 
 func TestPermissionAdditionalEdgeBranches(t *testing.T) {
@@ -254,20 +410,21 @@ func TestPermissionAdditionalEdgeBranches(t *testing.T) {
 	conn = newRecordingAgentClient()
 	conn.permission = acp.PermissionOptionId(modeDefault)
 	agent.setConnection(conn)
-	decision, err = session.handlePermission(ctx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-1", Title: "Exit plan"})
+	turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+	decision, err = session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-1", Title: "Exit plan"})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorAllow, decision.Behavior)
 
 	conn = newRecordingAgentClient()
 	conn.permissionErr = errors.New("exit permission failed")
 	agent.setConnection(conn)
-	_, err = session.handleExitPlanMode(ctx, claude.PermissionRequest{ToolName: exitPlanModeTool})
+	_, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool})
 	require.ErrorContains(t, err, "exit permission failed")
 
 	conn = newRecordingAgentClient()
 	conn.nilPermission = true
 	agent.setConnection(conn)
-	decision, err = session.handleExitPlanMode(ctx, claude.PermissionRequest{ToolName: exitPlanModeTool})
+	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool})
 	require.NoError(t, err)
 	require.Equal(t, permissionCancelledMessage, decision.Message)
 
@@ -275,7 +432,7 @@ func TestPermissionAdditionalEdgeBranches(t *testing.T) {
 	conn.permission = acp.PermissionOptionId(modeDefault)
 	conn.sessionUpdateErr = errors.New("config update failed")
 	agent.setConnection(conn)
-	_, err = session.handleExitPlanMode(ctx, claude.PermissionRequest{ToolName: exitPlanModeTool})
+	_, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool})
 	require.ErrorContains(t, err, "config update failed")
 
 	nonWorkflow := map[string]any{

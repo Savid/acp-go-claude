@@ -13,7 +13,15 @@ import (
 
 type processContainment struct{}
 
-func startContainedProcess(*exec.Cmd) (*processContainment, error) {
+func prepareProcessTreeCommand(cmd *exec.Cmd) (*processTreeCommand, error) {
+	return &processTreeCommand{cmd: cmd}, nil
+}
+
+func startContainedProcess(launch *processTreeCommand) (*processContainment, error) {
+	if launch != nil {
+		launch.close()
+	}
+
 	return nil, fmt.Errorf("claude runtime containment is unsupported on %s", runtime.GOOS)
 }
 

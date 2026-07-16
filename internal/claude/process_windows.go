@@ -37,9 +37,18 @@ func configureProcessCommandPlatform(cmd *exec.Cmd) {
 	}
 }
 
-func startContainedProcess(cmd *exec.Cmd) (*processContainment, error) {
+func prepareProcessTreeCommand(cmd *exec.Cmd) (*processTreeCommand, error) {
+	return &processTreeCommand{cmd: cmd}, nil
+}
+
+func startContainedProcess(launch *processTreeCommand) (*processContainment, error) {
+	if launch == nil || launch.cmd == nil {
+		return nil, errors.New("claude containment launch is unavailable")
+	}
+	cmd := launch.cmd
 	job, err := createProcessJob()
 	if err != nil {
+		launch.close()
 		return nil, err
 	}
 
@@ -50,9 +59,11 @@ func startContainedProcess(cmd *exec.Cmd) (*processContainment, error) {
 	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED
 	if err := cmd.Start(); err != nil {
 		_ = windows.CloseHandle(job)
+		launch.close()
 
 		return nil, err
 	}
+	launch.releaseInherited()
 
 	containment := &processContainment{job: job}
 	process, err := windows.OpenProcess(

@@ -33,6 +33,7 @@ const stderrTailLines = 20
 
 var (
 	processCommandContext    = exec.CommandContext
+	processPrepareContained  = prepareProcessTreeCommand
 	processStartContained    = startContainedProcess
 	processAfterDecode       = func() {}
 	processGetwd             = os.Getwd
@@ -149,25 +150,64 @@ func (t *ProcessTransport) Start(ctx context.Context) error {
 
 	envOptions := t.options
 	envOptions.Cwd = cmd.Dir
+
 	cmd.Env = BuildEnv(envOptions)
+
+	if cmd.Stdin != nil {
+		return errors.New("create stdin pipe: exec: Stdin already set")
+	}
+
+	if cmd.Stdout != nil {
+		return errors.New("create stdout pipe: exec: Stdout already set")
+	}
+
+	if cmd.Stderr != nil {
+		return errors.New("create stderr pipe: exec: Stderr already set")
+	}
+
+	launch, err := processPrepareContained(cmd)
+	if err != nil {
+		if errors.Is(err, ErrProcessTreeUnproven) && t.options.ObserveProcessInventory != nil {
+			t.options.ObserveProcessInventory(ctx, unavailableProcessInventory)
+		}
+
+		return fmt.Errorf("prepare claude containment: %w", err)
+	}
+
+	cmd = launch.cmd
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		launch.close()
+
 		return fmt.Errorf("create stdin pipe: %w", err)
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		_ = stdin.Close()
+
+		launch.close()
+
 		return fmt.Errorf("create stdout pipe: %w", err)
 	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+
+		launch.close()
+
 		return fmt.Errorf("create stderr pipe: %w", err)
 	}
 
-	tree, err := processStartContained(cmd)
+	tree, err := processStartContained(launch)
 	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+
 		if errors.Is(err, ErrProcessTreeUnproven) && t.options.ObserveProcessInventory != nil {
 			t.options.ObserveProcessInventory(ctx, unavailableProcessInventory)
 		}
@@ -552,7 +592,10 @@ func (t *ProcessTransport) waitForShutdown(waitErr <-chan error, shutdown bool) 
 		return err
 	case <-timer.C:
 		closeErr := t.closeStdout()
-		if killed, err := processKill(t.cmd); err != nil {
+		if t.tree != nil {
+			closeErr = errors.Join(closeErr, t.quiesceProcessTree())
+			shutdown = true
+		} else if killed, err := processKill(t.cmd); err != nil {
 			closeErr = errors.Join(closeErr, err)
 		} else {
 			shutdown = shutdown || killed

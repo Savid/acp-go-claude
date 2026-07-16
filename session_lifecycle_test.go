@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -282,8 +283,8 @@ const processContainmentHelperArg = "--acp-go-claude-containment-helper"
 
 // TestCancelContainsActualNativeDescendants exercises the complete adapter
 // cancellation path against a real OS process tree. The protocol stand-in
-// deliberately acknowledges interrupt without stopping its zsh -> sleep tool
-// descendants; only transport containment can make this test pass.
+// deliberately acknowledges interrupt without stopping a setsid tool process
+// that ignores INT and TERM; only transport containment can make this test pass.
 func TestCancelContainsActualNativeDescendants(t *testing.T) {
 	fixture := newActualProcessFixture(t)
 	agent, sessionID := fixture.agent, fixture.session.id
@@ -307,6 +308,7 @@ func TestCancelContainsActualNativeDescendants(t *testing.T) {
 	require.NoError(t, agent.Cancel(t.Context(), CancelRequest(sessionID, "turn-cancel")))
 	require.False(t, unixProcessExists(childPID),
 		"session/cancel returned while the native tool descendant was still alive")
+	fixture.assertNoDelayedSideEffect(t)
 
 	select {
 	case result := <-promptResult:
@@ -316,18 +318,7 @@ func TestCancelContainsActualNativeDescendants(t *testing.T) {
 		t.Fatal("cancelled prompt did not settle")
 	}
 
-	response, err := agent.Prompt(
-		t.Context(),
-		TextPromptRequest(sessionID, "turn-resume", "continue after cancellation"),
-	)
-	require.NoError(t, err)
-	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
-
-	launchArgs, err := os.ReadFile(fixture.argsFile)
-	require.NoError(t, err)
-	lastLaunch := strings.TrimSpace(string(launchArgs))
-	require.Contains(t, lastLaunch, "--resume "+string(sessionID))
-	require.NotContains(t, lastLaunch, "--fork-session")
+	fixture.assertLazyResume(t, "turn-resume")
 }
 
 func TestTimeoutContainsActualNativeDescendants(t *testing.T) {
@@ -351,6 +342,8 @@ func TestTimeoutContainsActualNativeDescendants(t *testing.T) {
 	}
 	require.False(t, unixProcessExists(childPID),
 		"timeout settled while the native tool descendant was still alive")
+	fixture.assertNoDelayedSideEffect(t)
+	fixture.assertLazyResume(t, "turn-after-timeout")
 }
 
 func TestParentCancelContainsActualNativeDescendants(t *testing.T) {
@@ -384,25 +377,31 @@ func TestParentCancelContainsActualNativeDescendants(t *testing.T) {
 	}
 	require.False(t, unixProcessExists(childPID),
 		"parent cancellation settled while the native tool descendant was still alive")
+	fixture.assertNoDelayedSideEffect(t)
+	fixture.assertLazyResume(t, "turn-after-parent-cancel")
 }
 
 type actualProcessFixture struct {
-	agent    *Agent
-	session  *agentSession
-	pidFile  string
-	argsFile string
+	agent        *Agent
+	session      *agentSession
+	pidFile      string
+	argsFile     string
+	triggerFile  string
+	sentinelFile string
 }
 
 func newActualProcessFixture(t *testing.T, agentOptions ...Option) actualProcessFixture {
 	t.Helper()
-	if os.PathSeparator == '\\' {
-		t.Skip("actual process-group containment test requires Unix signals")
+	if runtime.GOOS != "linux" {
+		t.Skip("authoritative detached-descendant containment requires Linux")
 	}
 
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	launchFile := filepath.Join(dir, "launch-count")
 	argsFile := filepath.Join(dir, "launch-args")
+	triggerFile := filepath.Join(dir, "delayed-trigger")
+	sentinelFile := filepath.Join(dir, "delayed-sentinel")
 	executable, err := os.Executable()
 	require.NoError(t, err)
 
@@ -424,6 +423,8 @@ func newActualProcessFixture(t *testing.T, agentOptions ...Option) actualProcess
 			"ACP_TEST_CHILD_PID":    pidFile,
 			"ACP_TEST_LAUNCH_COUNT": launchFile,
 			"ACP_TEST_LAUNCH_ARGS":  argsFile,
+			"ACP_TEST_TRIGGER":      triggerFile,
+			"ACP_TEST_SENTINEL":     sentinelFile,
 		},
 	}
 	client := agent.newClaudeClient(agent.log, options)
@@ -446,7 +447,10 @@ func newActualProcessFixture(t *testing.T, agentOptions ...Option) actualProcess
 	agent.mu.Unlock()
 	t.Cleanup(func() { _ = session.Close(context.Background()) })
 
-	return actualProcessFixture{agent: agent, session: session, pidFile: pidFile, argsFile: argsFile}
+	return actualProcessFixture{
+		agent: agent, session: session, pidFile: pidFile,
+		argsFile: argsFile, triggerFile: triggerFile, sentinelFile: sentinelFile,
+	}
 }
 
 func (f actualProcessFixture) waitForChild(t *testing.T) int {
@@ -456,21 +460,49 @@ func (f actualProcessFixture) waitForChild(t *testing.T) int {
 
 		return statErr == nil
 	}, 5*time.Second, 10*time.Millisecond)
-	childPID := readProcessTestPID(t, f.pidFile)
+	raw, err := os.ReadFile(f.pidFile)
+	require.NoError(t, err)
+	fields := strings.Fields(string(raw))
+	require.Len(t, fields, 6)
+	values := make([]int, len(fields))
+	for index, field := range fields {
+		values[index], err = strconv.Atoi(field)
+		require.NoError(t, err)
+	}
+	childPID, childPGID, childSID := values[0], values[1], values[2]
+	rootPID, rootPGID, rootSID := values[3], values[4], values[5]
 	require.True(t, unixProcessExists(childPID))
+	require.Equal(t, childPID, childPGID, "setsid child must lead its own process group")
+	require.Equal(t, childPID, childSID, "setsid child must lead its own session")
+	require.NotEqual(t, rootPID, childPID)
+	require.NotEqual(t, rootPGID, childPGID)
+	require.NotEqual(t, rootSID, childSID)
 
 	return childPID
 }
 
-func readProcessTestPID(t *testing.T, path string) int {
+func (f actualProcessFixture) assertNoDelayedSideEffect(t *testing.T) {
 	t.Helper()
+	require.NoError(t, os.WriteFile(f.triggerFile, []byte("settled"), 0o600))
+	time.Sleep(500 * time.Millisecond)
+	require.NoFileExists(t, f.sentinelFile,
+		"a detached native descendant performed a delayed side effect after settlement")
+}
 
-	raw, err := os.ReadFile(path)
+func (f actualProcessFixture) assertLazyResume(t *testing.T, turnNonce string) {
+	t.Helper()
+	response, err := f.agent.Prompt(
+		t.Context(),
+		TextPromptRequest(f.session.id, turnNonce, "continue after containment"),
+	)
 	require.NoError(t, err)
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
 
-	return pid
+	launchArgs, err := os.ReadFile(f.argsFile)
+	require.NoError(t, err)
+	lastLaunch := strings.TrimSpace(string(launchArgs))
+	require.Contains(t, lastLaunch, "--resume "+string(f.session.id))
+	require.NotContains(t, lastLaunch, "--fork-session")
 }
 
 func unixProcessExists(pid int) bool {
@@ -528,19 +560,12 @@ func TestClaudeProcessContainmentHelper(t *testing.T) {
 			})
 		case "user":
 			if launch == 1 {
-				shell := "zsh"
-				if _, err := exec.LookPath(shell); err != nil {
-					shell = "sh"
-				}
-
-				child := exec.Command(shell, "-c", "trap '' TERM; sleep 180")
-				if child.Start() == nil {
-					_ = os.WriteFile(
-						os.Getenv("ACP_TEST_CHILD_PID"),
-						[]byte(strconv.Itoa(child.Process.Pid)),
-						0o600,
-					)
-				}
+				_ = startDetachedContainmentChild(
+					os.Args[0],
+					os.Getenv("ACP_TEST_CHILD_PID"),
+					os.Getenv("ACP_TEST_TRIGGER"),
+					os.Getenv("ACP_TEST_SENTINEL"),
+				)
 
 				continue
 			}

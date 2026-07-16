@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -665,7 +666,7 @@ func TestProcessTransportCloseKillsAfterTermTimeout(t *testing.T) {
 	}
 
 	oldWaitDelay := processShutdownWaitDelay
-	processShutdownWaitDelay = 20 * time.Millisecond
+	processShutdownWaitDelay = 2 * time.Second
 	t.Cleanup(func() { processShutdownWaitDelay = oldWaitDelay })
 
 	oldGrace := processExitGracePeriod
@@ -719,31 +720,22 @@ func TestProcessTransportCloseReportsKillError(t *testing.T) {
 	}
 	t.Cleanup(func() { processKill = oldKill })
 
-	dir := t.TempDir()
-	ready := filepath.Join(dir, "ready")
-	script := writeShellScript(t, filepath.Join(dir, "claude"), `#!/bin/sh
-trap '' TERM
-printf ready > "$READY_MARK"
-while :; do sleep 1; done
-`)
-	transport := NewProcessTransport(nil, Options{
-		CLIPath: script,
-		Env:     map[string]string{"READY_MARK": ready},
-	})
-
-	require.NoError(t, transport.Start(context.Background()))
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(ready)
-
-		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	cmd := exec.Command("sh", "-c", "trap '' TERM; while :; do sleep 1; done")
+	ready, pipeErr := cmd.StdoutPipe()
+	require.NoError(t, pipeErr)
+	cmd.Args = []string{"sh", "-c", "trap '' TERM; echo ready; while :; do sleep 1; done"}
+	require.NoError(t, cmd.Start())
+	line, readErr := bufio.NewReader(ready).ReadString('\n')
+	require.NoError(t, readErr)
+	require.Equal(t, "ready\n", line)
+	transport := &ProcessTransport{cmd: cmd}
 
 	err := transport.Close()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "kill failed")
 
 	processKill = oldKill
-	_, _ = killProcess(transport.cmd)
+	_, _ = killProcess(cmd)
 	_ = transport.wait()
 }
 
@@ -782,6 +774,20 @@ func TestProcessTransportWaitForShutdownWithoutWaitDelayReturnsWaitError(t *test
 	waitCh <- waitErr
 
 	require.ErrorIs(t, transport.waitForShutdown(waitCh, false), waitErr)
+}
+
+func TestProcessTransportWaitForShutdownRecordsSuccessfulKill(t *testing.T) {
+	oldWaitDelay := processShutdownWaitDelay
+	processShutdownWaitDelay = time.Millisecond
+	t.Cleanup(func() { processShutdownWaitDelay = oldWaitDelay })
+
+	oldKill := processKill
+	processKill = func(*exec.Cmd) (bool, error) { return true, nil }
+	t.Cleanup(func() { processKill = oldKill })
+
+	transport := &ProcessTransport{cmd: &exec.Cmd{}}
+	err := transport.waitForShutdown(make(chan error), false)
+	require.ErrorContains(t, err, processWaitTimedOutMessage)
 }
 
 func TestProcessTransportCloseWaitsForVoluntaryExitBeforeTerm(t *testing.T) {
@@ -935,10 +941,12 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 	}
 
 	commandContext := processCommandContext
+	prepareContained := processPrepareContained
 	startContained := processStartContained
 	getwd := processGetwd
 	t.Cleanup(func() {
 		processCommandContext = commandContext
+		processPrepareContained = prepareContained
 		processStartContained = startContained
 		processGetwd = getwd
 	})
@@ -979,7 +987,42 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 
 	processCommandContext = commandContext
 	var inventories []func() (int, bool)
-	processStartContained = func(*exec.Cmd) (*processContainment, error) {
+	processPrepareContained = func(*exec.Cmd) (*processTreeCommand, error) {
+		return nil, errors.Join(ErrProcessTreeUnproven, errors.New("prepare failed"))
+	}
+	transport = NewProcessTransport(nil, Options{
+		CLIPath: "/bin/sh",
+		Cwd:     t.TempDir(),
+		ObserveProcessInventory: func(_ context.Context, inventory func() (int, bool)) {
+			inventories = append(inventories, inventory)
+		},
+	})
+	require.ErrorIs(t, transport.Start(context.Background()), ErrProcessTreeUnproven)
+	require.Len(t, inventories, 1)
+	inventories = nil
+
+	for _, test := range []struct {
+		name  string
+		shape func(*exec.Cmd)
+	}{
+		{name: "prepared-stdin", shape: func(cmd *exec.Cmd) { cmd.Stdin = strings.NewReader("") }},
+		{name: "prepared-stdout", shape: func(cmd *exec.Cmd) { cmd.Stdout = io.Discard }},
+		{name: "prepared-stderr", shape: func(cmd *exec.Cmd) { cmd.Stderr = io.Discard }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			processPrepareContained = func(*exec.Cmd) (*processTreeCommand, error) {
+				prepared := exec.Command("/bin/sh")
+				test.shape(prepared)
+
+				return &processTreeCommand{cmd: prepared}, nil
+			}
+			preparedTransport := NewProcessTransport(nil, Options{CLIPath: "/bin/sh", Cwd: t.TempDir()})
+			require.Error(t, preparedTransport.Start(context.Background()))
+		})
+	}
+
+	processPrepareContained = prepareContained
+	processStartContained = func(*processTreeCommand) (*processContainment, error) {
 		return nil, errors.Join(ErrProcessTreeUnproven, errors.New("containment cleanup failed"))
 	}
 	transport = NewProcessTransport(nil, Options{

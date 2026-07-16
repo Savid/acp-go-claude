@@ -21,14 +21,31 @@ capability flag are available only when explicitly enabled — see
 
 ## Process isolation
 
-Each session's Claude process is started in its own process group and, on Unix
-platforms, is configured to receive a parent-death signal, so a crashed or
-killed adapter does not leave orphaned Claude processes behind.
+On Linux, each session's Claude process runs below a private embedded
+supervisor. The supervisor enables `PR_SET_CHILD_SUBREAPER` before launch, so a
+tool descendant that double-forks, calls `setsid`, changes process group, or
+ignores `SIGINT`/`SIGTERM` is still adopted, identity-checked through `/proc`,
+killed, and reaped. The supervisor accepts only the kernel's `ECHILD` result as
+the final no-descendants condition; an empty `/proc` scan is not proof because
+it can race a fork or reparent. Separate inherited descriptors carry immutable
+launch configuration, shutdown control, startup readiness, and the final
+quiescence proof. Those descriptors are close-on-exec before Claude starts.
+Adapter death therefore closes the sole control writer and makes the supervisor
+contain the tree rather than leaving it detached.
+
+On Windows, Claude is created suspended, assigned to a private kill-on-close
+Job Object, and only then resumed. Job accounting must report zero active
+processes before shutdown succeeds. Darwin, FreeBSD, OpenBSD, and other kernels
+without an equivalent unescapable boundary reject native session launch. A
+process group alone is never accepted as proof because a descendant can leave
+it.
 
 Turn cancellation is also process-tree contained. A native interrupt response
 is advisory; the adapter then closes the per-session tree and does not settle
 the cancel, timeout, or caller-context cancellation until every descendant is
-proved gone. The next prompt starts a fresh Claude process with
+proved gone. Readiness and supervisor exit are not proof: Linux requires the
+dedicated proof descriptor, and an unexpected supervisor death fails closed.
+The next prompt starts a fresh Claude process with
 `--resume <session-id>`. Failed quiescence proof disables that relaunch and
 retains the runtime admission instead of making an unsafe capacity claim.
 

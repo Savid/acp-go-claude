@@ -63,6 +63,11 @@ and cancellation of the prompt's caller context use the same proof boundary.
 The next prompt lazily launches Claude with `--resume <session-id>`, so the ACP
 session remains addressable without reusing the aborted process.
 
+Linux uses an embedded subreaper supervisor and a dedicated proof descriptor;
+the proof covers descendants that escape Claude's process group or session.
+Windows uses a suspended-start, kill-on-close Job Object. Unsupported kernels
+reject launch rather than treating process-group emptiness as whole-tree proof.
+
 If process-tree quiescence cannot be proved, the prompt never reports a
 successful cancellation. It fails with cause `transport`, lazy relaunch is
 disabled, and the native-root admission remains quarantined for operator

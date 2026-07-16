@@ -247,7 +247,7 @@ func TestHandleAskUserQuestionRoutesActiveTurn(t *testing.T) {
 
 func TestElicitationCallbacksPublishExactPendingToolOnACPWire(t *testing.T) {
 	t.Run("AskUserQuestion", func(t *testing.T) {
-		session, client, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
+		session, wire, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
 		decision, err := session.handleAskUserQuestion(turnCtx, claude.PermissionRequest{
 			ToolName:  askUserQuestionTool,
 			ToolUseID: "ask-wire",
@@ -257,11 +257,11 @@ func TestElicitationCallbacksPublishExactPendingToolOnACPWire(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, claude.BehaviorAllow, decision.Behavior)
-		require.Equal(t, []string{"tool_call:ask-wire", "elicitation:ask-wire"}, client.Order())
+		require.Equal(t, []string{"tool_call:ask-wire", "elicitation:ask-wire"}, wire.Order(t))
 	})
 
 	t.Run("native MCP form", func(t *testing.T) {
-		session, client, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
+		session, wire, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
 		response, err := session.handleElicitation(turnCtx, claude.ElicitationRequest{
 			Mode:            claude.ElicitationModeForm,
 			Message:         "Choose",
@@ -270,11 +270,11 @@ func TestElicitationCallbacksPublishExactPendingToolOnACPWire(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, claude.ElicitationActionAccept, response.Action)
-		require.Equal(t, []string{"tool_call:mcp-wire", "elicitation:mcp-wire"}, client.Order())
+		require.Equal(t, []string{"tool_call:mcp-wire", "elicitation:mcp-wire"}, wire.Order(t))
 	})
 
 	t.Run("native MCP URL", func(t *testing.T) {
-		session, client, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
+		session, wire, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
 		response, err := session.handleElicitation(turnCtx, claude.ElicitationRequest{
 			Mode:          claude.ElicitationModeURL,
 			Message:       "Authorize",
@@ -284,7 +284,7 @@ func TestElicitationCallbacksPublishExactPendingToolOnACPWire(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, claude.ElicitationActionAccept, response.Action)
-		require.Equal(t, []string{"tool_call:mcp-url-wire", "elicitation:mcp-url-wire"}, client.Order())
+		require.Equal(t, []string{"tool_call:mcp-url-wire", "elicitation:mcp-url-wire"}, wire.Order(t))
 	})
 }
 

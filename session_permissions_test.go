@@ -1,7 +1,9 @@
 package claudeacp
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"sync"
@@ -494,43 +496,13 @@ func TestPermissionAdditionalEdgeBranches(t *testing.T) {
 type callbackOrderWireClient struct {
 	recordingClient
 
-	orderMu          sync.Mutex
-	order            []string
 	permissionOption acp.PermissionOptionId
-}
-
-func (c *callbackOrderWireClient) record(event string) {
-	c.orderMu.Lock()
-	c.order = append(c.order, event)
-	c.orderMu.Unlock()
-}
-
-func (c *callbackOrderWireClient) Order() []string {
-	c.orderMu.Lock()
-	defer c.orderMu.Unlock()
-
-	return append([]string(nil), c.order...)
-}
-
-func (c *callbackOrderWireClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
-	switch {
-	case notification.Update.ToolCall != nil:
-		c.record("tool_call:" + string(notification.Update.ToolCall.ToolCallId))
-	case notification.Update.ToolCallUpdate != nil:
-		c.record("tool_call_update:" + string(notification.Update.ToolCallUpdate.ToolCallId))
-	default:
-		c.record("session_update")
-	}
-
-	return c.recordingClient.SessionUpdate(ctx, notification)
 }
 
 func (c *callbackOrderWireClient) RequestPermission(
 	_ context.Context,
-	request acp.RequestPermissionRequest,
+	_ acp.RequestPermissionRequest,
 ) (acp.RequestPermissionResponse, error) {
-	c.record("permission:" + string(request.ToolCall.ToolCallId))
-
 	return acp.RequestPermissionResponse{
 		Outcome: acp.NewRequestPermissionOutcomeSelected(c.permissionOption),
 	}, nil
@@ -538,28 +510,93 @@ func (c *callbackOrderWireClient) RequestPermission(
 
 func (c *callbackOrderWireClient) UnstableCreateElicitation(
 	_ context.Context,
-	request acp.UnstableCreateElicitationRequest,
+	_ acp.UnstableCreateElicitationRequest,
 ) (acp.UnstableCreateElicitationResponse, error) {
-	var meta map[string]any
-	if request.Form != nil {
-		meta = request.Form.Meta
-	} else if request.Url != nil {
-		meta = request.Url.Meta
-	}
-	route, _ := meta[routeMetaKey].(map[string]any)
-	toolCallID, _ := route["toolCallId"].(string)
-	c.record("elicitation:" + toolCallID)
-
 	response := acp.NewUnstableCreateElicitationResponseAccept()
 	response.Accept.Content = map[string]any{"q": "Yes"}
 
 	return response, nil
 }
 
+type callbackOrderWireRecorder struct {
+	writer io.Writer
+
+	mu       sync.Mutex
+	messages []json.RawMessage
+}
+
+// Write records successful agent-to-client frames before the next frame can be
+// sent. The ACP SDK dispatches notifications and requests on different client
+// goroutines, so callback handler order is not evidence of sender wire order.
+func (r *callbackOrderWireRecorder) Write(p []byte) (int, error) {
+	n, err := r.writer.Write(p)
+	if err != nil || n != len(p) {
+		return n, err
+	}
+
+	line := bytes.TrimSpace(p)
+	if len(line) > 0 {
+		r.mu.Lock()
+		r.messages = append(r.messages, append(json.RawMessage(nil), line...))
+		r.mu.Unlock()
+	}
+
+	return n, nil
+}
+
+func (r *callbackOrderWireRecorder) Order(t *testing.T) []string {
+	t.Helper()
+
+	r.mu.Lock()
+	messages := append([]json.RawMessage(nil), r.messages...)
+	r.mu.Unlock()
+
+	order := make([]string, 0, len(messages))
+	for _, message := range messages {
+		var envelope struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		require.NoError(t, json.Unmarshal(message, &envelope))
+
+		switch envelope.Method {
+		case acp.ClientMethodSessionUpdate:
+			var notification acp.SessionNotification
+			require.NoError(t, json.Unmarshal(envelope.Params, &notification))
+			switch {
+			case notification.Update.ToolCall != nil:
+				order = append(order, "tool_call:"+string(notification.Update.ToolCall.ToolCallId))
+			case notification.Update.ToolCallUpdate != nil:
+				order = append(order, "tool_call_update:"+string(notification.Update.ToolCallUpdate.ToolCallId))
+			default:
+				order = append(order, "session_update")
+			}
+		case acp.ClientMethodSessionRequestPermission:
+			var request acp.RequestPermissionRequest
+			require.NoError(t, json.Unmarshal(envelope.Params, &request))
+			order = append(order, "permission:"+string(request.ToolCall.ToolCallId))
+		case acp.ClientMethodElicitationCreate:
+			var request acp.UnstableCreateElicitationRequest
+			require.NoError(t, json.Unmarshal(envelope.Params, &request))
+			var meta map[string]any
+			if request.Form != nil {
+				meta = request.Form.Meta
+			} else if request.Url != nil {
+				meta = request.Url.Meta
+			}
+			route, _ := meta[routeMetaKey].(map[string]any)
+			toolCallID, _ := route["toolCallId"].(string)
+			order = append(order, "elicitation:"+toolCallID)
+		}
+	}
+
+	return order
+}
+
 func newCallbackOrderWireSession(
 	t *testing.T,
 	permissionOption acp.PermissionOptionId,
-) (*agentSession, *callbackOrderWireClient, context.Context) {
+) (*agentSession, *callbackOrderWireRecorder, context.Context) {
 	t.Helper()
 
 	clientToAgentReader, clientToAgentWriter := io.Pipe()
@@ -574,7 +611,8 @@ func newCallbackOrderWireSession(
 	agent := NewAgent()
 	wireClient := &callbackOrderWireClient{permissionOption: permissionOption}
 	peer := acp.NewClientSideConnection(wireClient, clientToAgentWriter, agentToClientReader)
-	local := newLocalAgentConnection(agent, agentToClientWriter, clientToAgentReader)
+	wire := &callbackOrderWireRecorder{writer: agentToClientWriter}
+	local := newLocalAgentConnection(agent, wire, clientToAgentReader)
 	agent.setConnection(local)
 
 	_, err := peer.Initialize(t.Context(), acp.InitializeRequest{ClientCapabilities: acp.ClientCapabilities{
@@ -595,46 +633,43 @@ func newCallbackOrderWireSession(
 	}
 	turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
 
-	return session, wireClient, turnCtx
+	return session, wire, turnCtx
 }
 
 func TestPermissionCallbacksPublishExactPendingToolOnACPWire(t *testing.T) {
 	t.Run("general permission", func(t *testing.T) {
-		session, client, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
+		session, wire, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
 		decision, err := session.handlePermission(turnCtx, claude.PermissionRequest{
 			ToolName: "Bash", ToolUseID: "bash-wire", Input: map[string]any{jsonFieldCommand: "true"},
 		})
 		require.NoError(t, err)
 		require.Equal(t, claude.BehaviorAllow, decision.Behavior)
-		require.Equal(t, []string{"tool_call:bash-wire", "permission:bash-wire"}, client.Order())
+		require.Equal(t, []string{"tool_call:bash-wire", "permission:bash-wire"}, wire.Order(t))
 
 		updates := mapper.MessageToUpdatesWithOptions(&claude.AssistantMessage{
 			Content: []claude.ContentBlock{claude.ToolUseBlock{ID: "bash-wire", Name: "Bash", Input: map[string]any{jsonFieldCommand: "true"}}},
 		}, mapper.ToolUpdateOptions{ToolUses: make(map[string]claude.ToolUseBlock)})
 		require.NoError(t, session.emitUpdates(turnCtx, updates))
-		require.Eventually(t, func() bool { return len(client.Order()) == 3 }, time.Second, time.Millisecond)
 		require.Equal(t, []string{
 			"tool_call:bash-wire", "permission:bash-wire", "tool_call_update:bash-wire",
-		}, client.Order())
+		}, wire.Order(t))
 	})
 
 	t.Run("ExitPlanMode", func(t *testing.T) {
-		session, client, turnCtx := newCallbackOrderWireSession(t, acp.PermissionOptionId(modeDefault))
+		session, wire, turnCtx := newCallbackOrderWireSession(t, acp.PermissionOptionId(modeDefault))
 		decision, err := session.handleExitPlanMode(turnCtx, claude.PermissionRequest{
 			ToolName: exitPlanModeTool, ToolUseID: "exit-wire", Input: map[string]any{"plan": "ship"},
 		})
 		require.NoError(t, err)
 		require.Equal(t, claude.BehaviorAllow, decision.Behavior)
-		require.Eventually(t, func() bool { return len(client.Order()) == 3 }, time.Second, time.Millisecond)
 		require.Equal(t, []string{
 			"tool_call:exit-wire", "permission:exit-wire", "session_update",
-		}, client.Order())
+		}, wire.Order(t))
 
 		updates := mapper.MessageToUpdatesWithOptions(&claude.AssistantMessage{
 			Content: []claude.ContentBlock{claude.ToolUseBlock{ID: "exit-wire", Name: exitPlanModeTool, Input: map[string]any{"plan": "ship"}}},
 		}, mapper.ToolUpdateOptions{ToolUses: make(map[string]claude.ToolUseBlock)})
 		require.NoError(t, session.emitUpdates(turnCtx, updates))
-		require.Eventually(t, func() bool { return len(client.Order()) == 4 }, time.Second, time.Millisecond)
-		require.Equal(t, "tool_call_update:exit-wire", client.Order()[3])
+		require.Equal(t, "tool_call_update:exit-wire", wire.Order(t)[3])
 	})
 }

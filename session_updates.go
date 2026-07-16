@@ -51,16 +51,70 @@ func (s *agentSession) emitUpdatesWithAssistantIdentity(
 	}
 
 	for _, update := range updates {
+		s.toolCallUpdateMu.Lock()
+
+		routedUpdate, started := s.reconcileToolCallStartLocked(update)
 		if err := conn.SessionUpdate(ctx, acp.SessionNotification{
 			Meta:      assistantIdentityNotificationMeta(ctx, messageID),
 			SessionId: s.id,
-			Update:    update,
+			Update:    routedUpdate,
 		}); err != nil {
+			s.toolCallUpdateMu.Unlock()
+
 			return err
 		}
+
+		if started != "" {
+			if s.publishedToolCalls == nil {
+				s.publishedToolCalls = make(map[acp.ToolCallId]struct{})
+			}
+
+			s.publishedToolCalls[started] = struct{}{}
+		}
+		s.toolCallUpdateMu.Unlock()
 	}
 
 	return nil
+}
+
+// resetPublishedToolCalls starts a fresh exact-ID admission set for one prompt
+// turn. Control callbacks and streamed tool-use blocks share this set so a
+// callback may publish a pending start before Claude streams the corresponding
+// block without producing a second tool_call start later.
+func (s *agentSession) resetPublishedToolCalls() {
+	s.toolCallUpdateMu.Lock()
+	s.publishedToolCalls = make(map[acp.ToolCallId]struct{})
+	s.toolCallUpdateMu.Unlock()
+}
+
+func (s *agentSession) reconcileToolCallStartLocked(update acp.SessionUpdate) (acp.SessionUpdate, acp.ToolCallId) {
+	start := update.ToolCall
+	if start == nil || start.ToolCallId == "" {
+		return update, ""
+	}
+
+	if _, published := s.publishedToolCalls[start.ToolCallId]; !published {
+		return update, start.ToolCallId
+	}
+
+	title := start.Title
+	kind := start.Kind
+	status := start.Status
+	update.ToolCall = nil
+	update.ToolCallUpdate = &acp.SessionToolCallUpdate{
+		Meta:          start.Meta,
+		Content:       start.Content,
+		Kind:          &kind,
+		Locations:     start.Locations,
+		RawInput:      start.RawInput,
+		RawOutput:     start.RawOutput,
+		SessionUpdate: "tool_call_update",
+		Status:        &status,
+		Title:         &title,
+		ToolCallId:    start.ToolCallId,
+	}
+
+	return update, ""
 }
 
 func assistantIdentityNotificationMeta(ctx context.Context, messageID string) map[string]any {

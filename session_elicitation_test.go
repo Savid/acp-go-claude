@@ -38,8 +38,9 @@ func TestElicitationCancelledDuringTurn(t *testing.T) {
 	require.Equal(t, claude.ElicitationActionCancel, urlResp.Action)
 
 	decision, err := session.handleAskUserQuestion(t.Context(), claude.PermissionRequest{
-		ToolName: askUserQuestionTool,
-		Input:    map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
+		ToolName:  askUserQuestionTool,
+		ToolUseID: "ask-cancelled",
+		Input:     map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
 	})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorDeny, decision.Behavior)
@@ -142,7 +143,8 @@ func TestHandleAskUserQuestion(t *testing.T) {
 	decline := acp.NewUnstableCreateElicitationResponseDecline()
 	conn.elicitResponse = &decline
 	decision, err = session.handleAskUserQuestion(t.Context(), claude.PermissionRequest{
-		Input: map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
+		ToolUseID: "ask-decline",
+		Input:     map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
 	})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorDeny, decision.Behavior)
@@ -150,16 +152,50 @@ func TestHandleAskUserQuestion(t *testing.T) {
 	accept.Accept.Content = map[string]any{"missing": "Yes"}
 	conn.elicitResponse = &accept
 	decision, err = session.handleAskUserQuestion(t.Context(), claude.PermissionRequest{
-		Input: map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
+		ToolUseID: "ask-invalid",
+		Input:     map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
 	})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorDeny, decision.Behavior)
 
 	conn.elicitErr = errors.New("elicit failed")
 	_, err = session.handleAskUserQuestion(t.Context(), claude.PermissionRequest{
-		Input: map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
+		ToolUseID: "ask-error",
+		Input:     map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
 	})
 	require.ErrorContains(t, err, "elicit failed")
+
+	decision, err = session.handleAskUserQuestion(t.Context(), claude.PermissionRequest{
+		Input: map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
+	})
+	require.NoError(t, err)
+	require.Contains(t, decision.Message, "missing its native tool-use ID")
+
+	conn.elicitErr = nil
+	conn.sessionUpdateErr = errors.New("pending update failed")
+	_, err = session.handleAskUserQuestion(t.Context(), claude.PermissionRequest{
+		ToolUseID: "ask-update-error",
+		Input:     map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
+	})
+	require.ErrorContains(t, err, "pending update failed")
+}
+
+func TestNativeElicitationPendingToolUpdateFailure(t *testing.T) {
+	agent := NewAgent()
+	conn := newRecordingAgentClient()
+	conn.sessionUpdateErr = errors.New("pending update failed")
+	agent.setConnection(conn)
+	session := &agentSession{agent: agent, id: "session-1"}
+
+	_, err := session.createFormElicitation(t.Context(), conn, claude.ElicitationRequest{
+		ToolUseID: "form-update-error",
+	})
+	require.ErrorContains(t, err, "pending update failed")
+
+	_, err = session.createURLElicitation(t.Context(), conn, claude.ElicitationRequest{
+		ToolUseID: "url-update-error", URL: "https://example.test", ElicitationID: "e1",
+	})
+	require.ErrorContains(t, err, "pending update failed")
 }
 
 func TestHandleAskUserQuestionRoutesActiveTurn(t *testing.T) {
@@ -206,6 +242,49 @@ func TestHandleAskUserQuestionRoutesActiveTurn(t *testing.T) {
 		require.ErrorContains(t, err, "route metadata requires sessionId and turnNonce")
 		require.Empty(t, conn.RoutedElicitations())
 		require.Empty(t, conn.Elicitations())
+	})
+}
+
+func TestElicitationCallbacksPublishExactPendingToolOnACPWire(t *testing.T) {
+	t.Run("AskUserQuestion", func(t *testing.T) {
+		session, client, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
+		decision, err := session.handleAskUserQuestion(turnCtx, claude.PermissionRequest{
+			ToolName:  askUserQuestionTool,
+			ToolUseID: "ask-wire",
+			Input: map[string]any{askFieldQuestions: []any{
+				map[string]any{askFieldID: "q", askFieldQuestion: "Proceed?"},
+			}},
+		})
+		require.NoError(t, err)
+		require.Equal(t, claude.BehaviorAllow, decision.Behavior)
+		require.Equal(t, []string{"tool_call:ask-wire", "elicitation:ask-wire"}, client.Order())
+	})
+
+	t.Run("native MCP form", func(t *testing.T) {
+		session, client, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
+		response, err := session.handleElicitation(turnCtx, claude.ElicitationRequest{
+			Mode:            claude.ElicitationModeForm,
+			Message:         "Choose",
+			ToolUseID:       "mcp-wire",
+			RequestedSchema: map[string]any{jsonFieldType: "object"},
+		})
+		require.NoError(t, err)
+		require.Equal(t, claude.ElicitationActionAccept, response.Action)
+		require.Equal(t, []string{"tool_call:mcp-wire", "elicitation:mcp-wire"}, client.Order())
+	})
+
+	t.Run("native MCP URL", func(t *testing.T) {
+		session, client, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
+		response, err := session.handleElicitation(turnCtx, claude.ElicitationRequest{
+			Mode:          claude.ElicitationModeURL,
+			Message:       "Authorize",
+			URL:           "https://example.test/authorize",
+			ElicitationID: "elicitation-wire",
+			ToolUseID:     "mcp-url-wire",
+		})
+		require.NoError(t, err)
+		require.Equal(t, claude.ElicitationActionAccept, response.Action)
+		require.Equal(t, []string{"tool_call:mcp-url-wire", "elicitation:mcp-url-wire"}, client.Order())
 	})
 }
 

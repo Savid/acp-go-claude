@@ -26,6 +26,7 @@ const (
 	jsonFieldIndex                = "index"
 	jsonFieldMessage              = "message"
 	jsonFieldMethod               = "method"
+	jsonFieldCommand              = "command"
 	jsonFieldMeta                 = "_meta"
 	jsonFieldMode                 = "mode"
 	jsonFieldOffset               = "offset"
@@ -164,11 +165,13 @@ type agentSession struct {
 
 	turn               chan struct{}
 	cancelMu           sync.Mutex
+	toolCallUpdateMu   sync.Mutex
 	mu                 sync.Mutex
 	permissionSaveMu   sync.Mutex
 	cancel             context.CancelFunc
 	turnCancelled      bool
 	turnNonce          string
+	publishedToolCalls map[acp.ToolCallId]struct{}
 	permissionCancel   map[string]*permissionRequestCancel
 	elicitationCancel  map[int64]*elicitationRequestCancel
 	elicitationSeq     int64

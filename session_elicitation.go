@@ -8,6 +8,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/savid/acp-go-claude/internal/observer"
 )
 
@@ -77,9 +78,25 @@ func (s *agentSession) handleAskUserQuestion(
 		}, nil
 	}
 
-	scope := elicitationScope{SessionID: s.id, TurnNonce: s.currentTurnNonce()}
-	if request.ToolUseID != "" {
-		scope.ToolCallID = acp.ToolCallId(request.ToolUseID)
+	if request.ToolUseID == "" {
+		return claude.PermissionDecision{
+			Behavior: claude.BehaviorDeny,
+			Message:  "AskUserQuestion callback is missing its native tool-use ID",
+		}, nil
+	}
+
+	scope := elicitationScope{
+		SessionID: s.id, TurnNonce: s.currentTurnNonce(), ToolCallID: acp.ToolCallId(request.ToolUseID),
+	}
+	if emitErr := s.emitPendingToolCall(
+		ctx,
+		askUserQuestionTool,
+		request.ToolUseID,
+		mapper.ToolTitle(askUserQuestionTool, request.Input),
+		request.Input,
+		request.Raw,
+	); emitErr != nil {
+		return claude.PermissionDecision{}, emitErr
 	}
 
 	elicitationCtx, finishElicitation := s.registerElicitation(ctx)
@@ -396,6 +413,12 @@ func (s *agentSession) createFormElicitation(
 	conn agentClient,
 	request claude.ElicitationRequest,
 ) (claude.ElicitationResponse, error) {
+	if request.ToolUseID != "" {
+		if err := s.emitPendingToolCall(ctx, "MCP elicitation", request.ToolUseID, request.Message, request.Raw, request.Raw); err != nil {
+			return claude.ElicitationResponse{}, err
+		}
+	}
+
 	elicitationCtx, finishElicitation := s.registerElicitation(ctx)
 	defer finishElicitation()
 
@@ -431,6 +454,12 @@ func (s *agentSession) createURLElicitation(
 		}
 
 		elicitationID = id
+	}
+
+	if request.ToolUseID != "" {
+		if err := s.emitPendingToolCall(ctx, "MCP elicitation", request.ToolUseID, request.Message, request.Raw, request.Raw); err != nil {
+			return claude.ElicitationResponse{}, err
+		}
 	}
 
 	elicitationCtx, finishElicitation := s.registerElicitation(ctx)

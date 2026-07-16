@@ -121,7 +121,10 @@ func (s *agentSession) handlePermission(ctx context.Context, request claude.Perm
 
 	toolCallID := request.ToolUseID
 	if toolCallID == "" {
-		toolCallID = request.ToolName
+		return claude.PermissionDecision{
+			Behavior: claude.BehaviorDeny,
+			Message:  "Claude permission callback is missing its native tool-use ID",
+		}, nil
 	}
 
 	permissionCtx, finishPermissionRequest := s.permissionRequestContext(ctx, toolCallID)
@@ -130,6 +133,10 @@ func (s *agentSession) handlePermission(ctx context.Context, request claude.Perm
 	title := request.Title
 	if title == "" {
 		title = mapper.ToolTitle(request.ToolName, request.Input)
+	}
+
+	if emitErr := s.emitPendingToolCall(ctx, request.ToolName, toolCallID, title, request.Input, request.Raw); emitErr != nil {
+		return claude.PermissionDecision{}, emitErr
 	}
 
 	info := mapper.ToolCallInfo(request.ToolName, toolCallID, request.Input, mapper.ToolUpdateOptions{
@@ -272,7 +279,10 @@ func (s *agentSession) handleExitPlanMode(
 
 	toolCallID := request.ToolUseID
 	if toolCallID == "" {
-		toolCallID = request.ToolName
+		return claude.PermissionDecision{
+			Behavior: claude.BehaviorDeny,
+			Message:  "ExitPlanMode callback is missing its native tool-use ID",
+		}, nil
 	}
 
 	_, model, availableModels := s.modeInfo()
@@ -286,6 +296,10 @@ func (s *agentSession) handleExitPlanMode(
 
 	if request.Title != "" {
 		title = request.Title
+	}
+
+	if err := s.emitPendingToolCall(ctx, request.ToolName, toolCallID, title, request.Input, request.Raw); err != nil {
+		return claude.PermissionDecision{}, err
 	}
 
 	resp, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{
@@ -341,6 +355,39 @@ func (s *agentSession) handleExitPlanMode(
 		UpdatedInput:       request.Input,
 		UpdatedPermissions: permissionSuggestionsOrFallback(request.Suggestions, permissionModeUpdate(selectedMode)),
 	}, nil
+}
+
+func (s *agentSession) emitPendingToolCall(
+	ctx context.Context,
+	toolName string,
+	toolCallID string,
+	title string,
+	input map[string]any,
+	raw map[string]any,
+) error {
+	info := mapper.ToolCallInfo(toolName, toolCallID, input, mapper.ToolUpdateOptions{
+		Cwd:                    s.cwd,
+		SupportsTerminalOutput: s.agent.clientSupportsTerminalOutput(),
+	})
+	if title == "" {
+		title = info.Title
+	}
+
+	update := acp.StartToolCall(
+		acp.ToolCallId(toolCallID),
+		title,
+		acp.WithStartKind(info.Kind),
+		acp.WithStartStatus(acp.ToolCallStatusPending),
+		acp.WithStartContent(info.Content),
+		acp.WithStartLocations(info.Locations),
+		acp.WithStartRawInput(input),
+	)
+	update.ToolCall.Meta = map[string]any{claudeMetaKey: map[string]any{
+		"toolName":  toolName,
+		acpFieldRaw: raw,
+	}}
+
+	return s.emitUpdates(ctx, []acp.SessionUpdate{update})
 }
 
 func exitPlanModeOptions(model string, availableModels []claude.AvailableModelInfo) []acp.PermissionOption {

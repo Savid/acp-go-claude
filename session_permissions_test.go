@@ -3,11 +3,14 @@ package claudeacp
 import (
 	"context"
 	"errors"
+	"io"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/stretchr/testify/require"
 )
 
@@ -180,7 +183,7 @@ func TestHandlePermissionBranches(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorDeny, decision.Behavior)
 	require.Contains(t, decision.Message, "saved")
-	decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash"})
+	decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-cancelled"})
 	require.NoError(t, err)
 	require.Equal(t, "ACP client is unavailable", decision.Message)
 	decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: askUserQuestionTool})
@@ -209,7 +212,7 @@ func TestHandlePermissionBranches(t *testing.T) {
 			agent.setConnection(conn)
 			session.permissionRules = map[string]string{}
 
-			decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash", ToolUseID: "tool-1", Input: map[string]any{"command": "true"}})
+			decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash", ToolUseID: "tool-1", Input: map[string]any{jsonFieldCommand: "true"}})
 			require.NoError(t, err)
 			require.Equal(t, tc.want, decision.Behavior)
 			if tc.wantUpdate {
@@ -221,15 +224,25 @@ func TestHandlePermissionBranches(t *testing.T) {
 	conn := newRecordingAgentClient()
 	conn.nilPermission = true
 	agent.setConnection(conn)
-	decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash"})
+	decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-cancelled"})
 	require.NoError(t, err)
 	require.Equal(t, permissionCancelledMessage, decision.Message)
 
 	conn = newRecordingAgentClient()
 	conn.permissionErr = errors.New("permission failed")
 	agent.setConnection(conn)
-	_, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash"})
+	_, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-error"})
 	require.ErrorContains(t, err, "permission failed")
+
+	decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash"})
+	require.NoError(t, err)
+	require.Contains(t, decision.Message, "missing its native tool-use ID")
+
+	conn = newRecordingAgentClient()
+	conn.sessionUpdateErr = errors.New("pending update failed")
+	agent.setConnection(conn)
+	_, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-update-error"})
+	require.ErrorContains(t, err, "pending update failed")
 }
 
 func TestExitPlanModePermission(t *testing.T) {
@@ -260,7 +273,7 @@ func TestExitPlanModePermission(t *testing.T) {
 
 	conn.permission = acp.PermissionOptionId(modePlan)
 	session.mode = modePlan
-	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool})
+	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-rejected"})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorDeny, decision.Behavior)
 }
@@ -289,8 +302,11 @@ func TestExitPlanModeControlCallbackRequiresExactActiveRoute(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, claude.BehaviorAllow, decision.Behavior)
 		updates := conn.Updates()
-		require.Len(t, updates, 1)
+		require.Len(t, updates, 2)
+		require.Equal(t, acp.ToolCallId("exit-1"), updates[0].Update.ToolCall.ToolCallId)
+		require.Equal(t, acp.ToolCallStatusPending, updates[0].Update.ToolCall.Status)
 		require.Equal(t, turnRouteMeta(permissionControlTurnNonce), updates[0].Meta)
+		require.NotNil(t, updates[1].Update.ConfigOptionUpdate)
 	})
 
 	t.Run("missing callback route", func(t *testing.T) {
@@ -353,7 +369,9 @@ func TestExitPlanModeControlCallbackRequiresExactActiveRoute(t *testing.T) {
 		require.NoError(t, <-errCh)
 		require.Equal(t, claude.BehaviorDeny, (<-decisionCh).Behavior)
 		require.Equal(t, modePlan, session.mode)
-		require.Empty(t, conn.Updates())
+		updates := conn.Updates()
+		require.Len(t, updates, 1)
+		require.Equal(t, acp.ToolCallId("exit-1"), updates[0].Update.ToolCall.ToolCallId)
 	})
 
 	t.Run("outside turn", func(t *testing.T) {
@@ -411,6 +429,10 @@ func TestPermissionAdditionalEdgeBranches(t *testing.T) {
 	conn.permission = acp.PermissionOptionId(modeDefault)
 	agent.setConnection(conn)
 	turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool})
+	require.NoError(t, err)
+	require.Contains(t, decision.Message, "missing its native tool-use ID")
+
 	decision, err = session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-1", Title: "Exit plan"})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorAllow, decision.Behavior)
@@ -418,22 +440,28 @@ func TestPermissionAdditionalEdgeBranches(t *testing.T) {
 	conn = newRecordingAgentClient()
 	conn.permissionErr = errors.New("exit permission failed")
 	agent.setConnection(conn)
-	_, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool})
+	_, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-error"})
 	require.ErrorContains(t, err, "exit permission failed")
 
 	conn = newRecordingAgentClient()
 	conn.nilPermission = true
 	agent.setConnection(conn)
-	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool})
+	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-cancelled"})
 	require.NoError(t, err)
 	require.Equal(t, permissionCancelledMessage, decision.Message)
 
 	conn = newRecordingAgentClient()
 	conn.permission = acp.PermissionOptionId(modeDefault)
 	conn.sessionUpdateErr = errors.New("config update failed")
+	conn.failUpdateAfter = 2
 	agent.setConnection(conn)
-	_, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool})
+	_, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-update-error"})
 	require.ErrorContains(t, err, "config update failed")
+
+	conn = newRecordingAgentClient()
+	agent.setConnection(conn)
+	require.NoError(t, session.emitPendingToolCall(ctx, "Read", "title-fallback", "", nil, nil))
+	require.Equal(t, "Read File", conn.Updates()[0].Update.ToolCall.Title)
 
 	nonWorkflow := map[string]any{
 		jsonFieldType:               permissionUpdateAddRules,
@@ -453,4 +481,152 @@ func TestPermissionAdditionalEdgeBranches(t *testing.T) {
 		permissionUpdateBehavior: claude.BehaviorAllow,
 		permissionUpdateRules:    []any{map[string]any{}},
 	}}, "Bash"))
+}
+
+type callbackOrderWireClient struct {
+	recordingClient
+
+	orderMu          sync.Mutex
+	order            []string
+	permissionOption acp.PermissionOptionId
+}
+
+func (c *callbackOrderWireClient) record(event string) {
+	c.orderMu.Lock()
+	c.order = append(c.order, event)
+	c.orderMu.Unlock()
+}
+
+func (c *callbackOrderWireClient) Order() []string {
+	c.orderMu.Lock()
+	defer c.orderMu.Unlock()
+
+	return append([]string(nil), c.order...)
+}
+
+func (c *callbackOrderWireClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	switch {
+	case notification.Update.ToolCall != nil:
+		c.record("tool_call:" + string(notification.Update.ToolCall.ToolCallId))
+	case notification.Update.ToolCallUpdate != nil:
+		c.record("tool_call_update:" + string(notification.Update.ToolCallUpdate.ToolCallId))
+	default:
+		c.record("session_update")
+	}
+
+	return c.recordingClient.SessionUpdate(ctx, notification)
+}
+
+func (c *callbackOrderWireClient) RequestPermission(
+	_ context.Context,
+	request acp.RequestPermissionRequest,
+) (acp.RequestPermissionResponse, error) {
+	c.record("permission:" + string(request.ToolCall.ToolCallId))
+
+	return acp.RequestPermissionResponse{
+		Outcome: acp.NewRequestPermissionOutcomeSelected(c.permissionOption),
+	}, nil
+}
+
+func (c *callbackOrderWireClient) UnstableCreateElicitation(
+	_ context.Context,
+	request acp.UnstableCreateElicitationRequest,
+) (acp.UnstableCreateElicitationResponse, error) {
+	var meta map[string]any
+	if request.Form != nil {
+		meta = request.Form.Meta
+	} else if request.Url != nil {
+		meta = request.Url.Meta
+	}
+	route, _ := meta[routeMetaKey].(map[string]any)
+	toolCallID, _ := route["toolCallId"].(string)
+	c.record("elicitation:" + toolCallID)
+
+	response := acp.NewUnstableCreateElicitationResponseAccept()
+	response.Accept.Content = map[string]any{"q": "Yes"}
+
+	return response, nil
+}
+
+func newCallbackOrderWireSession(
+	t *testing.T,
+	permissionOption acp.PermissionOptionId,
+) (*agentSession, *callbackOrderWireClient, context.Context) {
+	t.Helper()
+
+	clientToAgentReader, clientToAgentWriter := io.Pipe()
+	agentToClientReader, agentToClientWriter := io.Pipe()
+	t.Cleanup(func() {
+		_ = clientToAgentReader.Close()
+		_ = clientToAgentWriter.Close()
+		_ = agentToClientReader.Close()
+		_ = agentToClientWriter.Close()
+	})
+
+	agent := NewAgent()
+	wireClient := &callbackOrderWireClient{permissionOption: permissionOption}
+	peer := acp.NewClientSideConnection(wireClient, clientToAgentWriter, agentToClientReader)
+	local := newLocalAgentConnection(agent, agentToClientWriter, clientToAgentReader)
+	agent.setConnection(local)
+
+	_, err := peer.Initialize(t.Context(), acp.InitializeRequest{ClientCapabilities: acp.ClientCapabilities{
+		Elicitation: &acp.ElicitationCapabilities{
+			Form: &acp.ElicitationFormCapabilities{},
+			Url:  &acp.ElicitationUrlCapabilities{},
+		},
+	}})
+	require.NoError(t, err)
+
+	session := &agentSession{
+		agent:           agent,
+		id:              "session-wire",
+		cwd:             "/tmp/project",
+		mode:            modePlan,
+		model:           "sonnet",
+		permissionRules: map[string]string{},
+	}
+	turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+
+	return session, wireClient, turnCtx
+}
+
+func TestPermissionCallbacksPublishExactPendingToolOnACPWire(t *testing.T) {
+	t.Run("general permission", func(t *testing.T) {
+		session, client, turnCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
+		decision, err := session.handlePermission(turnCtx, claude.PermissionRequest{
+			ToolName: "Bash", ToolUseID: "bash-wire", Input: map[string]any{jsonFieldCommand: "true"},
+		})
+		require.NoError(t, err)
+		require.Equal(t, claude.BehaviorAllow, decision.Behavior)
+		require.Equal(t, []string{"tool_call:bash-wire", "permission:bash-wire"}, client.Order())
+
+		updates := mapper.MessageToUpdatesWithOptions(&claude.AssistantMessage{
+			Content: []claude.ContentBlock{claude.ToolUseBlock{ID: "bash-wire", Name: "Bash", Input: map[string]any{jsonFieldCommand: "true"}}},
+		}, mapper.ToolUpdateOptions{ToolUses: make(map[string]claude.ToolUseBlock)})
+		require.NoError(t, session.emitUpdates(turnCtx, updates))
+		require.Eventually(t, func() bool { return len(client.Order()) == 3 }, time.Second, time.Millisecond)
+		require.Equal(t, []string{
+			"tool_call:bash-wire", "permission:bash-wire", "tool_call_update:bash-wire",
+		}, client.Order())
+	})
+
+	t.Run("ExitPlanMode", func(t *testing.T) {
+		session, client, turnCtx := newCallbackOrderWireSession(t, acp.PermissionOptionId(modeDefault))
+		decision, err := session.handleExitPlanMode(turnCtx, claude.PermissionRequest{
+			ToolName: exitPlanModeTool, ToolUseID: "exit-wire", Input: map[string]any{"plan": "ship"},
+		})
+		require.NoError(t, err)
+		require.Equal(t, claude.BehaviorAllow, decision.Behavior)
+		require.Eventually(t, func() bool { return len(client.Order()) == 3 }, time.Second, time.Millisecond)
+		require.Equal(t, []string{
+			"tool_call:exit-wire", "permission:exit-wire", "session_update",
+		}, client.Order())
+
+		updates := mapper.MessageToUpdatesWithOptions(&claude.AssistantMessage{
+			Content: []claude.ContentBlock{claude.ToolUseBlock{ID: "exit-wire", Name: exitPlanModeTool, Input: map[string]any{"plan": "ship"}}},
+		}, mapper.ToolUpdateOptions{ToolUses: make(map[string]claude.ToolUseBlock)})
+		require.NoError(t, session.emitUpdates(turnCtx, updates))
+		require.Eventually(t, func() bool { return len(client.Order()) == 4 }, time.Second, time.Millisecond)
+		require.Equal(t, "tool_call_update:exit-wire", client.Order()[3])
+	})
 }

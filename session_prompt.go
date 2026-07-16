@@ -45,7 +45,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	if denied {
 		return acp.PromptResponse{}, acp.NewInvalidParams(map[string]any{
 			jsonFieldError:   "unsupported command",
-			"command":        deniedName,
+			jsonFieldCommand: deniedName,
 			"alternative":    alternative,
 			jsonFieldMessage: "Use " + alternative + " instead of /" + deniedName + ".",
 		})
@@ -74,6 +74,7 @@ func (s *agentSession) Prompt(ctx context.Context, params acp.PromptRequest) (ac
 	}
 
 	s.cancelMu.Lock()
+	s.resetPublishedToolCalls()
 	s.mu.Lock()
 	turnCtx, cancel := context.WithCancel(ctx)
 	turnCtx = withTurnRoute(turnCtx, route.turnNonce)

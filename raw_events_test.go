@@ -85,6 +85,66 @@ func TestRawEventOversizeMarker(t *testing.T) {
 	require.Greater(t, sizeBytes, float64(rawEventMaxBytes))
 }
 
+func TestRawEventFinalPayloadBoundaryIncludesRouteMeta(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]any{
+		acpFieldSessionID:     "session-1",
+		rawEventFieldSequence: int64(1),
+		rawEventFieldSource:   claudeMetaKey,
+		rawEventFieldEvent:    map[string]any{"data": ""},
+		"_meta":               turnRouteMeta(strings.Repeat("n", routeTurnNonceMaxBytes)),
+	}
+	empty, err := json.Marshal(payload)
+	require.NoError(t, err)
+	padding := rawEventMaxBytes - len(empty)
+	require.Positive(t, padding)
+	payload[rawEventFieldEvent] = map[string]any{"data": strings.Repeat("x", padding)}
+
+	capped, err := capRawEventPayload(payload)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(capped)
+	require.NoError(t, err)
+	require.Len(t, encoded, rawEventMaxBytes)
+	require.NotContains(t, capped[rawEventFieldEvent], rawEventFieldTruncated)
+
+	payload[rawEventFieldEvent] = map[string]any{"data": strings.Repeat("x", padding+1)}
+	capped, err = capRawEventPayload(payload)
+	require.NoError(t, err)
+	encoded, err = json.Marshal(capped)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(encoded), rawEventMaxBytes)
+	marker, ok := capped[rawEventFieldEvent].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, rawEventReasonOversize, marker[rawEventFieldReason])
+	require.Equal(t, rawEventMaxBytes+1, marker[rawEventFieldSizeBytes])
+}
+
+func TestRawEventFinalPayloadRejectsUnboundedInternalRoute(t *testing.T) {
+	t.Parallel()
+
+	hugeNonce := strings.Repeat("n", rawEventMaxBytes)
+	payload := map[string]any{
+		acpFieldSessionID:     "session-1",
+		rawEventFieldSequence: int64(1),
+		rawEventFieldSource:   claudeMetaKey,
+		rawEventFieldEvent:    normalMessage().RawMessage(),
+		"_meta":               turnRouteMeta(hugeNonce),
+	}
+
+	_, err := capRawEventPayload(payload)
+	require.ErrorContains(t, err, "exceeds")
+
+	session, conn := newRawEventSession(t, "session-1", true)
+	session.emitRawClaudeMessage(withTurnRoute(context.Background(), hugeNonce), normalMessage())
+	require.Empty(t, conn.Extensions())
+	require.Zero(t, session.rawEventSequence)
+
+	payload["_meta"] = map[string]any{"bad": make(chan int)}
+	_, err = capRawEventPayload(payload)
+	require.ErrorContains(t, err, "marshal capped")
+}
+
 // Case 2 — the per-session sequence is contiguous, starts at 1, and every event
 // (normal or marker) consumes exactly one sequence.
 func TestRawEventContiguousSequence(t *testing.T) {
@@ -171,6 +231,14 @@ func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
 
 	session.emitRawClaudeMessage(ctx, normalMessage())
 	require.Empty(t, conn.Extensions())
+	require.Zero(t, session.rawEventSequence)
+
+	conn.extensionErr = nil
+	session.emitRawClaudeMessage(ctx, normalMessage())
+	events := decodeRawEvents(t, conn)
+	require.Len(t, events, 1)
+	require.Equal(t, 1, events[0].Sequence)
+	require.EqualValues(t, 1, session.rawEventSequence)
 }
 
 // Case 6 — with raw events disabled (the default), no notifications are emitted

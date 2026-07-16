@@ -166,6 +166,7 @@ type agentSession struct {
 	turn               chan struct{}
 	cancelMu           sync.Mutex
 	toolCallUpdateMu   sync.Mutex
+	rawEventMu         sync.Mutex
 	mu                 sync.Mutex
 	permissionSaveMu   sync.Mutex
 	cancel             context.CancelFunc

@@ -31,7 +31,7 @@ Claude namespace:
 Every `session/prompt` and every cancellation of an active turn MUST carry
 exactly `_meta["acp-go.dev/route"] = {"version":1,"turnNonce":"..."}`.
 Missing, extra, wrong-typed, unsupported-version, and stale values are rejected.
-The nonce is fresh and unguessable for each turn.
+The nonce is fresh and unguessable for each turn and is at most 4096 bytes.
 
 Every live-turn `session/update` and `_claude/rawEvent` notification carries the
 same exact `{version, turnNonce}` object in its notification `_meta`; raw-event

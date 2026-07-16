@@ -421,34 +421,41 @@ func (s *agentSession) emitRawClaudeMessage(ctx context.Context, msg claude.Mess
 	conn := s.agent.conn
 	s.agent.mu.Unlock()
 
-	s.mu.Lock()
-	s.rawEventSequence++
-	sequence := s.rawEventSequence
-	s.mu.Unlock()
+	s.rawEventMu.Lock()
+	defer s.rawEventMu.Unlock()
+
+	sequence := s.rawEventSequence + 1
 
 	payload := map[string]any{
-		acpFieldSessionID:  s.id,
-		"sequence":         sequence,
-		"source":           claudeMetaKey,
-		rawEventFieldEvent: raw,
+		acpFieldSessionID:     s.id,
+		rawEventFieldSequence: sequence,
+		rawEventFieldSource:   claudeMetaKey,
+		rawEventFieldEvent:    raw,
 	}
 	if meta := turnRouteMetaFromContext(ctx); meta != nil {
 		payload["_meta"] = meta
 	}
 
-	// Oversized or unserializable events are never dropped: replace the event
-	// with a fixed marker that consumes the sequence, keeping the per-session
-	// sequence contiguous and self-describing.
-	if marker, replaced := rawEventMarker(payload); replaced {
-		payload[rawEventFieldEvent] = marker
+	// Oversized or unserializable provider events are replaced with the fixed
+	// marker after route metadata is attached, and the final payload is checked
+	// before delivery.
+	capped, err := capRawEventPayload(payload)
+	if err != nil {
+		s.agent.observe.RecordRawMessageEmitFailure(ctx, err)
+
+		return
 	}
 
 	// A raw-event emit failure must not abort the prompt turn: raw events are
 	// non-authoritative debug output. Record it on the internal observer hook
 	// and continue.
-	if err := conn.NotifyExtension(ctx, RawEventMethod, payload); err != nil {
+	if err := conn.NotifyExtension(ctx, RawEventMethod, capped); err != nil {
 		s.agent.observe.RecordRawMessageEmitFailure(ctx, err)
+
+		return
 	}
+
+	s.rawEventSequence = sequence
 }
 
 func resultOriginKind(result *claude.ResultMessage) string {

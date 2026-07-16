@@ -87,7 +87,7 @@ Request builders: `TextPromptRequest`, `CallForkSession`, `WithSessionRawEvents`
 
 `PromptRequest(sessionID, turnNonce, blocks...)` and
 `TextPromptRequest(sessionID, turnNonce, text)` require a fresh, unguessable
-nonce for every turn. Use the same nonce with
+nonce of at most 4096 bytes for every turn. Use the same nonce with
 `CancelRequest(sessionID, turnNonce)` while that turn is active.
 
 `RuntimeResourceHooks` has `AcquireNativeRoot`, `ReserveScratchRoot`,

@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -26,6 +27,10 @@ func TestRouteEnvelopeHardCutover(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	require.Equal(t, "decoded-turn", decoded.turnNonce)
+	boundaryNonce := strings.Repeat("n", routeTurnNonceMaxBytes)
+	boundary, err := parseInboundTurnRoute(turnRouteMeta(boundaryNonce))
+	require.NoError(t, err)
+	require.Equal(t, boundaryNonce, boundary.turnNonce)
 	require.False(t, routeVersionIsOne("1"))
 
 	for _, meta := range []map[string]any{
@@ -34,6 +39,7 @@ func TestRouteEnvelopeHardCutover(t *testing.T) {
 		{routeMetaKey: map[string]any{routeFieldVer: 2, routeFieldTurn: "turn"}},
 		{routeMetaKey: map[string]any{routeFieldVer: 1, routeFieldTurn: ""}},
 		{routeMetaKey: map[string]any{routeFieldVer: 1.5, routeFieldTurn: "turn"}},
+		{routeMetaKey: map[string]any{routeFieldVer: 1, routeFieldTurn: strings.Repeat("n", routeTurnNonceMaxBytes+1)}},
 		{routeMetaKey: map[string]any{routeFieldVer: 1, routeFieldTurn: "turn", "extra": true}},
 	} {
 		_, routeErr := parseInboundTurnRoute(meta)

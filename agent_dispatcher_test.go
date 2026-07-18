@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -429,6 +430,18 @@ func TestLifecycleCommandPostResponseHookBranches(t *testing.T) {
 	require.False(t, ok)
 	_, ok = lifecycleCommandSessionID(acp.AgentMethodSessionResume, json.RawMessage(`{bad`), acp.ResumeSessionResponse{})
 	require.False(t, ok)
+}
+
+func TestPostResponseHookRecoversPanic(t *testing.T) {
+	t.Parallel()
+
+	ran := false
+	runPostResponseHook(slog.New(slog.DiscardHandler), func() {
+		defer func() { ran = true }()
+
+		panic("hook panic")
+	})
+	require.True(t, ran)
 }
 
 func TestPostResponseHookRequestReaderTagsLifecycleRequests(t *testing.T) {

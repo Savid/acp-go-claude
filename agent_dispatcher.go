@@ -339,11 +339,17 @@ func (h *postResponseHooks) runAfterResponseWrite(data []byte) {
 		h.all = slicesDelete(h.all, index)
 		h.mu.Unlock()
 
-		go hook.run()
+		go runPostResponseHook(h.log, hook.run)
 
 		return
 	}
 	h.mu.Unlock()
+}
+
+func runPostResponseHook(log *slog.Logger, run func()) {
+	defer recoverAgentGoroutine(context.Background(), log, "post-response hook")
+
+	run()
 }
 
 func responseHookID(id *json.RawMessage) string {

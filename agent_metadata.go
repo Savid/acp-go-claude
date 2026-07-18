@@ -1,8 +1,6 @@
 package claudeacp
 
-import (
-	"maps"
-)
+import "maps"
 
 func cloneStringMap(values map[string]string) map[string]string {
 	return maps.Clone(values)

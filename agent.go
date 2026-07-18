@@ -155,7 +155,7 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	defer func() {
 		if closeErr := agent.Close(); closeErr != nil {
 			agent.log.DebugContext(context.Background(), "close Claude ACP agent failed", slog.String(jsonFieldError, closeErr.Error()))
-			serveErr = errors.Join(serveErr, closeErr)
+			serveErr = closeErr
 		}
 	}()
 

@@ -15,8 +15,8 @@ details live in `internal/`.
 - **Entrypoint** (`cmd/acp-go-claude`): process entrypoint, ACP stdio mode,
   Claude passthrough mode, tracing setup, and signal handling.
 - **ACP agent surface** (root package, e.g. `agent.go`, `agent_connection.go`,
-  `agent_dispatcher.go`, `options.go`, `auth.go`, `ids.go`): ACP method
-  handlers, request dispatch, agent options, authentication, and ID helpers.
+  `agent_dispatcher.go`, `agent_metadata.go`, `options.go`, `ids.go`): ACP method
+  handlers, request dispatch, shared metadata, agent options, and ID helpers.
 - **Session orchestration** (`session.go`, `session_meta.go`, `raw_events.go`,
   `session_store.go`):
   Claude turn lifecycle, prompts, cancellation, permissions, elicitation,
@@ -63,8 +63,7 @@ ACP_GO_CLAUDE_RUN_INTEGRATION=1 ACP_GO_CLAUDE_RUN_LIVE_TOKENS=1 go test -race -c
 `ACP_GO_CLAUDE_RUN_INTEGRATION=1` gates the integration tier;
 `ACP_GO_CLAUDE_RUN_LIVE_TOKENS=1` additionally opts in to tests that spend
 model tokens (`make test-integration-smoke` omits it).
-`make test-integration` runs the same live suite. Use
-`make test-integration-cover` for compiled `acp-go-claude` coverage through
+Use `make test-integration-cover` for compiled `acp-go-claude` coverage through
 `GOCOVERDIR`. Set `ACP_GO_CLAUDE_MODEL` to override the model used by live
 tests. Live tests always launch Claude with an isolated temp
 `CLAUDE_CONFIG_DIR`. Set `ACP_GO_CLAUDE_HOME` to choose the source Claude config

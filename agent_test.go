@@ -80,10 +80,13 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	cancelEarly()
 	require.ErrorIs(t, Serve(preCancelled, &blockingReader{}, io.Discard), context.Canceled)
 
-	// A context cancelled while Serve is blocked resolves through the select.
+	// A context cancelled while Serve is blocked resolves through the select,
+	// but the deferred Close error takes precedence over that loop result.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	require.ErrorIs(t, Serve(ctx, &blockingReader{}, io.Discard), context.DeadlineExceeded)
+	err = Serve(ctx, &blockingReader{}, io.Discard)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
 }
 
 type blockingCloseTransport struct {
@@ -212,7 +215,9 @@ func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {
 	close(transport.release)
 	require.ErrorIs(t, <-newSessionErr, claude.ErrProcessContainmentIncomplete)
 	require.ErrorIs(t, <-closeErr, claude.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, <-serveErr, claude.ErrProcessContainmentIncomplete)
+	gotServeErr := <-serveErr
+	require.ErrorIs(t, gotServeErr, claude.ErrProcessContainmentIncomplete)
+	require.NotErrorIs(t, gotServeErr, context.Canceled)
 	require.ErrorIs(t, agent.Close(), claude.ErrProcessContainmentIncomplete)
 }
 

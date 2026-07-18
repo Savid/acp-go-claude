@@ -33,6 +33,19 @@ func TestClaudeOptionsMetaAndParsing(t *testing.T) {
 	require.Nil(t, outputSchemaJSONSchema(nil))
 }
 
+func TestCloneStringMap(t *testing.T) {
+	t.Parallel()
+
+	require.Nil(t, cloneStringMap(nil))
+
+	original := map[string]string{"key": "value"}
+	cloned := cloneStringMap(original)
+	require.Equal(t, original, cloned)
+
+	cloned["key"] = "changed"
+	require.Equal(t, "value", original["key"])
+}
+
 func TestClaudeOptionsValidationBranches(t *testing.T) {
 	t.Parallel()
 

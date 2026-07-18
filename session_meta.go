@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -296,6 +297,10 @@ func stringMapOption(value any, path string) (map[string]string, error) {
 	default:
 		return nil, unsupportedField(path)
 	}
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	return maps.Clone(values)
 }
 
 func validateOutputSchema(schema map[string]any) (map[string]any, error) {

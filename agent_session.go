@@ -551,7 +551,9 @@ func (a *Agent) clientSupportsTerminalOutput() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	return clientMetaBool(a.clientCapabilities.Meta, clientMetaTerminalOutput)
+	enabled, _ := a.clientCapabilities.Meta[clientMetaTerminalOutput].(bool)
+
+	return enabled
 }
 
 func (a *Agent) activeSessionForStart(id acp.SessionId, start sessionStart) *agentSession {

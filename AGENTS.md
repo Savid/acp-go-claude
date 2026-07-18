@@ -15,8 +15,8 @@ details live in `internal/`.
 - **Entrypoint** (`cmd/acp-go-claude`): process entrypoint, ACP stdio mode,
   Claude passthrough mode, tracing setup, and signal handling.
 - **ACP agent surface** (root package, e.g. `agent.go`, `agent_connection.go`,
-  `agent_dispatcher.go`, `agent_metadata.go`, `options.go`, `ids.go`): ACP method
-  handlers, request dispatch, shared metadata, agent options, and ID helpers.
+  `agent_dispatcher.go`, `options.go`, `ids.go`): ACP method handlers, request
+  dispatch, agent options, and ID helpers.
 - **Session orchestration** (`session.go`, `session_meta.go`, `raw_events.go`,
   `session_store.go`):
   Claude turn lifecycle, prompts, cancellation, permissions, elicitation,

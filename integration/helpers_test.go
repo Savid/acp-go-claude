@@ -290,6 +290,13 @@ func (c *recordingClient) elicitationCount() int {
 	return len(c.elicitations)
 }
 
+func (c *recordingClient) elicitationSnapshot() []acp.UnstableCreateElicitationRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]acp.UnstableCreateElicitationRequest(nil), c.elicitations...)
+}
+
 func (c *recordingClient) updateSnapshot() []acp.SessionUpdate {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -874,7 +881,7 @@ func connectLiveAgentBinary(
 
 	claudePath := integrationClaudePath(t)
 	runtime := isolatedClaudeRuntime(t)
-	args := []string{"-claude", claudePath, "-claude-home", runtime.home}
+	args := []string{"-path", claudePath, "-home", runtime.home}
 	if model := os.Getenv("ACP_GO_CLAUDE_MODEL"); model != "" {
 		args = append(args, "-model", model)
 	}

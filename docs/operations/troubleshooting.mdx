@@ -1,0 +1,114 @@
+---
+title: "Troubleshooting"
+description: "Match failure symptoms to their cause and the test that reproduces them"
+---
+
+Each entry links an observable symptom to the adapter behavior that produces it
+and to the test in this repository that reproduces it.
+
+## Symptom lookup
+
+| Symptom | Cause | Reproducing tests |
+| --- | --- | --- |
+| An MCP tool exposed after session establishment is not visible to the model until the first prompt completes its refresh. | The Claude Code CLI fixes its MCP tool registry at process startup; the adapter refreshes it by closing the CLI process and starting a replacement. | `TestClaudeCLIAuthorizedMCPRefresh`, `TestClaudeFirstMCPPromptRefreshesFixedRegistryOnce` |
+| A prompt fails at finish even though the model produced a result, or assistant content streams while the turn is finishing. | At prompt finish the adapter drains trailing transcript-mirror frames within a bounded window before returning the response; failures in that drain fail the turn. | `TestFinishPromptResultAndDrainEdges`, `TestLateMirrorNoopBranches` |
+| The native `claude` CLI raises its AskUserQuestion tool but no question ever reaches the host. | The client did not advertise elicitation capability at initialize, so the adapter suppresses the emission and hands the CLI a bounded failure instead of an `elicitation/create` request. | `TestClientElicitationCapabilityGating`, `TestHandleAskUserQuestion`, `TestClaudeAskUserQuestionElicitationLive` |
+| A forwarded question is answered but the answer is discarded and the turn stops. | The turn was cancelled while the elicitation was pending; the adapter fails the pending elicitation closed rather than feeding a late answer back to the CLI. | `TestElicitationCancelledDuringTurn` |
+| Compiled-binary integration tests skip and report no coverage. | Those tests run only when `ACP_GO_CLAUDE_AGENT_BINARY` points at a built agent binary. | `connectLiveAgentBinary` skip in `integration/helpers_test.go` |
+
+## MCP tools missing until the first prompt
+
+The Claude Code CLI in stream-json mode fixes its MCP tool registry at process
+startup: MCP servers cannot be added or replaced on a live CLI process. The
+adapter therefore refreshes MCP configuration by closing the CLI process
+completely and starting a replacement — the first MCP-bearing prompt pays that
+one-time refresh before the model sees the turn. A session-bound MCP endpoint
+that exposes only a readiness tool during session establishment gains its
+authorized tools through this refresh; until the replacement process starts,
+the model still sees the registry the provisional process built at startup.
+The [MCP guide](/docs/features/mcp) describes the refresh contract in full.
+
+- `TestClaudeCLIAuthorizedMCPRefresh` (`integration/mcp_refresh_test.go`)
+  drives the live CLI: session establishment sees only a readiness tool, the
+  first turn's refresh discovers the authorized tools, an unrelated external
+  MCP server stays registered through the relaunch, and a close/load cycle
+  repeats the same one-time refresh before native continuation.
+- `TestClaudeFirstMCPPromptRefreshesFixedRegistryOnce`
+  (`agent_runtime_resources_test.go`) asserts the process accounting: the first
+  prompt launches exactly one replacement reusing the same MCP config file, the
+  provisional process tree is released before the replacement is admitted, and
+  the refresh does not repeat on the second prompt.
+
+<Note>
+A tool that appears only after the refresh is not a lost declaration. The
+session's private MCP config file is unchanged and is reused by the replacement
+process; the refresh exists purely because the Claude Code CLI cannot extend a
+live registry.
+</Note>
+
+## Trailing transcript updates at prompt finish
+
+The adapter mirrors the native Claude transcript into the session store, and a
+turn result can arrive while trailing transcript-mirror frames are still
+pending. At prompt finish the adapter drains those frames within a bounded
+window before returning the prompt response: drained assistant content is still
+forwarded as session updates, and a session-store append failure during the
+drain fails the turn instead of silently dropping transcript entries.
+
+- `TestFinishPromptResultAndDrainEdges` (`session_prompt_test.go`) exercises
+  the finish path's edge branches: a task-notification result that does not
+  complete the prompt while a workflow is still active, a context-usage fetch
+  failure that still finishes the turn, update-emit failures that fail the
+  turn, an error result surfacing as a turn failure, and a store append failure
+  during the trailing-frame drain.
+- `TestLateMirrorNoopBranches` (`session_late_mirror_test.go`) proves that
+  starting and stopping the late-mirror processor on a session with no mirror
+  configured is a safe no-op.
+
+## AskUserQuestion never reaches the host
+
+The native `claude` CLI raises its AskUserQuestion tool whenever the model wants
+a mid-turn clarification. The adapter forwards that callback as an ACP
+`elicitation/create` request only when the client advertised elicitation support
+during initialize; a client that never opted in receives a bounded failure and
+the CLI continues or stops per its own logic. A missing question is therefore
+not a dropped callback — it is the adapter suppressing an emission the client
+cannot render. Advertise the form (or URL) elicitation capability at initialize
+to open the path. The [elicitation guide](/docs/features/elicitation) describes
+the capability gate in full.
+
+- `TestClientElicitationCapabilityGating` (`session_elicitation_test.go`) fixes
+  the gate: a nil capability blocks both modes, an empty object opens form, and
+  a URL-only capability opens only URL.
+- `TestHandleAskUserQuestion` (`session_elicitation_test.go`) denies the native
+  AskUserQuestion callback when no elicitation-capable connection is present,
+  then accepts, declines, and fails closed across the answered paths once the
+  capability is advertised.
+- `TestClaudeAskUserQuestionElicitationLive` (`integration/elicitation_test.go`)
+  drives the real CLI end to end: one turn advertises form elicitation, forces
+  the AskUserQuestion tool, answers the forwarded `elicitation/create`, and
+  confirms the answered turn completes.
+
+## Answered question is discarded when the turn was cancelled
+
+When a turn is cancelled while an AskUserQuestion elicitation is still pending,
+the adapter fails that elicitation closed: it resolves the pending request as
+cancelled and returns a deny-with-interrupt to the native CLI instead of
+applying an answer to a turn that no longer exists. A late answer to a cancelled
+turn never re-enters the model.
+
+- `TestElicitationCancelledDuringTurn` (`session_elicitation_test.go`) proves
+  the fail-closed contract across all three elicitation entry points: form, URL,
+  and AskUserQuestion each resolve as cancelled or denied when the turn was
+  already cancelled, and AskUserQuestion returns the interrupt.
+
+## Integration tests skip instead of running
+
+The live integration tier gates on `ACP_GO_CLAUDE_RUN_INTEGRATION=1`, and the
+compiled-binary subset within it additionally requires
+`ACP_GO_CLAUDE_AGENT_BINARY` to point at a built agent binary
+(`integration/helpers_test.go` skips those tests when it is unset). If an
+integration run appears to do nothing, check both variables. `make
+test-integration-cover` builds an instrumented binary and sets
+`ACP_GO_CLAUDE_AGENT_BINARY` together with `GOCOVERDIR` so the compiled-binary
+tests run and report coverage.

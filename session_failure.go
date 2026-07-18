@@ -115,16 +115,16 @@ func (s *agentSession) cancelledResponse(messageID *string) acp.PromptResponse {
 }
 
 // turnTimeoutFailure returns the timeout failure. Prompt's settlement fence
-// has already closed and proved the native process tree quiescent before this
-// error is allowed to return.
+// has already completed the selected containment boundary before this error is
+// allowed to return.
 func (s *agentSession) turnTimeoutFailure(timeout string) error {
 	return turnFailureError(failureCauseTimeout, fmt.Sprintf("claude turn exceeded %s", timeout))
 }
 
 // settlePromptTurn runs with cancelMu held by Prompt's deferred turn cleanup.
 // It is the single settlement fence for explicit cancellation, parent-context
-// cancellation, and WithTurnTimeout expiry: no response can return while a
-// native descendant remains live or its quiescence proof failed.
+// cancellation, and WithTurnTimeout expiry: no response can return before the
+// selected containment boundary completes.
 func (s *agentSession) settlePromptTurn(
 	ctx context.Context,
 	turnCtx context.Context,
@@ -152,7 +152,7 @@ func (s *agentSession) settlePromptTurn(
 
 	if timedOut {
 		abortErr := s.cancelNative(ctx)
-		if errors.Is(abortErr, claude.ErrProcessTreeUnproven) {
+		if errors.Is(abortErr, claude.ErrProcessContainmentIncomplete) {
 			return acp.PromptResponse{}, nativeTurnFailure(abortErr)
 		}
 
@@ -161,7 +161,7 @@ func (s *agentSession) settlePromptTurn(
 
 	if turnCtx.Err() != nil {
 		abortErr := s.cancelNative(ctx)
-		if errors.Is(abortErr, claude.ErrProcessTreeUnproven) {
+		if errors.Is(abortErr, claude.ErrProcessContainmentIncomplete) {
 			return acp.PromptResponse{}, nativeTurnFailure(abortErr)
 		}
 

@@ -16,6 +16,7 @@ func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {
 	var processDelta int64
 	var snapshot int
 	var stage RuntimeStartupStage
+	var containment RuntimeContainmentMode
 	hooks := instrumentRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return func() { releases++ }, nil
@@ -29,6 +30,7 @@ func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {
 		ObserveStartupStage: func(_ context.Context, _ RuntimeResourceKind, got RuntimeStartupStage, _ time.Duration, _ error) {
 			stage = got
 		},
+		ObserveContainment: func(_ context.Context, mode RuntimeContainmentMode) { containment = mode },
 	}, observer.New(observer.Config{}))
 
 	release, err := hooks.AcquireNativeRoot(t.Context(), RuntimeResourceSession)
@@ -40,9 +42,11 @@ func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {
 	observeRuntimeProcess(t.Context(), hooks, RuntimeProcessHomeLockSupervisor, 2)
 	observeRuntimeProcessSnapshot(t.Context(), hooks, RuntimeProcessProviderDescendant, 3)
 	observeRuntimeStartupStage(t.Context(), hooks, RuntimeResourceRuntime, RuntimeStartupReadiness, time.Now(), nil)
+	hooks.ObserveContainment(t.Context(), RuntimeContainmentBestEffort)
 	require.Equal(t, int64(2), processDelta)
 	require.Equal(t, 3, snapshot)
 	require.Equal(t, RuntimeStartupReadiness, stage)
+	require.Equal(t, RuntimeContainmentBestEffort, containment)
 
 	wantErr := errors.New("full")
 	rejected := instrumentRuntimeResourceHooks(RuntimeResourceHooks{
@@ -52,6 +56,19 @@ func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {
 	}, observer.New(observer.Config{}))
 	_, err = rejected.ReserveScratchRoot(t.Context(), RuntimeResourcePrompt)
 	require.ErrorIs(t, err, wantErr)
+}
+
+func TestRuntimeProcessSnapshotTrackerSuppressesBestEffortInventories(t *testing.T) {
+	var snapshots []int
+	tracker := newRuntimeProcessSnapshotTracker(RuntimeResourceHooks{
+		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
+			snapshots = append(snapshots, count)
+		},
+	}, false)
+	source := tracker.newSource()
+	source.started(t.Context(), func() (int, bool) { return 7, true })
+	source.quiesced(t.Context())
+	require.Empty(t, snapshots, "best-effort containment must not publish descendant totals, including zero")
 }
 
 func TestRuntimeProcessSnapshotTrackerAggregatesOnlyCompleteInventories(t *testing.T) {

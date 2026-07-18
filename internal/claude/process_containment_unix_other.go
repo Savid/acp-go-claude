@@ -1,4 +1,4 @@
-//go:build unix && !linux
+//go:build unix && !linux && !darwin
 
 package claude
 
@@ -11,10 +11,18 @@ import (
 
 type processContainment struct{}
 
-func prepareProcessTreeCommand(*exec.Cmd) (*processTreeCommand, error) {
+func prepareProcessTreeCommand(_ *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
+	if options.DarwinBestEffort {
+		return nil, fmt.Errorf(
+			"%w: Darwin best-effort containment is invalid on %s",
+			ErrProcessContainmentIncomplete,
+			runtime.GOOS,
+		)
+	}
+
 	return nil, fmt.Errorf(
 		"%w: %s cannot prove Claude descendants that escape a process group",
-		ErrProcessTreeUnproven,
+		ErrProcessContainmentIncomplete,
 		runtime.GOOS,
 	)
 }
@@ -24,11 +32,13 @@ func startContainedProcess(launch *processTreeCommand) (*processContainment, err
 		launch.close()
 	}
 
-	return nil, ErrProcessTreeUnproven
+	return nil, ErrProcessContainmentIncomplete
 }
 
-func (*processContainment) quiesce(time.Duration) error { return ErrProcessTreeUnproven }
+func (*processContainment) quiesce(time.Duration) error { return ErrProcessContainmentIncomplete }
 func (*processContainment) close() error                { return nil }
 func (*processContainment) processSnapshot() (int, bool) {
 	return 0, false
 }
+func (*processContainment) wait(command *exec.Cmd) error { return command.Wait() }
+func (*processContainment) ownsShutdown() bool           { return false }

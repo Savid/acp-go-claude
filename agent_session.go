@@ -45,18 +45,14 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		return acp.NewSessionResponse{}, openErr
 	}
 
-	session, err := a.startSession(ctx, acp.SessionId(sessionID), sessionStart{
+	session, err := a.startAndStoreSession(ctx, acp.SessionId(sessionID), sessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: additionalDirectories,
 		McpServers:            params.McpServers,
 		MetaOptions:           metaOptions,
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
-	})
+	}, nil)
 	if err != nil {
-		return acp.NewSessionResponse{}, err
-	}
-
-	if err := a.storeStartedSession(ctx, session); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
 
@@ -114,16 +110,12 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 	start.StoreEntries = storeEntries
 
-	session, err := a.startSession(ctx, params.SessionId, start)
+	session, err := a.startAndStoreSession(ctx, params.SessionId, start, nil)
 	if err != nil {
 		if missingClaudeSessionError(err) {
 			return acp.ResumeSessionResponse{}, unknownSessionError()
 		}
 
-		return acp.ResumeSessionResponse{}, err
-	}
-
-	if err := a.storeStartedSession(ctx, session); err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
 
@@ -175,17 +167,13 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	startedSession := false
 
 	if session == nil {
-		session, err = a.startSession(ctx, params.SessionId, start)
+		session, err = a.startAndStoreSession(ctx, params.SessionId, start, nil)
 		if err != nil {
 			if missingClaudeSessionError(err) {
 				return acp.LoadSessionResponse{}, unknownSessionError()
 			}
 
 			return acp.LoadSessionResponse{}, err
-		}
-
-		if storeErr := a.storeStartedSession(ctx, session); storeErr != nil {
-			return acp.LoadSessionResponse{}, storeErr
 		}
 
 		startedSession = true
@@ -317,6 +305,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 
 	_ = session.Cancel(ctx)
 	closeErr := session.Close(ctx)
+	a.recordContainmentError(closeErr)
 
 	a.mu.Lock()
 	_, existed := a.sessions[params.SessionId]
@@ -367,6 +356,8 @@ func (a *Agent) UnstableDeleteSession(
 	}
 
 	if cleanupErr != nil {
+		a.recordContainmentError(cleanupErr)
+
 		return acp.UnstableDeleteSessionResponse{}, cleanupErr
 	}
 
@@ -440,6 +431,7 @@ func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, sess
 
 	if session != nil {
 		if err := session.Close(ctx); err != nil {
+			a.recordContainmentError(err)
 			a.log.DebugContext(ctx, "close removed Claude session failed", slog.String(jsonFieldError, err.Error()))
 		}
 	}
@@ -463,6 +455,7 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) 
 		a.mu.Unlock()
 
 		if err := session.Close(ctx); err != nil {
+			a.recordContainmentError(err)
 			a.log.DebugContext(ctx, "close rejected Claude session failed", slog.String(jsonFieldError, err.Error()))
 		}
 
@@ -474,6 +467,7 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) 
 		a.mu.Unlock()
 
 		if err := session.Close(ctx); err != nil {
+			a.recordContainmentError(err)
 			a.log.DebugContext(ctx, "close backpressured Claude session failed", slog.String(jsonFieldError, err.Error()))
 		}
 
@@ -485,6 +479,7 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) 
 
 	if previous != nil {
 		if err := previous.Close(ctx); err != nil {
+			a.recordContainmentError(err)
 			a.log.WarnContext(ctx, "close replaced Claude session failed", slog.String(jsonFieldError, err.Error()))
 		}
 
@@ -494,6 +489,33 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) 
 	a.observe.AddActiveSession(ctx, 1)
 
 	return nil
+}
+
+func (a *Agent) startAndStoreSession(
+	ctx context.Context,
+	id acp.SessionId,
+	start sessionStart,
+	afterStart func(*agentSession),
+) (*agentSession, error) {
+	if err := a.beginSessionConstruction(); err != nil {
+		return nil, err
+	}
+	defer a.endSessionConstruction()
+
+	session, err := a.startSession(ctx, id, start)
+	if err != nil {
+		return nil, err
+	}
+
+	if afterStart != nil {
+		afterStart(session)
+	}
+
+	if err := a.storeStartedSession(ctx, session); err != nil {
+		return nil, err
+	}
+
+	return session, nil
 }
 
 func (a *Agent) connection() agentClient {
@@ -608,6 +630,8 @@ func missingClaudeSessionError(err error) bool {
 }
 
 func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessionStart) (_ *agentSession, err error) { //nolint:gocyclo // Session startup owns the complete resource unwind graph.
+	defer func() { a.recordContainmentError(err) }()
+
 	if start.ResumeID != "" && len(start.StoreEntries) == 0 && !start.ActiveSessionResume {
 		return nil, unknownSessionError()
 	}
@@ -743,7 +767,17 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		},
 		ObserveProcessInventory: processSnapshotSource.started,
 		ObserveProcessQuiesced:  processSnapshotSource.quiesced,
-		SessionMirror:           true,
+		DarwinBestEffort:        a.containmentMode == RuntimeContainmentBestEffort,
+		AcquireVersionDiscovery: func(discoveryCtx context.Context) (func(), error) {
+			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
+		},
+		PrepareDarwinGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
+			return a.prepareDarwinGeneration(generationCtx, RuntimeResourceSession)
+		},
+		PrepareDarwinVersionGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
+			return a.prepareDarwinGeneration(generationCtx, RuntimeResourceDiscovery)
+		},
+		SessionMirror: true,
 		Hooks: claude.Hooks{
 			claude.HookEventPostToolUse: {
 				{

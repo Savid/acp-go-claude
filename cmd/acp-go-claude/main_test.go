@@ -17,10 +17,13 @@ import (
 func TestRunPassesContractFlags(t *testing.T) {
 	originalServe := serve
 	originalAgentVersion := agentVersion
+	originalGOOS := runtimeGOOS
 	t.Cleanup(func() {
 		serve = originalServe
 		agentVersion = originalAgentVersion
+		runtimeGOOS = originalGOOS
 	})
+	runtimeGOOS = "darwin"
 
 	var got claudeacp.Options
 	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...claudeacp.Option) error {
@@ -32,17 +35,19 @@ func TestRunPassesContractFlags(t *testing.T) {
 	}
 	agentVersion = func() string { return "v1.2.3" }
 
+	var stderr bytes.Buffer
 	code := run(context.Background(), []string{
 		"-path", "/bin/claude",
 		"-home", "/tmp/claude",
 		"-scratch-dir", "/tmp/claude-scratch",
+		"-darwin-best-effort-containment",
 		"-model", "sonnet",
 		"-claude-bare",
 		"-claude-permission-mode", "plan",
 		"-claude-system-prompt", "system",
 		"-claude-hide-auth",
 		"-debug",
-	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
+	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 
 	require.Equal(t, 0, code)
 	require.Equal(t, "v1.2.3", got.AgentVersion)
@@ -54,7 +59,9 @@ func TestRunPassesContractFlags(t *testing.T) {
 	require.Equal(t, "plan", got.DefaultPermissionMode)
 	require.Equal(t, "system", got.DefaultSystemPrompt)
 	require.True(t, got.HideAuth)
+	require.True(t, got.DarwinBestEffortContainment)
 	require.NotNil(t, got.Logger)
+	require.Contains(t, stderr.String(), "containment=best_effort")
 }
 
 func TestRunPassesSeedAndSettingsFlags(t *testing.T) {

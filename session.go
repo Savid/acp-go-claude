@@ -191,6 +191,8 @@ type agentSession struct {
 	handledHookOrder []string
 	closeTurnWait    time.Duration
 	turnAcquiredHook func(int)
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 type promptLoopState struct {

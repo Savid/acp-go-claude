@@ -93,7 +93,7 @@ The `cause` vocabulary:
 | `process_exit` | The Claude process died; `message` carries the real exit status and a stderr tail. |
 | `transport` | Stream close, malformed frame, or client-lifecycle break. |
 | `provider` | Claude reported an error in its result frame (including auth failures). |
-| `timeout` | A `WithTurnTimeout` deadline expired; the complete native process tree was closed and proved quiescent before settlement. |
+| `timeout` | A `WithTurnTimeout` deadline expired; the selected native containment boundary completed before settlement. |
 
 Provider failures additionally include the result `subtype`, and may include an
 `errors` array and an `errorKind`.
@@ -104,6 +104,9 @@ This adapter advertises no ACP auth methods, so an authentication failure is a
 variant. A user cancel that races a timeout resolves as a successful `cancelled`
 response, not a failure. `session/cancel`, timeout expiry, and caller-context
 cancellation do not settle on a native interrupt acknowledgement alone: every
-tool descendant must be proved gone. An unproven tree is a `transport` failure,
-keeps its runtime admission quarantined, and cannot be lazily relaunched.
+authoritatively contained tool descendant must be proved gone. Darwin best
+effort instead requires direct-child reaping and absence of the captured
+original group; a `setsid` descendant may survive. An incomplete selected
+boundary is a `transport` failure, keeps its runtime admission quarantined, and
+cannot be lazily relaunched.
 </Note>

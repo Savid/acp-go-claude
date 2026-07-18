@@ -131,7 +131,11 @@ func turnSupervisorBootstrap() {
 	turnSupervisorExit(0)
 }
 
-func prepareProcessTreeCommand(native *exec.Cmd) (*processTreeCommand, error) {
+func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
+	if options.DarwinBestEffort {
+		return nil, fmt.Errorf("%w: Darwin best-effort containment is invalid on linux", ErrProcessContainmentIncomplete)
+	}
+
 	config := turnSupervisorConfig{
 		Path: native.Path,
 		Args: append([]string(nil), native.Args...),
@@ -382,13 +386,13 @@ func containLinuxSupervisorDescendants(supervisorPID int, nativePID int) error {
 	for {
 		descendants, err := turnSupervisorDescendants(supervisorPID)
 		if err != nil {
-			return fmt.Errorf("%w: enumerate supervised Claude descendants: %v", ErrProcessTreeUnproven, err)
+			return fmt.Errorf("%w: enumerate supervised Claude descendants: %v", ErrProcessContainmentIncomplete, err)
 		}
 
 		for _, descendant := range descendants {
 			if descendant.state != 'Z' {
 				if err := turnSupervisorSignalPID(descendant, syscall.SIGKILL); err != nil {
-					return fmt.Errorf("%w: kill supervised Claude descendant %d: %v", ErrProcessTreeUnproven, descendant.pid, err)
+					return fmt.Errorf("%w: kill supervised Claude descendant %d: %v", ErrProcessContainmentIncomplete, descendant.pid, err)
 				}
 			}
 		}
@@ -403,7 +407,7 @@ func containLinuxSupervisorDescendants(supervisorPID int, nativePID int) error {
 		case errors.Is(waitErr, syscall.EINTR):
 			continue
 		case waitErr != nil:
-			return fmt.Errorf("%w: reap supervised Claude descendants: %v", ErrProcessTreeUnproven, waitErr)
+			return fmt.Errorf("%w: reap supervised Claude descendants: %v", ErrProcessContainmentIncomplete, waitErr)
 		case reapedPID > 0:
 			continue
 		}

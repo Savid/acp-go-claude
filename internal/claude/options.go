@@ -46,9 +46,27 @@ type Options struct {
 	// that returns its current exact absolute process count when the platform
 	// backend can prove one.
 	ObserveProcessInventory func(context.Context, func() (int, bool))
-	// ObserveProcessQuiesced reports that containment proved this transport's
-	// complete process tree empty.
+	// ObserveProcessQuiesced reports authoritative whole-tree completion. It is
+	// suppressed when the selected backend cannot make that claim.
 	ObserveProcessQuiesced func(context.Context)
+	// DarwinBestEffort selects the explicitly limited process-group backend.
+	DarwinBestEffort bool
+	// Generation identifies one fresh wrapper-owned native launch root.
+	Generation *DarwinGeneration
+	// PrepareDarwinGeneration allocates one fresh generation after discovery
+	// succeeds and immediately before the native launch is prepared.
+	PrepareDarwinGeneration func(context.Context) (*DarwinGeneration, error)
+	// AcquireVersionDiscovery admits the separate native root used to run
+	// claude --version. Its release remains held if that boundary is incomplete.
+	AcquireVersionDiscovery func(context.Context) (func(), error)
+	// PrepareDarwinVersionGeneration allocates the fresh Darwin generation for
+	// the separately admitted claude --version root.
+	PrepareDarwinVersionGeneration func(context.Context) (*DarwinGeneration, error)
+	// AcquireUsageDiscovery admits the native root used by claude /usage.
+	AcquireUsageDiscovery func(context.Context) (func(), error)
+	// PrepareUsageGeneration reserves the fresh scratch generation used by
+	// claude /usage on every supported containment backend.
+	PrepareUsageGeneration func(context.Context) (*DarwinGeneration, error)
 
 	PermissionHandler  PermissionHandler
 	ElicitationHandler ElicitationHandler

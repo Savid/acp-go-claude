@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -167,19 +168,90 @@ func TestQueryRateLimits(t *testing.T) {
 		"#!/bin/sh\ncat <<'EOF'\n"+string(envelope)+"\nEOF\n",
 	)
 
-	limits, err := QueryRateLimits(context.Background(), Options{CLIPath: good})
+	options := platformTestTransportOptions(t, Options{CLIPath: good, Cwd: dir})
+	prepareGeneration := options.PrepareUsageGeneration
+	acquireDiscovery := options.AcquireUsageDiscovery
+	prepared := 0
+	admitted := 0
+	released := 0
+	inventories := 0
+	quiesced := 0
+	options.PrepareUsageGeneration = func(ctx context.Context) (*DarwinGeneration, error) {
+		prepared++
+
+		return prepareGeneration(ctx)
+	}
+	options.AcquireUsageDiscovery = func(ctx context.Context) (func(), error) {
+		admitted++
+		release, acquireErr := acquireDiscovery(ctx)
+
+		return func() {
+			released++
+			release()
+		}, acquireErr
+	}
+	options.ObserveProcessInventory = func(context.Context, func() (int, bool)) { inventories++ }
+	options.ObserveProcessQuiesced = func(context.Context) { quiesced++ }
+	limits, err := QueryRateLimits(context.Background(), options)
 	require.NoError(t, err)
 	require.Len(t, limits.Windows, 3)
 	require.Equal(t, "session", limits.Windows[0].ID)
+	require.Equal(t, 1, prepared)
+	require.Equal(t, 1, admitted)
+	require.Equal(t, 1, released)
+	require.Positive(t, inventories)
+	require.Equal(t, 1, quiesced)
 
 	failing := writeShellScript(t, filepath.Join(dir, "fail"), "#!/bin/sh\nexit 1\n")
 
-	_, err = QueryRateLimits(context.Background(), Options{CLIPath: failing})
+	options.CLIPath = failing
+	_, err = QueryRateLimits(context.Background(), options)
 	require.ErrorContains(t, err, "run claude /usage")
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err = QueryRateLimits(cancelled, Options{CLIPath: good})
+	options.CLIPath = good
+	_, err = QueryRateLimits(cancelled, options)
 	require.Error(t, err)
+}
+
+func TestQueryRateLimitsFailsClosedWithoutContainedResources(t *testing.T) {
+	_, err := QueryRateLimits(context.Background(), Options{CLIPath: "must-not-run"})
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+
+	options := Options{
+		CLIPath: "must-not-run",
+		PrepareUsageGeneration: func(context.Context) (*DarwinGeneration, error) {
+			return &DarwinGeneration{}, nil
+		},
+	}
+	_, err = QueryRateLimits(context.Background(), options)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.True(t, errors.Is(err, ErrProcessContainmentIncomplete))
+
+	wantErr := errors.New("usage admission failed")
+	options.PrepareUsageGeneration = func(context.Context) (*DarwinGeneration, error) {
+		return nil, wantErr
+	}
+	_, err = QueryRateLimits(context.Background(), options)
+	require.ErrorIs(t, err, wantErr)
+
+	finished := 0
+	options.PrepareUsageGeneration = func(context.Context) (*DarwinGeneration, error) {
+		return &DarwinGeneration{Release: func(bool) error {
+			finished++
+
+			return nil
+		}}, nil
+	}
+	options.AcquireUsageDiscovery = func(context.Context) (func(), error) { return nil, wantErr }
+	_, err = QueryRateLimits(context.Background(), options)
+	require.ErrorIs(t, err, wantErr)
+	require.Equal(t, 1, finished)
+
+	options.AcquireUsageDiscovery = func(context.Context) (func(), error) { return nil, nil } //nolint:nilnil // Invalid callback result under test.
+	_, err = QueryRateLimits(context.Background(), options)
+	require.ErrorContains(t, err, "nil release")
+	require.Equal(t, 2, finished)
 }

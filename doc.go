@@ -25,4 +25,9 @@
 //
 // Hosts that need deterministic Claude sessions can use [WithClaudeBareMode] or
 // per-session [ClaudeOptions] to launch Claude with --bare.
+//
+// Linux and Windows use authoritative native-process containment. Darwin
+// rejects native launch unless [WithDarwinBestEffortContainment] is supplied;
+// that explicit mode reaps the direct child and empties its captured original
+// process group but cannot contain descendants that escape with setsid.
 package claudeacp

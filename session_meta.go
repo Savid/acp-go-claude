@@ -252,6 +252,10 @@ func validateClaudeOptions(options ClaudeOptions) (ClaudeOptions, error) {
 
 func blockedClaudeEnvKey(key string) bool {
 	upper := strings.ToUpper(key)
+	if strings.HasPrefix(upper, privateAdapterEnvPrefix) {
+		return true
+	}
+
 	switch upper {
 	case "PATH", "NODE_OPTIONS", "BASH_ENV", "ENV", "CLAUDECODE":
 		return true

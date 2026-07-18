@@ -886,7 +886,7 @@ func (s *agentSession) interruptAfterEmitError(ctx context.Context, err error) e
 	defer cancel()
 
 	cancelErr := s.Cancel(interruptCtx)
-	if errors.Is(cancelErr, claude.ErrProcessTreeUnproven) {
+	if errors.Is(cancelErr, claude.ErrProcessContainmentIncomplete) {
 		return errors.Join(err, cancelErr)
 	}
 

@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -37,10 +38,49 @@ func QueryRateLimits(ctx context.Context, options Options) (RateLimits, error) {
 		return RateLimits{}, err
 	}
 
-	command := execCommandContext(ctx, path, "/usage", "--print", "--output-format", "json")
-	command.Env = BuildEnv(options)
+	if options.PrepareUsageGeneration == nil {
+		return RateLimits{}, fmt.Errorf("%w: claude /usage scratch generation is unavailable", ErrProcessContainmentIncomplete)
+	}
 
-	output, err := command.Output()
+	generation, err := options.PrepareUsageGeneration(ctx)
+	if err != nil {
+		return RateLimits{}, err
+	}
+
+	if options.AcquireUsageDiscovery == nil {
+		return RateLimits{}, errors.Join(
+			fmt.Errorf("%w: claude /usage native admission is unavailable", ErrProcessContainmentIncomplete),
+			generation.finish(true),
+		)
+	}
+
+	release, err := options.AcquireUsageDiscovery(ctx)
+	if err != nil {
+		return RateLimits{}, errors.Join(err, generation.finish(true))
+	}
+
+	if release == nil {
+		return RateLimits{}, errors.Join(
+			errors.New("admit claude /usage discovery: nil release"),
+			generation.finish(true),
+		)
+	}
+
+	output, err := containedClaudeOutput(
+		ctx,
+		path,
+		[]string{"/usage", "--print", cliArgOutputFormat, "json"},
+		options,
+		generation,
+		"claude /usage",
+	)
+	finishErr := generation.finish(!errors.Is(err, ErrProcessContainmentIncomplete))
+
+	err = errors.Join(err, finishErr)
+	if !errors.Is(err, ErrProcessContainmentIncomplete) {
+		release()
+	}
+
 	if err != nil {
 		return RateLimits{}, fmt.Errorf("run claude /usage: %w", err)
 	}

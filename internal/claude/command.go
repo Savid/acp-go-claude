@@ -3,7 +3,9 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -13,6 +15,7 @@ import (
 )
 
 const envClaudeCodeNested = "CLAUDECODE"
+const cliArgOutputFormat = "--output-format"
 
 // minClaudeVersion is the oldest Claude CLI the adapter supports. The adapter's
 // stream-json control protocol (bidirectional control requests, partial-message
@@ -21,12 +24,10 @@ const minClaudeVersion = "2.0.0"
 
 var commandEnviron = os.Environ
 
-var execCommandContext = exec.CommandContext
-
 // BuildArgs returns the Claude CLI arguments for ACP-backed interactive sessions.
 func BuildArgs(options Options) []string {
 	args := []string{
-		"--output-format", streamJSON,
+		cliArgOutputFormat, streamJSON,
 		"--input-format", streamJSON,
 		"--include-partial-messages",
 		"--verbose",
@@ -113,7 +114,7 @@ func BuildEnv(options Options) []string {
 	keys := make([]string, 0, len(os.Environ())+len(options.Env)+3)
 
 	set := func(key string, value string) {
-		if key == envClaudeCodeNested {
+		if key == envClaudeCodeNested || strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) {
 			return
 		}
 
@@ -187,8 +188,27 @@ func Discover(ctx context.Context, cliPath string, _ map[string]string) (string,
 // validateClaudeVersion probes the Claude CLI version and fails fast when it is
 // older than minClaudeVersion. The adapter never silently downgrades to an
 // unsupported CLI.
-func validateClaudeVersion(ctx context.Context, path string) error {
-	output, err := execCommandContext(ctx, path, "--version").Output()
+func validateClaudeVersion(ctx context.Context, path string, options Options) error {
+	release := func() {}
+
+	if options.AcquireVersionDiscovery != nil {
+		acquired, err := options.AcquireVersionDiscovery(ctx)
+		if err != nil {
+			return fmt.Errorf("admit claude CLI version discovery: %w", err)
+		}
+
+		if acquired == nil {
+			return errors.New("admit claude CLI version discovery: nil release")
+		}
+
+		release = acquired
+	}
+
+	output, err := containedClaudeVersionOutput(ctx, path, options)
+	if !errors.Is(err, ErrProcessContainmentIncomplete) {
+		release()
+	}
+
 	if err != nil {
 		return fmt.Errorf("check claude CLI version: %w", err)
 	}
@@ -203,6 +223,149 @@ func validateClaudeVersion(ctx context.Context, path string) error {
 	}
 
 	return nil
+}
+
+func containedClaudeVersionOutput(ctx context.Context, path string, options Options) (output []byte, returnErr error) {
+	var (
+		generation *DarwinGeneration
+		err        error
+	)
+
+	if options.DarwinBestEffort {
+		if options.PrepareDarwinVersionGeneration == nil {
+			return nil, fmt.Errorf("%w: Darwin version discovery generation is unavailable", ErrProcessContainmentIncomplete)
+		}
+
+		generation, err = options.PrepareDarwinVersionGeneration(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return containedClaudeOutput(ctx, path, []string{"--version"}, options, generation, "claude version")
+}
+
+func containedClaudeOutput(
+	ctx context.Context,
+	path string,
+	args []string,
+	options Options,
+	generation *DarwinGeneration,
+	operation string,
+) (output []byte, returnErr error) {
+	var err error
+
+	generationOwnedByTree := false
+	defer func() {
+		if generation != nil && !generationOwnedByTree {
+			complete := !errors.Is(returnErr, ErrProcessContainmentIncomplete)
+			returnErr = errors.Join(returnErr, generation.finish(complete))
+		}
+	}()
+
+	command := processCommandContext(ctx, path, args...)
+	configureProcessCommand(command)
+	command.Dir = options.Cwd
+
+	if command.Dir == "" {
+		command.Dir, err = processGetwd()
+		if err != nil {
+			return nil, fmt.Errorf("get working directory for %s: %w", operation, err)
+		}
+	}
+
+	envOptions := options
+	envOptions.Cwd = command.Dir
+	command.Env = BuildEnv(envOptions)
+
+	launch, err := processPrepareContained(command, processLaunchOptions{
+		DarwinBestEffort: options.DarwinBestEffort,
+		Generation:       generation,
+	})
+	if err != nil {
+		if errors.Is(err, ErrProcessContainmentIncomplete) && options.ObserveProcessInventory != nil {
+			options.ObserveProcessInventory(ctx, unavailableProcessInventory)
+		}
+
+		return nil, fmt.Errorf("prepare %s containment: %w", operation, err)
+	}
+
+	stdout, err := launch.cmd.StdoutPipe()
+	if err != nil {
+		launch.close()
+
+		return nil, fmt.Errorf("capture %s output: %w", operation, err)
+	}
+
+	tree, err := processStartContained(launch)
+	if err != nil {
+		_ = stdout.Close()
+
+		if errors.Is(err, ErrProcessContainmentIncomplete) && options.ObserveProcessInventory != nil {
+			options.ObserveProcessInventory(ctx, unavailableProcessInventory)
+		}
+
+		return nil, fmt.Errorf("start %s: %w", operation, err)
+	}
+
+	generationOwnedByTree = true
+
+	if options.ObserveProcessInventory != nil {
+		options.ObserveProcessInventory(ctx, tree.processSnapshot)
+	}
+
+	type readResult struct {
+		data []byte
+		err  error
+	}
+
+	readDone := make(chan readResult, 1)
+
+	go func() {
+		data, readErr := io.ReadAll(stdout)
+		readDone <- readResult{data: data, err: readErr}
+	}()
+
+	var (
+		contextErr error
+		read       readResult
+	)
+
+	select {
+	case read = <-readDone:
+	case <-ctx.Done():
+		contextErr = ctx.Err()
+		containErr := tree.quiesce(processShutdownWaitDelay)
+		waitErr := tree.wait(launch.cmd)
+		read = <-readDone
+		closeErr := processContainmentClose(tree)
+
+		observeAuxiliaryQuiescence(options, containErr)
+
+		return read.data, errors.Join(contextErr, read.err, waitErr, containErr, closeErr)
+	}
+
+	waitErr := tree.wait(launch.cmd)
+	containErr := tree.quiesce(processShutdownWaitDelay)
+	closeErr := processContainmentClose(tree)
+
+	observeAuxiliaryQuiescence(options, containErr)
+
+	return read.data, errors.Join(read.err, waitErr, containErr, closeErr)
+}
+
+func observeAuxiliaryQuiescence(options Options, containmentErr error) {
+	if containmentErr != nil {
+		if options.ObserveProcessInventory != nil {
+			options.ObserveProcessInventory(context.Background(), unavailableProcessInventory)
+		}
+
+		return
+	}
+
+	if options.ObserveProcessQuiesced != nil {
+		options.ObserveProcessQuiesced(context.Background())
+	}
 }
 
 var claudeVersionRE = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)

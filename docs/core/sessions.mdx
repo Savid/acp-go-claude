@@ -57,18 +57,20 @@ and [ACP methods](/docs/reference/acp-methods) for the failure contract.
 
 Cancellation is a contained native-process cutover, not only a control-protocol
 interrupt. The adapter acknowledges the native interrupt, closes the session's
-Claude process tree, and proves all tool descendants quiescent before either
+Claude process, and completes the selected containment boundary before either
 `session/cancel` or the cancelled prompt may settle. `WithTurnTimeout` expiry
-and cancellation of the prompt's caller context use the same proof boundary.
+and cancellation of the prompt's caller context use the same boundary.
 The next prompt lazily launches Claude with `--resume <session-id>`, so the ACP
 session remains addressable without reusing the aborted process.
 
 Linux uses an embedded subreaper supervisor and a dedicated proof descriptor;
 the proof covers descendants that escape Claude's process group or session.
-Windows uses a suspended-start, kill-on-close Job Object. Unsupported kernels
-reject launch rather than treating process-group emptiness as whole-tree proof.
+Windows uses a suspended-start, kill-on-close Job Object. Darwin rejects launch
+by default; its explicit best-effort mode reaps the direct child and empties the
+captured original process group without claiming escaped descendants ended.
+Unsupported kernels reject launch.
 
-If process-tree quiescence cannot be proved, the prompt never reports a
-successful cancellation. It fails with cause `transport`, lazy relaunch is
-disabled, and the native-root admission remains quarantined for operator
-recovery.
+If the selected containment boundary does not complete, the prompt never
+reports a successful cancellation. It fails with cause `transport`, lazy
+relaunch is disabled, and the native-root admission remains quarantined for
+operator recovery.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"sync"
 	"syscall"
 	"time"
@@ -52,7 +53,7 @@ func startContainedProcess(launch *processTreeCommand) (*processContainment, err
 		launch.close()
 
 		if proofErr != nil {
-			proofErr = fmt.Errorf("%w: %v", ErrProcessTreeUnproven, proofErr)
+			proofErr = fmt.Errorf("%w: %v", ErrProcessContainmentIncomplete, proofErr)
 		}
 
 		return nil, errors.Join(err, proofErr, waitErr)
@@ -99,7 +100,7 @@ func (c *processContainment) quiesce(timeout time.Duration) error {
 		c.mu.Unlock()
 
 		if proofErr := awaitProcessTreeProof(proof, timeout); proofErr != nil {
-			c.proofErr = fmt.Errorf("%w: %v", ErrProcessTreeUnproven, proofErr)
+			c.proofErr = fmt.Errorf("%w: %v", ErrProcessContainmentIncomplete, proofErr)
 
 			return
 		}
@@ -190,3 +191,7 @@ func (c *processContainment) close() error {
 }
 
 func (*processContainment) processSnapshot() (int, bool) { return 0, false }
+
+func (*processContainment) wait(command *exec.Cmd) error { return command.Wait() }
+
+func (*processContainment) ownsShutdown() bool { return false }

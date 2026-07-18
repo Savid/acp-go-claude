@@ -16,6 +16,7 @@ acp-go-claude -path /usr/local/bin/claude -home /tmp/claude-home -model sonnet -
 | `-path` | Claude CLI executable (default: search `PATH`). |
 | `-home` | Claude config directory (`CLAUDE_CONFIG_DIR`) for launched sessions. |
 | `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
+| `-darwin-best-effort-containment` | On Darwin only, explicitly accept process-group containment and its escaped-descendant and numeric-PGID-reuse risks. Darwin fails closed without it; other platforms reject it. |
 | `-model` | Default Claude model. |
 | `-seed-file` | Write a host file into the config dir as `<relpath>=<hostpath>`; repeatable. Requires `-home`. |
 | `-claude-settings-file` | Settings-overlay relpath under the config dir passed as `--settings`. Requires `-home`. |
@@ -32,3 +33,20 @@ OpenTelemetry providers, and the session store are embedded-Go only — configur
 them with the [Go API](/docs/reference/go-api) options such as `WithTurnTimeout`
 and `WithSessionStore`.
 </Note>
+
+## Darwin containment operations
+
+These commands inspect and clean retained Darwin best-effort generations:
+
+```sh
+acp-go-claude containment diagnose -scratch-dir <parent>
+acp-go-claude containment cleanup -scratch-dir <parent> -runtime-id <id> -force
+```
+
+`diagnose` is read-only. `cleanup` requires an exact lowercase 128-bit runtime
+id and revalidates same-user process identity plus both inherited markers before
+signalling individual candidates. Both write one JSON object to stdout. Their
+correlation is not ownership or proof of absence: descendants can escape the
+original process group with `setsid` and can scrub inherited markers. A PID can
+also be reused between revalidation and signal, so cleanup can affect unrelated
+same-user work. Its fixed five-second deadline starts before enumeration.

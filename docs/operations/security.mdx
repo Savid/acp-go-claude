@@ -35,18 +35,51 @@ contain the tree rather than leaving it detached.
 
 On Windows, Claude is created suspended, assigned to a private kill-on-close
 Job Object, and only then resumed. Job accounting must report zero active
-processes before shutdown succeeds. Darwin, FreeBSD, OpenBSD, and other kernels
-without an equivalent unescapable boundary reject native session launch. A
-process group alone is never accepted as proof because a descendant can leave
-it.
+processes before shutdown succeeds. FreeBSD, OpenBSD, and other unsupported
+kernels reject native session launch.
 
-Turn cancellation is also process-tree contained. A native interrupt response
-is advisory; the adapter then closes the per-session tree and does not settle
-the cancel, timeout, or caller-context cancellation until every descendant is
-proved gone. Readiness and supervisor exit are not proof: Linux requires the
-dedicated proof descriptor, and an unexpected supervisor death fails closed.
+Darwin also rejects native launch by default. An operator can explicitly accept
+its weaker boundary with `-darwin-best-effort-containment` or
+`WithDarwinBestEffortContainment`. Each launch then gets a fresh mode-`0700`
+generation under the selected scratch parent, a random runtime identity, and a
+new process group. Shutdown reaps the direct child, sends bounded group
+`SIGTERM` then `SIGKILL`, and polls the captured original group until absent.
+The fixed cleanup budget is five seconds, with escalation after 500 ms.
+
+That success means only that the direct child was reaped and its original group
+was absent. A descendant can call `setsid` and survive outside the group;
+Darwin's numeric PGID reuse can make a later negative-PGID signal affect an
+unrelated group. Marker correlation is not ownership, inherited markers can be
+scrubbed, and managed native-root permits do not bound provider work that
+escaped. Best-effort mode therefore emits no provider-descendant snapshots,
+including zero, and never claims whole-tree quiescence.
+
+For crash investigation, `acp-go-claude containment diagnose -scratch-dir
+<parent>` reads the retained identity registry. Cleanup requires an exact
+operator-selected runtime and force acknowledgement:
+
+```sh
+acp-go-claude containment cleanup -scratch-dir <parent> -runtime-id <id> -force
+```
+
+Cleanup revalidates same-user process identity and both inherited markers,
+signals individual correlated processes rather than a recorded PGID, and
+retains ambiguous evidence. Neither command proves that marker-scrubbing
+escapees are absent. Darwin has no identity-bound process handle here: a PID
+can be reused between revalidation and `kill(pid, signal)`, so even individual
+signalling can affect unrelated same-user work. The command's fixed five-second
+deadline starts before registry and process enumeration.
+
+Turn cancellation is also contained. A native interrupt response is advisory;
+the adapter then completes the selected per-session boundary before settling a
+cancel, timeout, or caller-context cancellation. Authoritative Linux and
+Windows containment covers every descendant. Darwin best effort requires only
+direct-child reaping and absence of the original process group, so a `setsid`
+escape may remain. Readiness and supervisor exit are not authoritative proof:
+Linux requires the dedicated proof descriptor, and an unexpected supervisor
+death fails closed.
 The next prompt starts a fresh Claude process with
-`--resume <session-id>`. Failed quiescence proof disables that relaunch and
+`--resume <session-id>`. Incomplete containment disables that relaunch and
 retains the runtime admission instead of making an unsafe capacity claim.
 
 ## Input validation

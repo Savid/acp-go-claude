@@ -79,6 +79,12 @@ type Agent struct {
 	positionEncoding   acp.PositionEncodingKind
 	permissionCache    map[acp.SessionId]map[string]string
 	activeLimitErr     error
+	configurationErr   error
+	containmentMode    RuntimeContainmentMode
+	containmentErr     error
+	constructions      sync.WaitGroup
+	closeOnce          sync.Once
+	closeErr           error
 
 	rateLimitsCacheMu   sync.Mutex
 	rateLimitsCache     rateLimitsCacheEntry
@@ -107,6 +113,17 @@ func NewAgent(opts ...Option) *Agent {
 	observe := observer.New(observer.Config{MeterProvider: options.MeterProvider, Propagator: options.TextMapPropagator, TracerProvider: options.TracerProvider, Version: options.AgentVersion})
 	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
 
+	mode := containmentMode(options)
+	if options.RuntimeResourceHooks.ObserveContainment != nil {
+		options.RuntimeResourceHooks.ObserveContainment(context.Background(), mode)
+	}
+
+	if mode == RuntimeContainmentBestEffort {
+		log.Warn("Darwin best-effort process containment is enabled; escaped descendants may survive, numeric PGID reuse can cause collateral signalling, marker correlation is not ownership, markers can be scrubbed, and native-root permits do not bound escaped provider work",
+			slog.String("containment", string(mode)),
+		)
+	}
+
 	return &Agent{
 		options:             options,
 		log:                 log,
@@ -117,7 +134,9 @@ func NewAgent(opts ...Option) *Agent {
 		positionEncoding:    acp.PositionEncodingKindUtf16,
 		permissionCache:     make(map[acp.SessionId]map[string]string),
 		activeLimitErr:      validateConcurrencyLimits(options.ConcurrencyLimits),
-		descendantProcesses: newRuntimeProcessSnapshotTracker(options.RuntimeResourceHooks),
+		configurationErr:    validateContainmentOptions(options),
+		containmentMode:     mode,
+		descendantProcesses: newRuntimeProcessSnapshotTracker(options.RuntimeResourceHooks, mode == RuntimeContainmentAuthoritative),
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
 			return claude.NewClient(log, options, nil)
 		},
@@ -136,7 +155,7 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	defer func() {
 		if closeErr := agent.Close(); closeErr != nil {
 			agent.log.DebugContext(context.Background(), "close Claude ACP agent failed", slog.String(jsonFieldError, closeErr.Error()))
-			serveErr = closeErr
+			serveErr = errors.Join(serveErr, closeErr)
 		}
 	}()
 
@@ -153,6 +172,20 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 
 // Close cancels and closes all resources owned by the agent.
 func (a *Agent) Close() error {
+	a.closeOnce.Do(func() {
+		a.closeErr = a.close()
+	})
+
+	return a.closeErr
+}
+
+func (a *Agent) close() error {
+	a.mu.Lock()
+	a.closed = true
+	a.mu.Unlock()
+
+	a.constructions.Wait()
+
 	a.mu.Lock()
 
 	sessions := make([]*agentSession, 0, len(a.sessions))
@@ -164,7 +197,6 @@ func (a *Agent) Close() error {
 	a.permissionCache = make(map[acp.SessionId]map[string]string)
 	a.deleted = make(map[acp.SessionId]struct{})
 	a.conn = nil
-	a.closed = true
 	a.mu.Unlock()
 
 	if len(sessions) > 0 {
@@ -179,7 +211,40 @@ func (a *Agent) Close() error {
 		}
 	}
 
-	return errors.Join(closeErrs...)
+	a.mu.Lock()
+	containmentErr := a.containmentErr
+	a.mu.Unlock()
+
+	return errors.Join(errors.Join(closeErrs...), containmentErr)
+}
+
+func (a *Agent) beginSessionConstruction() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.closed {
+		return errAgentClosed
+	}
+
+	a.constructions.Add(1)
+
+	return nil
+}
+
+func (a *Agent) endSessionConstruction() {
+	a.constructions.Done()
+}
+
+func (a *Agent) recordContainmentError(err error) {
+	if !errors.Is(err, claude.ErrProcessContainmentIncomplete) {
+		return
+	}
+
+	a.mu.Lock()
+	if a.containmentErr == nil {
+		a.containmentErr = err
+	}
+	a.mu.Unlock()
 }
 
 func (a *Agent) setConnection(conn agentClient) {
@@ -194,8 +259,8 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 	_, finish := a.observe.StartACP(ctx, params.Meta, "initialize")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	if a.activeLimitErr != nil {
-		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: a.activeLimitErr.Error()})
+	if configurationErr := errors.Join(a.activeLimitErr, a.configurationErr); configurationErr != nil {
+		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: configurationErr.Error()})
 	}
 
 	title := a.options.AgentTitle

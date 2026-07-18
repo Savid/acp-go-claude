@@ -16,10 +16,10 @@ import (
 var sessionInterruptTimeout = 5 * time.Second
 var sessionRemoveAll = os.RemoveAll
 
-// finalizeSessionRuntimeResources returns admissions only after the resource
-// they account for is gone. A failed process-tree proof retains both the
-// native admission and every adapter-owned scratch root because that tree may
-// still be using them. Other close errors do not obscure a successful proof.
+// finalizeSessionRuntimeResources returns admissions only after the selected
+// containment boundary completes. An incomplete boundary retains both the
+// native admission and every adapter-owned scratch root because escaped work
+// may still be using them. Other close errors do not obscure completion.
 func finalizeSessionRuntimeResources(
 	runtimeErr error,
 	nativeRelease func(),
@@ -27,7 +27,7 @@ func finalizeSessionRuntimeResources(
 	materialized *materializedSession,
 	scratchRelease func(),
 ) error {
-	if errors.Is(runtimeErr, claude.ErrProcessTreeUnproven) {
+	if errors.Is(runtimeErr, claude.ErrProcessContainmentIncomplete) {
 		return runtimeErr
 	}
 
@@ -214,16 +214,24 @@ func (s *agentSession) currentRelaunchConfig() relaunchConfig {
 	}
 }
 
-// relaunchClient replaces one proven-quiescent native process without ever
-// holding two native-root admissions at once. A failed or cancelled launch is
-// fully closed before its new admission is returned; an unproven tree poisons
-// relaunch permanently and retains the admission.
+// relaunchClient replaces one completed native containment boundary without
+// ever holding two session native-root admissions at once. A failed or
+// cancelled launch is fully closed before its new admission is returned; an
+// incomplete boundary poisons relaunch permanently and retains the admission.
 func (s *agentSession) relaunchClient(
 	ctx context.Context,
 	client *claude.Client,
 	nativeRelease func(),
 	opts claude.Options,
-) error {
+) (returnErr error) {
+	if err := s.agent.beginSessionConstruction(); err != nil {
+		return err
+	}
+	defer func() {
+		s.recordContainmentError(returnErr)
+		s.agent.endSessionConstruction()
+	}()
+
 	config := s.currentRelaunchConfig()
 	if config.model != "" {
 		opts.Model = claudeModelID(config.model, config.modelOverrides)
@@ -236,12 +244,13 @@ func (s *agentSession) relaunchClient(
 	var previousCloseErr error
 	if client != nil {
 		previousCloseErr = client.Close()
-		if errors.Is(previousCloseErr, claude.ErrProcessTreeUnproven) {
+		if errors.Is(previousCloseErr, claude.ErrProcessContainmentIncomplete) {
 			s.mu.Lock()
 			s.canRelaunch = false
 			s.mu.Unlock()
+			s.recordContainmentError(previousCloseErr)
 
-			return fmt.Errorf("prove previous Claude process tree quiescent: %w", previousCloseErr)
+			return fmt.Errorf("complete previous Claude containment boundary: %w", previousCloseErr)
 		}
 	}
 
@@ -293,16 +302,17 @@ func (s *agentSession) cleanupFailedRelaunch(
 ) error {
 	cleanupErr := errors.Join(cause, relaunched.Close())
 
-	if !errors.Is(cleanupErr, claude.ErrProcessTreeUnproven) {
+	if !errors.Is(cleanupErr, claude.ErrProcessContainmentIncomplete) {
 		if nativeRelease != nil {
 			nativeRelease()
 		}
 	} else {
 		// No later path may launch another root under an admission whose
-		// process-tree quiescence could not be proven.
+		// selected containment boundary did not complete.
 		s.mu.Lock()
 		s.canRelaunch = false
 		s.mu.Unlock()
+		s.recordContainmentError(cleanupErr)
 	}
 
 	return errors.Join(previousCloseErr, cleanupErr)
@@ -310,7 +320,7 @@ func (s *agentSession) cleanupFailedRelaunch(
 
 // Cancel cancels the active Claude turn. Settlement is fenced by cancelMu: the
 // local turn wakes immediately, but neither Cancel nor Prompt may return until
-// the native process tree has been closed and proved quiescent. A later prompt
+// the selected native containment boundary has completed. A later prompt
 // lazily relaunches Claude and resumes the same native session id.
 func (s *agentSession) Cancel(ctx context.Context) (err error) {
 	s.cancelMu.Lock()
@@ -380,7 +390,7 @@ func (s *agentSession) cancelNative(ctx context.Context) (err error) {
 	}
 
 	s.mu.Lock()
-	if errors.Is(closeErr, claude.ErrProcessTreeUnproven) {
+	if errors.Is(closeErr, claude.ErrProcessContainmentIncomplete) {
 		s.turnContainmentErr = closeErr
 	} else {
 		s.turnContainmentErr = nil
@@ -390,19 +400,20 @@ func (s *agentSession) cancelNative(ctx context.Context) (err error) {
 	return errors.Join(interruptErr, closeErr)
 }
 
-// closeNativeClient terminates the complete native process tree and returns its
-// admission only after transport containment proves that tree quiescent. An
-// unproven tree permanently disables relaunch and retains its admission.
+// closeNativeClient terminates the selected native containment boundary and
+// returns its admission only after that boundary completes. An incomplete
+// boundary permanently disables relaunch and retains its admission.
 func (s *agentSession) closeNativeClient(client *claude.Client) error {
 	if client == nil {
 		return nil
 	}
 
 	closeErr := client.Close()
-	if errors.Is(closeErr, claude.ErrProcessTreeUnproven) {
+	if errors.Is(closeErr, claude.ErrProcessContainmentIncomplete) {
 		s.mu.Lock()
 		s.canRelaunch = false
 		s.mu.Unlock()
+		s.recordContainmentError(closeErr)
 
 		return closeErr
 	}
@@ -474,8 +485,16 @@ func (s *agentSession) cancelElicitationRequestsLocked() []context.CancelFunc {
 	return elicitationCancels
 }
 
-// Close closes the underlying Claude process.
+// Close closes the underlying Claude process and memoizes the terminal result.
 func (s *agentSession) Close(ctx context.Context) (err error) {
+	s.closeOnce.Do(func() {
+		s.closeErr = s.close(ctx)
+	})
+
+	return s.closeErr
+}
+
+func (s *agentSession) close(ctx context.Context) (err error) {
 	if s.agent != nil {
 		var finish func(error)
 
@@ -516,9 +535,16 @@ func (s *agentSession) Close(ctx context.Context) (err error) {
 
 	if s.agent != nil {
 		s.agent.observe.RecordClaudeProcessExit(ctx, "closed", err)
+		s.agent.recordContainmentError(err)
 	}
 
 	return err
+}
+
+func (s *agentSession) recordContainmentError(err error) {
+	if s.agent != nil {
+		s.agent.recordContainmentError(err)
+	}
 }
 
 func (s *agentSession) closeTurnTimeout() time.Duration {

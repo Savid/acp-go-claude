@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -66,6 +67,9 @@ var serve = claudeacp.Serve
 var exit = os.Exit
 var shutdownOpenTelemetry = shutdownTelemetry
 var agentVersion = version
+var runtimeGOOS = runtime.GOOS
+
+const platformDarwin = "darwin"
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
@@ -74,12 +78,17 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "containment" {
+		return runContainment(args[1:], stdout, stderr)
+	}
+
 	flags := flag.NewFlagSet("acp-go-claude", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
 	claudePath := flags.String("path", "", "path to claude CLI")
 	claudeHome := flags.String("home", "", "Claude config directory")
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
+	darwinBestEffort := flags.Bool("darwin-best-effort-containment", false, "accept Darwin process-group containment and its escaped-descendant and PGID-reuse risks")
 	model := flags.String("model", "", "default Claude model")
 	bare := flags.Bool("claude-bare", false, "launch Claude sessions with --bare; requires API-key or apiKeyHelper auth")
 	permissionMode := flags.String("claude-permission-mode", "", "default Claude permission mode")
@@ -96,6 +105,13 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	}
 
 	version := agentVersion()
+
+	if *darwinBestEffort && runtimeGOOS != platformDarwin {
+		_, _ = fmt.Fprintln(stderr, "acp-go-claude: -darwin-best-effort-containment is valid only on darwin")
+
+		return 2
+	}
+
 	if *printVersion {
 		_, _ = fmt.Fprintln(stdout, version)
 
@@ -105,6 +121,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	logger := slog.New(slog.DiscardHandler)
 	if *debug {
 		logger = slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+
+	if *darwinBestEffort {
+		_, _ = fmt.Fprintln(stderr, "WARNING containment=best_effort: escaped descendants may survive; numeric PGID reuse can cause collateral signalling; marker correlation is not ownership; markers can be scrubbed; native-root permits do not bound escaped provider work")
 	}
 
 	telemetry, err := configureTelemetry(ctx, logger, version)
@@ -153,6 +173,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	if *settingsFile != "" {
 		serveOptions = append(serveOptions, claudeacp.WithClaudeSettingsFile(*settingsFile))
+	}
+
+	if *darwinBestEffort {
+		serveOptions = append(serveOptions, claudeacp.WithDarwinBestEffortContainment())
 	}
 
 	serveOptions = append(serveOptions, telemetry.options...)

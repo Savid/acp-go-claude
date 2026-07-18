@@ -24,9 +24,9 @@ err := claudeacp.Serve(ctx, input, output,
 
 `Serve` closes the agent before it returns. If shutdown fails, that close error
 takes precedence over EOF or context cancellation. In particular,
-`errors.Is(err, claudeacp.ErrProcessTreeUnproven)` means the adapter could not
-prove every native Claude descendant exited; an embedding host must keep that
-runtime and its resources quarantined. Close is idempotent, and this proof
+`errors.Is(err, claudeacp.ErrProcessContainmentIncomplete)` means the adapter could not
+complete the selected native containment boundary; an embedding host must keep
+that runtime and its resources quarantined. Close is idempotent, and this
 failure remains sticky across repeated calls so later cleanup cannot
 accidentally release the quarantined admission.
 
@@ -37,6 +37,7 @@ accidentally release the quarantined admission.
 | `WithExecutablePath` | Set the Claude CLI path (default: search `PATH`). |
 | `WithHome` | Set `CLAUDE_CONFIG_DIR` for launched Claude processes. |
 | `WithScratchDir` | Parent directory for ephemeral on-disk materialization, created `0700` when missing (default: system temp). |
+| `WithDarwinBestEffortContainment` | Explicitly accept Darwin's process-group boundary. Invalid off Darwin; without it Darwin native launch fails closed. |
 | `WithDefaultModel` | Default Claude model for new sessions. |
 | `WithEnv` | Merge environment variables into every Claude child. |
 | `WithSeedFiles` | Write files into the resolved config dir before launch (requires `WithHome`). |
@@ -95,13 +96,17 @@ or one larger than 4096 bytes leaves the builder's route metadata nil, so the
 receiving agent rejects the request or cancellation fail-closed.
 
 `RuntimeResourceHooks` has `AcquireNativeRoot`, `ReserveScratchRoot`,
-`ObserveProcess`, `ObserveProcessSnapshot`, and `ObserveStartupStage`
+`ObserveProcess`, `ObserveProcessSnapshot`, `ObserveStartupStage`, and
+`ObserveContainment`
 callbacks. Admission callbacks receive one of `runtime`, `session`, `prompt`,
 or `discovery` and return an idempotently wrapped release function. Native-root
 release happens only after the native controller has stopped; scratch release
 happens after deletion. Claude is lockless and emits no home-lock-supervisor
-count. Absolute descendant snapshots are emitted only when containment proves
-them; startup stages are `spawn`, `readiness`, `configuration`, and `session`
+count. `Agent.ContainmentMode()` and `ObserveContainment` report
+`authoritative`, `best_effort`, or `unavailable`. Absolute descendant snapshots
+are emitted only under authoritative containment; Darwin best effort suppresses
+all such snapshots, including zero. Startup stages are `spawn`, `readiness`,
+`configuration`, and `session`
 where applicable. A nil callback keeps standalone use unbounded.
 
 Session-store surface: `SessionStore`, `SessionKey`, `SessionSummary`,

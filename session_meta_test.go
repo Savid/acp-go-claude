@@ -153,6 +153,7 @@ func TestClaudeMetaSmallHelpers(t *testing.T) {
 	require.Equal(t, []string{"/a", "/b"}, sessionAdditionalDirectories([]string{"/a", "/b"}))
 	require.True(t, blockedClaudeEnvKey("LD_PRELOAD"))
 	require.True(t, blockedClaudeEnvKey("dyld_library_path"))
+	require.True(t, blockedClaudeEnvKey(privateAdapterEnvPrefix+"TEST"))
 	require.False(t, blockedClaudeEnvKey("ANTHROPIC_BASE_URL"))
 	require.True(t, validClaudePermissionMode(string(modeDefault)))
 	require.True(t, validClaudePermissionMode(permissionModeAcceptEdits))

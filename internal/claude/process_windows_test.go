@@ -27,7 +27,7 @@ func TestWindowsJobContainsStubbornGrandchild(t *testing.T) {
 		"--", windowsContainmentHelperArg, "root", pidFile,
 	)
 	configureProcessCommand(cmd)
-	launch, err := prepareProcessTreeCommand(cmd)
+	launch, err := prepareProcessTreeCommand(cmd, processLaunchOptions{})
 	require.NoError(t, err)
 	tree, err := startContainedProcess(launch)
 	require.NoError(t, err)

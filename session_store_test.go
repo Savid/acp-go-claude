@@ -59,7 +59,7 @@ func TestInMemorySessionStoreBranches(t *testing.T) {
 	require.Len(t, summaries, 2)
 	require.Equal(t, "other", summaries[0].SessionID)
 
-	require.Error(t, store.Replace(ctx, SessionKey{}, nil))
+	require.EqualError(t, store.Replace(ctx, SessionKey{}, nil), "session id is required")
 	require.Error(t, store.Replace(ctx, SessionKey{SessionID: "s", Subpath: "sub"}, nil))
 	require.Error(t, store.Replace(ctx, SessionKey{SessionID: "s"}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "other"}}}))
 	require.Error(t, store.Replace(ctx, SessionKey{SessionID: "s"}, nil))

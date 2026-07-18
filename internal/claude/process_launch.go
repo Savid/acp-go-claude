@@ -1,18 +1,66 @@
 package claude
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
+	"sync"
 )
 
 // processTreeCommand owns the platform launch wrapper and the parent-side
 // descriptors that establish the containment boundary.
 type processTreeCommand struct {
-	cmd       *exec.Cmd
-	inherited []*os.File
-	control   *os.File
-	ready     *os.File
-	proof     *os.File
+	cmd        *exec.Cmd
+	inherited  []*os.File
+	startGate  *os.File
+	control    *os.File
+	ready      *os.File
+	proof      *os.File
+	bestEffort bool
+	generation *DarwinGeneration
+}
+
+type processLaunchOptions struct {
+	DarwinBestEffort bool
+	Generation       *DarwinGeneration
+}
+
+type commandWait struct {
+	done chan struct{}
+	err  error
+}
+
+func startPausedCommandWait(wait func() error) (*commandWait, func()) {
+	state := &commandWait{done: make(chan struct{})}
+	start := make(chan struct{})
+
+	var once sync.Once
+
+	go func() {
+		<-start
+
+		if wait != nil {
+			state.err = wait()
+		}
+
+		close(state.done)
+	}()
+
+	return state, func() { once.Do(func() { close(start) }) }
+}
+
+func (wait *commandWait) await(ctx context.Context) (error, bool) {
+	if wait == nil {
+		return nil, true
+	}
+
+	select {
+	case <-wait.done:
+		return wait.err, true
+	case <-ctx.Done():
+		return ctx.Err(), false
+	}
 }
 
 func (c *processTreeCommand) releaseInherited() {
@@ -27,12 +75,35 @@ func (c *processTreeCommand) releaseInherited() {
 	c.inherited = nil
 }
 
+func (c *processTreeCommand) releaseStartGate() error {
+	if c == nil || c.startGate == nil {
+		return nil
+	}
+
+	gate := c.startGate
+	c.startGate = nil
+	_, writeErr := gate.Write([]byte{1})
+	closeErr := gate.Close()
+
+	return errors.Join(writeErr, closeErr)
+}
+
+func (c *processTreeCommand) abortStartGate() {
+	if c == nil || c.startGate == nil {
+		return
+	}
+
+	_ = c.startGate.Close()
+	c.startGate = nil
+}
+
 func (c *processTreeCommand) close() {
 	if c == nil {
 		return
 	}
 
 	c.releaseInherited()
+	c.abortStartGate()
 
 	if c.control != nil {
 		_ = c.control.Close()

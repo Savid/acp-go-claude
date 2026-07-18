@@ -2,12 +2,16 @@ package claude
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -34,7 +38,7 @@ func TestBuildArgs(t *testing.T) {
 	})
 
 	require.Equal(t, []string{
-		"--output-format", "stream-json",
+		cliArgOutputFormat, "stream-json",
 		"--input-format", "stream-json",
 		"--include-partial-messages",
 		"--verbose",
@@ -219,16 +223,143 @@ func TestValidateClaudeVersion(t *testing.T) {
 	dir := t.TempDir()
 
 	current := writeShellScript(t, filepath.Join(dir, "current"), "#!/bin/sh\necho '2.1.201 (Claude Code)'\n")
-	require.NoError(t, validateClaudeVersion(context.Background(), current))
+	options := platformTestTransportOptions(t, Options{})
+	require.NoError(t, validateClaudeVersion(context.Background(), current, options))
 
 	old := writeShellScript(t, filepath.Join(dir, "old"), "#!/bin/sh\necho '1.9.9 (Claude Code)'\n")
-	require.ErrorContains(t, validateClaudeVersion(context.Background(), old), "too old")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), old, options), "too old")
 
 	unparseable := writeShellScript(t, filepath.Join(dir, "bad"), "#!/bin/sh\necho 'no version'\n")
-	require.ErrorContains(t, validateClaudeVersion(context.Background(), unparseable), "could not parse")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), unparseable, options), "could not parse")
 
 	failing := writeShellScript(t, filepath.Join(dir, "fail"), "#!/bin/sh\nexit 1\n")
-	require.Error(t, validateClaudeVersion(context.Background(), failing))
+	require.Error(t, validateClaudeVersion(context.Background(), failing, options))
+}
+
+func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
+	want := errors.New("version seam")
+	releases := 0
+	err := validateClaudeVersion(t.Context(), "/bin/sh", Options{
+		AcquireVersionDiscovery: func(context.Context) (func(), error) { return nil, want },
+	})
+	require.ErrorIs(t, err, want)
+	err = validateClaudeVersion(t.Context(), "/bin/sh", Options{
+		AcquireVersionDiscovery: func(context.Context) (func(), error) { return nil, nil }, //nolint:nilnil // Invalid callback result under test.
+	})
+	require.ErrorContains(t, err, "nil release")
+
+	err = validateClaudeVersion(t.Context(), "/bin/sh", Options{
+		DarwinBestEffort: true,
+		AcquireVersionDiscovery: func(context.Context) (func(), error) {
+			return func() { releases++ }, nil
+		},
+	})
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.Zero(t, releases)
+
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{
+		DarwinBestEffort: true,
+		PrepareDarwinVersionGeneration: func(context.Context) (*DarwinGeneration, error) {
+			return nil, want
+		},
+	})
+	require.ErrorIs(t, err, want)
+
+	originalGetwd := processGetwd
+	originalPrepare := processPrepareContained
+	originalStart := processStartContained
+	t.Cleanup(func() {
+		processGetwd = originalGetwd
+		processPrepareContained = originalPrepare
+		processStartContained = originalStart
+	})
+
+	finished := 0
+	generationOptions := Options{
+		DarwinBestEffort: true,
+		PrepareDarwinVersionGeneration: func(context.Context) (*DarwinGeneration, error) {
+			return &DarwinGeneration{RecordFinished: func(bool) error {
+				finished++
+
+				return nil
+			}}, nil
+		},
+	}
+	processGetwd = func() (string, error) { return "", want }
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", generationOptions)
+	require.ErrorIs(t, err, want)
+	require.Equal(t, 1, finished)
+	processGetwd = originalGetwd
+
+	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) { return nil, want }
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{Cwd: t.TempDir()})
+	require.ErrorIs(t, err, want)
+	observedUnavailable := 0
+	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) {
+		return nil, ErrProcessContainmentIncomplete
+	}
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{
+		Cwd: t.TempDir(),
+		ObserveProcessInventory: func(context.Context, func() (int, bool)) {
+			observedUnavailable++
+		},
+	})
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.Equal(t, 1, observedUnavailable)
+
+	processPrepareContained = func(command *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
+		command.Stdout = io.Discard
+
+		return &processTreeCommand{cmd: command}, nil
+	}
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{Cwd: t.TempDir()})
+	require.ErrorContains(t, err, "capture claude version output")
+
+	processPrepareContained = func(command *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
+		return &processTreeCommand{cmd: command}, nil
+	}
+	processStartContained = func(*processTreeCommand) (*processContainment, error) { return nil, want }
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{Cwd: t.TempDir()})
+	require.ErrorIs(t, err, want)
+	processStartContained = func(*processTreeCommand) (*processContainment, error) {
+		return nil, ErrProcessContainmentIncomplete
+	}
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{
+		Cwd: t.TempDir(),
+		ObserveProcessInventory: func(context.Context, func() (int, bool)) {
+			observedUnavailable++
+		},
+	})
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.Equal(t, 2, observedUnavailable)
+
+	processPrepareContained = originalPrepare
+	processStartContained = originalStart
+	if runtime.GOOS != "windows" {
+		dir := t.TempDir()
+		hanging := writeShellScript(t, filepath.Join(dir, "hanging"), "#!/bin/sh\nsleep 30\n")
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		defer cancel()
+		_, err = containedClaudeVersionOutput(ctx, hanging, platformTestTransportOptions(t, Options{Cwd: dir}))
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+}
+
+func TestObserveAuxiliaryQuiescenceBranches(t *testing.T) {
+	inventories := 0
+	quiesced := 0
+	options := Options{
+		ObserveProcessInventory: func(context.Context, func() (int, bool)) { inventories++ },
+		ObserveProcessQuiesced:  func(context.Context) { quiesced++ },
+	}
+	observeAuxiliaryQuiescence(options, errors.New("cleanup failed"))
+	require.Equal(t, 1, inventories)
+	require.Zero(t, quiesced)
+
+	observeAuxiliaryQuiescence(Options{}, errors.New("cleanup failed"))
+	observeAuxiliaryQuiescence(options, nil)
+	require.Equal(t, 1, inventories)
+	require.Equal(t, 1, quiesced)
 }
 
 func TestDiscoverFromPath(t *testing.T) {

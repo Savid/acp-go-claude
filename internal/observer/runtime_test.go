@@ -17,6 +17,7 @@ func TestRuntimeObserver(t *testing.T) {
 	nilObserver.AddRuntimeProcess(ctx, "supervisor", 1)
 	nilObserver.SetRuntimeProcess(ctx, "descendant", 1)
 	nilObserver.ObserveRuntimeStartupStage(ctx, "session", "spawn", time.Second, nil)
+	nilObserver.ObserveRuntimeContainment(ctx, "best_effort")
 
 	empty := &Observer{}
 	empty.RecordRuntimeResourceAdmission(ctx, "native", "session", "admitted")
@@ -24,6 +25,7 @@ func TestRuntimeObserver(t *testing.T) {
 	empty.AddRuntimeProcess(ctx, "supervisor", 1)
 	empty.SetRuntimeProcess(ctx, "descendant", 1)
 	empty.ObserveRuntimeStartupStage(ctx, "session", "spawn", time.Second, nil)
+	empty.ObserveRuntimeContainment(ctx, "best_effort")
 
 	observe := New(Config{})
 	observe.RecordRuntimeResourceAdmission(ctx, "native", "session", "admitted")
@@ -34,6 +36,7 @@ func TestRuntimeObserver(t *testing.T) {
 	observe.SetRuntimeProcess(ctx, "descendant", -1)
 	observe.SetRuntimeProcess(ctx, "descendant", 3)
 	observe.SetRuntimeProcess(ctx, "descendant", 1)
+	observe.ObserveRuntimeContainment(ctx, "best_effort")
 	observe.ObserveRuntimeStartupStage(ctx, "session", "spawn", time.Second, nil)
 	observe.ObserveRuntimeStartupStage(ctx, "session", "readiness", time.Second, errors.New("not ready"))
 }

@@ -19,9 +19,9 @@ import (
 
 var errMessagesAlreadyStarted = errors.New("claude transport messages already started")
 
-// ErrProcessTreeUnproven means a launched Claude process tree could not be
-// proven quiescent. Callers that hold native-root admission must retain it.
-var ErrProcessTreeUnproven = errors.New("claude process tree quiescence is unproven")
+// ErrProcessContainmentIncomplete means the selected native containment
+// boundary did not complete.
+var ErrProcessContainmentIncomplete = errors.New("claude process containment incomplete")
 
 const transportErrorBuffer = 8
 const defaultMaxJSONLineBytes = 10 * 1024 * 1024
@@ -32,7 +32,7 @@ const processWaitTimedOutMessage = "wait for claude process after kill timed out
 const stderrTailLines = 20
 
 var (
-	processCommandContext    = exec.CommandContext
+	processCommandContext    = newProcessCommand
 	processPrepareContained  = prepareProcessTreeCommand
 	processStartContained    = startContainedProcess
 	processAfterDecode       = func() {}
@@ -62,11 +62,12 @@ type ProcessTransport struct {
 	log     *slog.Logger
 	options Options
 
-	cmd    *exec.Cmd
-	tree   *processContainment
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	stderr io.ReadCloser
+	cmd      *exec.Cmd
+	tree     *processContainment
+	waitTree *processContainment
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	stderr   io.ReadCloser
 
 	mu              sync.Mutex
 	closeOnce       sync.Once
@@ -126,15 +127,30 @@ func NewProcessTransport(log *slog.Logger, options Options) *ProcessTransport {
 }
 
 // Start launches the Claude CLI.
-func (t *ProcessTransport) Start(ctx context.Context) error {
+func (t *ProcessTransport) Start(ctx context.Context) (returnErr error) {
 	path, err := Discover(ctx, t.options.CLIPath, t.options.Env)
 	if err != nil {
 		return err
 	}
 
-	if probeErr := claudeVersionProbe(ctx, path); probeErr != nil {
+	if probeErr := claudeVersionProbe(ctx, path, t.options); probeErr != nil {
 		return probeErr
 	}
+
+	generation := t.options.Generation
+	if generation == nil && t.options.DarwinBestEffort && t.options.PrepareDarwinGeneration != nil {
+		generation, err = t.options.PrepareDarwinGeneration(ctx)
+		if err != nil {
+			return err
+		}
+	}
+
+	generationOwnedByTree := false
+	defer func() {
+		if generation != nil && !generationOwnedByTree {
+			returnErr = errors.Join(returnErr, generation.finish(true))
+		}
+	}()
 
 	args := BuildArgs(t.options)
 	cmd := processCommandContext(ctx, path, args...)
@@ -165,9 +181,12 @@ func (t *ProcessTransport) Start(ctx context.Context) error {
 		return errors.New("create stderr pipe: exec: Stderr already set")
 	}
 
-	launch, err := processPrepareContained(cmd)
+	launch, err := processPrepareContained(cmd, processLaunchOptions{
+		DarwinBestEffort: t.options.DarwinBestEffort,
+		Generation:       generation,
+	})
 	if err != nil {
-		if errors.Is(err, ErrProcessTreeUnproven) && t.options.ObserveProcessInventory != nil {
+		if errors.Is(err, ErrProcessContainmentIncomplete) && t.options.ObserveProcessInventory != nil {
 			t.options.ObserveProcessInventory(ctx, unavailableProcessInventory)
 		}
 
@@ -208,7 +227,7 @@ func (t *ProcessTransport) Start(ctx context.Context) error {
 		_ = stdout.Close()
 		_ = stderr.Close()
 
-		if errors.Is(err, ErrProcessTreeUnproven) && t.options.ObserveProcessInventory != nil {
+		if errors.Is(err, ErrProcessContainmentIncomplete) && t.options.ObserveProcessInventory != nil {
 			t.options.ObserveProcessInventory(ctx, unavailableProcessInventory)
 		}
 
@@ -217,6 +236,8 @@ func (t *ProcessTransport) Start(ctx context.Context) error {
 
 	t.cmd = cmd
 	t.tree = tree
+	t.waitTree = tree
+	generationOwnedByTree = true
 	t.stdin = stdin
 	t.stdout = stdout
 	t.stderr = stderr
@@ -386,7 +407,11 @@ func (t *ProcessTransport) recoverStdoutReader(ctx context.Context, errs chan<- 
 func (t *ProcessTransport) wait() error {
 	t.waitOnce.Do(func() {
 		if t.cmd != nil {
-			t.waitErr = t.cmd.Wait()
+			if t.waitTree != nil {
+				t.waitErr = t.waitTree.wait(t.cmd)
+			} else {
+				t.waitErr = t.cmd.Wait()
+			}
 		}
 	})
 
@@ -522,6 +547,12 @@ func (t *ProcessTransport) shutdownProcess(stdinClosed bool) error {
 		}
 	}
 
+	if t.tree != nil && t.tree.ownsShutdown() {
+		containmentErr := t.quiesceProcessTree()
+
+		return errors.Join(containmentErr, t.waitForShutdown(waitErr, true))
+	}
+
 	shutdown := false
 
 	var closeErr error
@@ -552,7 +583,7 @@ func (t *ProcessTransport) quiesceProcessTree() error {
 			t.options.ObserveProcessInventory(context.Background(), unavailableProcessInventory)
 		}
 
-		return fmt.Errorf("%w: %v", ErrProcessTreeUnproven, err)
+		return fmt.Errorf("%w: %v", ErrProcessContainmentIncomplete, err)
 	}
 
 	if t.options.ObserveProcessQuiesced != nil {

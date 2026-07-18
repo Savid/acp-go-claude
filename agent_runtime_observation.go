@@ -68,6 +68,14 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 			externalStage(ctx, lifecycle, stage, elapsed, err)
 		}
 	}
+	externalContainment := hooks.ObserveContainment
+	hooks.ObserveContainment = func(ctx context.Context, mode RuntimeContainmentMode) {
+		observe.ObserveRuntimeContainment(ctx, string(mode))
+
+		if externalContainment != nil {
+			externalContainment(ctx, mode)
+		}
+	}
 
 	return hooks
 }
@@ -85,24 +93,31 @@ func observeRuntimeProcessSnapshot(ctx context.Context, hooks RuntimeResourceHoo
 }
 
 type runtimeProcessSnapshotTracker struct {
-	mu         sync.Mutex
-	hooks      RuntimeResourceHooks
-	sources    map[*runtimeProcessSnapshotSource]func() (int, bool)
-	publishing bool
-	dirty      bool
-	emit       func(RuntimeResourceHooks, int)
-	lastCount  int
-	lastValid  bool
+	mu            sync.Mutex
+	hooks         RuntimeResourceHooks
+	sources       map[*runtimeProcessSnapshotSource]func() (int, bool)
+	publishing    bool
+	dirty         bool
+	emit          func(RuntimeResourceHooks, int)
+	lastCount     int
+	lastValid     bool
+	authoritative bool
 }
 
 type runtimeProcessSnapshotSource struct {
 	tracker *runtimeProcessSnapshotTracker
 }
 
-func newRuntimeProcessSnapshotTracker(hooks RuntimeResourceHooks) *runtimeProcessSnapshotTracker {
+func newRuntimeProcessSnapshotTracker(hooks RuntimeResourceHooks, authoritative ...bool) *runtimeProcessSnapshotTracker {
+	proveInventory := true
+	if len(authoritative) > 0 {
+		proveInventory = authoritative[0]
+	}
+
 	return &runtimeProcessSnapshotTracker{
-		hooks:   hooks,
-		sources: make(map[*runtimeProcessSnapshotSource]func() (int, bool)),
+		hooks:         hooks,
+		sources:       make(map[*runtimeProcessSnapshotSource]func() (int, bool)),
+		authoritative: proveInventory,
 	}
 }
 
@@ -133,6 +148,10 @@ func (s *runtimeProcessSnapshotSource) quiesced(ctx context.Context) {
 }
 
 func (t *runtimeProcessSnapshotTracker) markDirtyLocked(ctx context.Context) bool {
+	if !t.authoritative {
+		return false
+	}
+
 	t.dirty = true
 	t.emit = func(hooks RuntimeResourceHooks, count int) {
 		observeRuntimeProcessSnapshot(ctx, hooks, RuntimeProcessProviderDescendant, count)

@@ -30,6 +30,17 @@ const (
 	RuntimeProcessProviderDescendant RuntimeProcessKind = "provider_descendant"
 )
 
+// RuntimeContainmentMode identifies the selected native process boundary.
+type RuntimeContainmentMode string
+
+const privateAdapterEnvPrefix = "ACP_" + "GO_CLAUDE_INTERNAL_"
+
+const (
+	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
+	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
+	RuntimeContainmentUnavailable   RuntimeContainmentMode = "unavailable"
+)
+
 type RuntimeStartupStage string
 
 const (
@@ -46,6 +57,7 @@ type RuntimeResourceHooks struct {
 	ObserveProcess         func(context.Context, RuntimeProcessKind, int64)
 	ObserveProcessSnapshot func(context.Context, RuntimeProcessKind, int)
 	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
+	ObserveContainment     func(context.Context, RuntimeContainmentMode)
 }
 
 // SettingSource selects one Claude Code filesystem settings source.
@@ -141,6 +153,9 @@ type Options struct {
 	// deadline. On expiry the turn is aborted and fails with cause "timeout".
 	TurnTimeout          time.Duration
 	RuntimeResourceHooks RuntimeResourceHooks
+	// DarwinBestEffortContainment explicitly accepts Darwin's process-group
+	// boundary and its escaped-descendant and numeric-PGID-reuse risks.
+	DarwinBestEffortContainment bool
 
 	defaultPermissionModeSet bool
 }
@@ -258,6 +273,14 @@ func WithHome(path string) Option {
 func WithScratchDir(dir string) Option {
 	return func(options *Options) {
 		options.ScratchDir = dir
+	}
+}
+
+// WithDarwinBestEffortContainment opts into the explicitly limited Darwin
+// process-group backend. It is invalid on every non-Darwin platform.
+func WithDarwinBestEffortContainment() Option {
+	return func(options *Options) {
+		options.DarwinBestEffortContainment = true
 	}
 }
 

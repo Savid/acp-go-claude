@@ -61,12 +61,12 @@ func TestClientCloseRetainsContainmentProofFailure(t *testing.T) {
 	t.Parallel()
 
 	transport := newFakeTransport()
-	transport.closeErr = ErrProcessTreeUnproven
+	transport.closeErr = ErrProcessContainmentIncomplete
 	client := NewClient(nil, Options{}, transport)
 
-	require.ErrorIs(t, client.Close(), ErrProcessTreeUnproven)
+	require.ErrorIs(t, client.Close(), ErrProcessContainmentIncomplete)
 	transport.closeErr = nil
-	require.ErrorIs(t, client.Close(), ErrProcessTreeUnproven,
+	require.ErrorIs(t, client.Close(), ErrProcessContainmentIncomplete,
 		"a repeated close must not forget an earlier failed quiescence proof")
 	require.Equal(t, 1, transport.closeCalls())
 }

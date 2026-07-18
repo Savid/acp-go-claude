@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -49,10 +50,18 @@ type RateLimitWindow struct {
 	ResetsAt string `json:"resetsAt,omitempty"`
 }
 
-func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (RateLimitsResponse, error) {
+func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ RateLimitsResponse, returnErr error) {
 	if err := validateEmptyParams(raw); err != nil {
 		return RateLimitsResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
+
+	if err := a.beginSessionConstruction(); err != nil {
+		return RateLimitsResponse{}, err
+	}
+	defer func() {
+		a.recordContainmentError(returnErr)
+		a.endSessionConstruction()
+	}()
 
 	// Home resolution shares the probes' degrade contract: a misconfigured
 	// Claude home leaves nothing to probe, so the request answers with empty
@@ -65,10 +74,20 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (Rate
 	}
 
 	claudeOptions := claude.Options{
-		CLIPath:    a.options.ExecutablePath,
-		ClaudeHome: claudeHome,
-		Env:        a.options.Env,
+		CLIPath:          a.options.ExecutablePath,
+		ClaudeHome:       claudeHome,
+		Env:              a.options.Env,
+		DarwinBestEffort: a.containmentMode == RuntimeContainmentBestEffort,
+		AcquireUsageDiscovery: func(discoveryCtx context.Context) (func(), error) {
+			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
+		},
+		PrepareUsageGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
+			return a.prepareUsageGeneration(generationCtx)
+		},
 	}
+	processSnapshotSource := a.descendantProcesses.newSource()
+	claudeOptions.ObserveProcessInventory = processSnapshotSource.started
+	claudeOptions.ObserveProcessQuiesced = processSnapshotSource.quiesced
 
 	probeCtx, cancel := context.WithTimeout(ctx, rateLimitsProbeTimeout)
 	defer cancel()
@@ -78,6 +97,10 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (Rate
 	// a broken probe must not break the extension.
 	limits, err := a.queryRateLimits(probeCtx, claudeOptions)
 	if err != nil {
+		if errors.Is(err, ErrProcessContainmentIncomplete) {
+			return RateLimitsResponse{}, err
+		}
+
 		a.log.DebugContext(ctx, "claude usage probe failed", slog.String(jsonFieldError, err.Error()))
 
 		limits = claude.RateLimits{}
@@ -209,7 +232,7 @@ func (a *Agent) handleForkSession(
 		}
 	}
 
-	session, err := a.startSession(ctx, acp.SessionId(sessionID), sessionStart{
+	session, err := a.startAndStoreSession(ctx, acp.SessionId(sessionID), sessionStart{
 		Cwd:                   params.Cwd,
 		AdditionalDirectories: additionalDirectories,
 		McpServers:            mcpServers,
@@ -220,6 +243,8 @@ func (a *Agent) handleForkSession(
 		PermissionRules:       permissionRules,
 		MetaOptions:           metaOptions,
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
+	}, func(session *agentSession) {
+		session.persistPermissionRules(ctx)
 	})
 	if err != nil {
 		// Forking an unknown or deleted parent returns the same uniform
@@ -229,12 +254,6 @@ func (a *Agent) handleForkSession(
 			return acp.UnstableForkSessionResponse{}, unknownSessionError()
 		}
 
-		return acp.UnstableForkSessionResponse{}, err
-	}
-
-	session.persistPermissionRules(ctx)
-
-	if err := a.storeStartedSession(ctx, session); err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
 

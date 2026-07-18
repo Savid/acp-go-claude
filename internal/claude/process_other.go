@@ -13,7 +13,11 @@ import (
 
 type processContainment struct{}
 
-func prepareProcessTreeCommand(cmd *exec.Cmd) (*processTreeCommand, error) {
+func prepareProcessTreeCommand(cmd *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
+	if options.DarwinBestEffort {
+		return nil, fmt.Errorf("%w: Darwin best-effort containment is invalid on %s", ErrProcessContainmentIncomplete, runtime.GOOS)
+	}
+
 	return &processTreeCommand{cmd: cmd}, nil
 }
 
@@ -32,6 +36,10 @@ func (*processContainment) quiesce(time.Duration) error {
 func (*processContainment) close() error { return nil }
 
 func (*processContainment) processSnapshot() (int, bool) { return 0, false }
+
+func (*processContainment) wait(command *exec.Cmd) error { return command.Wait() }
+
+func (*processContainment) ownsShutdown() bool { return false }
 
 func configureProcessCommandPlatform(cmd *exec.Cmd) {
 	cmd.Cancel = func() error {

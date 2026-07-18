@@ -101,6 +101,9 @@ providers.
 - Optional raw Claude stream-json extension notifications.
 - OpenTelemetry spans, metrics, trace propagation, and structured logs without
   recording prompt or tool secrets by default.
+- Authoritative native-process containment on Linux and Windows. Darwin fails
+  closed by default and has an explicit best-effort opt-in for operators who
+  accept escaped-descendant and numeric-PGID-reuse risks.
 
 ## Slash Commands
 
@@ -115,6 +118,7 @@ corresponding Claude command.
 - [Go API](docs/reference/go-api.mdx)
 - [ACP methods](docs/reference/acp-methods.mdx)
 - [Observability](docs/operations/observability.mdx)
+- [Security and process containment](docs/operations/security.mdx)
 
 Full Go API reference:
 [pkg.go.dev/github.com/savid/acp-go-claude](https://pkg.go.dev/github.com/savid/acp-go-claude).

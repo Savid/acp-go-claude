@@ -37,7 +37,11 @@ func configureProcessCommandPlatform(cmd *exec.Cmd) {
 	}
 }
 
-func prepareProcessTreeCommand(cmd *exec.Cmd) (*processTreeCommand, error) {
+func prepareProcessTreeCommand(cmd *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
+	if options.DarwinBestEffort {
+		return nil, fmt.Errorf("%w: Darwin best-effort containment is invalid on windows", ErrProcessContainmentIncomplete)
+	}
+
 	return &processTreeCommand{cmd: cmd}, nil
 }
 
@@ -83,7 +87,7 @@ func startContainedProcess(launch *processTreeCommand) (*processContainment, err
 	if err != nil {
 		cleanupErr := cleanupSuspendedProcess(cmd, containment)
 		if cleanupErr != nil {
-			return nil, fmt.Errorf("%w: assign suspended Claude root to Windows Job Object: %v; cleanup: %v", ErrProcessTreeUnproven, err, cleanupErr)
+			return nil, fmt.Errorf("%w: assign suspended Claude root to Windows Job Object: %v; cleanup: %v", ErrProcessContainmentIncomplete, err, cleanupErr)
 		}
 
 		return nil, fmt.Errorf("assign suspended Claude root to Windows Job Object: %w", err)
@@ -248,3 +252,7 @@ func (c *processContainment) processSnapshot() (int, bool) {
 }
 
 func (c *processContainment) close() error { return windows.CloseHandle(c.job) }
+
+func (*processContainment) wait(command *exec.Cmd) error { return command.Wait() }
+
+func (*processContainment) ownsShutdown() bool { return false }

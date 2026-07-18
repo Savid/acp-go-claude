@@ -215,7 +215,7 @@ func TestStartLinuxProcessSupervisorBranches(t *testing.T) {
 		control: controlWrite, ready: readyRead, proof: proofRead,
 	}
 	_, err = startContainedProcess(launch)
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 }
 
 func TestUnixSignalProcessGroupIDBranches(t *testing.T) {
@@ -253,7 +253,7 @@ func TestProcessTransportQuiescenceProofFailures(t *testing.T) {
 		},
 	}
 	syscallKill = func(int, syscall.Signal) error { return errors.New("probe failed") }
-	require.ErrorIs(t, transport.quiesceProcessTree(), ErrProcessTreeUnproven)
+	require.ErrorIs(t, transport.quiesceProcessTree(), ErrProcessContainmentIncomplete)
 	require.Zero(t, quiesced)
 	require.Len(t, inventories, 1)
 	_, exact := inventories[0]()
@@ -286,7 +286,7 @@ func TestLinuxSupervisorControlEOFContainsDetachedDescendant(t *testing.T) {
 	sentinel := filepath.Join(dir, "sentinel")
 	native := supervisorDetachedNativeCommand(t, pidFile, sentinel)
 	configureProcessCommand(native)
-	launch, err := prepareProcessTreeCommand(native)
+	launch, err := prepareProcessTreeCommand(native, processLaunchOptions{})
 	require.NoError(t, err)
 	tree, err := startContainedProcess(launch)
 	require.NoError(t, err)
@@ -323,7 +323,7 @@ func TestLinuxSupervisorDeathCannotCertifyDetachedDescendant(t *testing.T) {
 
 	require.NoError(t, transport.cmd.Process.Kill())
 	err := transport.Close()
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	require.True(t, processExists(childPID),
 		"unexpected supervisor death fixture must retain the escaped process so a false proof is observable")
 }

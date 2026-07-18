@@ -16,6 +16,14 @@ with `-debug` (`WithLogger` for a custom logger). Telemetry records lifecycle
 timing, request outcomes, and counters, and by default avoids recording prompt
 text, tool inputs, tool outputs, and raw Claude event bodies.
 
+The `acp_go_claude.runtime.containment` gauge records the selected containment
+mode in its `containment` attribute: `authoritative`, `best_effort`, or
+`unavailable`. Embedded hosts receive the same selection through
+`RuntimeResourceHooks.ObserveContainment` and can query it with
+`Agent.ContainmentMode()`. Darwin best effort never publishes
+provider-descendant snapshots, including a zero value, because its process
+group cannot account for `setsid` escapees.
+
 ## Diagnosing turn failures
 
 A failed prompt returns a `claude_turn_failed` error whose `cause` tells you
@@ -33,7 +41,9 @@ full shape; use the `cause` to route the investigation:
 A user cancel that coincides with a `WithTurnTimeout` expiry resolves as a
 successful `cancelled` response, not a `timeout` failure. If you expect timeouts
 but see cancellations, the client is cancelling first. Both outcomes wait for
-native process-tree quiescence. A `transport` failure mentioning an unproven
-Claude process tree means the adapter retained the runtime admission and
-disabled lazy relaunch; investigate the contained processes before recovery.
+the selected native containment boundary. A `transport` failure mentioning
+incomplete containment means the adapter retained the runtime admission and
+disabled lazy relaunch. Darwin best effort never upgrades that boundary to a
+whole-tree claim; investigate retained records and contained processes before
+recovery.
 </Note>

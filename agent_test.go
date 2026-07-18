@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,7 +58,7 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	transport := newFakeClaudeTransport()
 	sessionClient := claude.NewClient(nil, claude.Options{}, transport)
 	require.NoError(t, sessionClient.Start(context.Background()))
-	transport.closeErr = errors.Join(errors.New("close failed"), claude.ErrProcessTreeUnproven)
+	transport.closeErr = errors.Join(errors.New("close failed"), claude.ErrProcessContainmentIncomplete)
 	agent.sessions["session-1"] = &agentSession{
 		agent:         agent,
 		id:            acp.SessionId("session-1"),
@@ -69,8 +71,8 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	// EOF input resolves conn.Done first; the deferred agent close must preserve
 	// the stronger process-tree proof failure.
 	err := Serve(context.Background(), bytes.NewBuffer(nil), io.Discard)
-	require.ErrorIs(t, err, ErrProcessTreeUnproven)
-	require.ErrorIs(t, ErrProcessTreeUnproven, claude.ErrProcessTreeUnproven)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, ErrProcessContainmentIncomplete, claude.ErrProcessContainmentIncomplete)
 
 	// A context that is already cancelled fails the pre-select guard before an
 	// agent is even constructed.
@@ -82,6 +84,226 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	require.ErrorIs(t, Serve(ctx, &blockingReader{}, io.Discard), context.DeadlineExceeded)
+}
+
+type blockingCloseTransport struct {
+	claude.Transport
+	entered chan struct{}
+	release chan struct{}
+	err     error
+	calls   atomic.Int32
+	once    sync.Once
+}
+
+type blockingStartTransport struct {
+	claude.Transport
+	entered chan struct{}
+	release chan struct{}
+	err     error
+	once    sync.Once
+}
+
+func (t *blockingStartTransport) Start(context.Context) error {
+	t.once.Do(func() { close(t.entered) })
+	<-t.release
+
+	return t.err
+}
+
+func (t *blockingCloseTransport) Close() error {
+	t.calls.Add(1)
+	t.once.Do(func() { close(t.entered) })
+	<-t.release
+
+	return t.err
+}
+
+func TestAgentCloseSingleflightAndStickyContainment(t *testing.T) {
+	blocked := &blockingCloseTransport{
+		Transport: newFakeClaudeTransport(),
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+		err:       errors.Join(errors.New("cleanup failed"), claude.ErrProcessContainmentIncomplete),
+	}
+	client := claude.NewClient(nil, claude.Options{}, blocked)
+	require.NoError(t, client.Start(t.Context()))
+
+	agent := NewAgent()
+	agent.sessions["session-1"] = &agentSession{
+		agent: agent, id: "session-1", client: client, turn: make(chan struct{}, 1),
+	}
+
+	results := make(chan error, 2)
+	go func() { results <- agent.Close() }()
+	<-blocked.entered
+	go func() { results <- agent.Close() }()
+	close(blocked.release)
+
+	for range 2 {
+		require.ErrorIs(t, <-results, claude.ErrProcessContainmentIncomplete)
+	}
+	require.Equal(t, int32(1), blocked.calls.Load())
+	require.ErrorIs(t, agent.Close(), claude.ErrProcessContainmentIncomplete)
+}
+
+func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {
+	previous := newServeAgent
+	t.Cleanup(func() { newServeAgent = previous })
+
+	transport := &blockingStartTransport{
+		Transport: newFakeClaudeTransport(),
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+		err:       claude.ErrProcessContainmentIncomplete,
+	}
+	agent := NewAgent(
+		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		return claude.NewClient(log, options, transport)
+	}
+
+	newSessionErr := make(chan error, 1)
+	go func() {
+		_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+		newSessionErr <- err
+	}()
+	<-transport.entered
+
+	serveCreated := make(chan struct{})
+	newServeAgent = func(...Option) *Agent {
+		close(serveCreated)
+
+		return agent
+	}
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	input, inputWriter := io.Pipe()
+	t.Cleanup(func() {
+		_ = input.Close()
+		_ = inputWriter.Close()
+	})
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- Serve(serveCtx, input, io.Discard) }()
+	<-serveCreated
+	cancelServe()
+
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- agent.Close() }()
+	require.Eventually(t, func() bool {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+
+		return agent.closed
+	}, time.Second, time.Millisecond)
+
+	select {
+	case err := <-closeErr:
+		t.Fatalf("Close returned before admitted construction published containment: %v", err)
+	default:
+	}
+	select {
+	case err := <-serveErr:
+		t.Fatalf("Serve returned before admitted construction published containment: %v", err)
+	default:
+	}
+
+	close(transport.release)
+	require.ErrorIs(t, <-newSessionErr, claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-closeErr, claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-serveErr, claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), claude.ErrProcessContainmentIncomplete)
+}
+
+func TestCloseAndServeJoinAdmittedIncompletePromptRelaunch(t *testing.T) {
+	previous := newServeAgent
+	t.Cleanup(func() { newServeAgent = previous })
+
+	transport := &blockingStartTransport{
+		Transport: newFakeClaudeTransport(),
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+		err:       claude.ErrProcessContainmentIncomplete,
+	}
+	agent := NewAgent(WithLogger(slog.New(slog.DiscardHandler)))
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		return claude.NewClient(log, options, transport)
+	}
+	session := &agentSession{
+		agent:       agent,
+		id:          "session-1",
+		client:      deadClaudeClient(t, nil),
+		turn:        make(chan struct{}, sessionTurnCapacity),
+		canRelaunch: true,
+	}
+	agent.sessions[session.id] = session
+
+	relaunchErr := make(chan error, 1)
+	go func() { relaunchErr <- session.ensureClientAlive(context.Background()) }()
+	<-transport.entered
+
+	serveCreated := make(chan struct{})
+	newServeAgent = func(...Option) *Agent {
+		close(serveCreated)
+
+		return agent
+	}
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	input, inputWriter := io.Pipe()
+	t.Cleanup(func() {
+		_ = input.Close()
+		_ = inputWriter.Close()
+	})
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- Serve(serveCtx, input, io.Discard) }()
+	<-serveCreated
+	cancelServe()
+
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- agent.Close() }()
+	require.Eventually(t, func() bool {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+
+		return agent.closed
+	}, time.Second, time.Millisecond)
+
+	select {
+	case err := <-closeErr:
+		t.Fatalf("Close returned before prompt relaunch unwound: %v", err)
+	default:
+	}
+	select {
+	case err := <-serveErr:
+		t.Fatalf("Serve returned before prompt relaunch unwound: %v", err)
+	default:
+	}
+
+	close(transport.release)
+	require.ErrorIs(t, <-relaunchErr, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-closeErr, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-serveErr, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
+}
+
+func TestRemovedSessionContainmentSurvivesTerminalServe(t *testing.T) {
+	previous := newServeAgent
+	t.Cleanup(func() { newServeAgent = previous })
+
+	agent := NewAgent()
+	session := closeErrorAgentSession(t, claude.ErrProcessContainmentIncomplete, nil)
+	session.agent = agent
+	agent.sessions["session-1"] = session
+
+	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: "session-1"})
+	require.ErrorIs(t, err, claude.ErrProcessContainmentIncomplete)
+	require.Empty(t, agent.sessions)
+
+	newServeAgent = func(...Option) *Agent { return agent }
+	err = Serve(t.Context(), bytes.NewBuffer(nil), io.Discard)
+	require.ErrorIs(t, err, claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), claude.ErrProcessContainmentIncomplete)
 }
 
 func TestAgentLifecycleWithFakeClaude(t *testing.T) {

@@ -14,6 +14,10 @@ import (
 )
 
 const (
+	platformDarwin  = "darwin"
+	platformLinux   = "linux"
+	platformWindows = "windows"
+
 	settingsFileName      = "settings.json"
 	settingsLocalFileName = "settings.local.json"
 	settingsDirName       = ".claude"
@@ -231,9 +235,9 @@ func userSettingsPath(claudeHome string) string {
 
 func defaultManagedSettingsPath() string {
 	switch runtimeGOOS {
-	case "darwin":
+	case platformDarwin:
 		return "/Library/Application Support/ClaudeCode/managed-settings.json"
-	case "windows":
+	case platformWindows:
 		return `C:\Program Files\ClaudeCode\managed-settings.json`
 	default:
 		return "/etc/claude-code/managed-settings.json"

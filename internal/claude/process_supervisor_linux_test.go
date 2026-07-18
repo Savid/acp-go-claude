@@ -207,19 +207,19 @@ func (c *recordingWriteCloser) Close() error {
 func TestPrepareTurnSupervisorBranches(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
 
-	if _, err := prepareProcessTreeCommand(&exec.Cmd{}); err == nil {
+	if _, err := prepareProcessTreeCommand(&exec.Cmd{}, processLaunchOptions{}); err == nil {
 		t.Fatal("incomplete native command was accepted")
 	}
 
 	native := exec.Command("true")
 	turnSupervisorMemfd = func(string, int) (int, error) { return 0, errors.New("memfd") }
-	if _, err := prepareProcessTreeCommand(native); err == nil {
+	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
 		t.Fatal("memfd failure was ignored")
 	}
 
 	turnSupervisorMemfd = unix.MemfdCreate
 	turnSupervisorWriteConfig = func(io.WriteSeeker, turnSupervisorConfig) error { return errors.New("write") }
-	if _, err := prepareProcessTreeCommand(native); err == nil {
+	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
 		t.Fatal("config write failure was ignored")
 	}
 	turnSupervisorWriteConfig = writeTurnSupervisorConfig
@@ -233,7 +233,7 @@ func TestPrepareTurnSupervisorBranches(t *testing.T) {
 
 		return os.Pipe()
 	}
-	if _, err := prepareProcessTreeCommand(native); err == nil {
+	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
 		t.Fatal("control pipe failure was ignored")
 	}
 
@@ -246,7 +246,7 @@ func TestPrepareTurnSupervisorBranches(t *testing.T) {
 
 		return os.Pipe()
 	}
-	if _, err := prepareProcessTreeCommand(native); err == nil {
+	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
 		t.Fatal("readiness pipe failure was ignored")
 	}
 
@@ -259,18 +259,18 @@ func TestPrepareTurnSupervisorBranches(t *testing.T) {
 
 		return os.Pipe()
 	}
-	if _, err := prepareProcessTreeCommand(native); err == nil {
+	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
 		t.Fatal("proof pipe failure was ignored")
 	}
 
 	turnSupervisorPipe = os.Pipe
 	turnSupervisorExecutable = func() (string, error) { return "", errors.New("executable") }
-	if _, err := prepareProcessTreeCommand(native); err == nil {
+	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
 		t.Fatal("executable failure was ignored")
 	}
 
 	turnSupervisorExecutable = os.Executable
-	launch, err := prepareProcessTreeCommand(native)
+	launch, err := prepareProcessTreeCommand(native, processLaunchOptions{})
 	if err != nil {
 		t.Fatalf("prepare supervisor: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestContainLinuxSupervisorDescendantsBranches(t *testing.T) {
 	}
 
 	turnSupervisorDescendants = func(int) ([]linuxProcessIdentity, error) { return nil, errors.New("list") }
-	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessTreeUnproven) {
+	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("list failure = %v", err)
 	}
 
@@ -525,14 +525,14 @@ func TestContainLinuxSupervisorDescendantsBranches(t *testing.T) {
 	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) {
 		return -1, errors.New("wait")
 	}
-	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessTreeUnproven) {
+	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("wait failure = %v", err)
 	}
 
 	descendant := linuxProcessIdentity{pid: 3, state: 'S', startTime: "1"}
 	turnSupervisorDescendants = func(int) ([]linuxProcessIdentity, error) { return []linuxProcessIdentity{descendant}, nil }
 	turnSupervisorSignalPID = func(linuxProcessIdentity, syscall.Signal) error { return errors.New("kill") }
-	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessTreeUnproven) {
+	if err := containLinuxSupervisorDescendants(1, 2); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("kill failure = %v", err)
 	}
 

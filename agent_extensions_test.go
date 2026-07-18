@@ -191,15 +191,25 @@ func TestHandleRateLimits(t *testing.T) {
 
 	agent := NewAgent(
 		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
 		WithExecutablePath("/usr/bin/claude-test"),
 		WithEnv(map[string]string{"CLAUDE_TEST": "1"}),
 	)
+	agent.containmentMode = RuntimeContainmentAuthoritative
 
 	var gotOptions claude.Options
 
 	reset := time.Date(2026, time.July, 9, 13, 40, 0, 0, time.UTC)
 	agent.queryRateLimits = func(_ context.Context, options claude.Options) (claude.RateLimits, error) {
 		gotOptions = options
+		generation, generationErr := options.PrepareUsageGeneration(ctx)
+		require.NoError(t, generationErr)
+		release, acquireErr := options.AcquireUsageDiscovery(ctx)
+		require.NoError(t, acquireErr)
+		options.ObserveProcessInventory(ctx, func() (int, bool) { return 0, true })
+		options.ObserveProcessQuiesced(ctx)
+		require.NoError(t, generation.Release(true))
+		release()
 
 		return claude.RateLimits{Windows: []claude.RateLimitWindow{
 			{ID: sessionWindowID, UsedPercent: 92, ResetsAt: reset},
@@ -220,6 +230,10 @@ func TestHandleRateLimits(t *testing.T) {
 	require.Equal(t, "/usr/bin/claude-test", gotOptions.CLIPath)
 	require.NotEmpty(t, gotOptions.ClaudeHome)
 	require.Equal(t, map[string]string{"CLAUDE_TEST": "1"}, gotOptions.Env)
+	require.NotNil(t, gotOptions.AcquireUsageDiscovery)
+	require.NotNil(t, gotOptions.PrepareUsageGeneration)
+	require.NotNil(t, gotOptions.ObserveProcessInventory)
+	require.NotNil(t, gotOptions.ObserveProcessQuiesced)
 
 	encoded, err := json.Marshal(resp)
 	require.NoError(t, err)
@@ -454,4 +468,55 @@ func TestHandleRateLimitsErrors(t *testing.T) {
 	require.NoError(t, closed.Close())
 	_, err = closed.HandleExtensionMethod(ctx, RateLimitsMethod, nil)
 	require.ErrorIs(t, err, errAgentClosed)
+}
+
+func TestHandleRateLimitsContainmentFailureFencesClose(t *testing.T) {
+	agent := NewAgent(WithHome(t.TempDir()))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	agent.queryRateLimits = func(context.Context, claude.Options) (claude.RateLimits, error) {
+		close(started)
+		<-release
+
+		return claude.RateLimits{}, claude.ErrProcessContainmentIncomplete
+	}
+	agent.queryRateLimitsAPI = func(context.Context, claude.RateLimitsProbe) (claude.RateLimits, error) {
+		t.Fatal("containment failure must not fall back to the direct API")
+
+		return claude.RateLimits{}, nil
+	}
+
+	requestDone := make(chan error, 1)
+	go func() {
+		_, err := agent.HandleExtensionMethod(context.Background(), RateLimitsMethod, nil)
+		requestDone <- err
+	}()
+	<-started
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- agent.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before the admitted usage lifecycle unwound: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(release)
+	require.ErrorIs(t, <-requestDone, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-closeDone, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
+}
+
+func TestClosedAgentRejectsDirectNativeConstructionAdmissions(t *testing.T) {
+	agent := NewAgent(WithHome(t.TempDir()))
+	require.NoError(t, agent.Close())
+	require.ErrorIs(t, agent.beginSessionConstruction(), errAgentClosed)
+
+	_, err := agent.handleRateLimits(t.Context(), nil)
+	require.ErrorIs(t, err, errAgentClosed)
+	_, err = agent.startAndStoreSession(t.Context(), "closed", sessionStart{}, nil)
+	require.ErrorIs(t, err, errAgentClosed)
+
+	session := &agentSession{agent: agent, id: "closed", client: deadClaudeClient(t, nil), canRelaunch: true}
+	require.ErrorIs(t, session.ensureClientAlive(t.Context()), errAgentClosed)
 }

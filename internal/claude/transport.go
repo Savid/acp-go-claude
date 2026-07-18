@@ -32,17 +32,19 @@ const processWaitTimedOutMessage = "wait for claude process after kill timed out
 const stderrTailLines = 20
 
 var (
-	processCommandContext    = newProcessCommand
-	processPrepareContained  = prepareProcessTreeCommand
-	processStartContained    = startContainedProcess
-	processAfterDecode       = func() {}
-	processGetwd             = os.Getwd
-	processTerminate         = terminateProcess
-	processKill              = killProcess
-	processContainmentClose  = func(tree *processContainment) error { return tree.close() }
-	maxJSONLineBytes         = defaultMaxJSONLineBytes
-	processShutdownWaitDelay = 5 * time.Second
-	processExitGracePeriod   = 2 * time.Second
+	processCommandContext          = newProcessCommand
+	processPrepareContained        = prepareProcessTreeCommand
+	processStartContained          = startContainedProcess
+	processAfterDecode             = func() {}
+	processGetwd                   = os.Getwd
+	processTerminate               = terminateProcess
+	processKill                    = killProcess
+	processContainmentOwnsShutdown = func(tree *processContainment) bool { return tree.ownsShutdown() }
+	processContainmentQuiesce      = func(tree *processContainment, timeout time.Duration) error { return tree.quiesce(timeout) }
+	processContainmentClose        = func(tree *processContainment) error { return tree.close() }
+	maxJSONLineBytes               = defaultMaxJSONLineBytes
+	processShutdownWaitDelay       = 5 * time.Second
+	processExitGracePeriod         = 2 * time.Second
 )
 
 // claudeVersionProbe fails fast when the discovered Claude CLI is too old. It is
@@ -547,7 +549,7 @@ func (t *ProcessTransport) shutdownProcess(stdinClosed bool) error {
 		}
 	}
 
-	if t.tree != nil && t.tree.ownsShutdown() {
+	if t.tree != nil && processContainmentOwnsShutdown(t.tree) {
 		containmentErr := t.quiesceProcessTree()
 
 		return errors.Join(containmentErr, t.waitForShutdown(waitErr, true))
@@ -578,7 +580,7 @@ func (t *ProcessTransport) quiesceProcessTree() error {
 		return nil
 	}
 
-	if err := t.tree.quiesce(processShutdownWaitDelay); err != nil {
+	if err := processContainmentQuiesce(t.tree, processShutdownWaitDelay); err != nil {
 		if t.options.ObserveProcessInventory != nil {
 			t.options.ObserveProcessInventory(context.Background(), unavailableProcessInventory)
 		}

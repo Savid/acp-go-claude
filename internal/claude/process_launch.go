@@ -17,8 +17,8 @@ type processTreeCommand struct {
 	control    *os.File
 	ready      *os.File
 	proof      *os.File
-	bestEffort bool
-	generation *DarwinGeneration
+	bestEffort bool              //nolint:unused // Darwin launch code consumes this field.
+	generation *DarwinGeneration //nolint:unused // Darwin launch code consumes this field.
 }
 
 type processLaunchOptions struct {

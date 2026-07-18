@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -40,6 +41,24 @@ func TestRunContainmentUsage(t *testing.T) {
 	var help bytes.Buffer
 	if code := runContainment([]string{"cleanup", "-h"}, &bytes.Buffer{}, &help); code != 2 || !strings.Contains(help.String(), "PID-reuse") {
 		t.Fatalf("cleanup help = %d, %q", code, help.String())
+	}
+}
+
+func TestRunContainmentSuccessfulOperations(t *testing.T) {
+	originalDiagnose := diagnoseContainment
+	originalCleanup := cleanupContainment
+	t.Cleanup(func() {
+		diagnoseContainment = originalDiagnose
+		cleanupContainment = originalCleanup
+	})
+
+	diagnoseContainment = func(string, io.Writer) error { return nil }
+	cleanupContainment = func(string, string, bool, io.Writer) error { return nil }
+	if code := runContainment([]string{"diagnose", "-scratch-dir", t.TempDir()}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("diagnose code = %d", code)
+	}
+	if code := runContainment([]string{"cleanup", "-scratch-dir", t.TempDir(), "-runtime-id", strings.Repeat("0", 32), "-force"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("cleanup code = %d", code)
 	}
 }
 

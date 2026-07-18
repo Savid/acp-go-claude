@@ -905,6 +905,25 @@ func TestProcessTransportShutdownExpiresVoluntaryExitGrace(t *testing.T) {
 	require.NotNil(t, command.ProcessState)
 }
 
+func TestProcessTransportContainedTreeOwnsShutdown(t *testing.T) {
+	originalOwnsShutdown := processContainmentOwnsShutdown
+	originalQuiesce := processContainmentQuiesce
+	originalClose := processContainmentClose
+	t.Cleanup(func() {
+		processContainmentOwnsShutdown = originalOwnsShutdown
+		processContainmentQuiesce = originalQuiesce
+		processContainmentClose = originalClose
+	})
+
+	processContainmentOwnsShutdown = func(*processContainment) bool { return true }
+	processContainmentQuiesce = func(*processContainment, time.Duration) error { return nil }
+	processContainmentClose = func(*processContainment) error { return nil }
+
+	transport := &ProcessTransport{tree: &processContainment{}}
+	require.NoError(t, transport.shutdownProcess(false))
+	require.Nil(t, transport.tree)
+}
+
 func TestWaitForProcessExitTimeout(t *testing.T) {
 	err := waitForProcessExit(make(chan error), true, errors.New("close failed"), time.Millisecond)
 

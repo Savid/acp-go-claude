@@ -2,23 +2,12 @@ package claude
 
 import (
 	"errors"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-type generationDirEntry struct {
-	info fs.FileInfo
-	err  error
-}
-
-func (entry generationDirEntry) Name() string               { return entry.info.Name() }
-func (entry generationDirEntry) IsDir() bool                { return entry.info.IsDir() }
-func (entry generationDirEntry) Type() fs.FileMode          { return entry.info.Mode().Type() }
-func (entry generationDirEntry) Info() (fs.FileInfo, error) { return entry.info, entry.err }
 
 func TestDarwinGenerationPrepareCommandCopiesWritableInputs(t *testing.T) {
 	root := t.TempDir()
@@ -37,7 +26,6 @@ func TestDarwinGenerationPrepareCommandCopiesWritableInputs(t *testing.T) {
 		"PATH=/bin",
 		"TMPDIR=/old",
 		DarwinRuntimeIDEnv + "=old",
-		DarwinScratchRootEnv + "=/old",
 		privateAdapterEnvPrefix + "FAKE=secret",
 		"malformed",
 	}

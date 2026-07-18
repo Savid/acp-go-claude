@@ -8,10 +8,10 @@ import (
 	nativeclaude "github.com/savid/acp-go-claude/internal/claude"
 )
 
-func diagnoseContainment(scratchDir string, output io.Writer) error {
+var diagnoseContainment = func(scratchDir string, output io.Writer) error {
 	return nativeclaude.DiagnoseDarwinContainment(scratchDir, output)
 }
 
-func cleanupContainment(scratchDir, runtimeID string, force bool, output io.Writer) error {
+var cleanupContainment = func(scratchDir, runtimeID string, force bool, output io.Writer) error {
 	return nativeclaude.CleanupDarwinContainment(scratchDir, runtimeID, force, output)
 }

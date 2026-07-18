@@ -5,6 +5,7 @@ package claude
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,16 @@ import (
 )
 
 type failingWriter struct{ err error }
+
+type generationDirEntry struct {
+	info fs.FileInfo
+	err  error
+}
+
+func (entry generationDirEntry) Name() string               { return entry.info.Name() }
+func (entry generationDirEntry) IsDir() bool                { return entry.info.IsDir() }
+func (entry generationDirEntry) Type() fs.FileMode          { return entry.info.Mode().Type() }
+func (entry generationDirEntry) Info() (fs.FileInfo, error) { return entry.info, entry.err }
 
 func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
 

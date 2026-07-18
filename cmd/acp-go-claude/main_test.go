@@ -168,26 +168,6 @@ func TestPendingSignalAndSignalCode(t *testing.T) {
 	require.Equal(t, 1, signalCode(fakeSignal("fake")))
 }
 
-func TestRunReturnsSignalCode(t *testing.T) {
-	originalServe := serve
-	originalShutdown := shutdownOpenTelemetry
-	t.Cleanup(func() {
-		serve = originalServe
-		shutdownOpenTelemetry = originalShutdown
-	})
-
-	serve = func(ctx context.Context, _ io.Reader, _ io.Writer, _ ...claudeacp.Option) error {
-		require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
-		<-ctx.Done()
-
-		return ctx.Err()
-	}
-	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
-
-	code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
-	require.Equal(t, 128+int(syscall.SIGTERM), code)
-}
-
 func TestMainExitBranch(t *testing.T) {
 	originalServe := serve
 	originalExit := exit

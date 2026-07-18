@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -92,6 +93,10 @@ func TestAgentContainmentModeObservationAndWarning(t *testing.T) {
 }
 
 func TestPrepareDarwinGenerationResources(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin generation registry is platform-specific")
+	}
+
 	originalMkdir := mkdirDarwinGeneration
 	originalRemove := removeDarwinGeneration
 	originalChmod := chmodDarwinGeneration
@@ -214,8 +219,13 @@ func TestPrepareUsageGenerationResources(t *testing.T) {
 	bestEffort := NewAgent(WithScratchDir(t.TempDir()))
 	bestEffort.containmentMode = RuntimeContainmentBestEffort
 	generation, err := bestEffort.prepareUsageGeneration(t.Context())
-	require.NoError(t, err)
-	require.NoError(t, generation.Release(true))
+	if runtime.GOOS == "darwin" {
+		require.NoError(t, err)
+		require.NoError(t, generation.Release(true))
+	} else {
+		require.Nil(t, generation)
+		require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	}
 
 	unavailable := NewAgent()
 	unavailable.containmentMode = RuntimeContainmentUnavailable

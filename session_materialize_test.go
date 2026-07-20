@@ -120,7 +120,8 @@ func TestMaterializeStoreSessionErrors(t *testing.T) {
 	cwd := t.TempDir()
 	store := NewInMemorySessionStore()
 	require.NoError(t, store.Append(ctx, SessionKey{SessionID: sessionID}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
-	agent := NewAgent(WithSessionStore(store))
+	copyScratch := filepath.Join(t.TempDir(), "copy-scratch")
+	agent := NewAgent(WithSessionStore(store), WithScratchDir(copyScratch))
 
 	originalCopy := copyClaudeConfigFiles
 	copyClaudeConfigFiles = func(string, string, map[string]string) error { return errors.New("copy failed") }
@@ -128,13 +129,19 @@ func TestMaterializeStoreSessionErrors(t *testing.T) {
 	materialized, err := agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
 	require.ErrorContains(t, err, "copy failed")
 	require.Nil(t, materialized)
+	requireScratchDirEmpty(t, copyScratch)
 	copyClaudeConfigFiles = originalCopy
 
 	listErr := errors.New("list failed")
-	agent = NewAgent(WithSessionStore(&faultSessionStore{SessionStore: store, listSubkeysErr: listErr}))
+	listScratch := filepath.Join(t.TempDir(), "list-scratch")
+	agent = NewAgent(
+		WithSessionStore(&faultSessionStore{SessionStore: store, listSubkeysErr: listErr}),
+		WithScratchDir(listScratch),
+	)
 	materialized, err = agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
 	require.ErrorContains(t, err, "list session store subkeys")
 	require.Nil(t, materialized)
+	requireScratchDirEmpty(t, listScratch)
 
 	loadErr := errors.New("load failed")
 	agent = NewAgent(WithSessionStore(&faultSessionStore{SessionStore: store, loadErr: loadErr}))
@@ -202,7 +209,12 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 	store := NewInMemorySessionStore()
 	require.NoError(t, store.Append(ctx, SessionKey{SessionID: sessionID}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
 	require.NoError(t, store.Append(ctx, SessionKey{SessionID: sessionID, Subpath: "subagents/worker"}, []SessionStoreEntry{[]byte(`{"type":"assistant"}`)}))
-	agent := NewAgent(WithSessionStore(store), WithSessionStoreLoadTimeout(time.Millisecond))
+	scratch := filepath.Join(t.TempDir(), "scratch")
+	agent := NewAgent(
+		WithSessionStore(store),
+		WithSessionStoreLoadTimeout(time.Millisecond),
+		WithScratchDir(scratch),
+	)
 
 	originalMkdirTemp := materializeMkdirTemp
 	originalWriteFile := materializeWriteFile
@@ -230,6 +242,19 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 	require.ErrorContains(t, writeStoreJSONL(filepath.Join(t.TempDir(), "out.jsonl"), []SessionStoreEntry{[]byte(`{}`)}), "write failed")
 	_, err = agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
 	require.ErrorContains(t, err, "write failed")
+	requireScratchDirEmpty(t, scratch)
+	materializeWriteFile = originalWriteFile
+
+	materializeWriteFile = func(path string, data []byte, mode os.FileMode) error {
+		if strings.Contains(filepath.ToSlash(path), "/subagents/") {
+			return errors.New("subkey materialization failed")
+		}
+
+		return originalWriteFile(path, data, mode)
+	}
+	_, err = agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
+	require.ErrorContains(t, err, "subkey materialization failed")
+	requireScratchDirEmpty(t, scratch)
 	materializeWriteFile = originalWriteFile
 
 	emptyStoreAgent := NewAgent(WithSessionStore(NewInMemorySessionStore()))

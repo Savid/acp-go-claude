@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,11 +104,14 @@ func (a *Agent) materializeStoreSessionWithEntries(
 	}
 
 	materialized = &materializedSession{configDir: tmp}
+	created := materialized
 
 	success := false
 	defer func() {
 		if !success {
-			_ = materialized.Close()
+			if cleanupErr := created.Close(); cleanupErr != nil {
+				err = errors.Join(err, errors.New("clean up materialized session"))
+			}
 		}
 	}()
 
@@ -283,7 +287,7 @@ func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, env map[stri
 		}
 	}
 
-	return nil
+	return copyClaudeResumeCredential(source, dst)
 }
 
 func sourceClaudeConfigDir(sourceClaudeHome string, env map[string]string) string {

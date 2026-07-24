@@ -2,6 +2,7 @@ package claudeacp
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -187,6 +188,208 @@ func TestCopyClaudeResumeCredentialRejectsUnsafeDestinations(t *testing.T) {
 		require.ErrorIs(t, err, errClaudeResumeCredentialDestination)
 		requireSecretSafeCredentialError(t, err, source, "unit-secret")
 	})
+}
+
+func TestClaudeResumeCredentialIOFailures(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	data := []byte(`{"token":"unit-secret"}`)
+	require.NoError(t, os.WriteFile(filepath.Join(source, claudeResumeCredentialFile), data, 0o600))
+
+	originalLstat := resumeCredentialLstat
+	originalOpenRoot := resumeCredentialOpenRoot
+	originalRootLstat := resumeCredentialRootLstat
+	originalRootOpen := resumeCredentialRootOpen
+	originalFileStat := resumeCredentialFileStat
+	originalReadAll := resumeCredentialReadAll
+	originalFileClose := resumeCredentialFileClose
+	originalRootStat := resumeCredentialRootStat
+	originalRootChmod := resumeCredentialRootChmod
+	originalRootOpenFile := resumeCredentialRootOpenFile
+	originalRootRemove := resumeCredentialRootRemove
+	originalFileWrite := resumeCredentialFileWrite
+	originalFileChmod := resumeCredentialFileChmod
+	reset := func() {
+		resumeCredentialLstat = originalLstat
+		resumeCredentialOpenRoot = originalOpenRoot
+		resumeCredentialRootLstat = originalRootLstat
+		resumeCredentialRootOpen = originalRootOpen
+		resumeCredentialFileStat = originalFileStat
+		resumeCredentialReadAll = originalReadAll
+		resumeCredentialFileClose = originalFileClose
+		resumeCredentialRootStat = originalRootStat
+		resumeCredentialRootChmod = originalRootChmod
+		resumeCredentialRootOpenFile = originalRootOpenFile
+		resumeCredentialRootRemove = originalRootRemove
+		resumeCredentialFileWrite = originalFileWrite
+		resumeCredentialFileChmod = originalFileChmod
+	}
+	t.Cleanup(reset)
+
+	readCases := []struct {
+		name   string
+		mutate func()
+		want   error
+	}{
+		{
+			name: "lstat",
+			mutate: func() {
+				resumeCredentialLstat = func(string) (os.FileInfo, error) {
+					return nil, errors.New("lstat")
+				}
+			},
+			want: errClaudeResumeCredentialSource,
+		},
+		{
+			name: "open root",
+			mutate: func() {
+				resumeCredentialOpenRoot = func(string) (*os.Root, error) {
+					return nil, errors.New("open root")
+				}
+			},
+			want: errClaudeResumeCredentialSource,
+		},
+		{
+			name: "root lstat",
+			mutate: func() {
+				resumeCredentialRootLstat = func(*os.Root, string) (os.FileInfo, error) {
+					return nil, errors.New("root lstat")
+				}
+			},
+			want: errClaudeResumeCredentialUnsafe,
+		},
+		{
+			name: "root open",
+			mutate: func() {
+				resumeCredentialRootOpen = func(*os.Root, string) (*os.File, error) {
+					return nil, errors.New("root open")
+				}
+			},
+			want: errClaudeResumeCredentialUnreadable,
+		},
+		{
+			name: "file stat",
+			mutate: func() {
+				resumeCredentialFileStat = func(*os.File) (os.FileInfo, error) {
+					return nil, errors.New("file stat")
+				}
+			},
+			want: errClaudeResumeCredentialUnsafe,
+		},
+		{
+			name: "read",
+			mutate: func() {
+				resumeCredentialReadAll = func(io.Reader) ([]byte, error) {
+					return []byte("partial"), errors.New("read")
+				}
+			},
+			want: errClaudeResumeCredentialUnreadable,
+		},
+		{
+			name: "close",
+			mutate: func() {
+				resumeCredentialFileClose = func(*os.File) error {
+					return errors.New("close")
+				}
+			},
+			want: errClaudeResumeCredentialUnreadable,
+		},
+		{
+			name: "growth",
+			mutate: func() {
+				resumeCredentialReadAll = func(io.Reader) ([]byte, error) {
+					return make([]byte, claudeResumeCredentialMaxBytes+1), nil
+				}
+			},
+			want: errClaudeResumeCredentialOversized,
+		},
+	}
+	for _, test := range readCases {
+		t.Run("read "+test.name, func(t *testing.T) {
+			reset()
+			test.mutate()
+			_, err := readClaudeResumeCredential(source)
+			require.ErrorIs(t, err, test.want)
+		})
+	}
+
+	writeCases := []struct {
+		name   string
+		mutate func()
+	}{
+		{
+			name: "open root",
+			mutate: func() {
+				resumeCredentialOpenRoot = func(string) (*os.Root, error) {
+					return nil, errors.New("open root")
+				}
+			},
+		},
+		{
+			name: "root stat",
+			mutate: func() {
+				resumeCredentialRootStat = func(*os.Root, string) (os.FileInfo, error) {
+					return nil, errors.New("root stat")
+				}
+			},
+		},
+		{
+			name: "root chmod",
+			mutate: func() {
+				resumeCredentialRootChmod = func(*os.Root, string, os.FileMode) error {
+					return errors.New("root chmod")
+				}
+			},
+		},
+		{
+			name: "open file",
+			mutate: func() {
+				resumeCredentialRootOpenFile = func(*os.Root, string, int, os.FileMode) (*os.File, error) {
+					return nil, errors.New("open file")
+				}
+			},
+		},
+		{
+			name: "write",
+			mutate: func() {
+				resumeCredentialFileWrite = func(*os.File, []byte) (int, error) {
+					return 0, errors.New("write")
+				}
+			},
+		},
+		{
+			name: "short write",
+			mutate: func() {
+				resumeCredentialFileWrite = func(*os.File, []byte) (int, error) {
+					return 0, nil
+				}
+			},
+		},
+		{
+			name: "file chmod",
+			mutate: func() {
+				resumeCredentialFileChmod = func(*os.File, os.FileMode) error {
+					return errors.New("file chmod")
+				}
+			},
+		},
+		{
+			name: "file close",
+			mutate: func() {
+				resumeCredentialFileClose = func(*os.File) error {
+					return errors.New("file close")
+				}
+			},
+		},
+	}
+	for _, test := range writeCases {
+		t.Run("write "+test.name, func(t *testing.T) {
+			reset()
+			test.mutate()
+			require.ErrorIs(t, writeClaudeResumeCredential(destination, data), errClaudeResumeCredentialDestination)
+			require.NoFileExists(t, filepath.Join(destination, claudeResumeCredentialFile))
+		})
+	}
 }
 
 func requireSecretSafeCredentialError(t *testing.T, err error, source string, secret string) {

@@ -92,6 +92,8 @@ providers.
 - Claude stream-json subprocess management and control-protocol handling.
 - Prompt streaming for messages, thoughts, tool calls, tool results, plans,
   usage, and session metadata.
+- Embedded static PNG, JPEG, GIF, and WebP prompt images, plus typed image and
+  resource-link output from native assistant and tool results.
 - Structured output through session-level JSON Schema.
 - Permission modes, permission prompts, plan mode, elicitation, and
   `AskUserQuestion` bridging.
@@ -116,6 +118,7 @@ corresponding Claude command.
 - [Overview](docs/overview.mdx)
 - [Run modes](docs/get-started/run-modes.mdx)
 - [Go API](docs/reference/go-api.mdx)
+- [Models and config](docs/features/models-config.mdx)
 - [ACP methods](docs/reference/acp-methods.mdx)
 - [Observability](docs/operations/observability.mdx)
 - [Security and process containment](docs/operations/security.mdx)

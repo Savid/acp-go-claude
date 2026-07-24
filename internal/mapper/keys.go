@@ -14,6 +14,7 @@ const (
 	keySource     = "source"
 	keyText       = "text"
 	keyType       = "type"
+	keyURI        = "uri"
 	keyURL        = "url"
 
 	sourceBase64 = "base64"

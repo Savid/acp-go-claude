@@ -63,7 +63,10 @@ func (s *agentSession) Prompt(
 	advertisedCommands := cloneAvailableCommands(s.advertisedCommands)
 	s.mu.Unlock()
 
-	content, err := mapper.PromptToClaude(prompt, advertisedCommands)
+	content, err := mapper.PromptToClaude(prompt, advertisedCommands, mapper.ImageInputLimits{
+		MaxBytesPerImage:  s.agent.options.ImageLimits.MaxInputBytesPerImage,
+		MaxBytesPerPrompt: s.agent.options.ImageLimits.MaxInputBytesPerPrompt,
+	})
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -510,7 +513,7 @@ func assistantIdentityMeta(messageID string) map[string]any {
 
 	return map[string]any{
 		claudeMetaKey: map[string]any{
-			"messageId": messageID,
+			jsonFieldMessageID: messageID,
 		},
 	}
 }

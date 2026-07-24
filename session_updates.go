@@ -22,13 +22,14 @@ var (
 const liveSessionTitleMaxRunes = 256
 
 func (s *agentSession) emitUpdates(ctx context.Context, updates []acp.SessionUpdate) error {
-	return s.emitUpdatesWithAssistantIdentity(ctx, updates, "")
+	return s.emitUpdatesWithAssistantIdentity(ctx, updates, "", false)
 }
 
 func (s *agentSession) emitUpdatesWithAssistantIdentity(
 	ctx context.Context,
 	updates []acp.SessionUpdate,
 	messageID string,
+	replay bool,
 ) error {
 	if len(updates) == 0 {
 		return nil
@@ -54,6 +55,38 @@ func (s *agentSession) emitUpdatesWithAssistantIdentity(
 		s.toolCallUpdateMu.Lock()
 
 		routedUpdate, started := s.reconcileToolCallStartLocked(update)
+
+		routedUpdate, shouldEmit, failedToolCallID, err := s.prepareImageUpdateLocked(ctx, routedUpdate, replay)
+		if err != nil {
+			if failedToolCallID != "" {
+				status := acp.ToolCallStatusFailed
+
+				failed := acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{
+					SessionUpdate: "tool_call_update",
+					Status:        &status,
+					ToolCallId:    failedToolCallID,
+				}}
+				if emitErr := conn.SessionUpdate(ctx, acp.SessionNotification{
+					Meta:      assistantIdentityNotificationMeta(ctx, messageID),
+					SessionId: s.id,
+					Update:    failed,
+				}); emitErr != nil {
+					s.toolCallUpdateMu.Unlock()
+
+					return emitErr
+				}
+			}
+			s.toolCallUpdateMu.Unlock()
+
+			return err
+		}
+
+		if !shouldEmit {
+			s.toolCallUpdateMu.Unlock()
+
+			continue
+		}
+
 		if err := conn.SessionUpdate(ctx, acp.SessionNotification{
 			Meta:      assistantIdentityNotificationMeta(ctx, messageID),
 			SessionId: s.id,
@@ -84,6 +117,8 @@ func (s *agentSession) emitUpdatesWithAssistantIdentity(
 func (s *agentSession) resetPublishedToolCalls() {
 	s.toolCallUpdateMu.Lock()
 	s.publishedToolCalls = make(map[acp.ToolCallId]struct{})
+	s.toolContent = make(map[acp.ToolCallId][]acp.ToolCallContent)
+	s.emittedAgentImages = make(map[string]struct{})
 	s.toolCallUpdateMu.Unlock()
 }
 
@@ -128,7 +163,7 @@ func assistantIdentityNotificationMeta(ctx context.Context, messageID string) ma
 		meta = make(map[string]any, 1)
 	}
 
-	meta[claudeMetaKey] = map[string]any{"messageId": messageID}
+	meta[claudeMetaKey] = map[string]any{jsonFieldMessageID: messageID}
 
 	return meta
 }
@@ -144,7 +179,7 @@ func (s *agentSession) emitNativeMessageIdentity(ctx context.Context, messageID 
 
 	return s.emitUpdatesWithAssistantIdentity(ctx, []acp.SessionUpdate{{
 		SessionInfoUpdate: &acp.SessionSessionInfoUpdate{},
-	}}, messageID)
+	}}, messageID, false)
 }
 
 func (s *agentSession) emitOptionalUpdates(ctx context.Context, updates []acp.SessionUpdate) error {
@@ -543,7 +578,12 @@ func (s *agentSession) replayTranscript(ctx context.Context, path string) error 
 }
 
 func (s *agentSession) replayTranscriptEntries(ctx context.Context, entries []SessionStoreEntry) error {
-	updates, truncated, err := transcript.ReplayEntries(entries)
+	rehydrated, err := rehydrateTranscriptImageEntries(entries, s.snapshotImageArtifacts())
+	if err != nil {
+		return err
+	}
+
+	updates, truncated, err := transcript.ReplayEntries(rehydrated)
 
 	return s.emitReplayUpdates(ctx, updates, truncated, err)
 }
@@ -564,7 +604,7 @@ func (s *agentSession) emitReplayUpdates(
 		}, updates...)
 	}
 
-	return s.emitUpdates(ctx, updates)
+	return s.emitUpdatesWithAssistantIdentity(ctx, updates, "", true)
 }
 
 func (s *agentSession) emitMessageSideEffects(ctx context.Context, msg claude.Message) error {

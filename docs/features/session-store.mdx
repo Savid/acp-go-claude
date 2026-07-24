@@ -70,3 +70,51 @@ subagent transcripts mirror under safe relative subpaths of the same session id.
 Set it when your store can hang (network round-trips), or a slow backend will
 stall `session/load`, `session/resume`, fork, and `session/list`.
 </Note>
+
+## Typed image output
+
+Native assistant and tool-result images are normalized to standard ACP content
+before emission. Inline base64 and base64 data URLs become an embedded ACP image
+with a truthful sniffed media type; a readable local image file under an allowed
+root is bounded, read, and embedded; a remote HTTP(S) URI becomes one ACP
+resource link and is never fetched. Output is not restricted to the prompt
+allowlist — any structurally recognized raster is emitted with its sniffed media
+type, so a BMP is valid output even though BMP prompt input is not. Each
+assistant image travels alone in its agent-message chunk, and a content-bearing
+tool update carries the tool call's complete content array because ACP clients
+replace that array; repeated native lifecycle frames never duplicate an
+artifact.
+
+Each image is validated, bounded, and stored before its update reaches the wire.
+Records live in private `_artifacts/images/<digest>.json` subkeys of the owning
+session, and mirrored transcript rows hold an artifact reference instead of a
+second base64 copy. Artifacts expire 24 hours after creation, are deleted with
+their session, and are copied into the child on fork. Load and replay rehydrate
+the reference and fail the whole request with `reason: "storage_failed"` when the
+required bytes are missing, expired, or invalid rather than silently dropping the
+image.
+
+An image-representation failure the adapter itself causes is turn-fatal and
+returns JSON-RPC `-32603` with the Claude turn envelope:
+
+```json
+{
+  "error": "claude_turn_failed",
+  "cause": "transport",
+  "message": "image output exceeds the configured per-image limit",
+  "stage": "image_output",
+  "reason": "too_large",
+  "sizeBytes": 7000000,
+  "maxBytes": 6291456
+}
+```
+
+The stable output `reason` values are `invalid_base64`, `not_a_raster`,
+`media_type_mismatch`, `missing_file`, `path_not_allowed`, `too_large`, and
+`storage_failed`.
+
+<Warning>
+A resource-link record retains its original source URI so replay can reproduce
+the native location result. A signed URI can authorize access to the image, so
+protect a host `SessionStore` as confidential application data.
+</Warning>

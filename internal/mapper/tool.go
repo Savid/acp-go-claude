@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	neturl "net/url"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 
@@ -25,56 +27,57 @@ const (
 	toolWorkflow         = "Workflow"
 	toolWrite            = "Write"
 
-	keyAllowedDomains   = "allowed_domains"
-	keyBlockedDomains   = "blocked_domains"
-	keyClaude           = "claude"
-	keyContent          = "content"
-	keyDescription      = "description"
-	keyErrorCode        = "error_code"
-	keyErrorMessage     = "error_message"
-	keyGlob             = "glob"
-	keyHeadLimit        = "head_limit"
-	keyIsError          = "is_error"
-	keyIsFileUpdate     = "is_file_update"
-	keyLimit            = "limit"
-	keyLines            = "lines"
-	keyMultiline        = "multiline"
-	keyMessageID        = "messageId"
-	keyEdits            = "edits"
-	keyNotebookPath     = "notebook_path"
-	keyNewSource        = "new_source"
-	keyCellID           = "cell_id"
-	keyNewStart         = "newStart"
-	keyNewString        = "new_string"
-	keyOffset           = "offset"
-	keyOldString        = "old_string"
-	keyOutputMode       = "output_mode"
-	keyPattern          = "pattern"
-	keyPlan             = "plan"
-	keyPrompt           = "prompt"
-	keyQuery            = "query"
-	keyReturnCode       = "return_code"
-	keyStderr           = "stderr"
-	keyStdout           = "stdout"
-	keyStatus           = "status"
-	keyStructuredPatch  = "structuredPatch"
-	keyTodos            = "todos"
-	keyToolName         = "toolName"
-	keyToolNameSnake    = "tool_name"
-	keyToolResponse     = "toolResponse"
-	keyToolReferences   = "tool_references"
-	keyToolUseID        = "tool_use_id"
-	keyDelta            = "delta"
-	keyTerminalID       = "terminal_id"
-	keyTerminalInfo     = "terminal_info"
-	keyTerminalOutput   = "terminal_output"
-	keyTerminalExit     = "terminal_exit"
-	keyTerminalData     = "data"
-	keyTerminalExitCode = "exit_code"
-	keyTerminalSignal   = "signal"
-	keyThinking         = "thinking"
-	keyTitle            = "title"
-	keyToolUseResult    = "tool_use_result"
+	keyAllowedDomains     = "allowed_domains"
+	keyBlockedDomains     = "blocked_domains"
+	keyClaude             = "claude"
+	keyContent            = "content"
+	keyDescription        = "description"
+	keyErrorCode          = "error_code"
+	keyErrorMessage       = "error_message"
+	keyGlob               = "glob"
+	keyHeadLimit          = "head_limit"
+	keyIsError            = "is_error"
+	keyIsFileUpdate       = "is_file_update"
+	keyLimit              = "limit"
+	keyLines              = "lines"
+	keyMultiline          = "multiline"
+	keyMessageID          = "messageId"
+	keyEdits              = "edits"
+	keyNotebookPath       = "notebook_path"
+	keyNewSource          = "new_source"
+	keyCellID             = "cell_id"
+	keyNewStart           = "newStart"
+	keyNewString          = "new_string"
+	keyOffset             = "offset"
+	keyOldString          = "old_string"
+	keyOutputMode         = "output_mode"
+	keyPattern            = "pattern"
+	keyPlan               = "plan"
+	keyPrompt             = "prompt"
+	keyQuery              = "query"
+	keyReturnCode         = "return_code"
+	keyStderr             = "stderr"
+	keyStdout             = "stdout"
+	keyStatus             = "status"
+	keyStructuredPatch    = "structuredPatch"
+	keyTodos              = "todos"
+	keyToolName           = "toolName"
+	keyToolNameSnake      = "tool_name"
+	keyToolResponse       = "toolResponse"
+	keyToolReferences     = "tool_references"
+	keyToolUseID          = "tool_use_id"
+	keyDelta              = "delta"
+	keyTerminalID         = "terminal_id"
+	keyTerminalInfo       = "terminal_info"
+	keyTerminalOutput     = "terminal_output"
+	keyTerminalExit       = "terminal_exit"
+	keyTerminalData       = "data"
+	keyTerminalExitCode   = "exit_code"
+	keyTerminalSignal     = "signal"
+	keyThinking           = "thinking"
+	keyTitle              = "title"
+	keyToolUseResult      = "tool_use_result"
+	keyInternalImageIndex = "_internalImageIndex"
 
 	streamEventContentBlockDelta = "content_block_delta"
 	streamEventContentBlockStart = "content_block_start"
@@ -330,9 +333,44 @@ func assistantUpdates(msg *claude.AssistantMessage, options ToolUpdateOptions) [
 		for _, update := range updates {
 			setAssistantMessageID(updateMeta(update), msg.MessageID)
 		}
+	} else if msg.MessageID != "" {
+		for _, update := range updates {
+			if update.AgentMessageChunk != nil &&
+				(update.AgentMessageChunk.Content.Image != nil ||
+					update.AgentMessageChunk.Content.ResourceLink != nil) {
+				setAssistantMessageID(updateMeta(update), msg.MessageID)
+			}
+		}
+	}
+
+	imageIndex := 0
+
+	for _, update := range updates {
+		if update.AgentMessageChunk == nil ||
+			(update.AgentMessageChunk.Content.Image == nil &&
+				update.AgentMessageChunk.Content.ResourceLink == nil) {
+			continue
+		}
+
+		setInternalImageIndex(updateMeta(update), imageIndex)
+		imageIndex++
 	}
 
 	return updates
+}
+
+func setInternalImageIndex(meta map[string]any, index int) {
+	if meta == nil {
+		return
+	}
+
+	claudeMeta, _ := meta[keyClaude].(map[string]any)
+	if claudeMeta == nil {
+		claudeMeta = make(map[string]any)
+		meta[keyClaude] = claudeMeta
+	}
+
+	claudeMeta[keyInternalImageIndex] = index
 }
 
 func checkpointableAssistantMessage(msg *claude.AssistantMessage, replay bool) bool {
@@ -345,12 +383,12 @@ func assistantUnknownBlockUpdate(block claude.UnknownBlock) (acp.SessionUpdate, 
 		return acp.SessionUpdate{}, false
 	}
 
-	data, mimeType := imageData(block.Raw)
-	if data == "" || mimeType == "" {
+	content, ok := imageContentBlock(block.Raw)
+	if !ok {
 		return acp.SessionUpdate{}, false
 	}
 
-	return acp.UpdateAgentMessage(acp.ImageBlock(data, mimeType)), true
+	return acp.UpdateAgentMessage(content), true
 }
 
 func localCommandMarkerText(text string) bool {
@@ -963,9 +1001,8 @@ func contentBlockToToolContent(block claude.ContentBlock, isError bool) (acp.Too
 
 func unknownBlockToToolContent(block claude.UnknownBlock, isError bool) (acp.ToolCallContent, bool) {
 	if block.Type == typeImage {
-		data, mimeType := imageData(block.Raw)
-		if data != "" && mimeType != "" {
-			return acp.ToolContent(acp.ImageBlock(data, mimeType)), true
+		if content, ok := imageContentBlock(block.Raw); ok {
+			return acp.ToolContent(content), true
 		}
 	}
 
@@ -985,12 +1022,11 @@ func rawMapToToolContent(raw map[string]any, isError bool, escapeReadText bool) 
 	case typeText:
 		return wrapText(stringInput(raw, keyText))
 	case typeImage:
-		data, mimeType := imageData(raw)
-		if data != "" && mimeType != "" {
-			return acp.ToolContent(acp.ImageBlock(data, mimeType)), true
+		if content, ok := imageContentBlock(raw); ok {
+			return acp.ToolContent(content), true
 		}
 
-		return wrapText(imageReferenceText(raw))
+		return acp.ToolCallContent{}, false
 	case toolResultToolReference:
 		return wrapText("Tool: " + stringInput(raw, keyToolNameSnake))
 	case toolResultToolSearch:
@@ -1032,18 +1068,6 @@ func textToolContent(text string, isError bool, escapeReadText bool) acp.ToolCal
 	}
 
 	return acp.ToolContent(acp.TextBlock(text))
-}
-
-func imageReferenceText(raw map[string]any) string {
-	source, _ := raw[keySource].(map[string]any)
-	switch stringInput(source, keyType) {
-	case sourceURL:
-		return "[image: " + stringInput(source, keyURL) + "]"
-	case "":
-		return "[image]"
-	default:
-		return "[image: file reference]"
-	}
 }
 
 func toolReferenceNames(raw map[string]any) string {
@@ -1394,6 +1418,62 @@ func imageData(raw map[string]any) (string, string) {
 	source, _ := raw[keySource].(map[string]any)
 
 	return stringInput(source, keyData), stringInput(source, keyMediaType)
+}
+
+func imageContentBlock(raw map[string]any) (acp.ContentBlock, bool) {
+	if raw == nil {
+		return acp.ContentBlock{}, false
+	}
+
+	data, mimeType := imageData(raw)
+	uri := imageURI(raw)
+
+	if data != "" {
+		block := acp.ImageBlock(data, mimeType)
+		if uri != "" {
+			block.Image.Uri = &uri
+		}
+
+		return block, true
+	}
+
+	if uri == "" {
+		return acp.ContentBlock{}, false
+	}
+
+	if parsed, err := neturl.Parse(uri); err == nil && (parsed.Scheme == typeHTTP || parsed.Scheme == "https") {
+		name := pathpkg.Base(parsed.Path)
+		if name == "." || name == "/" || name == "" {
+			name = typeImage
+		}
+
+		return acp.ResourceLinkBlock(name, uri), true
+	}
+
+	return acp.ContentBlock{
+		Image: &acp.ContentBlockImage{
+			Type:     typeImage,
+			MimeType: mimeType,
+			Uri:      &uri,
+		},
+	}, true
+}
+
+func imageURI(raw map[string]any) string {
+	for _, key := range []string{keyURI, keyURL, keyPath, keyFilePath} {
+		if value := stringInput(raw, key); value != "" {
+			return value
+		}
+	}
+
+	source, _ := raw[keySource].(map[string]any)
+	for _, key := range []string{keyURI, keyURL, keyPath, keyFilePath} {
+		if value := stringInput(source, key); value != "" {
+			return value
+		}
+	}
+
+	return ""
 }
 
 func stringInput(input map[string]any, key string) string {

@@ -30,9 +30,10 @@ type sessionMirror struct {
 	log         *slog.Logger
 	store       SessionStore
 	projectsDir string
+	session     *agentSession
 }
 
-func newSessionMirror(log *slog.Logger, store SessionStore, claudeHome string) *sessionMirror {
+func newSessionMirror(log *slog.Logger, store SessionStore, claudeHome string, session *agentSession) *sessionMirror {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -41,6 +42,7 @@ func newSessionMirror(log *slog.Logger, store SessionStore, claudeHome string) *
 		log:         log.With(slog.String("component", "session_mirror")),
 		store:       store,
 		projectsDir: filepath.Join(defaultClaudeConfigDir(claudeHome), "projects"),
+		session:     session,
 	}
 }
 
@@ -55,7 +57,15 @@ func (m *sessionMirror) appendFrame(ctx context.Context, frame *claude.Transcrip
 		return nil
 	}
 
-	if err := appendMirrorEntries(ctx, m.store, *key, frame.Entries); err != nil {
+	entries := frame.Entries
+	if m.session != nil {
+		entries, err = m.session.sanitizeTranscriptImageEntries(ctx, entries)
+		if err != nil {
+			return err
+		}
+	}
+
+	if err := appendMirrorEntries(ctx, m.store, *key, entries); err != nil {
 		return fmt.Errorf("%w: %w", errSessionMirrorAppend, err)
 	}
 
@@ -110,7 +120,8 @@ func sessionKeyForMirrorPath(filePath string, projectsDir string) (*SessionKey, 
 	absoluteProjects := filepath.Clean(projectsDir)
 
 	rel, _ := filepath.Rel(absoluteProjects, absoluteFile)
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if rel == "." || rel == parentDirSegment ||
+		strings.HasPrefix(rel, parentDirSegment+string(filepath.Separator)) {
 		return nil, fmt.Errorf("path is outside Claude projects dir")
 	}
 

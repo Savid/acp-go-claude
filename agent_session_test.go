@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -704,6 +705,87 @@ func TestStartSessionEdgeBranches(t *testing.T) {
 		StoreEntries: []SessionStoreEntry{[]byte(`{"type":"user"}`)},
 	})
 	require.ErrorContains(t, err, "create scratch parent dir")
+
+	imageListErrAgent, _, _ := newFakeLifecycleAgent(
+		t,
+		newFakeClaudeTransport(),
+		WithSessionStore(&faultSessionStore{
+			SessionStore:   NewInMemorySessionStore(),
+			listSubkeysErr: errors.New("image list failed"),
+		}),
+	)
+	_, err = imageListErrAgent.startSession(ctx, sessionID, sessionStart{
+		Cwd:          cwd,
+		ResumeID:     string(sessionID),
+		StoreEntries: []SessionStoreEntry{[]byte(`{"type":"user"}`)},
+	})
+	require.ErrorContains(t, err, "list image artifacts")
+
+	missingArtifactAgent, _, _ := newFakeLifecycleAgent(
+		t,
+		newFakeClaudeTransport(),
+		WithSessionStore(NewInMemorySessionStore()),
+	)
+	_, err = missingArtifactAgent.startSession(ctx, sessionID, sessionStart{
+		Cwd:      cwd,
+		ResumeID: string(sessionID),
+		StoreEntries: []SessionStoreEntry{[]byte(
+			`{"type":"assistant","message":{"content":[{"type":"image","source":{"type":"acp_artifact","artifact_key":"missing"}}]}}`,
+		)},
+	})
+	requireImageOutputError(t, err, imageOutputStorageFailed)
+
+	originalMaterializeMkdirTemp := materializeMkdirTemp
+	materializeMkdirTemp = func(string, string) (string, error) {
+		return "", errors.New("materialize temp failed")
+	}
+	materializeTempErrAgent, _, _ := newFakeLifecycleAgent(
+		t,
+		newFakeClaudeTransport(),
+		WithSessionStore(NewInMemorySessionStore()),
+	)
+	_, err = materializeTempErrAgent.startSession(ctx, sessionID, sessionStart{
+		Cwd:          cwd,
+		ResumeID:     string(sessionID),
+		StoreEntries: []SessionStoreEntry{[]byte(`{"type":"user"}`)},
+	})
+	require.ErrorContains(t, err, "materialize temp failed")
+	materializeMkdirTemp = originalMaterializeMkdirTemp
+
+	forkStore := NewInMemorySessionStore()
+	png := outputFixtureBase64(t, "valid.png")
+	decoded, err := base64.StdEncoding.DecodeString(png)
+	require.NoError(t, err)
+	forkArtifact := storedImageArtifact{
+		Version:     imageArtifactVersion,
+		Identity:    "agent:message:0",
+		Fingerprint: imageFingerprint(decoded),
+		MimeType:    "image/png",
+		Data:        png,
+		CreatedAt:   imageArtifactNow().UnixMilli(),
+	}
+	forkRaw, err := json.Marshal(forkArtifact)
+	require.NoError(t, err)
+	require.NoError(t, forkStore.Append(ctx, SessionKey{
+		SessionID: "parent",
+		Subpath:   imageArtifactKey(forkArtifact.Identity, forkArtifact.Fingerprint),
+	}, []SessionStoreEntry{forkRaw}))
+	failingForkStore := &faultSessionStore{
+		SessionStore: forkStore,
+		appendErr:    errors.New("fork image append failed"),
+	}
+	forkAgent, _, _ := newFakeLifecycleAgent(
+		t,
+		newFakeClaudeTransport(),
+		WithSessionStore(failingForkStore),
+	)
+	_, err = forkAgent.startSession(ctx, sessionID, sessionStart{
+		Cwd:          cwd,
+		ResumeID:     "parent",
+		StoreEntries: []SessionStoreEntry{[]byte(`{"type":"user"}`)},
+		ForkSession:  true,
+	})
+	require.ErrorContains(t, err, "store forked image artifact")
 
 	modelConfigErr, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithEnv(map[string]string{envClaudeModelConfig: "[]"}))
 	_, err = modelConfigErr.startSession(ctx, sessionID, sessionStart{Cwd: cwd})

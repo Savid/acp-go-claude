@@ -44,6 +44,7 @@ accidentally release the quarantined admission.
 | `WithSessionStore` | Replace the default in-memory session authority with a host store. |
 | `WithSessionStoreLoadTimeout` | Bound store reads used during restore and listing. |
 | `WithConcurrencyLimits` | Cap active sessions and concurrent client calls. |
+| `WithImageLimits` | Set decoded-byte policy limits for image input and output. |
 | `WithTurnTimeout` | Bound one prompt turn; expiry fails the turn with cause `timeout` (default: no deadline). |
 | `WithRuntimeResourceHooks` | Let an embedding host admit native roots and reserve adapter scratch roots before they are created. |
 
@@ -112,3 +113,11 @@ where applicable. A nil callback keeps standalone use unbounded.
 Session-store surface: `SessionStore`, `SessionKey`, `SessionSummary`,
 `SessionStoreReplacement`, `InMemorySessionStore`, and the constants
 `SessionStoreFormat` and `SessionStoreMainSubpath`.
+
+`ImageLimits` has four `int64` fields:
+`MaxInputBytesPerImage`, `MaxInputBytesPerPrompt`,
+`MaxOutputBytesPerImage`, and `MaxOutputBytesPerToolCall`. Omitting
+`WithImageLimits` defaults every field to 6 MiB decoded. Supplying the option
+replaces the whole struct; a zero field disables that adapter policy limit and
+a negative field makes initialization fail. The ACP Go frame bound still
+limits one emitted image even when an output policy field is zero.

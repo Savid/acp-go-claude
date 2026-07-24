@@ -25,6 +25,72 @@ Session configuration uses typed option categories:
 Use `session/set_config_option` with a selected option value. Boolean mode
 payloads are rejected; clients should send the selected mode value.
 
+## Image prompts
+
+The adapter advertises standard ACP image prompt support
+(`agentCapabilities.promptCapabilities.image`). That advertises transport only:
+it does not claim that every selected model can interpret pixels or that Claude
+has a native image generator. Model listings publish no per-model `capabilities`
+array and no modality or generator fields.
+
+Send a standard ACP image content block with embedded base64 `data` and one of
+these exact media types:
+
+- `image/png`
+- `image/jpeg`
+- `image/gif`
+- `image/webp`
+
+Images must be static. GIFs with multiple image descriptors, WebP with the
+`ANIM` flag, and PNG with an `acTL` chunk are rejected before Claude starts, as
+are missing or invalid base64, noncanonical media types, media-type/byte
+mismatches, invalid dimensions, and configured byte-limit overflow. When a block
+carries both `data` and `uri`, the embedded bytes are authoritative and the URI
+is never fetched; a URI-only prompt image is invalid.
+
+Claude exposes no authoritative selected-model modality field, so a structurally
+valid image is forwarded and the harness or provider stays authoritative for
+whether the selected model can use those pixels.
+
+Input failures use JSON-RPC `-32602 Invalid params`:
+
+```json
+{
+  "field": "prompt.image",
+  "error": "too_large",
+  "index": 1,
+  "sizeBytes": 6291457,
+  "maxBytes": 6291456
+}
+```
+
+The stable `error` values are `missing_data`, `invalid_base64`,
+`invalid_media_type`, `media_type_mismatch`, `animated_not_supported`,
+`invalid_dimensions`, and `too_large`. Validation stops at the first failing
+prompt block, and an aggregate overflow is attributed to the image that crosses
+the total.
+
+## Image limits
+
+All four decoded-byte policy limits default to 6 MiB:
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+	claudeacp.WithImageLimits(claudeacp.ImageLimits{
+		MaxInputBytesPerImage:     6 * 1024 * 1024,
+		MaxInputBytesPerPrompt:    6 * 1024 * 1024,
+		MaxOutputBytesPerImage:    6 * 1024 * 1024,
+		MaxOutputBytesPerToolCall: 6 * 1024 * 1024,
+	}),
+)
+```
+
+Supplying `WithImageLimits` replaces the whole struct. A zero field disables
+that specific adapter policy limit; a negative field fails initialization with
+the uniform invalid-parameters error. Zero never bypasses the hard ACP frame
+bound that limits one emitted image. Typed image output and its durable replay
+are covered in [Session store](/docs/features/session-store).
+
 ## Custom Anthropic-compatible base URL
 
 To point Claude Code at a custom Anthropic-compatible endpoint, set the base URL

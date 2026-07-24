@@ -245,6 +245,15 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 	requireScratchDirEmpty(t, scratch)
 	materializeWriteFile = originalWriteFile
 
+	materializeWriteFile = func(string, []byte, os.FileMode) error { return errors.New("write failed") }
+	materializeRemoveAll = func(string) error { return errors.New("remove failed") }
+	_, err = agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
+	require.ErrorContains(t, err, "write failed")
+	require.ErrorContains(t, err, "clean up materialized session")
+	materializeWriteFile = originalWriteFile
+	materializeRemoveAll = originalRemoveAll
+	require.NoError(t, os.RemoveAll(scratch))
+
 	materializeWriteFile = func(path string, data []byte, mode os.FileMode) error {
 		if strings.Contains(filepath.ToSlash(path), "/subagents/") {
 			return errors.New("subkey materialization failed")

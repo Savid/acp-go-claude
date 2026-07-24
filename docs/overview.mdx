@@ -18,6 +18,8 @@ It owns:
   Claude Code process per ACP session; MCP-bearing sessions replace one
   provisional process before their first turn).
 - Streaming Claude stream-json output into ACP session updates.
+- Validation and transport of embedded image prompts, plus normalization of
+  native image results into typed ACP content.
 - Permission prompts, elicitation, model and mode configuration, slash-command
   projection, optional raw events, and optional durable session storage.
 
@@ -53,6 +55,9 @@ metadata lives under the `_meta.claude` namespace:
   </Card>
   <Card title="Permissions" href="/docs/features/permissions">
     How tool-permission decisions flow through ACP.
+  </Card>
+  <Card title="Images" href="/docs/features/models-config">
+    Send bounded image prompts and consume typed image results.
   </Card>
   <Card title="Go API" href="/docs/reference/go-api">
     Embed the adapter with `Serve` and its options.

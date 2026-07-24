@@ -134,7 +134,7 @@ func NewAgent(opts ...Option) *Agent {
 		positionEncoding:    acp.PositionEncodingKindUtf16,
 		permissionCache:     make(map[acp.SessionId]map[string]string),
 		activeLimitErr:      validateConcurrencyLimits(options.ConcurrencyLimits),
-		configurationErr:    validateContainmentOptions(options),
+		configurationErr:    errors.Join(validateContainmentOptions(options), validateImageLimits(options.ImageLimits)),
 		containmentMode:     mode,
 		descendantProcesses: newRuntimeProcessSnapshotTracker(options.RuntimeResourceHooks, mode == RuntimeContainmentAuthoritative),
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
@@ -291,7 +291,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 					},
 					"elicitation": map[string]any{
 						"unstable": true,
-						"scope":    "session",
+						"scope":    string(RuntimeResourceSession),
 						"tracks":   "in-progress ACP elicitation RFD",
 					},
 					"rawEvent": map[string]any{

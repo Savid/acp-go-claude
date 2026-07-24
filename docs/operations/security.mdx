@@ -89,3 +89,10 @@ transports are rejected up front and never reach the CLI (see
 [MCP](/docs/features/mcp)). Seed and settings-overlay writes fail closed rather
 than overwrite an operator-authored file — see
 [Models and config](/docs/features/models-config).
+
+Embedded image data is decoded and structurally validated before a native turn.
+Local image output is readable only from the session workspace or the private
+session image scratch directory. Reads resolve symlinks, require a regular
+file, and enforce the configured byte bound before emission. Remote image URLs
+are never fetched. Raw events and raw tool output remove image base64 and
+signed query strings, retaining only bounded metadata needed for diagnostics.

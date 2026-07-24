@@ -24,6 +24,7 @@ func finalizeSessionRuntimeResources(
 	runtimeErr error,
 	nativeRelease func(),
 	mcpConfigDir string,
+	imageScratchDir string,
 	materialized *materializedSession,
 	scratchRelease func(),
 ) error {
@@ -40,16 +41,21 @@ func finalizeSessionRuntimeResources(
 		mcpRemoveErr = sessionRemoveAll(mcpConfigDir)
 	}
 
+	var imageRemoveErr error
+	if imageScratchDir != "" {
+		imageRemoveErr = sessionRemoveAll(imageScratchDir)
+	}
+
 	var materializedRemoveErr error
 	if materialized != nil {
 		materializedRemoveErr = materialized.Close()
 	}
 
-	if mcpRemoveErr == nil && materializedRemoveErr == nil && scratchRelease != nil {
+	if mcpRemoveErr == nil && imageRemoveErr == nil && materializedRemoveErr == nil && scratchRelease != nil {
 		scratchRelease()
 	}
 
-	return errors.Join(runtimeErr, mcpRemoveErr, materializedRemoveErr)
+	return errors.Join(runtimeErr, mcpRemoveErr, imageRemoveErr, materializedRemoveErr)
 }
 
 func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
@@ -529,6 +535,7 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 		err,
 		s.nativeRootRelease,
 		s.mcpConfigDir,
+		s.imageScratchDir,
 		s.materialized,
 		s.scratchRootRelease,
 	)

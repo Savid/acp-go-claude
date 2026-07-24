@@ -631,23 +631,6 @@ func TestSpecialToolResultContent(t *testing.T) {
 			want: "Error: bad - nope",
 		},
 		{
-			name: "url image",
-			raw: map[string]any{"type": "image", "source": map[string]any{
-				"type": "url", "url": "https://example.com/a.png",
-			}},
-			want: "[image: https://example.com/a.png]",
-		},
-		{
-			name: "generic image",
-			raw:  map[string]any{"type": "image"},
-			want: "[image]",
-		},
-		{
-			name: "file image",
-			raw:  map[string]any{"type": "image", "source": map[string]any{"type": "file"}},
-			want: "[image: file reference]",
-		},
-		{
 			name: "web search url only",
 			raw:  map[string]any{"type": "web_search_result", "url": "https://example.com"},
 			want: "https://example.com",
@@ -675,6 +658,17 @@ func TestSpecialToolResultContent(t *testing.T) {
 	require.Contains(t, content.Content.Content.Text.Text, `"x":"y"`)
 
 	_, ok = rawMapToToolContent(map[string]any{"type": "future", "bad": func() {}}, false, false)
+	require.False(t, ok)
+
+	content, ok = rawMapToToolContent(map[string]any{"type": "image", "source": map[string]any{
+		"type": "url", "url": "https://example.com/a.png",
+	}}, false, false)
+	require.True(t, ok)
+	require.Equal(t, "https://example.com/a.png", content.Content.Content.ResourceLink.Uri)
+
+	_, ok = rawMapToToolContent(map[string]any{"type": "image"}, false, false)
+	require.False(t, ok)
+	_, ok = rawMapToToolContent(map[string]any{"type": "image", "source": map[string]any{"type": "file"}}, false, false)
 	require.False(t, ok)
 }
 
@@ -789,6 +783,68 @@ func TestToolMappingHelpers(t *testing.T) {
 	require.Nil(t, rawToolResultContent("", false, false))
 	require.Equal(t, "one", rawToolResultContent([]any{"", "one"}, false, false)[0].Content.Content.Text.Text)
 	require.Equal(t, "ok", rawToolResultContent(map[string]any{"type": "text", "text": "ok"}, false, false)[0].Content.Content.Text.Text)
+}
+
+func TestImageContentMappingEdges(t *testing.T) {
+	t.Parallel()
+
+	require.NotPanics(t, func() { setInternalImageIndex(nil, 0) })
+
+	content, ok := imageContentBlock(map[string]any{
+		keyType: typeImage,
+		keySource: map[string]any{
+			keyType:      sourceBase64,
+			keyData:      "data",
+			keyMediaType: mimePNG,
+		},
+		keyURL: "file:///tmp/image.png",
+	})
+	require.True(t, ok)
+	require.Equal(t, "data", content.Image.Data)
+	require.Equal(t, "file:///tmp/image.png", *content.Image.Uri)
+
+	content, ok = imageContentBlock(map[string]any{
+		keyType: typeImage,
+		keyURL:  "https://example.com/",
+	})
+	require.True(t, ok)
+	require.Equal(t, "image", content.ResourceLink.Name)
+
+	content, ok = imageContentBlock(map[string]any{
+		keyType: typeImage,
+		"uri":   "file:///tmp/image.png",
+	})
+	require.True(t, ok)
+	require.Equal(t, "file:///tmp/image.png", *content.Image.Uri)
+
+	_, ok = imageContentBlock(nil)
+	require.False(t, ok)
+}
+
+func TestNonCheckpointAssistantImageKeepsIdentity(t *testing.T) {
+	t.Parallel()
+
+	msg := &claude.AssistantMessage{
+		MessageID:  "message-1",
+		StopReason: "tool_use",
+		Content: []claude.ContentBlock{claude.UnknownBlock{
+			Type: typeImage,
+			Raw: map[string]any{
+				keyType: typeImage,
+				keySource: map[string]any{
+					keyType:      sourceBase64,
+					keyData:      "data",
+					keyMediaType: mimePNG,
+				},
+			},
+		}},
+	}
+	updates := assistantUpdates(msg, ToolUpdateOptions{})
+	require.Len(t, updates, 1)
+	meta, ok := updates[0].AgentMessageChunk.Meta[keyClaude].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "message-1", meta[keyMessageID])
+	require.Equal(t, 0, meta[keyInternalImageIndex])
 }
 
 func mustInt(value int, ok bool) int {

@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -51,6 +52,9 @@ func TestAgentModelMetaAndOptions(t *testing.T) {
 	require.Equal(t, []string{effortLow, effortHigh}, infoMeta[claudeModelMetaSupportedEffortKey])
 	require.Equal(t, true, infoMeta[claudeModelMetaSupportsAutoModeKey])
 	require.Equal(t, defaultContextWindow, infoMeta[claudeModelMetaContextWindowKey])
+	encodedInfo, err := json.Marshal(claudeModelInfoMeta(available[0]))
+	require.NoError(t, err)
+	require.NotContains(t, string(encodedInfo), `"capabilities"`)
 	require.Nil(t, claudeModelInfoMeta(claude.AvailableModelInfo{Value: "unknown"}))
 	require.Equal(t, largeContextWindow, modelContextWindowHint(available[1]))
 	require.Equal(t, largeContextWindow, modelContextWindowHint(claude.AvailableModelInfo{Description: "has 1m context"}))
@@ -73,6 +77,9 @@ func TestAgentModelMetaAndOptions(t *testing.T) {
 	require.Equal(t, configMode, options[1].Select.Id)
 	require.Equal(t, configOutputStyle, options[2].Select.Id)
 	require.Equal(t, configEffort, options[3].Select.Id)
+	encodedOptions, err := json.Marshal(options)
+	require.NoError(t, err)
+	require.NotContains(t, string(encodedOptions), `"capabilities"`)
 
 	unstable := unstableConfigOptions(modeAuto, "claude-sonnet-4-5", available, "default", []string{"default"}, effortHigh, true, true)
 	require.Len(t, unstable, 4)

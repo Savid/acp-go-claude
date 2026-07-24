@@ -120,7 +120,7 @@ func TestNewSessionMirrorAndDefaultClaudeConfigDir(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
 	home := t.TempDir()
-	mirror := newSessionMirror(nil, NewInMemorySessionStore(), home)
+	mirror := newSessionMirror(nil, NewInMemorySessionStore(), home, nil)
 	require.Equal(t, filepath.Join(home, "projects"), mirror.projectsDir)
 	require.NotNil(t, mirror.log)
 

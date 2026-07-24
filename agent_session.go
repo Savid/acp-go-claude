@@ -644,10 +644,11 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	}
 
 	var (
-		materialized  *materializedSession
-		mcpConfigDir  string
-		nativeRelease func()
-		cleanupClient *claude.Client
+		materialized    *materializedSession
+		mcpConfigDir    string
+		imageScratchDir string
+		nativeRelease   func()
+		cleanupClient   *claude.Client
 	)
 
 	cleanupNeeded := true
@@ -662,13 +663,29 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		}
 
 		err = finalizeSessionRuntimeResources(
-			errors.Join(err, closeErr), nativeRelease, mcpConfigDir, materialized, scratchRelease,
+			errors.Join(err, closeErr), nativeRelease, mcpConfigDir, imageScratchDir, materialized, scratchRelease,
 		)
 	}()
 
 	claudeHome, err := canonicalClaudeHome(a.options.Home)
 	if err != nil {
 		return nil, err
+	}
+
+	imageScratchDir, err = createImageScratchDir(a.options.ScratchDir)
+	if err != nil {
+		return nil, err
+	}
+
+	imageArtifacts, err := a.loadImageArtifacts(ctx, start.ResumeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if start.ForkSession && string(id) != start.ResumeID {
+		if copyErr := a.copyImageArtifacts(ctx, string(id), imageArtifacts); copyErr != nil {
+			return nil, copyErr
+		}
 	}
 
 	mcpConfig, err := a.mcpConfigForStart(start)
@@ -686,8 +703,13 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	env = a.observe.InjectTraceEnv(ctx, env)
 
 	if len(start.StoreEntries) > 0 {
+		rehydrated, rehydrateErr := rehydrateTranscriptImageEntries(start.StoreEntries, imageArtifacts)
+		if rehydrateErr != nil {
+			return nil, rehydrateErr
+		}
+
 		materialized, err = a.materializeStoreSessionWithEntries(
-			ctx, start.ResumeID, start.Cwd, claudeHome, env, start.StoreEntries,
+			ctx, start.ResumeID, start.Cwd, claudeHome, env, rehydrated,
 		)
 	}
 
@@ -809,11 +831,15 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		permissionRules:       permissions.Clone(permissionRules),
 		materialized:          materialized,
 		mcpConfigDir:          mcpConfigDir,
+		imageScratchDir:       imageScratchDir,
 		scratchRootRelease:    scratchRelease,
-		mirror:                newSessionMirror(a.log, a.sessionStore(), processClaudeHome),
+		imageArtifacts:        imageArtifacts,
+		toolContent:           make(map[acp.ToolCallId][]acp.ToolCallContent),
+		emittedAgentImages:    make(map[string]struct{}),
 		rawMessages:           start.RawMessages,
 		mcpRefreshPending:     len(start.McpServers) > 0,
 	}
+	session.mirror = newSessionMirror(a.log, a.sessionStore(), processClaudeHome, session)
 	options.PermissionHandler = session.handlePermission
 	options.ElicitationHandler = session.handleElicitation
 	options.HookHandler = session.handleHookCallback

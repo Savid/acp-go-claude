@@ -21,6 +21,22 @@ var (
 	errClaudeResumeCredentialUnreadable  = errors.New("claude resume credential source is unreadable")
 	errClaudeResumeCredentialMalformed   = errors.New("claude resume credential source is malformed")
 	errClaudeResumeCredentialDestination = errors.New("claude resume credential destination is unavailable")
+
+	resumeCredentialLstat        = os.Lstat
+	resumeCredentialOpenRoot     = os.OpenRoot
+	resumeCredentialRootLstat    = func(root *os.Root, name string) (os.FileInfo, error) { return root.Lstat(name) }
+	resumeCredentialRootOpen     = func(root *os.Root, name string) (*os.File, error) { return root.Open(name) }
+	resumeCredentialFileStat     = func(file *os.File) (os.FileInfo, error) { return file.Stat() }
+	resumeCredentialReadAll      = io.ReadAll
+	resumeCredentialFileClose    = func(file *os.File) error { return file.Close() }
+	resumeCredentialRootStat     = func(root *os.Root, name string) (os.FileInfo, error) { return root.Stat(name) }
+	resumeCredentialRootChmod    = func(root *os.Root, name string, mode os.FileMode) error { return root.Chmod(name, mode) }
+	resumeCredentialRootOpenFile = func(root *os.Root, name string, flag int, mode os.FileMode) (*os.File, error) {
+		return root.OpenFile(name, flag, mode)
+	}
+	resumeCredentialRootRemove = func(root *os.Root, name string) error { return root.Remove(name) }
+	resumeCredentialFileWrite  = func(file *os.File, data []byte) (int, error) { return file.Write(data) }
+	resumeCredentialFileChmod  = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
 )
 
 func copyClaudeResumeCredential(source string, destination string) error {
@@ -39,7 +55,7 @@ func copyClaudeResumeCredential(source string, destination string) error {
 
 func readClaudeResumeCredential(source string) ([]byte, error) {
 	sourcePath := filepath.Join(source, claudeResumeCredentialFile)
-	sourceInfo, err := os.Lstat(sourcePath)
+	sourceInfo, err := resumeCredentialLstat(sourcePath)
 
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -57,32 +73,32 @@ func readClaudeResumeCredential(source string) ([]byte, error) {
 		return nil, errClaudeResumeCredentialOversized
 	}
 
-	sourceRoot, err := os.OpenRoot(source)
+	sourceRoot, err := resumeCredentialOpenRoot(source)
 	if err != nil {
 		return nil, errClaudeResumeCredentialSource
 	}
 	defer sourceRoot.Close()
 
-	rootSourceInfo, err := sourceRoot.Lstat(claudeResumeCredentialFile)
+	rootSourceInfo, err := resumeCredentialRootLstat(sourceRoot, claudeResumeCredentialFile)
 	if err != nil || !rootSourceInfo.Mode().IsRegular() || !os.SameFile(sourceInfo, rootSourceInfo) {
 		return nil, errClaudeResumeCredentialUnsafe
 	}
 
-	sourceFile, err := sourceRoot.Open(claudeResumeCredentialFile)
+	sourceFile, err := resumeCredentialRootOpen(sourceRoot, claudeResumeCredentialFile)
 	if err != nil {
 		return nil, errClaudeResumeCredentialUnreadable
 	}
 
-	openedSourceInfo, statErr := sourceFile.Stat()
+	openedSourceInfo, statErr := resumeCredentialFileStat(sourceFile)
 	if statErr != nil || !openedSourceInfo.Mode().IsRegular() || !os.SameFile(sourceInfo, openedSourceInfo) {
-		_ = sourceFile.Close()
+		_ = resumeCredentialFileClose(sourceFile)
 
 		return nil, errClaudeResumeCredentialUnsafe
 	}
 
-	data, readErr := io.ReadAll(io.LimitReader(sourceFile, claudeResumeCredentialMaxBytes+1))
+	data, readErr := resumeCredentialReadAll(io.LimitReader(sourceFile, claudeResumeCredentialMaxBytes+1))
 
-	closeErr := sourceFile.Close()
+	closeErr := resumeCredentialFileClose(sourceFile)
 	if readErr != nil || closeErr != nil {
 		clear(data)
 
@@ -105,23 +121,23 @@ func validClaudeResumeCredential(data []byte) bool {
 }
 
 func writeClaudeResumeCredential(destination string, data []byte) error {
-	destinationInfo, err := os.Lstat(destination)
+	destinationInfo, err := resumeCredentialLstat(destination)
 	if err != nil || !destinationInfo.IsDir() {
 		return errClaudeResumeCredentialDestination
 	}
 
-	destinationRoot, err := os.OpenRoot(destination)
+	destinationRoot, err := resumeCredentialOpenRoot(destination)
 	if err != nil {
 		return errClaudeResumeCredentialDestination
 	}
 	defer destinationRoot.Close()
 
-	rootDestinationInfo, err := destinationRoot.Stat(".")
+	rootDestinationInfo, err := resumeCredentialRootStat(destinationRoot, ".")
 	if err != nil || !os.SameFile(destinationInfo, rootDestinationInfo) {
 		return errClaudeResumeCredentialDestination
 	}
 
-	chmodErr := destinationRoot.Chmod(".", 0o700)
+	chmodErr := resumeCredentialRootChmod(destinationRoot, ".", 0o700)
 	if chmodErr != nil {
 		return errClaudeResumeCredentialDestination
 	}
@@ -130,7 +146,8 @@ func writeClaudeResumeCredential(destination string, data []byte) error {
 }
 
 func writeClaudeResumeCredentialFile(destinationRoot *os.Root, data []byte) error {
-	destinationFile, err := destinationRoot.OpenFile(
+	destinationFile, err := resumeCredentialRootOpenFile(
+		destinationRoot,
 		claudeResumeCredentialFile,
 		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
 		0o600,
@@ -142,18 +159,18 @@ func writeClaudeResumeCredentialFile(destinationRoot *os.Root, data []byte) erro
 	removeDestination := true
 	defer func() {
 		if removeDestination {
-			_ = destinationRoot.Remove(claudeResumeCredentialFile)
+			_ = resumeCredentialRootRemove(destinationRoot, claudeResumeCredentialFile)
 		}
 	}()
 
-	written, writeErr := destinationFile.Write(data)
+	written, writeErr := resumeCredentialFileWrite(destinationFile, data)
 	if writeErr == nil && written != len(data) {
 		writeErr = io.ErrShortWrite
 	}
 
-	chmodErr := destinationFile.Chmod(0o600)
+	chmodErr := resumeCredentialFileChmod(destinationFile, 0o600)
 
-	closeErr := destinationFile.Close()
+	closeErr := resumeCredentialFileClose(destinationFile)
 	if writeErr != nil || chmodErr != nil || closeErr != nil {
 		return errClaudeResumeCredentialDestination
 	}

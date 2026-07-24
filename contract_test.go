@@ -28,6 +28,7 @@ func TestInitializeContractCapabilities(t *testing.T) {
 	require.Nil(t, resp.AgentCapabilities.SessionCapabilities.Fork)
 	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Delete)
 	require.Nil(t, resp.AgentCapabilities.Nes)
+	require.True(t, resp.AgentCapabilities.PromptCapabilities.Image)
 
 	claudeMeta := requireAnyMap(t, resp.AgentCapabilities.Meta[claudeMetaKey])
 	require.Equal(t, ForkSessionMethod, requireAnyMap(t, claudeMeta["fork"])["method"])

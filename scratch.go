@@ -5,6 +5,8 @@ import (
 	"os"
 )
 
+var imageScratchMkdirTemp = os.MkdirTemp
+
 // scratchParent resolves the parent directory for all ephemeral on-disk
 // materialization: dir when set, else the system temp directory.
 func scratchParent(dir string) string {
@@ -24,4 +26,24 @@ func ensureScratchParent(dir string) (string, error) {
 	}
 
 	return parent, nil
+}
+
+func createImageScratchDir(dir string) (string, error) {
+	parent, err := ensureScratchParent(dir)
+	if err != nil {
+		return "", err
+	}
+
+	path, err := imageScratchMkdirTemp(parent, "acp-go-claude-images-*")
+	if err != nil {
+		return "", fmt.Errorf("create image scratch dir: %w", err)
+	}
+
+	if err := os.Chmod(path, 0o700); err != nil {
+		_ = os.RemoveAll(path)
+
+		return "", fmt.Errorf("set image scratch permissions: %w", err)
+	}
+
+	return path, nil
 }

@@ -47,3 +47,14 @@ cannot be marshalled is emitted with `{ "truncated": true, "reason":
 "unserializable", "maxBytes": 65536 }` (no `sizeBytes`). Because the marker still
 consumes a sequence number, the stream stays contiguous even when a frame is
 replaced.
+
+## Image and URL hygiene
+
+Raw events are diagnostic, so they never carry a second copy of image bytes.
+Image blocks inside a raw frame have their base64 data removed and replaced with
+an `imageMetadata` object holding `mimeType`, `sizeBytes`, `sha256`, and, when
+structurally readable, `width` and `height`. `data:` URIs are collapsed to
+`data:[redacted]`, and HTTP(S) `url`/`uri` values lose their query and fragment
+so signed tokens never persist in diagnostics. Typed image content is delivered
+through normal session updates, not raw events — see
+[typed image output](/docs/features/session-store).

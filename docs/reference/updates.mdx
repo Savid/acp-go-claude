@@ -11,6 +11,7 @@ updates:
 | Update | Source |
 | --- | --- |
 | assistant message chunks | Claude assistant text |
+| assistant image chunks | Claude assistant image results, one image per chunk |
 | thought chunks | Claude thinking text |
 | tool call | Claude tool start/input |
 | tool result | Claude tool result |
@@ -34,3 +35,5 @@ updates:
 - Subagent output flattens into this same update stream, tagged with
   `_meta.claude.parentToolUseId`; untagged updates are the main agent — see
   [Metadata](/docs/reference/meta).
+- A content-bearing tool update contains the complete current content array;
+  clients replace the prior array. Status-only updates omit `content`.

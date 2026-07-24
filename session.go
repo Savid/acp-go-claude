@@ -24,7 +24,10 @@ const (
 	jsonFieldFormat               = "format"
 	jsonFieldImportID             = "importId"
 	jsonFieldIndex                = "index"
+	jsonFieldData                 = "data"
+	jsonFieldMediaType            = "media_type"
 	jsonFieldMessage              = "message"
+	jsonFieldMessageID            = "messageId"
 	jsonFieldMethod               = "method"
 	jsonFieldCommand              = "command"
 	jsonFieldMeta                 = "_meta"
@@ -42,6 +45,9 @@ const (
 	jsonFieldURI                  = "uri"
 	jsonFieldURL                  = "url"
 	jsonFieldSubtype              = "subtype"
+	imageContentType              = "image"
+	uriSchemeHTTP                 = "http"
+	uriSchemeHTTPS                = "https"
 	permissionUpdateAddRules      = "addRules"
 	permissionUpdateBehavior      = "behavior"
 	permissionUpdateDestination   = "destination"
@@ -166,6 +172,7 @@ type agentSession struct {
 	turn               chan struct{}
 	cancelMu           sync.Mutex
 	toolCallUpdateMu   sync.Mutex
+	imageMu            sync.Mutex
 	rawEventMu         sync.Mutex
 	mu                 sync.Mutex
 	permissionSaveMu   sync.Mutex
@@ -174,12 +181,16 @@ type agentSession struct {
 	turnContainmentErr error
 	turnNonce          string
 	publishedToolCalls map[acp.ToolCallId]struct{}
+	toolContent        map[acp.ToolCallId][]acp.ToolCallContent
+	emittedAgentImages map[string]struct{}
+	imageArtifacts     map[string]storedImageArtifact
 	permissionCancel   map[string]*permissionRequestCancel
 	elicitationCancel  map[int64]*elicitationRequestCancel
 	elicitationSeq     int64
 	permissionRules    map[string]string
 	materialized       *materializedSession
 	mcpConfigDir       string
+	imageScratchDir    string
 	nativeRootRelease  func()
 	scratchRootRelease func()
 	// Started sessions always mirror transcript rows into the agent's

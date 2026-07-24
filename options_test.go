@@ -50,6 +50,12 @@ func TestApplyOptionsBranches(t *testing.T) {
 			MaxActiveSessions:        2,
 			MaxConcurrentClientCalls: 4,
 		}),
+		WithImageLimits(ImageLimits{
+			MaxInputBytesPerImage:     1,
+			MaxInputBytesPerPrompt:    2,
+			MaxOutputBytesPerImage:    3,
+			MaxOutputBytesPerToolCall: 4,
+		}),
 	})
 
 	require.Same(t, logger, options.Logger)
@@ -79,8 +85,25 @@ func TestApplyOptionsBranches(t *testing.T) {
 	require.Equal(t, env, options.Env)
 	require.Equal(t, 2, options.ConcurrencyLimits.MaxActiveSessions)
 	require.Equal(t, 4, options.ConcurrencyLimits.MaxConcurrentClientCalls)
+	require.Equal(t, ImageLimits{
+		MaxInputBytesPerImage:     1,
+		MaxInputBytesPerPrompt:    2,
+		MaxOutputBytesPerImage:    3,
+		MaxOutputBytesPerToolCall: 4,
+	}, options.ImageLimits)
 	require.Equal(t, []string{"project", "local"}, settingSourceArgs(options.SettingSources))
 
 	defaults := applyOptions(nil)
 	require.Equal(t, []SettingSource{SettingSourceUser, SettingSourceProject, SettingSourceLocal}, defaults.SettingSources)
+	require.Equal(t, ImageLimits{
+		MaxInputBytesPerImage:     defaultImageBytes,
+		MaxInputBytesPerPrompt:    defaultImageBytes,
+		MaxOutputBytesPerImage:    defaultImageBytes,
+		MaxOutputBytesPerToolCall: defaultImageBytes,
+	}, defaults.ImageLimits)
+	require.NoError(t, validateImageLimits(defaults.ImageLimits))
+	require.ErrorContains(t, validateImageLimits(ImageLimits{MaxInputBytesPerImage: -1}), "MaxInputBytesPerImage")
+	require.ErrorContains(t, validateImageLimits(ImageLimits{MaxInputBytesPerPrompt: -1}), "MaxInputBytesPerPrompt")
+	require.ErrorContains(t, validateImageLimits(ImageLimits{MaxOutputBytesPerImage: -1}), "MaxOutputBytesPerImage")
+	require.ErrorContains(t, validateImageLimits(ImageLimits{MaxOutputBytesPerToolCall: -1}), "MaxOutputBytesPerToolCall")
 }

@@ -1072,7 +1072,7 @@ func newPromptFlowSession(t *testing.T) (*agentSession, *fakeClaudeTransport, fu
 		client:            client,
 		turn:              make(chan struct{}, sessionTurnCapacity),
 		contextWindowSize: 200000,
-		mirror:            newSessionMirror(agent.log, nil, t.TempDir()),
+		mirror:            newSessionMirror(agent.log, nil, t.TempDir(), nil),
 		closeTurnWait:     defaultSessionCloseTurnWait,
 	}
 
@@ -1191,7 +1191,7 @@ func TestPromptMirrorAndObservationBranches(t *testing.T) {
 	agent := NewAgent()
 	session, cleanup := newStartedAgentSessionForTest(t, agent, "session-1")
 	defer cleanup()
-	session.mirror = newSessionMirror(agent.log, nil, t.TempDir())
+	session.mirror = newSessionMirror(agent.log, nil, t.TempDir(), nil)
 	handled, err := session.handleSessionMirror(ctx, &claude.AssistantMessage{})
 	require.NoError(t, err)
 	require.False(t, handled)
@@ -1213,7 +1213,7 @@ func TestPromptMirrorAndObservationBranches(t *testing.T) {
 	client := claude.NewClient(nil, claude.Options{}, transport)
 	require.NoError(t, client.Start(ctx))
 	defer func() { _ = client.Close() }()
-	drainSession := &agentSession{agent: agent, id: "drain", client: client, mirror: newSessionMirror(agent.log, nil, t.TempDir())}
+	drainSession := &agentSession{agent: agent, id: "drain", client: client, mirror: newSessionMirror(agent.log, nil, t.TempDir(), nil)}
 	transport.messages <- map[string]any{"type": "transcript_mirror", "filePath": "/tmp/outside.jsonl", "entries": []any{map[string]any{"type": "user"}}}
 	require.NoError(t, drainSession.drainSessionMirror(ctx, mapper.ToolUpdateOptions{Workflow: mapper.NewWorkflowTracker()}))
 }

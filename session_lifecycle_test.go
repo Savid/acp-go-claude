@@ -438,7 +438,7 @@ func newActualProcessFixture(t *testing.T, agentOptions ...Option) actualProcess
 		clientOptions:     options,
 		canRelaunch:       true,
 		turn:              make(chan struct{}, sessionTurnCapacity),
-		mirror:            newSessionMirror(agent.log, nil, dir),
+		mirror:            newSessionMirror(agent.log, nil, dir, nil),
 		closeTurnWait:     defaultSessionCloseTurnWait,
 		contextWindowSize: 200000,
 	}

@@ -110,6 +110,9 @@ type Options struct {
 	SessionStoreLoadTimeout time.Duration
 	// ConcurrencyLimits controls process-local backpressure.
 	ConcurrencyLimits ConcurrencyLimits
+	// ImageLimits controls decoded image bytes accepted from prompts and
+	// emitted in session updates.
+	ImageLimits ImageLimits
 	// SeedFiles maps paths relative to the resolved Claude config directory to
 	// file contents written into that directory before each Claude CLI session
 	// launches, so the launched CLI reads them as its own config (e.g.
@@ -166,6 +169,16 @@ type ConcurrencyLimits struct {
 	MaxConcurrentClientCalls int
 }
 
+// ImageLimits controls decoded image bytes at the ACP boundary.
+type ImageLimits struct {
+	MaxInputBytesPerImage     int64
+	MaxInputBytesPerPrompt    int64
+	MaxOutputBytesPerImage    int64
+	MaxOutputBytesPerToolCall int64
+}
+
+const defaultImageBytes int64 = 6 * 1024 * 1024
+
 func applyOptions(opts []Option) Options {
 	options := Options{
 		AgentName:             "acp-go-claude",
@@ -176,6 +189,12 @@ func applyOptions(opts []Option) Options {
 		SettingSources:        defaultSettingSources(),
 		InitializeTimeout:     time.Minute,
 		ControlHandlerTimeout: 5 * time.Minute,
+		ImageLimits: ImageLimits{
+			MaxInputBytesPerImage:     defaultImageBytes,
+			MaxInputBytesPerPrompt:    defaultImageBytes,
+			MaxOutputBytesPerImage:    defaultImageBytes,
+			MaxOutputBytesPerToolCall: defaultImageBytes,
+		},
 	}
 
 	for _, opt := range opts {
@@ -419,6 +438,14 @@ func WithEnv(env map[string]string) Option {
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) {
 		options.ConcurrencyLimits = limits
+	}
+}
+
+// WithImageLimits sets decoded image byte limits. Zero fields disable the
+// corresponding adapter policy limit.
+func WithImageLimits(limits ImageLimits) Option {
+	return func(options *Options) {
+		options.ImageLimits = limits
 	}
 }
 

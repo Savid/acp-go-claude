@@ -183,6 +183,10 @@ func (a *Agent) materializeStoreSubkeys(
 	sessionDir := filepath.Join(projectDir, mainKey.SessionID)
 
 	for _, subpath := range subkeys {
+		if imageArtifactSubpath(subpath) {
+			continue
+		}
+
 		if !isSafeSessionSubpath(subpath) {
 			continue
 		}

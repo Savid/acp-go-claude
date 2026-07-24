@@ -30,11 +30,13 @@ Raw Claude stream frames are not sent by default. A host opts in per session wit
 
 Prompt content fails closed before the turn starts. An empty prompt (zero
 content blocks), an unsupported block type (audio or an unknown block), an
-image with neither base64 data nor an `http(s)` URI, and an embedded resource
-that is empty or carries an unsupported blob mime type are all rejected with an
-invalid-params (`-32602`) error naming the offending field (`prompt`,
-`prompt.image`, or `prompt.resource`). Nothing is silently dropped and nothing
-is forwarded to Claude.
+invalid image block, and an embedded resource that is empty or carries an
+unsupported blob mime type are all rejected with an invalid-params (`-32602`)
+error naming the offending field (`prompt`, `prompt.image`, or
+`prompt.resource`). Image blocks require embedded base64 data and pass a
+structural validation pipeline before the turn starts — see
+[image prompts](/docs/features/models-config). Nothing is silently dropped and
+nothing is forwarded to Claude.
 
 ## Slash commands
 

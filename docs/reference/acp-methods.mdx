@@ -98,6 +98,13 @@ The `cause` vocabulary:
 Provider failures additionally include the result `subtype`, and may include an
 `errors` array and an `errorKind`.
 
+An adapter-side image representation failure uses the same `-32603` envelope
+with `cause: "transport"` and adds `stage: "image_output"`. Its `reason` is one
+of `invalid_base64`, `not_a_raster`, `media_type_mismatch`, `missing_file`,
+`path_not_allowed`, `too_large`, or `storage_failed`; byte-limit failures also
+carry `sizeBytes` and `maxBytes`. A tool-origin image failure first emits a
+status-only failed update for that tool call, then fails the prompt.
+
 <Note>
 This adapter advertises no ACP auth methods, so an authentication failure is a
 `provider` failure under `-32603` — it never emits the `-32000` auth-required

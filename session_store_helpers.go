@@ -52,7 +52,7 @@ func isSafeSessionSubpath(subpath string) bool {
 	}
 
 	for _, part := range strings.FieldsFunc(subpath, func(r rune) bool { return r == '/' || r == '\\' }) {
-		if part == "" || part == "." || part == ".." || strings.Contains(part, ":") {
+		if part == "" || part == "." || part == parentDirSegment || strings.Contains(part, ":") {
 			return false
 		}
 	}

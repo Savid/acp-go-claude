@@ -17,6 +17,11 @@
 // for session/load or session/resume when the local Claude transcript is
 // absent.
 //
+// Prompts may carry embedded base64 image blocks (static PNG, JPEG, GIF, and
+// WebP), validated before the turn starts, and native image results are
+// emitted as typed ACP image or resource-link content. [WithImageLimits]
+// bounds decoded image bytes in both directions.
+//
 // Hosts that need adapter telemetry can provide OpenTelemetry providers with
 // [WithTracerProvider] and [WithMeterProvider]. The package never configures
 // global OpenTelemetry providers; the acp-go-claude binary handles env-based

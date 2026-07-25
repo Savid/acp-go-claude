@@ -98,10 +98,15 @@ func promptImageHandoffForm(image *acp.ContentBlockImage) bool {
 }
 
 // handoffImageData resolves a handoff-form image block to the base64 payload
-// the native request carries. Block structure is validated first, then the file
-// is located and opened through the caller's root-confined reader, then the
-// media type and the declared size are checked before a single byte is read, and
-// only bytes that match the declared digest reach the embedded gate chain.
+// the native request carries.
+//
+// Every verdict decidable from the request alone is decided first — the
+// envelope, the uri, the declared media type, the declared size — so a block
+// this adapter was never going to accept costs no filesystem access at all.
+// That is cheaper, and it also keeps a rejected declaration from reporting
+// whether the path it named exists. Only then is the file opened, read, and
+// verified, and only bytes that match the declared digest reach the embedded
+// gate chain.
 func handoffImageData(
 	ctx context.Context,
 	reader HandoffFileReader,
@@ -124,6 +129,18 @@ func handoffImageData(
 		return "", err
 	}
 
+	if !portableImageMIME(image.MimeType) {
+		return "", imageInputError(errInvalidMediaType, index, 0, 0)
+	}
+
+	// The size gate is answered by the caller's own declaration, so an oversize
+	// block is refused without opening anything and without measuring a file the
+	// caller may not be entitled to measure.
+	gate := EffectiveInputBytesPerImage(limits.MaxBytesPerImage)
+	if envelope.sizeBytes > gate {
+		return "", imageInputError(errImageTooLarge, index, envelope.sizeBytes, gate)
+	}
+
 	file, err := reader.OpenHandoffImage(ctx, path)
 	if err != nil {
 		var refused *HandoffPathError
@@ -135,30 +152,14 @@ func handoffImageData(
 	}
 	defer file.Close()
 
-	// Where the file lives is a deployment question and is answered above
-	// whatever the block declares. Everything from here costs I/O, so the two
-	// checks that need none run first.
-	if !portableImageMIME(image.MimeType) {
-		return "", imageInputError(errInvalidMediaType, index, 0, 0)
-	}
-
-	gate := EffectiveInputBytesPerImage(limits.MaxBytesPerImage)
-	if envelope.sizeBytes > gate {
-		return "", imageInputError(errImageTooLarge, index, envelope.sizeBytes, gate)
-	}
-
-	// One byte past the gate distinguishes a file that fits from one that does
-	// not without holding an unbounded read.
-	data, err := io.ReadAll(io.LimitReader(file, gate+1))
+	// The read is bounded by what the block declared rather than by the policy
+	// gate, so the work a block commits this adapter to is charged to the size
+	// its own envelope stood behind. One byte past the declaration is enough to
+	// see that the file is not the one described, and verification below rejects
+	// it: a file bigger than it claims is not the file the digest covers.
+	data, err := io.ReadAll(io.LimitReader(file, envelope.sizeBytes+1))
 	if err != nil {
 		return "", handoffInputError(errMissingFile, index, "handoff file cannot be read")
-	}
-
-	// The bytes in hand are the only size this verdict may consult, and a read
-	// that came back over the bound leaves nothing behind: rejecting here is
-	// what keeps unverified bytes out of every gate below.
-	if int64(len(data)) > gate {
-		return "", imageInputError(errImageTooLarge, index, int64(len(data)), gate)
 	}
 
 	if err := verifyHandoffBytes(data, envelope, index); err != nil {
@@ -179,11 +180,29 @@ func parseHandoffEnvelope(meta map[string]any, index int) (handoffEnvelope, erro
 	}
 
 	object, ok := value.(map[string]any)
-	if !ok || len(object) != handoffFieldCount {
+	if !ok {
+		return handoffEnvelope{}, handoffInputError(errInvalidHandoff, index, "handoff metadata must be an object")
+	}
+
+	// A host that left a field out and a host that added one have made different
+	// mistakes, and neither can fix it from an answer that only says the envelope
+	// is wrong. Both are reported apart, and apart from a value that is present
+	// but malformed.
+	for _, field := range [...]string{handoffFieldVersion, handoffFieldDigest, handoffFieldSizeBytes} {
+		if _, present := object[field]; !present {
+			return handoffEnvelope{}, handoffInputError(
+				errInvalidHandoff,
+				index,
+				"handoff metadata is missing version, digest, or sizeBytes",
+			)
+		}
+	}
+
+	if len(object) != handoffFieldCount {
 		return handoffEnvelope{}, handoffInputError(
 			errInvalidHandoff,
 			index,
-			"handoff metadata must contain exactly version, digest, and sizeBytes",
+			"handoff metadata carries a field beyond version, digest, and sizeBytes",
 		)
 	}
 

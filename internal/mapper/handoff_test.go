@@ -25,10 +25,14 @@ const handoffRoot = "/handoff"
 // implements: it opens by path, refuses what it cannot find, and reports no size
 // of its own. Bounding the read is the caller's job, as it is in production.
 type stubHandoffReader struct {
-	files    map[string][]byte
-	err      error
-	readErr  error
-	paths    []string
+	files   map[string][]byte
+	err     error
+	readErr error
+	paths   []string
+	// read totals the bytes the caller pulled through every descriptor this
+	// reader handed out, which is how a test observes the bound the caller
+	// actually applied rather than the one it says it applies.
+	read     int
 	unclosed int
 }
 
@@ -60,7 +64,10 @@ func (f *stubHandoffFile) Read(into []byte) (int, error) {
 		return 0, f.err
 	}
 
-	return f.reader.Read(into)
+	count, err := f.reader.Read(into)
+	f.opened.read += count
+
+	return count, err
 }
 
 func (f *stubHandoffFile) Close() error {
@@ -185,14 +192,25 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 		message string
 	}{
 		{name: "absent", meta: map[string]any{}, message: "handoff metadata is missing"},
-		{name: "not an object", meta: map[string]any{MetaKeyHandoff: "handoff"}, message: "handoff metadata must contain exactly version, digest, and sizeBytes"},
+		{name: "not an object", meta: map[string]any{MetaKeyHandoff: "handoff"}, message: "handoff metadata must be an object"},
 		{
 			name: "missing field",
 			meta: map[string]any{MetaKeyHandoff: map[string]any{
 				handoffFieldVersion: HandoffVersion,
 				handoffFieldDigest:  valid[handoffFieldDigest],
 			}},
-			message: "handoff metadata must contain exactly version, digest, and sizeBytes",
+			message: "handoff metadata is missing version, digest, or sizeBytes",
+		},
+		{
+			// A field short and a field long is not one defect: the count alone
+			// cannot tell them apart, and the answer names which happened.
+			name: "unknown field replacing a required one",
+			meta: map[string]any{MetaKeyHandoff: map[string]any{
+				handoffFieldVersion: HandoffVersion,
+				handoffFieldDigest:  valid[handoffFieldDigest],
+				"extra":             true,
+			}},
+			message: "handoff metadata is missing version, digest, or sizeBytes",
 		},
 		{
 			name: "unknown field",
@@ -202,7 +220,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldSizeBytes: valid[handoffFieldSizeBytes],
 				"extra":               true,
 			}},
-			message: "handoff metadata must contain exactly version, digest, and sizeBytes",
+			message: "handoff metadata carries a field beyond version, digest, and sizeBytes",
 		},
 		{
 			name: "missing version",
@@ -639,24 +657,23 @@ func TestHandoffPathErrorMessage(t *testing.T) {
 	require.EqualError(t, err, "handoff file does not exist")
 }
 
-// TestHandoffOverBoundReadEndsTheBlock pins the byte verdict to the bytes in
-// hand. The reader hands back one byte past the gate while the envelope declares
-// a much smaller file, so only a verdict decided on the read itself can reject:
-// a verdict decided on the declared size would let those bytes through
-// unverified.
-func TestHandoffOverBoundReadEndsTheBlock(t *testing.T) {
+// TestHandoffUnderDeclaredFileEndsTheBlockWithoutReadingIt pins the read to the
+// caller's own declaration. The file on disk is one byte past the policy gate
+// while the envelope declares 448 bytes and carries the real digest of the whole
+// file, so nothing about the block is dishonest except its size: an adapter that
+// bounded the read at the gate would read every one of those bytes to say so,
+// and would report a size the caller never stood behind.
+func TestHandoffUnderDeclaredFileEndsTheBlockWithoutReadingIt(t *testing.T) {
 	t.Parallel()
 
 	gate := int64(4096)
+	declared := int64(448)
 	oversized := append(fixtureHeaderPNG(), make([]byte, gate+1-33)...)
 
 	block := handoffImageBlock("a.png", oversized, mimePNG)
 	envelope, ok := block.Image.Meta[MetaKeyHandoff].(map[string]any)
 	require.True(t, ok)
-
-	// The host declares a small, plausible file. Its digest is the real one for
-	// the bytes on disk, so digest verification could not reject this block.
-	envelope[handoffFieldSizeBytes] = 448
+	envelope[handoffFieldSizeBytes] = declared
 
 	reader := newStubHandoffReader("a.png", oversized)
 
@@ -669,13 +686,16 @@ func TestHandoffOverBoundReadEndsTheBlock(t *testing.T) {
 	)
 	require.Nil(t, blocks)
 
+	// A file bigger than its envelope claims is not the file the digest covers,
+	// so the truthful answer is the envelope mismatch and not the byte policy.
 	details := requireImageInputErrorData(t, err)
-	require.Equal(t, errImageTooLarge, details[keyErrorField])
-	require.EqualValues(t, gate+1, details[keySizeBytes])
-	require.EqualValues(t, gate, details[keyMaxBytes])
+	require.Equal(t, errHandoffDigestMismatch, details[keyErrorField])
+	require.NotContains(t, details, keySizeBytes)
 
-	// The read happened, and nothing it returned reached the native request.
+	// The block was located and read, but never past one byte more than it
+	// declared: the work it committed the adapter to is the work it asked for.
 	require.Len(t, reader.paths, 1)
+	require.LessOrEqual(t, reader.read, int(declared+1))
 
 	// A second block after the rejection proves the prompt was abandoned rather
 	// than continuing with the aggregate charged a stale, smaller number.
@@ -693,8 +713,36 @@ func TestHandoffOverBoundReadEndsTheBlock(t *testing.T) {
 		pair,
 	)
 	require.Nil(t, blocks)
-	require.Equal(t, errImageTooLarge, requireImageInputErrorData(t, err)[keyErrorField])
+	require.Equal(t, errHandoffDigestMismatch, requireImageInputErrorData(t, err)[keyErrorField])
 	require.Equal(t, []string{filepath.Join(handoffRoot, "a.png")}, pair.paths)
+}
+
+// TestHandoffDeclaredSizeOverTheGateReadsNothing pins the one byte verdict the
+// pre-gate still reaches from the envelope alone. The reader would fail on any
+// read and the path is not one it knows, so a too_large answer proves the
+// declaration was refused before either could matter.
+func TestHandoffDeclaredSizeOverTheGateReadsNothing(t *testing.T) {
+	t.Parallel()
+
+	gate := int64(4096)
+	oversized := append(fixtureHeaderPNG(), make([]byte, gate+1-33)...)
+
+	reader := &stubHandoffReader{}
+	reader.readErr = errors.New("bytes must not be read")
+
+	_, err := PromptToClaude(
+		context.Background(),
+		[]acp.ContentBlock{handoffImageBlock("absent.png", oversized, mimePNG)},
+		nil,
+		ImageInputLimits{MaxBytesPerImage: gate},
+		reader,
+	)
+
+	details := requireImageInputErrorData(t, err)
+	require.Equal(t, errImageTooLarge, details[keyErrorField])
+	require.EqualValues(t, gate+1, details[keySizeBytes])
+	require.EqualValues(t, gate, details[keyMaxBytes])
+	require.Empty(t, reader.paths)
 }
 
 // TestHandoffBlockCountIsCappedWithTheAggregateDisabled pins the count cap as
@@ -912,26 +960,34 @@ func TestHandoffVersionZeroIsRejected(t *testing.T) {
 	require.Equal(t, "unsupported handoff metadata version", details[keyMessage])
 }
 
-// TestHandoffMediaTypeIsCheckedBeforeAnyByteIsRead pins the pre-read ordering: a
-// media type the adapter never accepts costs the located file, and nothing more.
-func TestHandoffMediaTypeIsCheckedBeforeAnyByteIsRead(t *testing.T) {
+// TestHandoffMediaTypeIsCheckedBeforeTheFilesystem pins the pre-gate ordering: a
+// media type the adapter never accepts costs no filesystem access whatsoever.
+// The absent-path case is the decisive one, because the only way to answer it
+// with the declared type is to never have looked — an adapter that locates the
+// file first reports missing_file and, in doing so, tells the caller its guess
+// about the path was wrong.
+func TestHandoffMediaTypeIsCheckedBeforeTheFilesystem(t *testing.T) {
 	t.Parallel()
 
 	png := fixtureBytes(t, "valid.png")
 
-	block := handoffImageBlock("a.png", png, "image/bmp")
-	reader := newStubHandoffReader("a.png", png)
+	for _, name := range []string{"a.png", "absent.png"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	// The read would fail if it happened, so a media-type verdict proves it did
-	// not: an implementation that reads first reports the read failure instead.
-	reader.readErr = errors.New("bytes must not be read")
+			block := handoffImageBlock(name, png, mimePDF)
+			reader := newStubHandoffReader("a.png", png)
+			reader.readErr = errors.New("bytes must not be read")
 
-	_, err := mapHandoffPrompt(t, block, reader, ImageInputLimits{})
-	details := requireImageInputErrorData(t, err)
-	require.Equal(t, errInvalidMediaType, details[keyErrorField])
+			_, err := mapHandoffPrompt(t, block, reader, ImageInputLimits{})
+			details := requireImageInputErrorData(t, err)
+			require.Equal(t, errInvalidMediaType, details[keyErrorField])
 
-	// The descriptor is released whether the block is accepted or refused.
-	require.Zero(t, reader.unclosed)
+			// Nothing was opened, so nothing is left open either.
+			require.Empty(t, reader.paths)
+			require.Zero(t, reader.unclosed)
+		})
+	}
 }
 
 // TestHandoffReadFailureIsAMissingFile pins the verdict for a file that located

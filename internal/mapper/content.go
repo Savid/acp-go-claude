@@ -467,11 +467,12 @@ func resourceToClaude(
 		// A gated blob consumes a media index like an image block, so a
 		// document and an image in one prompt never report the same index.
 		if normalized == mimePDF {
-			if err := validatePromptBlob(blob, mediaIndex, promptMediaBytes, limits); err != nil {
+			decoded, err := validatePromptBlob(blob, mediaIndex, promptMediaBytes, limits)
+			if err != nil {
 				return nil, nil, true, err
 			}
 
-			return []map[string]any{base64Block(typeDocument, normalized, blob)}, nil, true, nil
+			return []map[string]any{base64Block(typeDocument, normalized, base64.StdEncoding.EncodeToString(decoded))}, nil, true, nil
 		}
 
 		return nil, nil, false, acp.NewInvalidParams(map[string]any{keyErrorField: errValueUnsupported, keyFieldField: fieldPromptResource})
@@ -483,20 +484,30 @@ func resourceToClaude(
 // validatePromptBlob gates an embedded blob resource whatever its media type:
 // its base64 must decode, its decoded size must fit the per-image byte gate,
 // and its bytes are charged to the per-prompt aggregate alongside image bytes.
-func validatePromptBlob(blob string, index int, promptBytes *int64, limits ImageInputLimits) error {
-	decoded, err := base64.StdEncoding.DecodeString(blob)
+// It returns the decoded bytes, which is what the native request is built from.
+//
+// The decode is strict, so an encoding with non-zero padding bits or embedded
+// whitespace is rejected rather than quietly reinterpreted, and the caller
+// re-encodes from the bytes that passed the gates: the payload the harness sees
+// is then the one the gates measured, whatever spelling the host chose.
+func validatePromptBlob(blob string, index int, promptBytes *int64, limits ImageInputLimits) ([]byte, error) {
+	decoded, err := base64.StdEncoding.Strict().DecodeString(blob)
 	if err != nil {
-		return mediaInputError(fieldPromptResource, errInvalidBase64, index, 0, 0)
+		return nil, mediaInputError(fieldPromptResource, errInvalidBase64, index, 0, 0)
 	}
 
 	size := int64(len(decoded))
 
 	maxPerImage := EffectiveInputBytesPerImage(limits.MaxBytesPerImage)
 	if size > maxPerImage {
-		return mediaInputError(fieldPromptResource, errImageTooLarge, index, size, maxPerImage)
+		return nil, mediaInputError(fieldPromptResource, errImageTooLarge, index, size, maxPerImage)
 	}
 
-	return chargePromptBytes(size, index, fieldPromptResource, promptBytes, limits)
+	if err := chargePromptBytes(size, index, fieldPromptResource, promptBytes, limits); err != nil {
+		return nil, err
+	}
+
+	return decoded, nil
 }
 
 func textBlock(text string) map[string]any {

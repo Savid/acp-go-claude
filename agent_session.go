@@ -445,7 +445,20 @@ func (a *Agent) ensureOpen() error {
 		return errAgentClosed
 	}
 
-	return nil
+	return a.configurationError()
+}
+
+// configurationError reports the options this agent was built with as refused.
+// Every entry point answers it, not only initialize: an in-process host that
+// drives the agent directly may never call initialize, and an agent whose limits
+// or read root were rejected must not serve a turn under them.
+func (a *Agent) configurationError() error {
+	err := errors.Join(a.activeLimitErr, a.configurationErr)
+	if err == nil {
+		return nil
+	}
+
+	return acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 }
 
 func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) error {

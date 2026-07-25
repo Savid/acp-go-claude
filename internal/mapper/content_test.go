@@ -493,6 +493,42 @@ func TestPromptToClaudeBlobResourceIsGated(t *testing.T) {
 	require.EqualValues(t, int64(len(png))+512, details[keySizeBytes])
 }
 
+// TestDocumentBlobCarriesTheBytesTheGatesMeasured pins the document payload to
+// the bytes validation decoded rather than to the host's spelling of them, the
+// same way an image blob is pinned. Forwarding the blob verbatim would hand the
+// harness a payload the gates never measured, and would let one document reach it
+// under as many spellings as the decoder tolerates.
+func TestDocumentBlobCarriesTheBytesTheGatesMeasured(t *testing.T) {
+	t.Parallel()
+
+	canonical := base64.StdEncoding.EncodeToString([]byte("%PDF-1.7 document bytes"))
+
+	// A host emitting MIME base64 wraps its lines. The decoder accepts that, so
+	// only re-encoding makes the payload the harness sees the canonical one.
+	for _, spelling := range []string{canonical, wrapBase64(canonical, 16)} {
+		blocks, err := mapPromptBlocks(
+			[]acp.ContentBlock{blobResourceBlock(mimePDF, spelling)},
+			nil,
+			ImageInputLimits{},
+		)
+		require.NoError(t, err)
+
+		source, ok := blocks[0][keySource].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, canonical, source[keyData])
+	}
+
+	// An encoding whose final character sets bits the decoded length cannot hold
+	// is refused rather than quietly reinterpreted, so a payload that means two
+	// things to two decoders never becomes one this adapter admitted.
+	_, err := mapPromptBlocks(
+		[]acp.ContentBlock{blobResourceBlock(mimePDF, "QR==")},
+		nil,
+		ImageInputLimits{},
+	)
+	require.Equal(t, errInvalidBase64, requireResourceInputErrorData(t, err, 0)[keyErrorField])
+}
+
 // TestPromptToClaudeMediaIndexCountsGatedBlocks pins the index a rejection
 // reports as the position among gated media blocks in request order, so a
 // document and an image can never both report index 0.

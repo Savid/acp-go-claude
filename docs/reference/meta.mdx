@@ -73,9 +73,12 @@ root, and exactly this block `_meta`:
 }
 ```
 
-Exactly those three fields: a missing, extra, or wrong-typed field is rejected.
-The adapter reads the file, verifies its size and digest, and then applies the
-same gates an embedded image passes. See
+Exactly those three fields: a missing field, an extra field, and a wrong-typed
+field are each rejected, and the `message` says which happened. `sizeBytes` is
+load-bearing rather than a hint — it bounds how much the adapter reads, so a file
+that turns out to be larger is `handoff_digest_mismatch`. The adapter reads to
+that declaration, verifies the size and digest, and then applies the same gates
+an embedded image passes. See
 [Models and config](/docs/features/models-config).
 
 Every `session/prompt` and every cancellation of an active turn MUST carry

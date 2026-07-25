@@ -22,7 +22,9 @@ import (
 var handoffCauseMessages = []string{
 	"no handoff read root is configured",
 	"handoff metadata is missing",
-	"handoff metadata must contain exactly version, digest, and sizeBytes",
+	"handoff metadata must be an object",
+	"handoff metadata is missing version, digest, or sizeBytes",
+	"handoff metadata carries a field beyond version, digest, and sizeBytes",
 	"unsupported handoff metadata version",
 	"handoff digest must be 64 lowercase hexadecimal characters",
 	"handoff sizeBytes must be a non-negative integer",
@@ -335,11 +337,12 @@ func TestHandoffHardlinkOutOfTheRootIsReadable(t *testing.T) {
 	require.Equal(t, "handoff file does not match the declared envelope", details["message"])
 }
 
-// TestHandoffOverBoundReadIsRejectedAndForwardsNoBytes pins the byte verdict to
-// the bytes the read returned. The file on disk is one byte past the gate while
-// the envelope declares a small one, so a verdict that trusted the declaration
-// would forward bytes whose digest was never checked.
-func TestHandoffOverBoundReadIsRejectedAndForwardsNoBytes(t *testing.T) {
+// TestHandoffUnderDeclaredFileIsRejectedAndForwardsNoBytes drives the whole read
+// path against a real file that is far larger than its envelope declares. The
+// declaration is inside the byte gate, so the gate cannot be what refuses it;
+// only reading to the declaration and finding more can, and the answer names the
+// envelope rather than the policy.
+func TestHandoffUnderDeclaredFileIsRejectedAndForwardsNoBytes(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -362,12 +365,13 @@ func TestHandoffOverBoundReadIsRejectedAndForwardsNoBytes(t *testing.T) {
 	blocks, err := mapHandoffThroughReader(t, root, block, mapper.ImageInputLimits{MaxBytesPerImage: gate})
 	require.Nil(t, blocks)
 
-	details := requireHandoffEnvelope(t, err, "too_large")
-	require.EqualValues(t, gate+1, details["sizeBytes"])
-	require.EqualValues(t, gate, details["maxBytes"])
+	details := requireHandoffEnvelope(t, err, "handoff_digest_mismatch")
+	require.Equal(t, "handoff file does not match the declared envelope", details["message"])
 
-	// The declared size the host asked to be trusted did not decide anything.
-	require.NotEqual(t, int64(448), details["sizeBytes"])
+	// No byte count reaches the caller, so neither the file's real size nor the
+	// gate it would have been measured against is reported back.
+	require.NotContains(t, details, "sizeBytes")
+	require.NotContains(t, details, "maxBytes")
 }
 
 // TestHandoffURIPathDefectsResolveToLocationVerdicts pins the uri shapes a host

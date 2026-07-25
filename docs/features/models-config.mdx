@@ -53,8 +53,12 @@ carries both `data` and `uri`, the embedded bytes are authoritative and the URI
 is never fetched.
 
 An embedded blob resource is gated the same way whatever its media type: its
-base64 must decode and its decoded size must fit the per-image byte gate, and
-its bytes count toward the per-prompt total alongside image bytes. A text
+base64 must decode strictly and its decoded size must fit the per-image byte
+gate, and its bytes count toward the per-prompt total alongside image bytes. The
+payload Claude receives is re-encoded from the bytes that passed the gates, so a
+line-wrapped encoding reaches it in canonical form and an encoding with
+non-canonical trailing bits is rejected `invalid_base64` rather than
+reinterpreted. A text
 resource is charged that same per-prompt total, so declaring bytes as text
 rather than as a blob buys no extra budget. A blob declaring `application/pdf`
 becomes a native document block, and the media type is matched after
@@ -80,18 +84,30 @@ Then send an image block with empty `data`, a `file://` uri under that root, and
 the handoff envelope carrying the payload's sha256 digest and byte size (the
 exact `_meta` shape is in [Metadata](/docs/reference/meta)).
 
-The adapter opens the file relative to the root with the operating system
+Everything decidable from the request alone is decided before the filesystem is
+touched, first failure winning: the block and its envelope (`invalid_handoff`),
+then the declared media type against the four-format allowlist
+(`invalid_media_type`), then the declared `sizeBytes` against the effective
+per-image byte gate (`too_large`). A block the adapter was never going to accept
+therefore costs no filesystem access at all, and a rejected declaration reveals
+nothing about whether the path it named exists.
+
+Only then is the file opened, relative to the root with the operating system
 enforcing containment as part of the open, so a path or symlink that leaves the
 root is refused with no window between the decision and the read. A symlink
 inside the root is followed only when its target is relative; an absolute
 symlink is refused even when it points back inside. Anything that is not a
 regular file — a directory, a FIFO, a device — is refused on the descriptor
-rather than on the path, and the open never blocks waiting for a writer. The
-adapter then reads at most the per-image byte gate, verifies the bytes against
-the declared size and digest, and applies the identical gate chain an embedded
-image passes. A handed-over image and an embedded image carrying the same bytes
-produce the same native request, and the host's path is never forwarded to
-Claude.
+rather than on the path, and the open never blocks waiting for a writer.
+
+The read is bounded at one byte more than the block declared, not at the byte
+gate: the work a block commits the adapter to is charged to the size its own
+envelope stood behind. A file larger than it declares is
+`handoff_digest_mismatch`, because it is not the file the declared digest covers.
+Bytes that match the declared size and digest then pass the identical gate chain
+an embedded image passes. A handed-over image and an embedded image carrying the
+same bytes produce the same native request, and the host's path is never
+forwarded to Claude.
 
 Containment covers paths, not inodes: a process that can already write under the
 root can hardlink a file into it from anywhere the adapter's user can read. The

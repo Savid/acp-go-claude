@@ -202,15 +202,29 @@ func TestInitializeAdvertisesHandoffOnlyWithARoot(t *testing.T) {
 func TestInputHandoffRootMustBeAbsolute(t *testing.T) {
 	t.Parallel()
 
+	requireRelativeRootRefused := func(t *testing.T, err error) {
+		t.Helper()
+
+		var requestErr *acp.RequestError
+		require.ErrorAs(t, err, &requestErr)
+		require.Equal(t, -32602, requestErr.Code)
+
+		details, ok := requestErr.Data.(map[string]any)
+		require.True(t, ok)
+		require.Contains(t, details[jsonFieldError], "InputHandoffRoot must be an absolute path")
+	}
+
 	_, err := NewAgent(WithInputHandoffRoot("relative")).Initialize(context.Background(), acp.InitializeRequest{})
+	requireRelativeRootRefused(t, err)
 
-	var requestErr *acp.RequestError
-	require.ErrorAs(t, err, &requestErr)
-	require.Equal(t, -32602, requestErr.Code)
-
-	details, ok := requestErr.Data.(map[string]any)
-	require.True(t, ok)
-	require.Contains(t, details[jsonFieldError], "InputHandoffRoot must be an absolute path")
+	// An in-process host is free to skip initialize entirely, so the refusal
+	// cannot live only there: opening a session under a root this agent already
+	// rejected would run a whole turn against options that never validated.
+	_, err = NewAgent(WithInputHandoffRoot("relative")).NewSession(
+		context.Background(),
+		acp.NewSessionRequest{Cwd: t.TempDir()},
+	)
+	requireRelativeRootRefused(t, err)
 }
 
 // TestPromptHandoffImageNeverForwardsTheHostPath drives a whole turn so the

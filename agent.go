@@ -263,8 +263,8 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 	_, finish := a.observe.StartACP(ctx, params.Meta, "initialize")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	if configurationErr := errors.Join(a.activeLimitErr, a.configurationErr); configurationErr != nil {
-		return acp.InitializeResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: configurationErr.Error()})
+	if err := a.configurationError(); err != nil {
+		return acp.InitializeResponse{}, err
 	}
 
 	title := a.options.AgentTitle

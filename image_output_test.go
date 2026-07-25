@@ -235,9 +235,17 @@ func TestImageOutputValidationAndLocalRoots(t *testing.T) {
 	// The OS temp directory is an allowed root, so this case narrows it to a
 	// directory of its own; the workspace and scratch roots above were created
 	// before the narrowing and stay outside it.
+	//
+	// The narrowed root is a symlink to the directory that holds the file, which
+	// is what the temp directory itself is on macOS. Only a check that resolves
+	// the root to the same degree as the candidate can match it, so this case
+	// fails on every host if the root side stops being resolved rather than only
+	// on the hosts whose temp directory happens to be a link.
 	private := t.TempDir()
+	tempTarget := filepath.Join(private, "tmp-target")
+	require.NoError(t, os.Mkdir(tempTarget, 0o700))
 	tempRoot := filepath.Join(private, "tmp")
-	require.NoError(t, os.Mkdir(tempRoot, 0o700))
+	require.NoError(t, os.Symlink(tempTarget, tempRoot))
 	outsideRoot := filepath.Join(private, "outside")
 	require.NoError(t, os.Mkdir(outsideRoot, 0o700))
 	narrowTempDir(t, tempRoot)

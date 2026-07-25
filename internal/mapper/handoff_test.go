@@ -177,6 +177,27 @@ func TestHandoffImageUnsetRootIsInvalidHandoff(t *testing.T) {
 	require.Equal(t, "no handoff read root is configured", details[keyMessage])
 }
 
+// TestHandoffUnsetRootAnswersAheadOfTheBlockCap pins the order of the two
+// pre-gate refusals a prompt can meet at once. An adapter with no read root has
+// no handoff work for the count to bound, and invalid_handoff is the answer that
+// tells a host its read root never reached the agent, so a prompt carrying more
+// than the cap must not be answered with too_large instead.
+func TestHandoffUnsetRootAnswersAheadOfTheBlockCap(t *testing.T) {
+	t.Parallel()
+
+	png := fixtureBytes(t, "valid.png")
+
+	prompt := make([]acp.ContentBlock, 0, maxHandoffBlocksPerPrompt+1)
+	for range maxHandoffBlocksPerPrompt + 1 {
+		prompt = append(prompt, handoffImageBlock("a.png", png, mimePNG))
+	}
+
+	_, err := PromptToClaude(context.Background(), prompt, nil, ImageInputLimits{}, nil)
+
+	details := requireHandoffError(t, err, errInvalidHandoff)
+	require.Equal(t, "no handoff read root is configured", details[keyMessage])
+}
+
 func TestHandoffImageEnvelopeDefects(t *testing.T) {
 	t.Parallel()
 

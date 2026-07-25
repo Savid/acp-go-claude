@@ -100,10 +100,13 @@ func promptImageHandoffForm(image *acp.ContentBlockImage) bool {
 // handoffImageData resolves a handoff-form image block to the base64 payload
 // the native request carries.
 //
-// Every verdict decidable from the request alone is decided first — the
-// envelope, the uri, the declared media type, the declared size — so a block
-// this adapter was never going to accept costs no filesystem access at all.
-// That is cheaper, and it also keeps a rejected declaration from reporting
+// An adapter with no reader answers first: it has no handoff work for any later
+// gate to bound, and the invalid_handoff it reports is how a host learns its
+// read root never arrived, so nothing may stand in front of it. Every verdict
+// decidable from the request alone is decided next — the per-prompt block
+// count, the envelope, the uri, the declared media type, the declared size — so
+// a block this adapter was never going to accept costs no filesystem access at
+// all. That is cheaper, and it also keeps a rejected declaration from reporting
 // whether the path it named exists. Only then is the file opened, read, and
 // verified, and only bytes that match the declared digest reach the embedded
 // gate chain.
@@ -112,11 +115,18 @@ func handoffImageData(
 	reader HandoffFileReader,
 	image *acp.ContentBlockImage,
 	index int,
-	promptBytes *int64,
+	media *promptMediaState,
 	limits ImageInputLimits,
 ) (string, error) {
 	if reader == nil {
 		return "", handoffInputError(errInvalidHandoff, index, "no handoff read root is configured")
+	}
+
+	// Counted before the read, so the block that crosses the cap costs no I/O at
+	// all.
+	media.handoffBlocks++
+	if media.handoffBlocks > maxHandoffBlocksPerPrompt {
+		return "", imageInputError(errImageTooLarge, index, int64(media.handoffBlocks), maxHandoffBlocksPerPrompt)
 	}
 
 	envelope, err := parseHandoffEnvelope(image.Meta, index)
@@ -166,7 +176,7 @@ func handoffImageData(
 		return "", err
 	}
 
-	if err := validateRasterBytes(data, image.MimeType, index, fieldPromptImage, promptBytes, limits); err != nil {
+	if err := validateRasterBytes(data, image.MimeType, index, fieldPromptImage, &media.bytes, limits); err != nil {
 		return "", err
 	}
 

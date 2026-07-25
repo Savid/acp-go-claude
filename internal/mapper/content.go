@@ -206,19 +206,7 @@ func promptImageToClaude(
 	handoff HandoffFileReader,
 ) ([]map[string]any, error) {
 	if image.Data == "" && promptImageHandoffForm(image) {
-		// Counted before the read, so the block that crosses the cap costs no
-		// I/O at all.
-		media.handoffBlocks++
-		if media.handoffBlocks > maxHandoffBlocksPerPrompt {
-			return nil, imageInputError(
-				errImageTooLarge,
-				index,
-				int64(media.handoffBlocks),
-				maxHandoffBlocksPerPrompt,
-			)
-		}
-
-		data, err := handoffImageData(ctx, handoff, image, index, &media.bytes, limits)
+		data, err := handoffImageData(ctx, handoff, image, index, media, limits)
 		if err != nil {
 			return nil, err
 		}

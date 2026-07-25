@@ -134,9 +134,11 @@ The stable `error` values are `missing_data`, `invalid_base64`,
 `path_not_allowed` (the path resolves outside the root or is not a regular
 file), `missing_file` (a path inside the root that is gone or unreadable), and
 `handoff_digest_mismatch` (the bytes do not match the declared digest or size).
-The four handoff values carry a `message` naming the real cause, and a
-`handoff_digest_mismatch` always fails the turn rather than falling back to
-another form. A blob-resource rejection reports `field` `prompt.resource`.
+The four handoff values carry a fixed `message` naming the cause, never a path,
+a digest, or an observed byte count. A `handoff_digest_mismatch` reports one
+message whether the size or the digest disagreed, so the envelope cannot be
+swept to measure a file, and it always fails the turn rather than falling back
+to another form. A blob-resource rejection reports `field` `prompt.resource`.
 
 `index` counts the blocks the byte gates apply to, in request order: image
 blocks and every gated blob resource whatever its media type. Text, resource

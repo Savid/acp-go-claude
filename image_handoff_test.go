@@ -38,8 +38,7 @@ var handoffCauseMessages = []string{
 	"handoff file cannot be inspected",
 	"handoff path is not a regular file",
 	"handoff file cannot be read",
-	"handoff file size does not match the declared sizeBytes",
-	"handoff file bytes do not match the declared digest",
+	"handoff file does not match the declared envelope",
 }
 
 func requireHandoffRefusal(t *testing.T, err error, verdict string, message string) {
@@ -333,7 +332,7 @@ func TestHandoffHardlinkOutOfTheRootIsReadable(t *testing.T) {
 	block := handoffBlock(hardlink, []byte("bytes the host claims are there"))
 	_, err = mapHandoffThroughReader(t, root, block, mapper.ImageInputLimits{})
 	details := requireHandoffEnvelope(t, err, "handoff_digest_mismatch")
-	require.Equal(t, "handoff file size does not match the declared sizeBytes", details["message"])
+	require.Equal(t, "handoff file does not match the declared envelope", details["message"])
 }
 
 // TestHandoffOverBoundReadIsRejectedAndForwardsNoBytes pins the byte verdict to
@@ -520,7 +519,7 @@ func TestHandoffMessagesAreConstants(t *testing.T) {
 			root:    root,
 			block:   func() acp.ContentBlock { return handoffBlock(tamperedPath, png) },
 			verdict: "handoff_digest_mismatch",
-			message: "handoff file bytes do not match the declared digest",
+			message: "handoff file does not match the declared envelope",
 		},
 		{
 			name: "declared size disagrees",
@@ -529,7 +528,7 @@ func TestHandoffMessagesAreConstants(t *testing.T) {
 				return handoffBlockForURI("file://"+good, png[:len(png)-1], hex.EncodeToString(digest[:]))
 			},
 			verdict: "handoff_digest_mismatch",
-			message: "handoff file size does not match the declared sizeBytes",
+			message: "handoff file does not match the declared envelope",
 		},
 	}
 

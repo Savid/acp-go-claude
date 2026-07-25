@@ -49,6 +49,10 @@ const (
 	// than derived from math.MaxInt64, which is not representable as a float64
 	// and rounds up when converted.
 	maxHandoffSizeBytes = 9223372036854775808.0
+
+	// handoffEnvelopeMismatch is the single answer for bytes that disagree with
+	// the envelope, whichever field disagreed.
+	handoffEnvelopeMismatch = "handoff file does not match the declared envelope"
 )
 
 // HandoffFileReader opens a handoff-form prompt image. An implementation
@@ -279,23 +283,18 @@ func handoffFilePath(uri *string, index int) (string, error) {
 }
 
 // verifyHandoffBytes fails closed: bytes that do not match the declared size
-// and digest are rejected outright and never fall back to another form.
+// and digest are rejected outright and never fall back to another form. Both
+// branches report one message, because a caller able to tell a size failure
+// from a digest failure could sweep sizeBytes and read the exact length of any
+// file this read can reach out of which message came back.
 func verifyHandoffBytes(data []byte, envelope handoffEnvelope, index int) error {
 	if int64(len(data)) != envelope.sizeBytes {
-		return handoffInputError(
-			errHandoffDigestMismatch,
-			index,
-			"handoff file size does not match the declared sizeBytes",
-		)
+		return handoffInputError(errHandoffDigestMismatch, index, handoffEnvelopeMismatch)
 	}
 
 	sum := sha256.Sum256(data)
 	if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(envelope.digest)) != 1 {
-		return handoffInputError(
-			errHandoffDigestMismatch,
-			index,
-			"handoff file bytes do not match the declared digest",
-		)
+		return handoffInputError(errHandoffDigestMismatch, index, handoffEnvelopeMismatch)
 	}
 
 	return nil

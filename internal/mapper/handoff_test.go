@@ -407,26 +407,21 @@ func TestHandoffImageDigestMismatch(t *testing.T) {
 	copy(tampered, png)
 	tampered[len(tampered)-1] ^= 0xFF
 
-	// Bytes that hash to something else are rejected, never forwarded.
-	_, err := mapHandoffPrompt(
-		t,
-		handoffImageBlock("a.png", png, mimePNG),
-		newStubHandoffReader("a.png", tampered),
-		ImageInputLimits{},
-	)
-	details := requireHandoffError(t, err, errHandoffDigestMismatch)
-	require.Equal(t, "handoff file bytes do not match the declared digest", details[keyMessage])
-
-	// A declared size that disagrees with the file is the same fail-closed
-	// verdict, checked before the hash.
-	_, err = mapHandoffPrompt(
-		t,
-		handoffImageBlock("a.png", png, mimePNG),
-		newStubHandoffReader("a.png", png[:len(png)-1]),
-		ImageInputLimits{},
-	)
-	details = requireHandoffError(t, err, errHandoffDigestMismatch)
-	require.Equal(t, "handoff file size does not match the declared sizeBytes", details[keyMessage])
+	// Bytes that hash to something else are rejected, never forwarded. Bytes of
+	// a different length are rejected by the cheap comparison ahead of the
+	// hash. The two take different branches and deliberately give one answer:
+	// telling them apart would let a caller sweep sizeBytes and read back the
+	// exact length of whatever the block pointed at.
+	for _, onDisk := range [][]byte{tampered, png[:len(png)-1]} {
+		_, err := mapHandoffPrompt(
+			t,
+			handoffImageBlock("a.png", png, mimePNG),
+			newStubHandoffReader("a.png", onDisk),
+			ImageInputLimits{},
+		)
+		details := requireHandoffError(t, err, errHandoffDigestMismatch)
+		require.Equal(t, "handoff file does not match the declared envelope", details[keyMessage])
+	}
 }
 
 func TestHandoffImageGateChain(t *testing.T) {

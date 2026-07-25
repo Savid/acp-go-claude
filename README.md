@@ -92,8 +92,9 @@ providers.
 - Claude stream-json subprocess management and control-protocol handling.
 - Prompt streaming for messages, thoughts, tool calls, tool results, plans,
   usage, and session metadata.
-- Embedded static PNG, JPEG, GIF, and WebP prompt images, plus typed image and
-  resource-link output from native assistant and tool results.
+- Embedded static PNG, JPEG, GIF, and WebP prompt images, or the same images
+  handed over as digest-verified local files under a configured read root, plus
+  typed image and resource-link output from native assistant and tool results.
 - Structured output through session-level JSON Schema.
 - Permission modes, permission prompts, plan mode, elicitation, and
   `AskUserQuestion` bridging.

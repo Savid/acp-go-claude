@@ -37,6 +37,7 @@ accidentally release the quarantined admission.
 | `WithExecutablePath` | Set the Claude CLI path (default: search `PATH`). |
 | `WithHome` | Set `CLAUDE_CONFIG_DIR` for launched Claude processes. |
 | `WithScratchDir` | Parent directory for ephemeral on-disk materialization, created `0700` when missing (default: system temp). |
+| `WithInputHandoffRoot` | Absolute directory prompt images may be handed over in as local files. Read-only to the adapter; unset rejects every handoff-form block. |
 | `WithDarwinBestEffortContainment` | Explicitly accept Darwin's process-group boundary. Invalid off Darwin; without it Darwin native launch fails closed. |
 | `WithDefaultModel` | Default Claude model for new sessions. |
 | `WithEnv` | Merge environment variables into every Claude child. |
@@ -113,6 +114,13 @@ where applicable. A nil callback keeps standalone use unbounded.
 Session-store surface: `SessionStore`, `SessionKey`, `SessionSummary`,
 `SessionStoreReplacement`, `InMemorySessionStore`, and the constants
 `SessionStoreFormat` and `SessionStoreMainSubpath`.
+
+`WithInputHandoffRoot` takes an absolute directory. The adapter only reads
+under it: it never creates, writes, moves, or deletes anything there, and the
+host owns the files' lifetime. A relative path makes initialization fail. When
+the option is set, initialize advertises
+`agentCapabilities._meta["acp-go.dev/handoff"]`, so a host can confirm the
+option arrived; see [Metadata](/docs/reference/meta).
 
 `ImageLimits` has four `int64` fields:
 `MaxInputBytesPerImage`, `MaxInputBytesPerPrompt`,

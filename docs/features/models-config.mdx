@@ -33,6 +33,10 @@ it does not claim that every selected model can interpret pixels or that Claude
 has a native image generator. Model listings publish no per-model `capabilities`
 array and no modality or generator fields.
 
+The adapter also advertises the bounds it enforces under
+`agentCapabilities._meta["acp-go.dev/mediaEnvelope"]`, so a host can check an
+image before it sends one. See [Metadata](/docs/reference/meta).
+
 Send a standard ACP image content block with embedded base64 `data` and one of
 these exact media types:
 
@@ -46,7 +50,46 @@ Images must be static. GIFs with multiple image descriptors, WebP with the
 are missing or invalid base64, noncanonical media types, media-type/byte
 mismatches, invalid dimensions, and configured byte-limit overflow. When a block
 carries both `data` and `uri`, the embedded bytes are authoritative and the URI
-is never fetched; a URI-only prompt image is invalid.
+is never fetched.
+
+An embedded blob resource is gated the same way whatever its media type: its
+base64 must decode and its decoded size must fit the per-image byte gate, and
+its bytes count toward the per-prompt total alongside image bytes. A blob
+declaring `application/pdf` becomes a native document block; a blob whose media
+type names a raster is validated as an image, so a noncanonical declaration such
+as `IMAGE/PNG` is rejected `invalid_media_type` rather than taking another path.
+
+## Handed-over prompt images
+
+A host that shares a filesystem with the adapter can hand image bytes over as
+local files instead of embedding base64, which keeps large multi-image turns out
+of the ACP frame. Set the read root:
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+	claudeacp.WithInputHandoffRoot("/srv/wagie/handoff"),
+)
+```
+
+Then send an image block with empty `data`, a `file://` uri under that root, and
+the handoff envelope carrying the payload's sha256 digest and byte size (the
+exact `_meta` shape is in [Metadata](/docs/reference/meta)).
+
+The adapter resolves the path inside the root, refusing anything that escapes it
+through a symlink and anything that is not a regular file; reads at most the
+per-image byte gate; verifies the bytes against the declared size and digest;
+and then applies the identical gate chain an embedded image passes. A
+handed-over image and an embedded image carrying the same bytes produce the same
+native request, and the host's path is never forwarded to Claude.
+
+The read is bounded even when `MaxInputBytesPerImage` is zero: the ACP frame
+clamp becomes the ceiling, and a file past it is rejected `too_large` rather
+than accepted with a digest that could not be verified.
+
+Files under the root belong to the host: the adapter only reads them, and the
+host may delete one as soon as the prompt call returns. Without
+`WithInputHandoffRoot` the form is rejected, so an image block with empty `data`
+and no local uri stays a plain `missing_data` failure.
 
 Claude exposes no authoritative selected-model modality field, so a structurally
 valid image is forwarded and the harness or provider stays authoritative for
@@ -66,9 +109,20 @@ Input failures use JSON-RPC `-32602 Invalid params`:
 
 The stable `error` values are `missing_data`, `invalid_base64`,
 `invalid_media_type`, `media_type_mismatch`, `animated_not_supported`,
-`invalid_dimensions`, and `too_large`. Validation stops at the first failing
-prompt block, and an aggregate overflow is attributed to the image that crosses
-the total.
+`invalid_dimensions`, and `too_large`, plus four for handed-over images:
+`invalid_handoff` (the block itself is malformed, including an unset read root),
+`path_not_allowed` (the path resolves outside the root or is not a regular
+file), `missing_file` (a path inside the root that is gone or unreadable), and
+`handoff_digest_mismatch` (the bytes do not match the declared digest or size).
+The four handoff values carry a `message` naming the real cause, and a
+`handoff_digest_mismatch` always fails the turn rather than falling back to
+another form. A blob-resource rejection reports `field` `prompt.resource`.
+
+`index` counts the blocks the byte gates apply to, in request order: image
+blocks and every gated blob resource whatever its media type. Text, resource
+links, and text resources consume no index. Validation stops at the first
+failing prompt block, and an aggregate overflow is attributed to the block that
+crosses the total.
 
 ## Image limits
 

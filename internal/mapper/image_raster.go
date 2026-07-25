@@ -10,6 +10,12 @@ import (
 // detection walks the container's block/chunk list without decoding any pixel
 // data.
 
+// MaxDecodedFrameBytes is the decoded-byte clamp derived from the ACP frame
+// bound: its base64 expansion leaves 220 bytes for the whole JSON-RPC envelope.
+// It clamps frames the adapter emits, and it bounds a handoff read when the
+// per-image policy gate is disabled, so no inbound read is ever unbounded.
+const MaxDecodedFrameBytes int64 = 7_864_155
+
 const (
 	mimePNG  = "image/png"
 	mimeJPEG = "image/jpeg"

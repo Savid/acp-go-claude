@@ -29,7 +29,7 @@ const (
 	imageOutputTooLarge          = "too_large"
 	imageOutputStorageFailed     = "storage_failed"
 
-	maxACPImageDecodedBytes int64 = 7_864_155
+	maxACPImageDecodedBytes int64 = mapper.MaxDecodedFrameBytes
 )
 
 var (

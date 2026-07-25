@@ -63,10 +63,10 @@ func (s *agentSession) Prompt(
 	advertisedCommands := cloneAvailableCommands(s.advertisedCommands)
 	s.mu.Unlock()
 
-	content, err := mapper.PromptToClaude(prompt, advertisedCommands, mapper.ImageInputLimits{
+	content, err := mapper.PromptToClaude(ctx, prompt, advertisedCommands, mapper.ImageInputLimits{
 		MaxBytesPerImage:  s.agent.options.ImageLimits.MaxInputBytesPerImage,
 		MaxBytesPerPrompt: s.agent.options.ImageLimits.MaxInputBytesPerPrompt,
-	})
+	}, newHandoffImageReader(s.agent.options.InputHandoffRoot))
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}

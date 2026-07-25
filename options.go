@@ -89,6 +89,10 @@ type Options struct {
 	// materialization (per-session roots, hydration temp files, probe dirs).
 	// Empty means the system temp directory.
 	ScratchDir string
+	// InputHandoffRoot is the absolute directory a host hands prompt-image
+	// bytes over in. It is a read root only: nothing is ever written, moved, or
+	// deleted under it. Empty rejects every handoff-form image block.
+	InputHandoffRoot string
 	// DefaultModel is passed to newly created Claude sessions when non-empty.
 	DefaultModel string
 	// Env is merged into every launched Claude process environment.
@@ -292,6 +296,19 @@ func WithHome(path string) Option {
 func WithScratchDir(dir string) Option {
 	return func(options *Options) {
 		options.ScratchDir = dir
+	}
+}
+
+// WithInputHandoffRoot sets the absolute directory prompt images may be handed
+// over in as local files instead of embedded base64. An image block with empty
+// `data`, a `file://` uri under this root, and a valid handoff envelope is read
+// and digest-verified before it reaches Claude. The directory is read-only to
+// the adapter, which never writes, moves, or deletes anything under it, and it
+// is the host's to create and clean up. Unset (the default) rejects every
+// handoff-form block; a relative path fails initialization.
+func WithInputHandoffRoot(dir string) Option {
+	return func(options *Options) {
+		options.InputHandoffRoot = dir
 	}
 }
 

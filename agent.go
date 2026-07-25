@@ -125,16 +125,20 @@ func NewAgent(opts ...Option) *Agent {
 	}
 
 	return &Agent{
-		options:             options,
-		log:                 log,
-		observe:             observe,
-		sessions:            make(map[acp.SessionId]*agentSession),
-		store:               NewInMemorySessionStore(),
-		deleted:             make(map[acp.SessionId]struct{}),
-		positionEncoding:    acp.PositionEncodingKindUtf16,
-		permissionCache:     make(map[acp.SessionId]map[string]string),
-		activeLimitErr:      validateConcurrencyLimits(options.ConcurrencyLimits),
-		configurationErr:    errors.Join(validateContainmentOptions(options), validateImageLimits(options.ImageLimits)),
+		options:          options,
+		log:              log,
+		observe:          observe,
+		sessions:         make(map[acp.SessionId]*agentSession),
+		store:            NewInMemorySessionStore(),
+		deleted:          make(map[acp.SessionId]struct{}),
+		positionEncoding: acp.PositionEncodingKindUtf16,
+		permissionCache:  make(map[acp.SessionId]map[string]string),
+		activeLimitErr:   validateConcurrencyLimits(options.ConcurrencyLimits),
+		configurationErr: errors.Join(
+			validateContainmentOptions(options),
+			validateImageLimits(options.ImageLimits),
+			validateInputHandoffRoot(options.InputHandoffRoot),
+		),
 		containmentMode:     mode,
 		descendantProcesses: newRuntimeProcessSnapshotTracker(options.RuntimeResourceHooks, mode == RuntimeContainmentAuthoritative),
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
@@ -280,37 +284,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 		},
 		AuthMethods: []acp.AuthMethod{},
 		AgentCapabilities: acp.AgentCapabilities{
-			Meta: map[string]any{
-				routeMetaKey: map[string]any{"versions": []int{routeVersion}},
-				claudeMetaKey: map[string]any{
-					"fork": map[string]any{
-						"unstable":        true,
-						"method":          ForkSessionMethod,
-						"request":         "acp.UnstableForkSessionRequest JSON payload only",
-						jsonFieldResponse: "acp.UnstableForkSessionResponse JSON payload only",
-					},
-					"elicitation": map[string]any{
-						"unstable": true,
-						"scope":    string(RuntimeResourceSession),
-						"tracks":   "in-progress ACP elicitation RFD",
-					},
-					"rawEvent": map[string]any{
-						"method":         RawEventMethod,
-						"enabledBy":      "_meta.claude.rawEvent.enabled",
-						"maxBytes":       rawEventMaxBytes,
-						"defaultEnabled": false,
-					},
-					"sessionStore": map[string]any{
-						"format": SessionStoreFormat,
-						"key":    []string{acpFieldSessionID, "subpath"},
-					},
-					"structuredOutput": map[string]any{
-						acpFieldConfig:  "_meta.claude.options.outputSchema",
-						jsonFieldResult: "_meta.claude.structuredOutput",
-						"schema":        "json_schema",
-					},
-				},
-			},
+			Meta:        a.capabilityMeta(),
 			LoadSession: true,
 			McpCapabilities: acp.McpCapabilities{
 				Http: true,
@@ -331,6 +305,51 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 	}
 
 	return resp, nil
+}
+
+// capabilityMeta builds the advertised capability metadata: the reserved
+// family literals beside the Claude namespace descriptors. The handoff literal
+// is present only when a handoff read root is configured, so its absence tells
+// a host its option never reached this adapter.
+func (a *Agent) capabilityMeta() map[string]any {
+	meta := map[string]any{
+		routeMetaKey:         map[string]any{metaVersionsKey: []int{routeVersion}},
+		mediaEnvelopeMetaKey: mediaEnvelope(a.options.ImageLimits),
+		claudeMetaKey: map[string]any{
+			"fork": map[string]any{
+				"unstable":        true,
+				"method":          ForkSessionMethod,
+				"request":         "acp.UnstableForkSessionRequest JSON payload only",
+				jsonFieldResponse: "acp.UnstableForkSessionResponse JSON payload only",
+			},
+			"elicitation": map[string]any{
+				"unstable": true,
+				"scope":    string(RuntimeResourceSession),
+				"tracks":   "in-progress ACP elicitation RFD",
+			},
+			"rawEvent": map[string]any{
+				"method":         RawEventMethod,
+				"enabledBy":      "_meta.claude.rawEvent.enabled",
+				"maxBytes":       rawEventMaxBytes,
+				"defaultEnabled": false,
+			},
+			"sessionStore": map[string]any{
+				"format": SessionStoreFormat,
+				"key":    []string{acpFieldSessionID, "subpath"},
+			},
+			"structuredOutput": map[string]any{
+				acpFieldConfig:  "_meta.claude.options.outputSchema",
+				jsonFieldResult: "_meta.claude.structuredOutput",
+				"schema":        "json_schema",
+			},
+		},
+	}
+
+	if a.options.InputHandoffRoot != "" {
+		meta[handoffMetaKey] = map[string]any{metaVersionsKey: []int{handoffVersion}}
+	}
+
+	return meta
 }
 
 // Authenticate rejects agent-handled auth methods because Claude owns auth.

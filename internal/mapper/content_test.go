@@ -1,6 +1,7 @@
 package mapper
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"os"
@@ -11,11 +12,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// mapPromptBlocks maps a prompt with no handoff read root configured, which is
+// every embedded-form case.
+func mapPromptBlocks(
+	prompt []acp.ContentBlock,
+	advertisedCommands []acp.AvailableCommand,
+	limits ImageInputLimits,
+) ([]map[string]any, error) {
+	return PromptToClaude(context.Background(), prompt, advertisedCommands, limits, nil)
+}
+
 func TestPromptToClaude(t *testing.T) {
 	t.Parallel()
 
 	png := fixtureBase64(t, "valid.png")
-	blocks, err := PromptToClaude([]acp.ContentBlock{
+	blocks, err := mapPromptBlocks([]acp.ContentBlock{
 		acp.TextBlock("hello"),
 		acp.ImageBlock(png, "image/png"),
 		acp.ResourceLinkBlock("readme", "file:///tmp/README.md"),
@@ -36,7 +47,7 @@ func TestPromptToClaude(t *testing.T) {
 func TestPromptToClaudeTextAudienceAnnotations(t *testing.T) {
 	t.Parallel()
 
-	blocks, err := PromptToClaude([]acp.ContentBlock{
+	blocks, err := mapPromptBlocks([]acp.ContentBlock{
 		textBlockWithAudience("model-visible", acp.RoleAssistant),
 		textBlockWithAudience("client-only", acp.RoleUser),
 		textBlockWithAudience("mixed", acp.RoleUser, acp.RoleAssistant),
@@ -64,7 +75,7 @@ func textBlockWithAudience(text string, audience ...acp.Role) acp.ContentBlock {
 func TestPromptToClaudeRewritesAdvertisedMCPSlashCommands(t *testing.T) {
 	t.Parallel()
 
-	blocks, err := PromptToClaude([]acp.ContentBlock{
+	blocks, err := mapPromptBlocks([]acp.ContentBlock{
 		acp.TextBlock("/mcp:server:name\targs"),
 		acp.TextBlock("/mcp:server:name"),
 	}, []acp.AvailableCommand{{Name: "mcp:server:name"}}, ImageInputLimits{})
@@ -77,7 +88,7 @@ func TestPromptToClaudeRewritesAdvertisedMCPSlashCommands(t *testing.T) {
 func TestPromptToClaudeLeavesUnadvertisedMCPSlashTextByteIdentical(t *testing.T) {
 	t.Parallel()
 
-	blocks, err := PromptToClaude([]acp.ContentBlock{
+	blocks, err := mapPromptBlocks([]acp.ContentBlock{
 		acp.TextBlock("/mcp:server:name args"),
 		acp.TextBlock("/mcp:bad\tserver:name"),
 		acp.TextBlock("/mcp:server"),
@@ -108,9 +119,10 @@ func TestPromptToClaudeEmbeddedResources(t *testing.T) {
 	uriImage := "https://example.com/image.png"
 	jpeg := fixtureBase64(t, "valid.jpg")
 	png := fixtureBase64(t, "valid.png")
+	pdf := base64.StdEncoding.EncodeToString([]byte("%PDF-1.4 body"))
 	image := acp.ImageBlock(png, "image/png")
 	image.Image.Uri = &uriImage
-	blocks, err := PromptToClaude([]acp.ContentBlock{
+	blocks, err := mapPromptBlocks([]acp.ContentBlock{
 		acp.ResourceBlock(acp.EmbeddedResourceResource{
 			TextResourceContents: &acp.TextResourceContents{Uri: "file:///tmp/a.txt", Text: "body"},
 		}),
@@ -121,7 +133,7 @@ func TestPromptToClaudeEmbeddedResources(t *testing.T) {
 			BlobResourceContents: &acp.BlobResourceContents{MimeType: &imageMime, Blob: jpeg},
 		}),
 		acp.ResourceBlock(acp.EmbeddedResourceResource{
-			BlobResourceContents: &acp.BlobResourceContents{MimeType: &pdfMime, Blob: "pdf"},
+			BlobResourceContents: &acp.BlobResourceContents{MimeType: &pdfMime, Blob: pdf},
 		}),
 		image,
 	}, nil, ImageInputLimits{})
@@ -140,7 +152,7 @@ func TestPromptToClaudeEmbeddedResources(t *testing.T) {
 func TestPromptToClaudeResourceLinks(t *testing.T) {
 	t.Parallel()
 
-	blocks, err := PromptToClaude([]acp.ContentBlock{
+	blocks, err := mapPromptBlocks([]acp.ContentBlock{
 		acp.ResourceLinkBlock("ticket", "https://example.com/T-1"),
 		acp.ResourceLinkBlock("", "%gh&%ij"),
 		acp.ResourceLinkBlock("local", "file://localhost/tmp/a.txt"),
@@ -176,38 +188,55 @@ func TestPromptToClaudeUnsupported(t *testing.T) {
 
 	// Unsupported content fails closed as an invalid parameter (-32602) with
 	// the uniform unsupported/field shapes, never a bare internal error.
-	_, err := PromptToClaude([]acp.ContentBlock{acp.AudioBlock("abc", "audio/wav")}, nil, ImageInputLimits{})
+	_, err := mapPromptBlocks([]acp.ContentBlock{acp.AudioBlock("abc", "audio/wav")}, nil, ImageInputLimits{})
 	requireInvalidParams(t, err, unsupportedPrompt)
 
 	// An empty prompt (zero content blocks) is rejected, not forwarded.
-	_, err = PromptToClaude(nil, nil, ImageInputLimits{})
+	_, err = mapPromptBlocks(nil, nil, ImageInputLimits{})
 	requireInvalidParams(t, err, unsupportedPrompt)
 
-	_, err = PromptToClaude([]acp.ContentBlock{{}}, nil, ImageInputLimits{})
+	_, err = mapPromptBlocks([]acp.ContentBlock{{}}, nil, ImageInputLimits{})
 	requireInvalidParams(t, err, unsupportedPrompt)
 
-	_, err = PromptToClaude([]acp.ContentBlock{
+	_, err = mapPromptBlocks([]acp.ContentBlock{
 		acp.ResourceBlock(acp.EmbeddedResourceResource{
 			BlobResourceContents: &acp.BlobResourceContents{Blob: "bin"},
 		}),
 	}, nil, ImageInputLimits{})
 	requireInvalidParams(t, err, map[string]any{keyErrorField: errValueUnsupported, keyFieldField: fieldPromptResource})
 
-	_, err = PromptToClaude([]acp.ContentBlock{
+	_, err = mapPromptBlocks([]acp.ContentBlock{
 		acp.ResourceBlock(acp.EmbeddedResourceResource{}),
 	}, nil, ImageInputLimits{})
 	requireInvalidParams(t, err, map[string]any{keyFieldField: fieldPromptResource, keyErrorField: errMissingResourceData})
 
-	_, err = PromptToClaude(
+	_, err = mapPromptBlocks(
 		[]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image"}}},
 		nil,
 		ImageInputLimits{},
 	)
 	requireInvalidParams(t, err, map[string]any{keyFieldField: fieldPromptImage, keyErrorField: errMissingImageData, "index": 0})
 
+	// An empty-data block naming a local file signals handoff intent, so with no
+	// handoff read root configured it is rejected as a handoff block rather than
+	// as missing data.
 	fileURI := "file:///tmp/image.png"
-	_, err = PromptToClaude(
+	_, err = mapPromptBlocks(
 		[]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &fileURI}}},
+		nil,
+		ImageInputLimits{},
+	)
+	requireInvalidParams(t, err, map[string]any{
+		keyFieldField: fieldPromptImage,
+		keyErrorField: errInvalidHandoff,
+		"index":       0,
+		keyMessage:    "no handoff read root is configured",
+	})
+
+	// A remote uri is not handoff intent, so the block stays missing data.
+	remoteURI := "https://example.test/image.png"
+	_, err = mapPromptBlocks(
+		[]acp.ContentBlock{{Image: &acp.ContentBlockImage{Type: "image", Uri: &remoteURI}}},
 		nil,
 		ImageInputLimits{},
 	)
@@ -296,7 +325,7 @@ func TestPromptToClaudeImageValidation(t *testing.T) {
 				data = fixtureBase64(t, test.fixture)
 			}
 
-			_, err := PromptToClaude([]acp.ContentBlock{acp.ImageBlock(data, test.mimeType)}, nil, test.limits)
+			_, err := mapPromptBlocks([]acp.ContentBlock{acp.ImageBlock(data, test.mimeType)}, nil, test.limits)
 			details := requireImageInputErrorData(t, err)
 			require.Equal(t, test.reason, details[keyErrorField])
 			require.Equal(t, test.index, details["index"])
@@ -304,7 +333,7 @@ func TestPromptToClaudeImageValidation(t *testing.T) {
 	}
 
 	imageMime := mimePNG
-	_, err := PromptToClaude([]acp.ContentBlock{acp.ResourceBlock(acp.EmbeddedResourceResource{
+	_, err := mapPromptBlocks([]acp.ContentBlock{acp.ResourceBlock(acp.EmbeddedResourceResource{
 		BlobResourceContents: &acp.BlobResourceContents{
 			MimeType: &imageMime,
 			Blob:     "%",
@@ -346,7 +375,7 @@ func TestPromptToClaudeImageOrderAndAggregateLimit(t *testing.T) {
 
 	prompt = append(prompt, acp.TextBlock("after"))
 
-	blocks, err := PromptToClaude(prompt, nil, ImageInputLimits{MaxBytesPerImage: 2000, MaxBytesPerPrompt: 4000})
+	blocks, err := mapPromptBlocks(prompt, nil, ImageInputLimits{MaxBytesPerImage: 2000, MaxBytesPerPrompt: 4000})
 	require.NoError(t, err)
 	require.Len(t, blocks, 6)
 
@@ -358,7 +387,7 @@ func TestPromptToClaudeImageOrderAndAggregateLimit(t *testing.T) {
 
 	first := fixtureBase64(t, "valid.png")
 	second := fixtureBase64(t, "valid.jpg")
-	_, err = PromptToClaude(
+	_, err = mapPromptBlocks(
 		[]acp.ContentBlock{acp.ImageBlock(first, mimePNG), acp.ImageBlock(second, mimeJPEG)},
 		nil,
 		ImageInputLimits{MaxBytesPerImage: 2000, MaxBytesPerPrompt: 2000},
@@ -369,7 +398,7 @@ func TestPromptToClaudeImageOrderAndAggregateLimit(t *testing.T) {
 	require.EqualValues(t, 2240, details["sizeBytes"])
 	require.EqualValues(t, 2000, details["maxBytes"])
 
-	blocks, err = PromptToClaude(
+	blocks, err = mapPromptBlocks(
 		[]acp.ContentBlock{acp.ImageBlock(first, mimePNG), acp.ImageBlock(second, mimeJPEG)},
 		nil,
 		ImageInputLimits{},
@@ -381,8 +410,139 @@ func TestPromptToClaudeImageOrderAndAggregateLimit(t *testing.T) {
 func fixtureBase64(t *testing.T, name string) string {
 	t.Helper()
 
+	return base64.StdEncoding.EncodeToString(fixtureBytes(t, name))
+}
+
+func fixtureBytes(t *testing.T, name string) []byte {
+	t.Helper()
+
 	data, err := os.ReadFile(filepath.Join("testdata", "images", name))
 	require.NoError(t, err)
 
-	return base64.StdEncoding.EncodeToString(data)
+	return data
+}
+
+func blobResourceBlock(mimeType string, blob string) acp.ContentBlock {
+	return acp.ResourceBlock(acp.EmbeddedResourceResource{
+		BlobResourceContents: &acp.BlobResourceContents{MimeType: &mimeType, Blob: blob},
+	})
+}
+
+func requireResourceInputErrorData(t *testing.T, err error, index int) map[string]any {
+	t.Helper()
+
+	details := requireImageInputErrorData(t, err)
+	require.Equal(t, fieldPromptResource, details[keyFieldField])
+	require.Equal(t, index, details[keyIndex])
+
+	return details
+}
+
+// TestPromptToClaudeBlobResourceIsGated covers the embedded blob channel, which
+// forwarded unbounded unvalidated bytes whatever their media type.
+func TestPromptToClaudeBlobResourceIsGated(t *testing.T) {
+	t.Parallel()
+
+	const perImage = 6_291_456
+
+	limits := ImageInputLimits{MaxBytesPerImage: perImage, MaxBytesPerPrompt: perImage}
+
+	// A document blob larger than the limit the same adapter enforces for an
+	// image blob is rejected rather than forwarded.
+	oversize := base64.StdEncoding.EncodeToString(make([]byte, 6_295_951))
+	_, err := mapPromptBlocks([]acp.ContentBlock{blobResourceBlock(mimePDF, oversize)}, nil, limits)
+	details := requireResourceInputErrorData(t, err, 0)
+	require.Equal(t, errImageTooLarge, details[keyErrorField])
+	require.EqualValues(t, 6_295_951, details[keySizeBytes])
+	require.EqualValues(t, perImage, details[keyMaxBytes])
+
+	// Exactly the limit still passes: the gate is inclusive.
+	atLimit := base64.StdEncoding.EncodeToString(make([]byte, perImage))
+	blocks, err := mapPromptBlocks([]acp.ContentBlock{blobResourceBlock(mimePDF, atLimit)}, nil, limits)
+	require.NoError(t, err)
+	require.Equal(t, typeDocument, blocks[0][keyType])
+
+	// Corrupt base64 in a blob is rejected rather than handed to the harness.
+	_, err = mapPromptBlocks([]acp.ContentBlock{blobResourceBlock(mimePDF, "%%%%")}, nil, limits)
+	require.Equal(t, errInvalidBase64, requireResourceInputErrorData(t, err, 0)[keyErrorField])
+
+	// Document bytes are charged to the per-prompt aggregate alongside images.
+	png := fixtureBytes(t, "valid.png")
+	document := base64.StdEncoding.EncodeToString(make([]byte, 512))
+	aggregate := ImageInputLimits{MaxBytesPerPrompt: int64(len(png)) + 511}
+	_, err = mapPromptBlocks([]acp.ContentBlock{
+		blobResourceBlock(mimePDF, document),
+		acp.ImageBlock(base64.StdEncoding.EncodeToString(png), mimePNG),
+	}, nil, aggregate)
+	details = requireImageInputErrorData(t, err)
+	require.Equal(t, errImageTooLarge, details[keyErrorField])
+	require.Equal(t, fieldPromptImage, details[keyFieldField])
+	// The document ahead of it consumed media index 0.
+	require.Equal(t, 1, details[keyIndex])
+	require.EqualValues(t, int64(len(png))+512, details[keySizeBytes])
+
+	// The blob itself reports the running aggregate when it is the block that
+	// crosses the budget, at its own media index.
+	_, err = mapPromptBlocks([]acp.ContentBlock{
+		acp.ImageBlock(base64.StdEncoding.EncodeToString(png), mimePNG),
+		blobResourceBlock(mimePDF, document),
+	}, nil, aggregate)
+	details = requireResourceInputErrorData(t, err, 1)
+	require.Equal(t, errImageTooLarge, details[keyErrorField])
+	require.EqualValues(t, int64(len(png))+512, details[keySizeBytes])
+}
+
+// TestPromptToClaudeMediaIndexCountsGatedBlocks pins the index a rejection
+// reports as the position among gated media blocks in request order, so a
+// document and an image can never both report index 0.
+func TestPromptToClaudeMediaIndexCountsGatedBlocks(t *testing.T) {
+	t.Parallel()
+
+	png := fixtureBase64(t, "valid.png")
+	document := base64.StdEncoding.EncodeToString([]byte("%PDF-1.4"))
+
+	// Text, resource links, and text resources are not gated media and consume
+	// no index; the third gated block is index 2 regardless of them.
+	prompt := []acp.ContentBlock{
+		acp.TextBlock("before"),
+		blobResourceBlock(mimePDF, document),
+		acp.ResourceLinkBlock("readme", "file:///tmp/README.md"),
+		acp.ImageBlock(png, mimePNG),
+		acp.ResourceBlock(acp.EmbeddedResourceResource{
+			TextResourceContents: &acp.TextResourceContents{Text: "inline"},
+		}),
+		acp.ImageBlock("%", mimePNG),
+	}
+
+	_, err := mapPromptBlocks(prompt, nil, ImageInputLimits{})
+	details := requireImageInputErrorData(t, err)
+	require.Equal(t, errInvalidBase64, details[keyErrorField])
+	require.Equal(t, 2, details[keyIndex])
+}
+
+// TestPromptToClaudeBlobMediaTypeNormalization pins the media-type prefix test
+// as case- and parameter-insensitive so a noncanonical raster declaration is
+// gated as an image instead of taking an unvalidated channel.
+func TestPromptToClaudeBlobMediaTypeNormalization(t *testing.T) {
+	t.Parallel()
+
+	png := fixtureBase64(t, "valid.png")
+
+	for _, declared := range []string{"IMAGE/PNG", "Image/Png", " image/png ", "image/png; charset=utf-8", "IMAGE/JPEG"} {
+		t.Run(declared, func(t *testing.T) {
+			t.Parallel()
+
+			blocks, err := mapPromptBlocks([]acp.ContentBlock{blobResourceBlock(declared, png)}, nil, ImageInputLimits{})
+			require.Nil(t, blocks)
+
+			details := requireImageInputErrorData(t, err)
+			require.Equal(t, errInvalidMediaType, details[keyErrorField])
+			require.Equal(t, fieldPromptImage, details[keyFieldField])
+		})
+	}
+
+	// The exact media type still maps to the native image block.
+	blocks, err := mapPromptBlocks([]acp.ContentBlock{blobResourceBlock(mimePNG, png)}, nil, ImageInputLimits{})
+	require.NoError(t, err)
+	require.Equal(t, typeImage, blocks[0][keyType])
 }

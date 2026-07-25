@@ -21,12 +21,58 @@ Initialize advertises capability descriptors under `_meta.claude`:
 | `sessionStore` | Store `format` and key shape. |
 | `structuredOutput` | Where the output schema is supplied and the result is emitted. |
 
-Initialize also advertises the reserved route envelope separately from the
-Claude namespace:
+Initialize also advertises reserved envelopes separately from the Claude
+namespace:
 
 ```json
 {"acp-go.dev/route":{"versions":[1]}}
 ```
+
+```json
+{
+  "acp-go.dev/mediaEnvelope": {
+    "maxBytes": 6291456,
+    "maxPromptBytes": 6291456,
+    "maxDimension": 0,
+    "imageFormats": ["image/png", "image/jpeg", "image/gif", "image/webp"],
+    "documentFormats": ["application/pdf"]
+  }
+}
+```
+
+The media envelope is always advertised. `maxBytes` and `maxPromptBytes` are the
+decoded per-image and per-prompt byte gates this adapter actually enforces, so
+they move with `WithImageLimits`. `maxDimension` is `0` because Claude enforces
+no per-dimension pixel bound — `0` means "no bound", never "zero". `imageFormats`
+is the inbound media-type allowlist and `documentFormats` lists the media types
+an embedded blob resource becomes a native document block for. Every value is
+an adapter bound; none of them describes what a selected model accepts, which
+stays a prompt-time result.
+
+```json
+{"acp-go.dev/handoff":{"versions":[1]}}
+```
+
+The handoff envelope is advertised **only** when `WithInputHandoffRoot` is set.
+Its absence tells a host the option never reached this adapter, and every
+handoff-form image block is then rejected `invalid_handoff`. A prompt image
+block opts into the form with empty `data`, a `file://` uri under the configured
+root, and exactly this block `_meta`:
+
+```json
+{
+  "acp-go.dev/handoff": {
+    "version": 1,
+    "digest": "<sha256 hex, 64 lowercase characters>",
+    "sizeBytes": 123456
+  }
+}
+```
+
+Exactly those three fields: a missing, extra, or wrong-typed field is rejected.
+The adapter reads the file, verifies its size and digest, and then applies the
+same gates an embedded image passes. See
+[Models and config](/docs/features/models-config).
 
 Every `session/prompt` and every cancellation of an active turn MUST carry
 exactly `_meta["acp-go.dev/route"] = {"version":1,"turnNonce":"..."}`.

@@ -58,25 +58,34 @@ func (s *agentSession) emitUpdatesWithAssistantIdentity(
 
 		routedUpdate, shouldEmit, failedToolCallID, err := s.prepareImageUpdateLocked(ctx, routedUpdate, replay)
 		if err != nil {
-			if failedToolCallID != "" {
-				status := acp.ToolCallStatusFailed
+			// A recoverable verdict is reported and the turn runs on, so the
+			// thread keeps its context and can write the image somewhere the
+			// adapter may read. Only the artifact store breaking is fatal, and
+			// even then the tool call still reports failed for attribution.
+			guidance, recoverable := imageOutputGuidance(err)
 
-				failed := acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{
-					SessionUpdate: "tool_call_update",
-					Status:        &status,
-					ToolCallId:    failedToolCallID,
-				}}
+			if recoverable || failedToolCallID != "" {
+				refusal := imageRefusalUpdate(failedToolCallID, guidance)
+				if !recoverable {
+					refusal.ToolCallUpdate.Content = nil
+				}
+
 				if emitErr := conn.SessionUpdate(ctx, acp.SessionNotification{
 					Meta:      assistantIdentityNotificationMeta(ctx, messageID),
 					SessionId: s.id,
-					Update:    failed,
+					Update:    refusal,
 				}); emitErr != nil {
 					s.toolCallUpdateMu.Unlock()
 
 					return emitErr
 				}
 			}
+
 			s.toolCallUpdateMu.Unlock()
+
+			if recoverable {
+				continue
+			}
 
 			return err
 		}

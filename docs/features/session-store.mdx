@@ -76,7 +76,8 @@ stall `session/load`, `session/resume`, fork, and `session/list`.
 Native assistant and tool-result images are normalized to standard ACP content
 before emission. Inline base64 and base64 data URLs become an embedded ACP image
 with a truthful sniffed media type; a readable local image file under an allowed
-root is bounded, read, and embedded; a remote HTTP(S) URI becomes one ACP
+root — the workspace, the session image scratch directory, or the
+operating-system temporary directory — is bounded, read, and embedded; a remote HTTP(S) URI becomes one ACP
 resource link and is never fetched. Output is not restricted to the prompt
 allowlist — any structurally recognized raster is emitted with its sniffed media
 type, so a BMP is valid output even though BMP prompt input is not. Each
@@ -94,24 +95,26 @@ the reference and fail the whole request with `reason: "storage_failed"` when th
 required bytes are missing, expired, or invalid rather than silently dropping the
 image.
 
-An image-representation failure the adapter itself causes is turn-fatal and
-returns JSON-RPC `-32603` with the Claude turn envelope:
+An image the adapter will not ship fails only its own tool call and carries
+fixed guidance saying what to do next, leaving the turn and its context alive.
+Losing stored bytes is different: it is the adapter's own durability breaking,
+so it is turn-fatal and returns JSON-RPC `-32603` with the Claude turn
+envelope:
 
 ```json
 {
   "error": "claude_turn_failed",
   "cause": "transport",
-  "message": "image output exceeds the configured per-image limit",
+  "message": "image output is no longer available from the artifact store",
   "stage": "image_output",
-  "reason": "too_large",
-  "sizeBytes": 7000000,
-  "maxBytes": 6291456
+  "reason": "storage_failed"
 }
 ```
 
 The stable output `reason` values are `invalid_base64`, `not_a_raster`,
 `media_type_mismatch`, `missing_file`, `path_not_allowed`, `too_large`, and
-`storage_failed`.
+`storage_failed`. Only `storage_failed` reaches this envelope; the rest refuse
+the tool call without ending the turn.
 
 <Warning>
 A resource-link record retains its original source URI so replay can reproduce

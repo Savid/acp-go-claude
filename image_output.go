@@ -39,6 +39,75 @@ var (
 	imageOutputReadAll      = io.ReadAll
 )
 
+const (
+	// Guidance carried back in place of an image output the adapter will not
+	// ship. Each string is a fixed constant keyed only by the verdict token: it
+	// says what to do next and never describes the path, filename, size, or
+	// operating-system error that produced the verdict.
+	imageGuidancePathNotAllowed = "write the image inside the workspace and try again"
+	imageGuidanceMissingFile    = "the image file could not be read; write the image inside the workspace and try again"
+	imageGuidanceTooLarge       = "the image is too large to send; write a smaller image and try again"
+	imageGuidanceNotRaster      = "the file is not a supported raster image; write a PNG, JPEG, GIF, WebP, BMP, ICO, or TIFF and try again"
+	imageGuidanceInvalidBase64  = "the image payload could not be decoded; write the image to a file inside the workspace and try again"
+	imageGuidanceMIMEMismatched = "the declared media type does not match the image; write the image again with a matching media type"
+)
+
+// imageOutputGuidance classifies an image-output failure. A recoverable
+// verdict is an ordinary mistake that can be retried — the bytes were written
+// somewhere the adapter may not read, are gone, are too big, or are not an
+// image — and comes back with fixed guidance. A storage failure is the
+// adapter's own artifact store breaking, which no retry addresses.
+func imageOutputGuidance(err error) (string, bool) {
+	var failure *acp.RequestError
+	if !errors.As(err, &failure) {
+		return "", false
+	}
+
+	data, _ := failure.Data.(map[string]any)
+	if data["stage"] != imageOutputStage {
+		return "", false
+	}
+
+	reason, _ := data["reason"].(string)
+
+	switch reason {
+	case imageOutputPathNotAllowed:
+		return imageGuidancePathNotAllowed, true
+	case imageOutputMissingFile:
+		return imageGuidanceMissingFile, true
+	case imageOutputTooLarge:
+		return imageGuidanceTooLarge, true
+	case imageOutputNotRaster:
+		return imageGuidanceNotRaster, true
+	case imageOutputInvalidBase64:
+		return imageGuidanceInvalidBase64, true
+	case imageOutputMediaTypeMismatch:
+		return imageGuidanceMIMEMismatched, true
+	default:
+		return "", false
+	}
+}
+
+// imageRefusalUpdate is what the client receives in place of an image output
+// the adapter will not ship. A tool call reports failed and carries the
+// guidance as its own content; an agent image has no tool call to attribute
+// to, so the guidance takes the image's place as agent text. Either way the
+// refusal is on the wire and the turn keeps running.
+func imageRefusalUpdate(toolCallID acp.ToolCallId, guidance string) acp.SessionUpdate {
+	if toolCallID == "" {
+		return acp.UpdateAgentMessageText(guidance)
+	}
+
+	status := acp.ToolCallStatusFailed
+
+	return acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{
+		SessionUpdate: "tool_call_update",
+		Status:        &status,
+		ToolCallId:    toolCallID,
+		Content:       []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(guidance))},
+	}}
+}
+
 func imageOutputFailure(reason string, message string, size int64, maxBytes int64) *acp.RequestError {
 	data := map[string]any{
 		jsonFieldError:    turnFailedError,
@@ -460,7 +529,12 @@ func localImagePath(location string) (string, error) {
 }
 
 func (s *agentSession) readAllowedImageFile(ctx context.Context, path string) ([]byte, error) {
-	roots := []string{s.cwd, s.imageScratchDir}
+	// The harness sandbox already permits writing to the OS temp directory, so
+	// a root set without it refuses reads of files the model was allowed to
+	// create. A temp file stays subject to every check below: the temp
+	// directory is shared with every process on the host, and nothing in it is
+	// trusted for being there.
+	roots := []string{s.cwd, s.imageScratchDir, os.TempDir()}
 	if !pathWithinAnyRoot(path, roots, false) {
 		return nil, imageOutputFailure(
 			imageOutputPathNotAllowed,

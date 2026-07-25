@@ -80,9 +80,73 @@ func TestImageOutputInlineStoreReplayAndDedup(t *testing.T) {
 	requireImageOutputError(t, err, imageOutputStorageFailed)
 }
 
-func TestImageOutputValidationAndLocalRoots(t *testing.T) {
+// TestImageOutputGuidanceSplitsRecoverableFromFatal pins the blast radius of
+// every image-output verdict: an ordinary mistake that can be retried carries
+// guidance and keeps the turn, the adapter's own store breaking does not.
+func TestImageOutputGuidanceSplitsRecoverableFromFatal(t *testing.T) {
 	t.Parallel()
 
+	recoverable := map[string]string{
+		imageOutputPathNotAllowed:    imageGuidancePathNotAllowed,
+		imageOutputMissingFile:       imageGuidanceMissingFile,
+		imageOutputTooLarge:          imageGuidanceTooLarge,
+		imageOutputNotRaster:         imageGuidanceNotRaster,
+		imageOutputInvalidBase64:     imageGuidanceInvalidBase64,
+		imageOutputMediaTypeMismatch: imageGuidanceMIMEMismatched,
+	}
+
+	for reason, guidance := range recoverable {
+		message, ok := imageOutputGuidance(imageOutputFailure(reason, "detail", 0, 0))
+		require.True(t, ok, reason)
+		require.Equal(t, guidance, message)
+
+		// The guidance says what to do next and never describes the input.
+		require.NotContains(t, message, "root")
+		require.NotContains(t, message, "path")
+	}
+
+	_, ok := imageOutputGuidance(imageOutputFailure(imageOutputStorageFailed, "detail", 0, 0))
+	require.False(t, ok)
+
+	_, ok = imageOutputGuidance(acp.NewInternalError(map[string]any{"stage": "other"}))
+	require.False(t, ok)
+
+	_, ok = imageOutputGuidance(errors.New("not a request error"))
+	require.False(t, ok)
+}
+
+// TestImageOutputReadsFromTheOSTempDir pins the temp directory as an allowed
+// root against the real os.TempDir, not a narrowed one: the fixture is created
+// through os.MkdirTemp so it sits wherever this platform actually puts temp
+// files, symlinked parents included.
+func TestImageOutputReadsFromTheOSTempDir(t *testing.T) {
+	t.Parallel()
+
+	session := &agentSession{
+		agent:          NewAgent(WithSessionStore(NewInMemorySessionStore())),
+		id:             "temp-root",
+		cwd:            t.TempDir(),
+		imageArtifacts: make(map[string]storedImageArtifact),
+	}
+
+	dir, err := os.MkdirTemp("", "claude-image-output")
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	path := filepath.Join(dir, "frame_01.png")
+	require.NoError(t, os.WriteFile(path, outputFixtureBytes(t, "valid.png"), 0o600))
+
+	require.False(t, pathWithinAnyRoot(path, []string{session.cwd}, true))
+
+	data, err := session.readAllowedImageFile(t.Context(), path)
+	require.NoError(t, err)
+	require.Equal(t, outputFixtureBytes(t, "valid.png"), data)
+}
+
+// This case narrows the process temp directory to tell an allowed root from a
+// refused one, so it cannot run in parallel.
+func TestImageOutputValidationAndLocalRoots(t *testing.T) {
 	workspace := t.TempDir()
 	scratch := t.TempDir()
 	agent := NewAgent(
@@ -117,8 +181,6 @@ func TestImageOutputValidationAndLocalRoots(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
 			_, _, err := session.prepareOutputContent(t.Context(), "agent:test:0", test.image, false)
 			requireImageOutputError(t, err, test.reason)
 		})
@@ -170,7 +232,26 @@ func TestImageOutputValidationAndLocalRoots(t *testing.T) {
 	}, false)
 	requireImageOutputError(t, err, imageOutputMissingFile)
 
-	outside := filepath.Join(t.TempDir(), "outside.png")
+	// The OS temp directory is an allowed root, so this case narrows it to a
+	// directory of its own; the workspace and scratch roots above were created
+	// before the narrowing and stay outside it.
+	private := t.TempDir()
+	tempRoot := filepath.Join(private, "tmp")
+	require.NoError(t, os.Mkdir(tempRoot, 0o700))
+	outsideRoot := filepath.Join(private, "outside")
+	require.NoError(t, os.Mkdir(outsideRoot, 0o700))
+	narrowTempDir(t, tempRoot)
+
+	tempImage := filepath.Join(tempRoot, "frame_01.png")
+	require.NoError(t, os.WriteFile(tempImage, outputFixtureBytes(t, "valid.png"), 0o600))
+	tempURI := "file://" + tempImage
+	block, _, err = session.prepareOutputContent(t.Context(), "tool:temp:0", acp.ContentBlock{
+		Image: &acp.ContentBlockImage{Type: "image", Uri: &tempURI},
+	}, false)
+	require.NoError(t, err)
+	require.Equal(t, outputFixtureBase64(t, "valid.png"), block.Image.Data)
+
+	outside := filepath.Join(outsideRoot, "outside.png")
 	require.NoError(t, os.WriteFile(outside, outputFixtureBytes(t, "valid.png"), 0o600))
 	outsideURI := "file://" + outside
 	_, _, err = session.prepareOutputContent(t.Context(), "tool:outside:0", acp.ContentBlock{
@@ -609,16 +690,37 @@ func TestImageOutputToolSnapshotsAggregateAndFailureFatality(t *testing.T) {
 	require.True(t, ok)
 	require.EqualValues(t, 896, aggregateData["sizeBytes"])
 
+	// A refused image output fails its own tool call, carries the guidance the
+	// model can act on, and leaves the turn running with its context.
 	failed := acp.UpdateToolCall(
 		"tool-3",
 		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
 		acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.ImageBlock("%", "image/png"))}),
 	)
-	err = session.emitUpdates(t.Context(), []acp.SessionUpdate{failed})
-	requireImageOutputError(t, err, imageOutputInvalidBase64)
-	last := conn.Updates()[len(conn.Updates())-1].Update.ToolCallUpdate
-	require.Equal(t, acp.ToolCallStatusFailed, *last.Status)
-	require.Nil(t, last.Content)
+	require.NoError(t, session.emitUpdates(t.Context(), []acp.SessionUpdate{failed}))
+	requireImageRefusal(t, conn.Updates()[len(conn.Updates())-1].Update, imageGuidanceInvalidBase64)
+
+	// The turn keeps making progress after the refusal.
+	require.NoError(t, session.emitUpdates(t.Context(), []acp.SessionUpdate{acp.UpdateAgentMessageText("still here")}))
+	require.Equal(t, "still here", conn.Updates()[len(conn.Updates())-1].Update.AgentMessageChunk.Content.Text.Text)
+
+	// An agent image has no tool call to attribute to, so the guidance takes
+	// the image's place rather than vanishing.
+	agentRefusal := acp.UpdateAgentMessage(acp.ImageBlock("%", "image/png"))
+	require.NoError(t, session.emitUpdates(t.Context(), []acp.SessionUpdate{agentRefusal}))
+	requireImageRefusal(t, conn.Updates()[len(conn.Updates())-1].Update, imageGuidanceInvalidBase64)
+
+	// The artifact store no longer holding a replayed image is the adapter's
+	// own durability breaking, so it still ends the turn. The tool call reports
+	// failed for attribution and carries no guidance: there is nothing to retry.
+	lost := acp.UpdateToolCall("tool-4", acp.WithUpdateContent([]acp.ToolCallContent{
+		acp.ToolContent(acp.ImageBlock(png, "image/png")),
+	}))
+	err = session.emitUpdatesWithAssistantIdentity(t.Context(), []acp.SessionUpdate{lost}, "", true)
+	requireImageOutputError(t, err, imageOutputStorageFailed)
+	lostUpdate := conn.Updates()[len(conn.Updates())-1].Update.ToolCallUpdate
+	require.Equal(t, acp.ToolCallStatusFailed, *lostUpdate.Status)
+	require.Nil(t, lostUpdate.Content)
 
 	failingConn := newRecordingAgentClient()
 	failingConn.sessionUpdateErr = errors.New("failed update")
@@ -1086,6 +1188,41 @@ func TestRawImageDiagnosticsExcludeBase64AndSignedQuery(t *testing.T) {
 	require.Equal(t, "data:[redacted]", redactDiagnosticURI("data:image/png;base64,abc"))
 	require.Equal(t, "%", redactDiagnosticURI("%"))
 	require.Equal(t, "file:///tmp/image.png", redactDiagnosticURI("file:///tmp/image.png"))
+}
+
+// narrowTempDir points os.TempDir at dir for the duration of one test, so a
+// case can hold a directory the adapter must refuse even though the real temp
+// directory is an allowed root. Every variable os.TempDir consults on any
+// supported platform is set.
+func narrowTempDir(t *testing.T, dir string) {
+	t.Helper()
+
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, dir)
+	}
+
+	require.Equal(t, dir, os.TempDir())
+}
+
+// requireImageRefusal asserts a recoverable image-output verdict reached the
+// client as its own update and left the turn running.
+func requireImageRefusal(t *testing.T, update acp.SessionUpdate, guidance string) {
+	t.Helper()
+
+	if update.ToolCallUpdate != nil {
+		require.NotNil(t, update.ToolCallUpdate.Status)
+		require.Equal(t, acp.ToolCallStatusFailed, *update.ToolCallUpdate.Status)
+		require.Len(t, update.ToolCallUpdate.Content, 1)
+		require.NotNil(t, update.ToolCallUpdate.Content[0].Content)
+		require.NotNil(t, update.ToolCallUpdate.Content[0].Content.Content.Text)
+		require.Equal(t, guidance, update.ToolCallUpdate.Content[0].Content.Content.Text.Text)
+
+		return
+	}
+
+	require.NotNil(t, update.AgentMessageChunk)
+	require.NotNil(t, update.AgentMessageChunk.Content.Text)
+	require.Equal(t, guidance, update.AgentMessageChunk.Content.Text.Text)
 }
 
 func requireImageOutputError(t *testing.T, err error, reason string) {

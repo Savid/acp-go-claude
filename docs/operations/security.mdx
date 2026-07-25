@@ -98,8 +98,13 @@ of the open, must be regular files, and are rejected unless their bytes match
 the digest the host declared. Anything able to write under that root can
 hardlink a file into it from elsewhere, so treat the digest rather than the root
 as the confidentiality boundary.
-Local image output is readable only from the session workspace or the private
-session image scratch directory. Reads resolve symlinks, require a regular
-file, and enforce the configured byte bound before emission. Remote image URLs
-are never fetched. Raw events and raw tool output remove image base64 and
+Local image output is readable only from the session workspace, the private
+session image scratch directory, or the operating-system temporary directory —
+the roots the harness sandbox already lets a turn write to. The roots stop
+accidental reads of arbitrary paths; they are not an exfiltration boundary
+against a shell-capable agent, which can copy any readable file into the
+workspace. Reads resolve symlinks, require a regular file, and enforce the
+configured byte bound before emission. A refused path fails that tool call with
+fixed guidance and does not end the turn. Remote image URLs are never
+fetched. Raw events and raw tool output remove image base64 and
 signed query strings, retaining only bounded metadata needed for diagnostics.

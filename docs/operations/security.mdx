@@ -90,7 +90,14 @@ transports are rejected up front and never reach the CLI (see
 than overwrite an operator-authored file — see
 [Models and config](/docs/features/models-config).
 
-Embedded image data is decoded and structurally validated before a native turn.
+Embedded image data is decoded and structurally validated before a native turn,
+and the native request carries the decoded bytes re-encoded rather than the
+base64 the host supplied. Handed-over image files are opened relative to the
+configured read root with containment enforced by the operating system as part
+of the open, must be regular files, and are rejected unless their bytes match
+the digest the host declared. Anything able to write under that root can
+hardlink a file into it from elsewhere, so treat the digest rather than the root
+as the confidentiality boundary.
 Local image output is readable only from the session workspace or the private
 session image scratch directory. Reads resolve symlinks, require a regular
 file, and enforce the configured byte bound before emission. Remote image URLs

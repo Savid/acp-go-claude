@@ -70,6 +70,36 @@ type ImageInputLimits struct {
 	MaxBytesPerPrompt int64
 }
 
+// EffectiveInputBytesPerImage is the per-image decoded byte bound prompt
+// validation enforces for the configured policy limit. A disabled or oversized
+// limit falls back to the decoded-frame clamp, because reading a host-named file
+// unbounded is never an option and no larger image can reach the adapter anyway.
+func EffectiveInputBytesPerImage(configured int64) int64 {
+	if configured <= 0 || configured > MaxDecodedFrameBytes {
+		return MaxDecodedFrameBytes
+	}
+
+	return configured
+}
+
+// EffectiveInputBytesPerPrompt is the per-prompt aggregate decoded byte bound
+// prompt validation enforces. A configured aggregate binds as given; a zero one
+// enforces no total at all, which is exactly what it reports.
+func EffectiveInputBytesPerPrompt(configured int64) int64 {
+	if configured <= 0 {
+		return 0
+	}
+
+	return configured
+}
+
+// promptMediaState is the per-prompt accounting the byte and count gates share:
+// the decoded bytes charged so far and the handoff-form blocks read so far.
+type promptMediaState struct {
+	bytes         int64
+	handoffBlocks int
+}
+
 // PromptToClaude converts ACP prompt content to Claude stream-json user content.
 // An empty prompt fails closed with the uniform unsupported-prompt shape. A
 // nil handoff reader rejects every handoff-form image block, which is how an
@@ -94,15 +124,21 @@ func PromptToClaude(
 	// the index a rejection reports, so no two gated blocks can share one.
 	mediaIndex := 0
 
-	var promptMediaBytes int64
+	var media promptMediaState
 
 	for _, block := range prompt {
-		converted, appended, media, err := contentBlockToClaude(
+		// Validation reads host-named files, so a cancelled turn stops between
+		// blocks rather than after the whole prompt has been pulled off disk.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		converted, appended, gated, err := contentBlockToClaude(
 			ctx,
 			block,
 			advertised,
 			mediaIndex,
-			&promptMediaBytes,
+			&media,
 			limits,
 			handoff,
 		)
@@ -110,7 +146,7 @@ func PromptToClaude(
 			return nil, err
 		}
 
-		if media {
+		if gated {
 			mediaIndex++
 		}
 
@@ -128,7 +164,7 @@ func contentBlockToClaude(
 	block acp.ContentBlock,
 	advertisedCommands map[string]struct{},
 	mediaIndex int,
-	promptMediaBytes *int64,
+	media *promptMediaState,
 	limits ImageInputLimits,
 	handoff HandoffFileReader,
 ) ([]map[string]any, []map[string]any, bool, error) {
@@ -140,7 +176,7 @@ func contentBlockToClaude(
 
 		return []map[string]any{textBlock(rewriteAdvertisedMCPSlashCommand(block.Text.Text, advertisedCommands))}, nil, false, nil
 	case block.Image != nil:
-		converted, err := promptImageToClaude(ctx, block.Image, mediaIndex, promptMediaBytes, limits, handoff)
+		converted, err := promptImageToClaude(ctx, block.Image, mediaIndex, media, limits, handoff)
 
 		return converted, nil, true, err
 	case block.ResourceLink != nil:
@@ -149,7 +185,7 @@ func contentBlockToClaude(
 		return resourceToClaude(
 			block.Resource.Resource,
 			mediaIndex,
-			promptMediaBytes,
+			&media.bytes,
 			limits,
 		)
 	default:
@@ -165,12 +201,24 @@ func promptImageToClaude(
 	ctx context.Context,
 	image *acp.ContentBlockImage,
 	index int,
-	promptBytes *int64,
+	media *promptMediaState,
 	limits ImageInputLimits,
 	handoff HandoffFileReader,
 ) ([]map[string]any, error) {
 	if image.Data == "" && promptImageHandoffForm(image) {
-		data, err := handoffImageData(ctx, handoff, image, index, promptBytes, limits)
+		// Counted before the read, so the block that crosses the cap costs no
+		// I/O at all.
+		media.handoffBlocks++
+		if media.handoffBlocks > maxHandoffBlocksPerPrompt {
+			return nil, imageInputError(
+				errImageTooLarge,
+				index,
+				int64(media.handoffBlocks),
+				maxHandoffBlocksPerPrompt,
+			)
+		}
+
+		data, err := handoffImageData(ctx, handoff, image, index, &media.bytes, limits)
 		if err != nil {
 			return nil, err
 		}
@@ -178,45 +226,57 @@ func promptImageToClaude(
 		return []map[string]any{base64Block(typeImage, image.MimeType, data)}, nil
 	}
 
-	if err := validatePromptImage(image.Data, image.MimeType, index, promptBytes, limits); err != nil {
+	decoded, err := validatePromptImage(image.Data, image.MimeType, index, fieldPromptImage, &media.bytes, limits)
+	if err != nil {
 		return nil, err
 	}
 
-	return []map[string]any{base64Block(typeImage, image.MimeType, image.Data)}, nil
+	// Re-encoded from the bytes that passed the gates rather than forwarded as
+	// received: base64 decoding ignores line breaks and accepts non-canonical
+	// trailing bits, so two host spellings of one image would otherwise reach
+	// the harness as two different payloads.
+	return []map[string]any{base64Block(typeImage, image.MimeType, base64.StdEncoding.EncodeToString(decoded))}, nil
 }
 
+// validatePromptImage returns the decoded bytes it admitted, which is what the
+// native request is built from.
 func validatePromptImage(
 	data string,
 	mimeType string,
 	index int,
+	field string,
 	promptBytes *int64,
 	limits ImageInputLimits,
-) error {
+) ([]byte, error) {
 	if data == "" {
-		return imageInputError(errMissingImageData, index, 0, 0)
+		return nil, mediaInputError(field, errMissingImageData, index, 0, 0)
 	}
 
 	if !portableImageMIME(mimeType) {
-		return imageInputError(errInvalidMediaType, index, 0, 0)
+		return nil, mediaInputError(field, errInvalidMediaType, index, 0, 0)
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(data)
 	if err != nil {
-		return imageInputError(errInvalidBase64, index, 0, 0)
+		return nil, mediaInputError(field, errInvalidBase64, index, 0, 0)
 	}
 
-	return validateRasterBytes(decoded, int64(len(decoded)), mimeType, index, promptBytes, limits)
+	if err := validateRasterBytes(decoded, mimeType, index, field, promptBytes, limits); err != nil {
+		return nil, err
+	}
+
+	return decoded, nil
 }
 
 // validateRasterBytes runs the structural and byte gates shared by every
-// inbound image form. size is the authoritative decoded size a byte rejection
-// reports, which for a handoff file is its real size on disk rather than the
-// length of the bounded read.
+// inbound image form. Every byte verdict and every charge to the aggregate is
+// decided on the bytes in hand, so nothing a separate size report claims can
+// move them.
 func validateRasterBytes(
 	decoded []byte,
-	size int64,
 	mimeType string,
 	index int,
+	field string,
 	promptBytes *int64,
 	limits ImageInputLimits,
 ) error {
@@ -227,27 +287,40 @@ func validateRasterBytes(
 		// invalid_dimensions failure, reported ahead of the declared-vs-sniffed
 		// mismatch checked below even when the declared type also disagrees.
 		if info.mime == "" {
-			return imageInputError(errMediaTypeMismatch, index, 0, 0)
+			return mediaInputError(field, errMediaTypeMismatch, index, 0, 0)
 		}
 
-		return imageInputError(errInvalidDimensions, index, 0, 0)
+		return mediaInputError(field, errInvalidDimensions, index, 0, 0)
 	}
 
 	if info.animated {
-		return imageInputError(errAnimatedUnsupported, index, 0, 0)
+		return mediaInputError(field, errAnimatedUnsupported, index, 0, 0)
 	}
 
 	if info.mime != mimeType {
-		return imageInputError(errMediaTypeMismatch, index, 0, 0)
+		return mediaInputError(field, errMediaTypeMismatch, index, 0, 0)
 	}
 
-	if limits.MaxBytesPerImage > 0 && size > limits.MaxBytesPerImage {
-		return imageInputError(errImageTooLarge, index, size, limits.MaxBytesPerImage)
+	size := int64(len(decoded))
+
+	maxPerImage := EffectiveInputBytesPerImage(limits.MaxBytesPerImage)
+	if size > maxPerImage {
+		return mediaInputError(field, errImageTooLarge, index, size, maxPerImage)
 	}
 
+	return chargePromptBytes(size, index, field, promptBytes, limits)
+}
+
+// chargePromptBytes adds size to the prompt's running total and enforces the
+// aggregate on it. Every form that puts host bytes into the native request goes
+// through here, so declaring bytes as one content shape rather than another
+// cannot buy a second budget.
+func chargePromptBytes(size int64, index int, field string, promptBytes *int64, limits ImageInputLimits) error {
 	*promptBytes += size
-	if limits.MaxBytesPerPrompt > 0 && *promptBytes > limits.MaxBytesPerPrompt {
-		return imageInputError(errImageTooLarge, index, *promptBytes, limits.MaxBytesPerPrompt)
+
+	maxPerPrompt := EffectiveInputBytesPerPrompt(limits.MaxBytesPerPrompt)
+	if maxPerPrompt > 0 && *promptBytes > maxPerPrompt {
+		return mediaInputError(field, errImageTooLarge, index, *promptBytes, maxPerPrompt)
 	}
 
 	return nil
@@ -267,9 +340,15 @@ func normalizeDeclaredMIME(mimeType string) string {
 	return strings.ToLower(strings.TrimSpace(base))
 }
 
-func imageInputError(reason string, index int, size int64, maxBytes int64) error {
+// mediaInputError reports a gated-media rejection. field names the kind of
+// prompt block the bytes arrived on, which is independent of the gate chain the
+// declared media type routed them through: a resource block stays
+// prompt.resource even when the image chain is what rejected it. index is the
+// media index, shared by image blocks and gated blob resources, so a document
+// and an image in one prompt never report the same one.
+func mediaInputError(field string, reason string, index int, size int64, maxBytes int64) error {
 	data := map[string]any{
-		keyFieldField: fieldPromptImage,
+		keyFieldField: field,
 		keyErrorField: reason,
 		keyIndex:      index,
 	}
@@ -281,21 +360,8 @@ func imageInputError(reason string, index int, size int64, maxBytes int64) error
 	return acp.NewInvalidParams(data)
 }
 
-// resourceInputError reports a blob-resource rejection. Its index is the same
-// media index an image block reports, because a gated blob occupies a position
-// in that sequence.
-func resourceInputError(reason string, index int, size int64, maxBytes int64) error {
-	data := map[string]any{
-		keyFieldField: fieldPromptResource,
-		keyErrorField: reason,
-		keyIndex:      index,
-	}
-	if size > 0 || maxBytes > 0 {
-		data[keySizeBytes] = size
-		data[keyMaxBytes] = maxBytes
-	}
-
-	return acp.NewInvalidParams(data)
+func imageInputError(reason string, index int, size int64, maxBytes int64) error {
+	return mediaInputError(fieldPromptImage, reason, index, size, maxBytes)
 }
 
 func advertisedCommandSet(commands []acp.AvailableCommand) map[string]struct{} {
@@ -344,6 +410,18 @@ func resourceToClaude(
 	limits ImageInputLimits,
 ) ([]map[string]any, []map[string]any, bool, error) {
 	if resource.TextResourceContents != nil {
+		// Text inlined into the prompt is prompt payload like any other, so it
+		// is charged the aggregate rather than being a way around it.
+		if err := chargePromptBytes(
+			int64(len(resource.TextResourceContents.Text)),
+			mediaIndex,
+			fieldPromptResource,
+			promptMediaBytes,
+			limits,
+		); err != nil {
+			return nil, nil, false, err
+		}
+
 		appended := []map[string]any{textBlock(contextResourceText(
 			resource.TextResourceContents.Uri,
 			resource.TextResourceContents.Text,
@@ -363,31 +441,37 @@ func resourceToClaude(
 
 		blob := resource.BlobResourceContents.Blob
 
-		// The media-type prefix test is normalization-tolerant so a
-		// noncanonical raster declaration reaches the image gates instead of
-		// falling through to a channel that does not validate rasters at all.
-		if strings.HasPrefix(normalizeDeclaredMIME(mimeType), imageMIMEPrefix) {
-			if err := validatePromptImage(
+		// Routing is decided on the normalized media type so a noncanonical
+		// declaration reaches the gates its bytes belong to instead of falling
+		// through to a channel that validates nothing.
+		normalized := normalizeDeclaredMIME(mimeType)
+
+		if strings.HasPrefix(normalized, imageMIMEPrefix) {
+			// The allowlist still admits on the verbatim declaration, so a
+			// noncanonical raster is rejected rather than silently accepted.
+			decoded, err := validatePromptImage(
 				blob,
 				mimeType,
 				mediaIndex,
+				fieldPromptResource,
 				promptMediaBytes,
 				limits,
-			); err != nil {
+			)
+			if err != nil {
 				return nil, nil, true, err
 			}
 
-			return []map[string]any{base64Block(typeImage, mimeType, blob)}, nil, true, nil
+			return []map[string]any{base64Block(typeImage, mimeType, base64.StdEncoding.EncodeToString(decoded))}, nil, true, nil
 		}
 
 		// A gated blob consumes a media index like an image block, so a
 		// document and an image in one prompt never report the same index.
-		if mimeType == mimePDF {
+		if normalized == mimePDF {
 			if err := validatePromptBlob(blob, mediaIndex, promptMediaBytes, limits); err != nil {
 				return nil, nil, true, err
 			}
 
-			return []map[string]any{base64Block(typeDocument, mimeType, blob)}, nil, true, nil
+			return []map[string]any{base64Block(typeDocument, normalized, blob)}, nil, true, nil
 		}
 
 		return nil, nil, false, acp.NewInvalidParams(map[string]any{keyErrorField: errValueUnsupported, keyFieldField: fieldPromptResource})
@@ -402,20 +486,17 @@ func resourceToClaude(
 func validatePromptBlob(blob string, index int, promptBytes *int64, limits ImageInputLimits) error {
 	decoded, err := base64.StdEncoding.DecodeString(blob)
 	if err != nil {
-		return resourceInputError(errInvalidBase64, index, 0, 0)
+		return mediaInputError(fieldPromptResource, errInvalidBase64, index, 0, 0)
 	}
 
 	size := int64(len(decoded))
-	if limits.MaxBytesPerImage > 0 && size > limits.MaxBytesPerImage {
-		return resourceInputError(errImageTooLarge, index, size, limits.MaxBytesPerImage)
+
+	maxPerImage := EffectiveInputBytesPerImage(limits.MaxBytesPerImage)
+	if size > maxPerImage {
+		return mediaInputError(fieldPromptResource, errImageTooLarge, index, size, maxPerImage)
 	}
 
-	*promptBytes += size
-	if limits.MaxBytesPerPrompt > 0 && *promptBytes > limits.MaxBytesPerPrompt {
-		return resourceInputError(errImageTooLarge, index, *promptBytes, limits.MaxBytesPerPrompt)
-	}
-
-	return nil
+	return chargePromptBytes(size, index, fieldPromptResource, promptBytes, limits)
 }
 
 func textBlock(text string) map[string]any {

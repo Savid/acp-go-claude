@@ -1,13 +1,18 @@
 package mapper
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -17,32 +22,51 @@ import (
 const handoffRoot = "/handoff"
 
 // stubHandoffReader answers from memory with the same contract the real reader
-// implements: a bounded read that reports the file's real size and whether the
-// bytes were truncated at the gate.
+// implements: it opens by path, refuses what it cannot find, and reports no size
+// of its own. Bounding the read is the caller's job, as it is in production.
 type stubHandoffReader struct {
-	files map[string][]byte
-	err   error
-	paths []string
+	files    map[string][]byte
+	err      error
+	readErr  error
+	paths    []string
+	unclosed int
 }
 
-func (s *stubHandoffReader) ReadHandoffImage(_ context.Context, path string, maxBytes int64) (HandoffFile, error) {
+func (s *stubHandoffReader) OpenHandoffImage(_ context.Context, path string) (io.ReadCloser, error) {
 	s.paths = append(s.paths, path)
 
 	if s.err != nil {
-		return HandoffFile{}, s.err
+		return nil, s.err
 	}
 
 	data, ok := s.files[path]
 	if !ok {
-		return HandoffFile{}, &HandoffPathError{Verdict: HandoffMissingFile, Message: "handoff file does not exist"}
+		return nil, &HandoffPathError{Verdict: HandoffMissingFile, Message: "handoff file does not exist"}
 	}
 
-	size := int64(len(data))
-	if maxBytes > 0 && size > maxBytes {
-		return HandoffFile{Data: data[:maxBytes+1], Size: size, Truncated: true}, nil
+	s.unclosed++
+
+	return &stubHandoffFile{reader: bytes.NewReader(data), err: s.readErr, opened: s}, nil
+}
+
+type stubHandoffFile struct {
+	reader *bytes.Reader
+	err    error
+	opened *stubHandoffReader
+}
+
+func (f *stubHandoffFile) Read(into []byte) (int, error) {
+	if f.err != nil {
+		return 0, f.err
 	}
 
-	return HandoffFile{Data: data, Size: size}, nil
+	return f.reader.Read(into)
+}
+
+func (f *stubHandoffFile) Close() error {
+	f.opened.unclosed--
+
+	return nil
 }
 
 func newStubHandoffReader(name string, data []byte) *stubHandoffReader {
@@ -108,8 +132,14 @@ func TestHandoffImageMatchesEmbeddedForm(t *testing.T) {
 	handoff, err := mapHandoffPrompt(t, handoffImageBlock("a.png", png, mimePNG), reader, ImageInputLimits{})
 	require.NoError(t, err)
 
+	// The embedded side is offered line-wrapped base64, which is legal on the
+	// wire and decodes to the same bytes. Identity therefore has to come from
+	// the payload rather than from the two sides being handed one string.
+	wrapped := wrapBase64(base64.StdEncoding.EncodeToString(png), 76)
+	require.Contains(t, wrapped, "\n")
+
 	embedded, err := mapPromptBlocks(
-		[]acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString(png), mimePNG)},
+		[]acp.ContentBlock{acp.ImageBlock(wrapped, mimePNG)},
 		nil,
 		ImageInputLimits{},
 	)
@@ -150,17 +180,19 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 	require.True(t, ok)
 
 	cases := []struct {
-		name string
-		meta map[string]any
+		name    string
+		meta    map[string]any
+		message string
 	}{
-		{name: "absent", meta: map[string]any{}},
-		{name: "not an object", meta: map[string]any{MetaKeyHandoff: "handoff"}},
+		{name: "absent", meta: map[string]any{}, message: "handoff metadata is missing"},
+		{name: "not an object", meta: map[string]any{MetaKeyHandoff: "handoff"}, message: "handoff metadata must contain exactly version, digest, and sizeBytes"},
 		{
 			name: "missing field",
 			meta: map[string]any{MetaKeyHandoff: map[string]any{
 				handoffFieldVersion: HandoffVersion,
 				handoffFieldDigest:  valid[handoffFieldDigest],
 			}},
+			message: "handoff metadata must contain exactly version, digest, and sizeBytes",
 		},
 		{
 			name: "unknown field",
@@ -170,6 +202,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldSizeBytes: valid[handoffFieldSizeBytes],
 				"extra":               true,
 			}},
+			message: "handoff metadata must contain exactly version, digest, and sizeBytes",
 		},
 		{
 			name: "missing version",
@@ -178,6 +211,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldDigest:    valid[handoffFieldDigest],
 				handoffFieldSizeBytes: valid[handoffFieldSizeBytes],
 			}},
+			message: "unsupported handoff metadata version",
 		},
 		{
 			name: "unsupported version",
@@ -186,6 +220,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldDigest:    valid[handoffFieldDigest],
 				handoffFieldSizeBytes: valid[handoffFieldSizeBytes],
 			}},
+			message: "unsupported handoff metadata version",
 		},
 		{
 			name: "float version",
@@ -194,6 +229,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldDigest:    valid[handoffFieldDigest],
 				handoffFieldSizeBytes: valid[handoffFieldSizeBytes],
 			}},
+			message: "unsupported handoff metadata version",
 		},
 		{
 			name: "digest not a string",
@@ -202,6 +238,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldDigest:    1,
 				handoffFieldSizeBytes: valid[handoffFieldSizeBytes],
 			}},
+			message: "handoff digest must be 64 lowercase hexadecimal characters",
 		},
 		{
 			name: "digest too short",
@@ -210,6 +247,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldDigest:    "abc",
 				handoffFieldSizeBytes: valid[handoffFieldSizeBytes],
 			}},
+			message: "handoff digest must be 64 lowercase hexadecimal characters",
 		},
 		{
 			name: "digest not lowercase hex",
@@ -218,6 +256,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldDigest:    "A" + hex.EncodeToString(make([]byte, 32))[1:],
 				handoffFieldSizeBytes: valid[handoffFieldSizeBytes],
 			}},
+			message: "handoff digest must be 64 lowercase hexadecimal characters",
 		},
 		{
 			name: "sizeBytes not a number",
@@ -226,6 +265,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldDigest:    valid[handoffFieldDigest],
 				handoffFieldSizeBytes: "12",
 			}},
+			message: "handoff sizeBytes must be a non-negative integer",
 		},
 		{
 			name: "sizeBytes negative",
@@ -234,6 +274,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldDigest:    valid[handoffFieldDigest],
 				handoffFieldSizeBytes: -1,
 			}},
+			message: "handoff sizeBytes must be a non-negative integer",
 		},
 		{
 			name: "sizeBytes negative int64",
@@ -242,6 +283,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldDigest:    valid[handoffFieldDigest],
 				handoffFieldSizeBytes: int64(-1),
 			}},
+			message: "handoff sizeBytes must be a non-negative integer",
 		},
 		{
 			name: "sizeBytes fractional",
@@ -250,6 +292,7 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldDigest:    valid[handoffFieldDigest],
 				handoffFieldSizeBytes: 1.5,
 			}},
+			message: "handoff sizeBytes must be a non-negative integer",
 		},
 		{
 			name: "sizeBytes out of range",
@@ -258,6 +301,19 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 				handoffFieldDigest:    valid[handoffFieldDigest],
 				handoffFieldSizeBytes: math.MaxFloat64,
 			}},
+			message: "handoff sizeBytes must be a non-negative integer",
+		},
+		{
+			// The int64 boundary itself: math.MaxInt64 is not representable as a
+			// float64 and rounds up, so a guard that admits this value converts
+			// it to a negative int64.
+			name: "sizeBytes at the signed 64-bit boundary",
+			meta: map[string]any{MetaKeyHandoff: map[string]any{
+				handoffFieldVersion:   HandoffVersion,
+				handoffFieldDigest:    valid[handoffFieldDigest],
+				handoffFieldSizeBytes: math.Pow(2, 63),
+			}},
+			message: "handoff sizeBytes must be a non-negative integer",
 		},
 	}
 
@@ -271,7 +327,8 @@ func TestHandoffImageEnvelopeDefects(t *testing.T) {
 			// Every case still signals handoff intent through the file uri, so
 			// none of them may be claimed by missing_data.
 			_, err := mapHandoffPrompt(t, block, newStubHandoffReader("a.png", png), ImageInputLimits{})
-			requireHandoffError(t, err, errInvalidHandoff)
+			details := requireHandoffError(t, err, errInvalidHandoff)
+			require.Equal(t, test.message, details[keyMessage])
 		})
 	}
 }
@@ -287,15 +344,16 @@ func TestHandoffImageURIDefects(t *testing.T) {
 	localhost := "file://localhost" + filepath.Join(handoffRoot, "a.png")
 
 	cases := []struct {
-		name string
-		uri  *string
+		name    string
+		uri     *string
+		message string
 	}{
-		{name: "absent", uri: nil},
-		{name: "blank", uri: &blank},
-		{name: "unparseable", uri: &unparseable},
-		{name: "not a file uri", uri: ptr("https://example.test/a.png")},
-		{name: "foreign host", uri: &remote},
-		{name: "relative path", uri: &opaque},
+		{name: "absent", uri: nil, message: "handoff block carries no uri"},
+		{name: "blank", uri: &blank, message: "handoff block carries no uri"},
+		{name: "unparseable", uri: &unparseable, message: "handoff uri cannot be parsed"},
+		{name: "not a file uri", uri: ptr("https://example.test/a.png"), message: "handoff uri scheme must be file"},
+		{name: "foreign host", uri: &remote, message: "handoff uri host is not local"},
+		{name: "relative path", uri: &opaque, message: "handoff uri path must be absolute"},
 	}
 
 	for _, test := range cases {
@@ -308,7 +366,8 @@ func TestHandoffImageURIDefects(t *testing.T) {
 			// Intent comes from the envelope here, so a defective uri is still a
 			// handoff verdict rather than missing data.
 			_, err := mapHandoffPrompt(t, block, newStubHandoffReader("a.png", png), ImageInputLimits{})
-			requireHandoffError(t, err, errInvalidHandoff)
+			details := requireHandoffError(t, err, errInvalidHandoff)
+			require.Equal(t, test.message, details[keyMessage])
 		})
 	}
 
@@ -324,30 +383,18 @@ func TestHandoffImageReadRefusals(t *testing.T) {
 
 	png := fixtureBytes(t, "valid.png")
 
-	cases := []struct {
-		name    string
-		verdict string
-	}{
-		{name: "outside the root", verdict: HandoffPathNotAllowed},
-		{name: "vanished inside the root", verdict: HandoffMissingFile},
-	}
-
-	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			reader := &stubHandoffReader{err: &HandoffPathError{Verdict: test.verdict, Message: "refused"}}
-			_, err := mapHandoffPrompt(t, handoffImageBlock("a.png", png, mimePNG), reader, ImageInputLimits{})
-			details := requireHandoffError(t, err, test.verdict)
-			require.Equal(t, "refused", details[keyMessage])
-		})
-	}
+	// A reader's path refusal reaches the client with its verdict and its
+	// message intact rather than being relabelled. Which paths produce which
+	// verdict is the reader's own behaviour, tested against a real filesystem.
+	reader := &stubHandoffReader{err: &HandoffPathError{Verdict: HandoffPathNotAllowed, Message: "refused"}}
+	_, err := mapHandoffPrompt(t, handoffImageBlock("a.png", png, mimePNG), reader, ImageInputLimits{})
+	details := requireHandoffError(t, err, HandoffPathNotAllowed)
+	require.Equal(t, "refused", details[keyMessage])
 
 	// A reader failure that is not a path refusal (a cancelled turn) is
 	// surfaced as itself rather than relabelled as a block defect.
 	cancelled := errors.New("context canceled")
-	reader := &stubHandoffReader{err: cancelled}
-	_, err := mapHandoffPrompt(t, handoffImageBlock("a.png", png, mimePNG), reader, ImageInputLimits{})
+	_, err = mapHandoffPrompt(t, handoffImageBlock("a.png", png, mimePNG), &stubHandoffReader{err: cancelled}, ImageInputLimits{})
 	require.ErrorIs(t, err, cancelled)
 }
 
@@ -517,32 +564,6 @@ func TestHandoffImageIntentSelection(t *testing.T) {
 	require.Equal(t, errMissingImageData, requireImageInputErrorData(t, err)[keyErrorField])
 }
 
-func TestHandoffImageTruncatedFileSkipsDigestAndRejects(t *testing.T) {
-	t.Parallel()
-
-	png := fixtureBytes(t, "valid.png")
-	limit := int64(len(png)) - 10
-
-	// The read stopped one byte past the gate, so the digest cannot be
-	// verified. Nothing unverified is forwarded: the byte gate rejects it.
-	block := handoffImageBlock("a.png", png, mimePNG)
-	block.Image.Meta = map[string]any{MetaKeyHandoff: map[string]any{
-		handoffFieldVersion:   HandoffVersion,
-		handoffFieldDigest:    hex.EncodeToString(make([]byte, 32)),
-		handoffFieldSizeBytes: 0,
-	}}
-
-	_, err := mapHandoffPrompt(
-		t,
-		block,
-		newStubHandoffReader("a.png", png),
-		ImageInputLimits{MaxBytesPerImage: limit},
-	)
-	details := requireImageInputErrorData(t, err)
-	require.Equal(t, errImageTooLarge, details[keyErrorField])
-	require.EqualValues(t, len(png), details[keySizeBytes])
-}
-
 // fixtureHeaderPNG is a structurally valid PNG header, which is all the gates
 // ahead of the byte verdict read.
 func fixtureHeaderPNG() []byte {
@@ -557,6 +578,21 @@ func fixtureHeaderPNG() []byte {
 
 func ptr(value string) *string {
 	return &value
+}
+
+// wrapBase64 breaks an encoded payload into lines the way a host emitting MIME
+// base64 would.
+func wrapBase64(encoded string, width int) string {
+	var wrapped strings.Builder
+
+	for start := 0; start < len(encoded); start += width {
+		end := min(start+width, len(encoded))
+
+		wrapped.WriteString(encoded[start:end])
+		wrapped.WriteString("\n")
+	}
+
+	return wrapped.String()
 }
 
 func TestAdvertisedMediaTypesMatchTheGate(t *testing.T) {
@@ -608,53 +644,312 @@ func TestHandoffPathErrorMessage(t *testing.T) {
 	require.EqualError(t, err, "handoff file does not exist")
 }
 
-// TestHandoffReadIsBoundedWithoutAPolicyGate covers the disabled per-image
-// limit: the read is still bounded, and a file past that bound is rejected
-// rather than forwarded with an unverifiable digest.
-func TestHandoffReadIsBoundedWithoutAPolicyGate(t *testing.T) {
+// TestHandoffOverBoundReadEndsTheBlock pins the byte verdict to the bytes in
+// hand. The reader hands back one byte past the gate while the envelope declares
+// a much smaller file, so only a verdict decided on the read itself can reject:
+// a verdict decided on the declared size would let those bytes through
+// unverified.
+func TestHandoffOverBoundReadEndsTheBlock(t *testing.T) {
+	t.Parallel()
+
+	gate := int64(4096)
+	oversized := append(fixtureHeaderPNG(), make([]byte, gate+1-33)...)
+
+	block := handoffImageBlock("a.png", oversized, mimePNG)
+	envelope, ok := block.Image.Meta[MetaKeyHandoff].(map[string]any)
+	require.True(t, ok)
+
+	// The host declares a small, plausible file. Its digest is the real one for
+	// the bytes on disk, so digest verification could not reject this block.
+	envelope[handoffFieldSizeBytes] = 448
+
+	reader := newStubHandoffReader("a.png", oversized)
+
+	blocks, err := PromptToClaude(
+		context.Background(),
+		[]acp.ContentBlock{block},
+		nil,
+		ImageInputLimits{MaxBytesPerImage: gate},
+		reader,
+	)
+	require.Nil(t, blocks)
+
+	details := requireImageInputErrorData(t, err)
+	require.Equal(t, errImageTooLarge, details[keyErrorField])
+	require.EqualValues(t, gate+1, details[keySizeBytes])
+	require.EqualValues(t, gate, details[keyMaxBytes])
+
+	// The read happened, and nothing it returned reached the native request.
+	require.Len(t, reader.paths, 1)
+
+	// A second block after the rejection proves the prompt was abandoned rather
+	// than continuing with the aggregate charged a stale, smaller number.
+	png := fixtureBytes(t, "valid.png")
+	pair := &stubHandoffReader{files: map[string][]byte{
+		filepath.Join(handoffRoot, "a.png"): oversized,
+		filepath.Join(handoffRoot, "b.png"): png,
+	}}
+
+	blocks, err = PromptToClaude(
+		context.Background(),
+		[]acp.ContentBlock{block, handoffImageBlock("b.png", png, mimePNG)},
+		nil,
+		ImageInputLimits{MaxBytesPerImage: gate, MaxBytesPerPrompt: gate},
+		pair,
+	)
+	require.Nil(t, blocks)
+	require.Equal(t, errImageTooLarge, requireImageInputErrorData(t, err)[keyErrorField])
+	require.Equal(t, []string{filepath.Join(handoffRoot, "a.png")}, pair.paths)
+}
+
+// TestHandoffBlockCountIsCappedWithTheAggregateDisabled pins the count cap as
+// the only thing bounding handoff I/O when the per-prompt aggregate is off.
+// Every block is a valid PNG far below the per-image gate, so no byte or
+// structural gate can produce the rejection.
+func TestHandoffBlockCountIsCappedWithTheAggregateDisabled(t *testing.T) {
+	t.Parallel()
+
+	png := fixtureBytes(t, "valid.png")
+	reader := newStubHandoffReader("a.png", png)
+
+	prompt := make([]acp.ContentBlock, 0, maxHandoffBlocksPerPrompt+1)
+	for range maxHandoffBlocksPerPrompt + 1 {
+		prompt = append(prompt, handoffImageBlock("a.png", png, mimePNG))
+	}
+
+	_, err := PromptToClaude(
+		context.Background(),
+		prompt,
+		nil,
+		ImageInputLimits{MaxBytesPerPrompt: 0},
+		reader,
+	)
+
+	details := requireImageInputErrorData(t, err)
+	require.Equal(t, errImageTooLarge, details[keyErrorField])
+	require.Equal(t, maxHandoffBlocksPerPrompt, details[keyIndex])
+	require.EqualValues(t, maxHandoffBlocksPerPrompt+1, details[keySizeBytes])
+	require.EqualValues(t, maxHandoffBlocksPerPrompt, details[keyMaxBytes])
+
+	// The block that crossed the cap cost no read at all.
+	require.Len(t, reader.paths, maxHandoffBlocksPerPrompt)
+
+	// Exactly the cap is accepted, so the bound is inclusive and a conforming
+	// multi-image turn is unaffected.
+	accepted, err := PromptToClaude(
+		context.Background(),
+		prompt[:maxHandoffBlocksPerPrompt],
+		nil,
+		ImageInputLimits{MaxBytesPerPrompt: 0},
+		newStubHandoffReader("a.png", png),
+	)
+	require.NoError(t, err)
+	require.Len(t, accepted, maxHandoffBlocksPerPrompt)
+}
+
+// TestHandoffReadHonoursContextCancellation pins the check between blocks: a
+// turn cancelled before validation reaches a block opens nothing at all.
+func TestHandoffReadHonoursContextCancellation(t *testing.T) {
 	t.Parallel()
 
 	png := fixtureBytes(t, "valid.png")
 
-	// With no policy gate the read bound is the decoded-frame clamp.
-	require.EqualValues(t, MaxDecodedFrameBytes, handoffReadBound(ImageInputLimits{}))
-	require.EqualValues(t, 10, handoffReadBound(ImageInputLimits{MaxBytesPerImage: 10}))
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
 
-	// A configured gate is never widened by the clamp.
-	gates := handoffGates(ImageInputLimits{MaxBytesPerImage: 10}, HandoffFile{Truncated: true})
-	require.EqualValues(t, 10, gates.MaxBytesPerImage)
-
-	// The aggregate gate is deliberately left alone.
-	gates = handoffGates(ImageInputLimits{MaxBytesPerPrompt: 10}, HandoffFile{Truncated: true})
-	require.EqualValues(t, MaxDecodedFrameBytes, gates.MaxBytesPerImage)
-	require.EqualValues(t, 10, gates.MaxBytesPerPrompt)
-
-	// A file that fits the clamp is read and verified as usual.
-	_, err := mapHandoffPrompt(t, handoffImageBlock("a.png", png, mimePNG), newStubHandoffReader("a.png", png), ImageInputLimits{})
-	require.NoError(t, err)
-
-	// A file past the clamp is truncated by the reader, so its digest cannot be
-	// verified; the clamp stands in as the byte gate and rejects it.
-	_, err = mapHandoffPrompt(
-		t,
-		handoffImageBlock("a.png", png, mimePNG),
-		&clampedHandoffReader{},
+	reader := newStubHandoffReader("a.png", png)
+	_, err := PromptToClaude(
+		cancelled,
+		[]acp.ContentBlock{handoffImageBlock("a.png", png, mimePNG)},
+		nil,
 		ImageInputLimits{},
+		reader,
 	)
-	details := requireImageInputErrorData(t, err)
-	require.Equal(t, errImageTooLarge, details[keyErrorField])
-	require.EqualValues(t, MaxDecodedFrameBytes+1, details[keySizeBytes])
-	require.EqualValues(t, MaxDecodedFrameBytes, details[keyMaxBytes])
+	require.ErrorIs(t, err, context.Canceled)
+
+	// Nothing was opened, so no file was touched and the turn slot is free.
+	require.Empty(t, reader.paths)
 }
 
-// clampedHandoffReader answers as the real reader does for a file one byte past
-// the read bound, without materializing eight megabytes.
-type clampedHandoffReader struct{}
+// TestEffectiveInputBoundsAreWhatTheGatesEnforce drives each configured shape
+// through the real gate rather than comparing a function to the constant it
+// returns.
+func TestEffectiveInputBoundsAreWhatTheGatesEnforce(t *testing.T) {
+	t.Parallel()
 
-func (*clampedHandoffReader) ReadHandoffImage(_ context.Context, _ string, maxBytes int64) (HandoffFile, error) {
-	return HandoffFile{
-		Data:      append(fixtureHeaderPNG(), make([]byte, 64)...),
-		Size:      maxBytes + 1,
-		Truncated: true,
-	}, nil
+	// A file one byte past the decoded-frame clamp, structurally valid so the
+	// byte gate is the only thing that can reject it.
+	oversized := append(fixtureHeaderPNG(), make([]byte, MaxDecodedFrameBytes+1-33)...)
+
+	// Neither a disabled per-image limit nor one larger than the frame can
+	// widen the bound past the clamp.
+	for _, configured := range []int64{0, MaxDecodedFrameBytes + 1, 10_000_000_000} {
+		_, err := mapHandoffPrompt(
+			t,
+			handoffImageBlock("a.png", oversized, mimePNG),
+			newStubHandoffReader("a.png", oversized),
+			ImageInputLimits{MaxBytesPerImage: configured},
+		)
+		details := requireImageInputErrorData(t, err)
+		require.Equal(t, errImageTooLarge, details[keyErrorField])
+		require.EqualValues(t, MaxDecodedFrameBytes, details[keyMaxBytes])
+		require.EqualValues(t, EffectiveInputBytesPerImage(configured), details[keyMaxBytes])
+	}
+
+	// A zero aggregate enforces no total, so a prompt whose blocks sum past
+	// every per-image bound is still accepted.
+	png := fixtureBytes(t, "valid.png")
+	blocks, err := PromptToClaude(
+		context.Background(),
+		[]acp.ContentBlock{
+			handoffImageBlock("a.png", png, mimePNG),
+			handoffImageBlock("a.png", png, mimePNG),
+		},
+		nil,
+		ImageInputLimits{MaxBytesPerImage: int64(len(png)), MaxBytesPerPrompt: 0},
+		newStubHandoffReader("a.png", png),
+	)
+	require.NoError(t, err)
+	require.Len(t, blocks, 2)
+	require.EqualValues(t, 0, EffectiveInputBytesPerPrompt(0))
+}
+
+// TestHandoffEnvelopeNumbersAreValidatedAsFloats pins the declared size against
+// the float64 boundary rather than against whatever an out-of-range float-to-int
+// conversion happens to produce on the host architecture.
+func TestHandoffEnvelopeNumbersAreValidatedAsFloats(t *testing.T) {
+	t.Parallel()
+
+	png := fixtureBytes(t, "valid.png")
+
+	cases := []struct {
+		name    string
+		size    any
+		message string
+	}{
+		{name: "one past the largest int64", size: math.Pow(2, 63), message: sizeBytesDefect},
+		{name: "the largest int64 as a float", size: float64(math.MaxInt64), message: sizeBytesDefect},
+		{name: "beyond exact float integers", size: math.Pow(2, 53), message: ""},
+		{name: "json number in range", size: json.Number(strconv.Itoa(len(png))), message: "accepted"},
+		{name: "json number past the boundary", size: json.Number("9223372036854775808"), message: sizeBytesDefect},
+		{name: "json number that is not a number", size: json.Number("not-a-number"), message: sizeBytesDefect},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			block := handoffImageBlock("a.png", png, mimePNG)
+			envelope, ok := block.Image.Meta[MetaKeyHandoff].(map[string]any)
+			require.True(t, ok)
+			envelope[handoffFieldSizeBytes] = test.size
+
+			_, err := mapHandoffPrompt(t, block, newStubHandoffReader("a.png", png), ImageInputLimits{})
+
+			switch test.message {
+			case "accepted":
+				require.NoError(t, err)
+
+				return
+			case "":
+			default:
+				details := requireHandoffError(t, err, errInvalidHandoff)
+				require.Equal(t, test.message, details[keyMessage])
+
+				return
+			}
+
+			// A size that is a legal integer but larger than the gate is a byte
+			// verdict, decided before the file is read at all.
+			details := requireImageInputErrorData(t, err)
+			require.Equal(t, errImageTooLarge, details[keyErrorField])
+			require.EqualValues(t, MaxDecodedFrameBytes, details[keyMaxBytes])
+		})
+	}
+}
+
+const sizeBytesDefect = "handoff sizeBytes must be a non-negative integer"
+
+// TestHandoffEnvelopeSurvivesANumberDecodingDecoder pins the envelope decoders
+// against the transport's JSON options: a decoder configured to keep numbers as
+// text must not turn a conforming block into a defect.
+func TestHandoffEnvelopeSurvivesANumberDecodingDecoder(t *testing.T) {
+	t.Parallel()
+
+	png := fixtureBytes(t, "valid.png")
+	sum := sha256.Sum256(png)
+
+	raw := `{"acp-go.dev/handoff":{"version":1,"digest":"` + hex.EncodeToString(sum[:]) +
+		`","sizeBytes":` + strconv.Itoa(len(png)) + `}}`
+
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+
+	var meta map[string]any
+	require.NoError(t, decoder.Decode(&meta))
+
+	envelope, ok := meta[MetaKeyHandoff].(map[string]any)
+	require.True(t, ok)
+	require.IsType(t, json.Number(""), envelope[handoffFieldVersion])
+
+	block := handoffImageBlock("a.png", png, mimePNG)
+	block.Image.Meta = meta
+
+	blocks, err := mapHandoffPrompt(t, block, newStubHandoffReader("a.png", png), ImageInputLimits{})
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+}
+
+// TestHandoffVersionZeroIsRejected pins the version gate against the zero value,
+// which a host omitting the field would produce after a strict decode.
+func TestHandoffVersionZeroIsRejected(t *testing.T) {
+	t.Parallel()
+
+	png := fixtureBytes(t, "valid.png")
+
+	block := handoffImageBlock("a.png", png, mimePNG)
+	envelope, ok := block.Image.Meta[MetaKeyHandoff].(map[string]any)
+	require.True(t, ok)
+	envelope[handoffFieldVersion] = 0
+
+	_, err := mapHandoffPrompt(t, block, newStubHandoffReader("a.png", png), ImageInputLimits{})
+	details := requireHandoffError(t, err, errInvalidHandoff)
+	require.Equal(t, "unsupported handoff metadata version", details[keyMessage])
+}
+
+// TestHandoffMediaTypeIsCheckedBeforeAnyByteIsRead pins the pre-read ordering: a
+// media type the adapter never accepts costs the located file, and nothing more.
+func TestHandoffMediaTypeIsCheckedBeforeAnyByteIsRead(t *testing.T) {
+	t.Parallel()
+
+	png := fixtureBytes(t, "valid.png")
+
+	block := handoffImageBlock("a.png", png, "image/bmp")
+	reader := newStubHandoffReader("a.png", png)
+
+	// The read would fail if it happened, so a media-type verdict proves it did
+	// not: an implementation that reads first reports the read failure instead.
+	reader.readErr = errors.New("bytes must not be read")
+
+	_, err := mapHandoffPrompt(t, block, reader, ImageInputLimits{})
+	details := requireImageInputErrorData(t, err)
+	require.Equal(t, errInvalidMediaType, details[keyErrorField])
+
+	// The descriptor is released whether the block is accepted or refused.
+	require.Zero(t, reader.unclosed)
+}
+
+// TestHandoffReadFailureIsAMissingFile pins the verdict for a file that located
+// and opened but could not be read through.
+func TestHandoffReadFailureIsAMissingFile(t *testing.T) {
+	t.Parallel()
+
+	png := fixtureBytes(t, "valid.png")
+	reader := newStubHandoffReader("a.png", png)
+	reader.readErr = errors.New("input/output error")
+
+	_, err := mapHandoffPrompt(t, handoffImageBlock("a.png", png, mimePNG), reader, ImageInputLimits{})
+	details := requireHandoffError(t, err, errMissingFile)
+	require.Equal(t, "handoff file cannot be read", details[keyMessage])
+	require.Zero(t, reader.unclosed)
 }

@@ -23,12 +23,13 @@ const (
 // mediaEnvelope reports the effective inbound media bounds a host can rely on
 // before it sends: the per-image and per-prompt decoded byte gates this adapter
 // enforces, the media types prompt validation accepts, and the media types it
-// maps to a native document block. Every value is read from the same field or
-// list the corresponding gate reads.
+// maps to a native document block. Both byte bounds come from the functions the
+// gates themselves call, never from the configured field, so a bound the
+// adapter clamps is advertised as clamped.
 func mediaEnvelope(limits ImageLimits) map[string]any {
 	return map[string]any{
-		envelopeFieldMaxBytes:        limits.MaxInputBytesPerImage,
-		envelopeFieldMaxPromptBytes:  limits.MaxInputBytesPerPrompt,
+		envelopeFieldMaxBytes:        mapper.EffectiveInputBytesPerImage(limits.MaxInputBytesPerImage),
+		envelopeFieldMaxPromptBytes:  mapper.EffectiveInputBytesPerPrompt(limits.MaxInputBytesPerPrompt),
 		envelopeFieldMaxDimension:    mediaEnvelopeMaxDimension,
 		envelopeFieldImageFormats:    mapper.PortableImageMIMEs(),
 		envelopeFieldDocumentFormats: mapper.DocumentMIMEs(),

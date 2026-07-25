@@ -3,9 +3,12 @@ package mapper
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"net/url"
 	"path/filepath"
@@ -34,23 +37,27 @@ const (
 	digestHexLength = 64
 	uriSchemeFile   = "file"
 	uriHostLocal    = "localhost"
+
+	// maxHandoffBlocksPerPrompt bounds the files one prompt may name. The
+	// handoff form deliberately decouples the bytes an adapter reads from the
+	// frame that asked for them, so the block count is what keeps a single
+	// prompt from multiplying the per-image bound without limit.
+	maxHandoffBlocksPerPrompt = 64
+
+	// maxHandoffSizeBytes is one past the largest int64, which is the first
+	// float64 a declared sizeBytes may not be. The bound is spelled out rather
+	// than derived from math.MaxInt64, which is not representable as a float64
+	// and rounds up when converted.
+	maxHandoffSizeBytes = 9223372036854775808.0
 )
 
-// HandoffFileReader reads the bytes of a handoff-form prompt image. An
-// implementation confines the path to the adapter's configured handoff read
-// root and reports a refusal as a HandoffPathError.
+// HandoffFileReader opens a handoff-form prompt image. An implementation
+// confines path to the adapter's configured handoff read root, admits only a
+// regular file, and reports a refusal as a HandoffPathError. It reports no size
+// of its own: the caller bounds the read and the bytes it gets back are the only
+// size any verdict may consult.
 type HandoffFileReader interface {
-	ReadHandoffImage(ctx context.Context, path string, maxBytes int64) (HandoffFile, error)
-}
-
-// HandoffFile is one bounded handoff-file read. Data holds at most maxBytes+1
-// bytes, so Truncated reports a file that outgrew the per-image gate and whose
-// digest therefore cannot be verified. Size is the file's real size, which is
-// what a byte-limit rejection reports.
-type HandoffFile struct {
-	Data      []byte
-	Size      int64
-	Truncated bool
+	OpenHandoffImage(ctx context.Context, path string) (io.ReadCloser, error)
 }
 
 // HandoffPathError is a refused handoff read carrying the input verdict to
@@ -87,10 +94,10 @@ func promptImageHandoffForm(image *acp.ContentBlockImage) bool {
 }
 
 // handoffImageData resolves a handoff-form image block to the base64 payload
-// the native request carries. The envelope and the uri are validated as block
-// structure, the file is read through the caller's root-confined reader, its
-// digest is verified whenever the whole file fit inside the read bound, and the
-// embedded-form gate chain then runs on the bytes.
+// the native request carries. Block structure is validated first, then the file
+// is located and opened through the caller's root-confined reader, then the
+// media type and the declared size are checked before a single byte is read, and
+// only bytes that match the declared digest reach the embedded gate chain.
 func handoffImageData(
 	ctx context.Context,
 	reader HandoffFileReader,
@@ -113,9 +120,7 @@ func handoffImageData(
 		return "", err
 	}
 
-	bound := handoffReadBound(limits)
-
-	file, err := reader.ReadHandoffImage(ctx, path, bound)
+	file, err := reader.OpenHandoffImage(ctx, path)
 	if err != nil {
 		var refused *HandoffPathError
 		if errors.As(err, &refused) {
@@ -124,45 +129,43 @@ func handoffImageData(
 
 		return "", err
 	}
+	defer file.Close()
 
-	if !file.Truncated {
-		if err := verifyHandoffBytes(file.Data, envelope, index); err != nil {
-			return "", err
-		}
-	}
-
+	// Where the file lives is a deployment question and is answered above
+	// whatever the block declares. Everything from here costs I/O, so the two
+	// checks that need none run first.
 	if !portableImageMIME(image.MimeType) {
 		return "", imageInputError(errInvalidMediaType, index, 0, 0)
 	}
 
-	if err := validateRasterBytes(file.Data, file.Size, image.MimeType, index, promptBytes, handoffGates(limits, file)); err != nil {
+	gate := EffectiveInputBytesPerImage(limits.MaxBytesPerImage)
+	if envelope.sizeBytes > gate {
+		return "", imageInputError(errImageTooLarge, index, envelope.sizeBytes, gate)
+	}
+
+	// One byte past the gate distinguishes a file that fits from one that does
+	// not without holding an unbounded read.
+	data, err := io.ReadAll(io.LimitReader(file, gate+1))
+	if err != nil {
+		return "", handoffInputError(errMissingFile, index, "handoff file cannot be read")
+	}
+
+	// The bytes in hand are the only size this verdict may consult, and a read
+	// that came back over the bound leaves nothing behind: rejecting here is
+	// what keeps unverified bytes out of every gate below.
+	if int64(len(data)) > gate {
+		return "", imageInputError(errImageTooLarge, index, int64(len(data)), gate)
+	}
+
+	if err := verifyHandoffBytes(data, envelope, index); err != nil {
 		return "", err
 	}
 
-	return base64.StdEncoding.EncodeToString(file.Data), nil
-}
-
-// handoffReadBound bounds the read even when the per-image policy gate is
-// disabled: reading a host-named file unbounded is never an option, so the
-// decoded-frame clamp stands in as the ceiling.
-func handoffReadBound(limits ImageInputLimits) int64 {
-	if limits.MaxBytesPerImage > 0 {
-		return limits.MaxBytesPerImage
+	if err := validateRasterBytes(data, image.MimeType, index, fieldPromptImage, promptBytes, limits); err != nil {
+		return "", err
 	}
 
-	return MaxDecodedFrameBytes
-}
-
-// handoffGates keeps a file whose digest could not be verified from ever being
-// forwarded. A truncated read means the file outgrew the read bound, so when no
-// per-image policy gate would reject it the read bound becomes the gate and the
-// byte verdict fires in its pinned position in the chain.
-func handoffGates(limits ImageInputLimits, file HandoffFile) ImageInputLimits {
-	if file.Truncated && limits.MaxBytesPerImage <= 0 {
-		limits.MaxBytesPerImage = MaxDecodedFrameBytes
-	}
-
-	return limits
+	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 func parseHandoffEnvelope(meta map[string]any, index int) (handoffEnvelope, error) {
@@ -186,33 +189,40 @@ func parseHandoffEnvelope(meta map[string]any, index int) (handoffEnvelope, erro
 
 	digest, ok := object[handoffFieldDigest].(string)
 	if !ok || !lowercaseHexDigest(digest) {
-		return handoffEnvelope{}, handoffInputError(
-			errInvalidHandoff,
-			index,
-			"handoff digest must be 64 lowercase hexadecimal characters",
-		)
+		return handoffEnvelope{}, handoffInputError(errInvalidHandoff, index, "handoff digest must be 64 lowercase hexadecimal characters")
 	}
 
 	size, ok := handoffSizeBytes(object[handoffFieldSizeBytes])
 	if !ok {
-		return handoffEnvelope{}, handoffInputError(
-			errInvalidHandoff,
-			index,
-			"handoff sizeBytes must be a non-negative integer",
-		)
+		return handoffEnvelope{}, handoffInputError(errInvalidHandoff, index, "handoff sizeBytes must be a non-negative integer")
 	}
 
 	return handoffEnvelope{digest: digest, sizeBytes: size}, nil
 }
 
 func handoffVersionSupported(value any) bool {
-	switch version := value.(type) {
-	case int:
-		return version == HandoffVersion
+	version, ok := handoffNumber(value)
+
+	return ok && version == HandoffVersion
+}
+
+// handoffNumber accepts every shape a JSON decoder may hand back for an
+// envelope number, so which decoder options the transport happens to enable
+// cannot decide whether a conforming block is accepted.
+func handoffNumber(value any) (float64, bool) {
+	switch number := value.(type) {
 	case float64:
-		return version == HandoffVersion
+		return number, true
+	case json.Number:
+		parsed, err := number.Float64()
+
+		return parsed, err == nil
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
 	default:
-		return false
+		return 0, false
 	}
 }
 
@@ -230,21 +240,17 @@ func lowercaseHexDigest(digest string) bool {
 	return true
 }
 
+// handoffSizeBytes admits a declared size only after checking it as a float.
+// Converting first would hand the range check a value Go leaves undefined: on
+// one architecture an out-of-range float truncates to a negative int64 and on
+// another it saturates to the largest one.
 func handoffSizeBytes(value any) (int64, bool) {
-	switch size := value.(type) {
-	case int:
-		return int64(size), size >= 0
-	case int64:
-		return size, size >= 0
-	case float64:
-		if size != math.Trunc(size) || size < 0 || size > math.MaxInt64 {
-			return 0, false
-		}
-
-		return int64(size), true
-	default:
+	size, ok := handoffNumber(value)
+	if !ok || size != math.Trunc(size) || size < 0 || size >= maxHandoffSizeBytes {
 		return 0, false
 	}
+
+	return int64(size), true
 }
 
 func handoffFilePath(uri *string, index int) (string, error) {
@@ -284,7 +290,7 @@ func verifyHandoffBytes(data []byte, envelope handoffEnvelope, index int) error 
 	}
 
 	sum := sha256.Sum256(data)
-	if hex.EncodeToString(sum[:]) != envelope.digest {
+	if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(envelope.digest)) != 1 {
 		return handoffInputError(
 			errHandoffDigestMismatch,
 			index,

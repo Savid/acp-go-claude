@@ -61,29 +61,68 @@ func TestInitializeAdvertisesMediaEnvelope(t *testing.T) {
 	require.NotContains(t, string(encoded), "null")
 }
 
-// TestMediaEnvelopeAdvertisesTheEnforcedGate drives the real gate with the
-// advertised bounds so advertisement and enforcement cannot drift apart.
-func TestMediaEnvelopeAdvertisesTheEnforcedGate(t *testing.T) {
+// TestMediaEnvelopeAdvertisesTheBoundTheGateReports drives both advertised byte
+// numbers through the real gate. Every comparison is against the number a
+// rejection reports, never against the option field the advertisement was built
+// from, and the two configured values are distinct so advertising one of them
+// twice cannot pass.
+func TestMediaEnvelopeAdvertisesTheBoundTheGateReports(t *testing.T) {
 	t.Parallel()
 
 	png := outputFixtureBytes(t, "valid.png")
-	limits := ImageLimits{
-		MaxInputBytesPerImage:  int64(len(png)) - 1,
-		MaxInputBytesPerPrompt: int64(len(png)) - 1,
+	perImage := int64(len(png))
+	perPrompt := 2*perImage - 1
+
+	limits := ImageLimits{MaxInputBytesPerImage: perImage, MaxInputBytesPerPrompt: perPrompt}
+	envelope := mediaEnvelope(limits)
+	require.NotEqual(t, envelope[envelopeFieldMaxBytes], envelope[envelopeFieldMaxPromptBytes])
+
+	// One image past the per-image bound reports the bound that was advertised.
+	details := requireGateRejection(t, limits, oversizedPNG(png, perImage+1))
+	require.Equal(t, envelope[envelopeFieldMaxBytes], details[envelopeFieldMaxBytes])
+
+	// Two images that each fit cross the aggregate, and that rejection reports
+	// the aggregate that was advertised.
+	details = requireGateRejection(t, limits, png, png)
+	require.EqualValues(t, 2*perImage, details["sizeBytes"])
+	require.Equal(t, envelope[envelopeFieldMaxPromptBytes], details[envelopeFieldMaxBytes])
+
+	// A per-image limit that is disabled or wider than the frame is enforced at
+	// the frame clamp, and advertised there too.
+	overClamp := oversizedPNG(png, mapper.MaxDecodedFrameBytes+1)
+
+	for _, configured := range []int64{0, mapper.MaxDecodedFrameBytes + 1, 10_000_000_000} {
+		clamped := ImageLimits{MaxInputBytesPerImage: configured}
+		details = requireGateRejection(t, clamped, overClamp)
+		require.Equal(t, mediaEnvelope(clamped)[envelopeFieldMaxBytes], details[envelopeFieldMaxBytes])
+		require.EqualValues(t, mapper.MaxDecodedFrameBytes, details[envelopeFieldMaxBytes])
 	}
 
-	envelope := mediaEnvelope(limits)
+	// A disabled aggregate enforces no total, and says so rather than naming a
+	// number a host would have to guess the meaning of.
+	require.EqualValues(t, 0, mediaEnvelope(ImageLimits{})[envelopeFieldMaxPromptBytes])
+}
 
-	_, err := mapper.PromptToClaude(
-		context.Background(),
-		[]acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString(png), "image/png")},
-		nil,
-		mapper.ImageInputLimits{
-			MaxBytesPerImage:  limits.MaxInputBytesPerImage,
-			MaxBytesPerPrompt: limits.MaxInputBytesPerPrompt,
-		},
-		nil,
-	)
+// oversizedPNG pads a valid raster to size without disturbing its header, so a
+// byte gate is the only thing that can reject the result.
+func oversizedPNG(png []byte, size int64) []byte {
+	return append(append([]byte(nil), png...), make([]byte, size-int64(len(png)))...)
+}
+
+// requireGateRejection maps images through the real prompt gates and returns the
+// too_large payload they produced.
+func requireGateRejection(t *testing.T, limits ImageLimits, images ...[]byte) map[string]any {
+	t.Helper()
+
+	prompt := make([]acp.ContentBlock, 0, len(images))
+	for _, image := range images {
+		prompt = append(prompt, acp.ImageBlock(base64.StdEncoding.EncodeToString(image), "image/png"))
+	}
+
+	_, err := mapper.PromptToClaude(context.Background(), prompt, nil, mapper.ImageInputLimits{
+		MaxBytesPerImage:  limits.MaxInputBytesPerImage,
+		MaxBytesPerPrompt: limits.MaxInputBytesPerPrompt,
+	}, nil)
 
 	var requestErr *acp.RequestError
 	require.ErrorAs(t, err, &requestErr)
@@ -92,14 +131,21 @@ func TestMediaEnvelopeAdvertisesTheEnforcedGate(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "too_large", details["error"])
 
-	// The bound the gate reports is the bound the host was promised.
-	require.Equal(t, envelope[envelopeFieldMaxBytes], details[envelopeFieldMaxBytes])
+	return details
+}
 
-	// Every advertised media type passes the gate's allowlist: declared against
-	// PNG bytes each one either succeeds or fails only on the declared-vs-sniffed
-	// disagreement, never as an unaccepted media type.
+// TestAdvertisedMediaTypesAreTheOnesTheGateAccepts pins the advertised format
+// list against the allowlist a prompt actually meets.
+func TestAdvertisedMediaTypesAreTheOnesTheGateAccepts(t *testing.T) {
+	t.Parallel()
+
+	png := outputFixtureBytes(t, "valid.png")
+	envelope := mediaEnvelope(ImageLimits{})
+
 	formats, ok := envelope[envelopeFieldImageFormats].([]string)
 	require.True(t, ok)
+
+	var requestErr *acp.RequestError
 
 	for _, format := range formats {
 		_, formatErr := mapper.PromptToClaude(
@@ -119,12 +165,14 @@ func TestMediaEnvelopeAdvertisesTheEnforcedGate(t *testing.T) {
 
 		formatDetails, formatOK := requestErr.Data.(map[string]any)
 		require.True(t, formatOK)
+
+		// An advertised format is never rejected as unaccepted; PNG bytes
+		// declared as another advertised raster fail only on the disagreement.
 		require.Equal(t, "media_type_mismatch", formatDetails["error"])
 	}
 
 	// A media type the envelope does not advertise is rejected as unaccepted.
-
-	_, err = mapper.PromptToClaude(
+	_, err := mapper.PromptToClaude(
 		context.Background(),
 		[]acp.ContentBlock{acp.ImageBlock(base64.StdEncoding.EncodeToString(png), "image/bmp")},
 		nil,
@@ -133,7 +181,7 @@ func TestMediaEnvelopeAdvertisesTheEnforcedGate(t *testing.T) {
 	)
 	require.ErrorAs(t, err, &requestErr)
 
-	details, ok = requestErr.Data.(map[string]any)
+	details, ok := requestErr.Data.(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "invalid_media_type", details["error"])
 }

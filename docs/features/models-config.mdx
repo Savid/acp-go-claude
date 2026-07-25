@@ -54,10 +54,15 @@ is never fetched.
 
 An embedded blob resource is gated the same way whatever its media type: its
 base64 must decode and its decoded size must fit the per-image byte gate, and
-its bytes count toward the per-prompt total alongside image bytes. A blob
-declaring `application/pdf` becomes a native document block; a blob whose media
-type names a raster is validated as an image, so a noncanonical declaration such
-as `IMAGE/PNG` is rejected `invalid_media_type` rather than taking another path.
+its bytes count toward the per-prompt total alongside image bytes. A text
+resource is charged that same per-prompt total, so declaring bytes as text
+rather than as a blob buys no extra budget. A blob declaring `application/pdf`
+becomes a native document block, and the media type is matched after
+normalization so `APPLICATION/PDF` and `application/pdf; charset=binary` reach
+it too. A blob whose media type names a raster is validated as an image, so a
+noncanonical declaration such as `IMAGE/PNG` is rejected `invalid_media_type`
+rather than taking another path. A rejection names the block the bytes arrived
+on: a resource block reports `prompt.resource` whichever gate chain ran.
 
 ## Handed-over prompt images
 
@@ -67,7 +72,7 @@ of the ACP frame. Set the read root:
 
 ```go
 err := claudeacp.Serve(ctx, input, output,
-	claudeacp.WithInputHandoffRoot("/srv/wagie/handoff"),
+	claudeacp.WithInputHandoffRoot("/srv/handoff"),
 )
 ```
 
@@ -75,16 +80,31 @@ Then send an image block with empty `data`, a `file://` uri under that root, and
 the handoff envelope carrying the payload's sha256 digest and byte size (the
 exact `_meta` shape is in [Metadata](/docs/reference/meta)).
 
-The adapter resolves the path inside the root, refusing anything that escapes it
-through a symlink and anything that is not a regular file; reads at most the
-per-image byte gate; verifies the bytes against the declared size and digest;
-and then applies the identical gate chain an embedded image passes. A
-handed-over image and an embedded image carrying the same bytes produce the same
-native request, and the host's path is never forwarded to Claude.
+The adapter opens the file relative to the root with the operating system
+enforcing containment as part of the open, so a path or symlink that leaves the
+root is refused with no window between the decision and the read. A symlink
+inside the root is followed only when its target is relative; an absolute
+symlink is refused even when it points back inside. Anything that is not a
+regular file — a directory, a FIFO, a device — is refused on the descriptor
+rather than on the path, and the open never blocks waiting for a writer. The
+adapter then reads at most the per-image byte gate, verifies the bytes against
+the declared size and digest, and applies the identical gate chain an embedded
+image passes. A handed-over image and an embedded image carrying the same bytes
+produce the same native request, and the host's path is never forwarded to
+Claude.
+
+Containment covers paths, not inodes: a process that can already write under the
+root can hardlink a file into it from anywhere the adapter's user can read. The
+declared digest is what makes handed-over bytes trustworthy, because a host that
+cannot predict a file's contents cannot produce a block that will be accepted
+for it.
 
 The read is bounded even when `MaxInputBytesPerImage` is zero: the ACP frame
 clamp becomes the ceiling, and a file past it is rejected `too_large` rather
-than accepted with a digest that could not be verified.
+than accepted with a digest that could not be verified. One prompt may hand over
+at most 64 image files whatever the per-prompt byte total is set to; the block
+that crosses that count is rejected `too_large` with the count as `sizeBytes`
+and 64 as `maxBytes`, before it is read.
 
 Files under the root belong to the host: the adapter only reads them, and the
 host may delete one as soon as the prompt call returns. Without

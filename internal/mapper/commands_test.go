@@ -84,8 +84,8 @@ func TestAvailableCommandsUpdateSanitizerGrammar(t *testing.T) {
 func TestGoalCommandIsAdvertised(t *testing.T) {
 	t.Parallel()
 
-	// The 2026-07-05 probe pass on Claude Code 2.1.200 and
-	// decisions/15-sc-iter1-adjudication.md require goal to stay advertised.
+	// goal is not a suppressed command: Claude Code 2.1.200 publishes it and
+	// the adapter must keep advertising it.
 	require.False(t, suppressedSlashCommand("goal"))
 
 	updates := AvailableCommandsUpdate([]claude.SlashCommand{{Name: "goal", Description: "Set a goal"}})

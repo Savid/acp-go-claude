@@ -4,24 +4,41 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
 	"github.com/savid/acp-go-claude/internal/mapper"
 )
 
-var (
-	handoffEvalSymlinks = filepath.EvalSymlinks
-	handoffStat         = os.Stat
-	handoffOpen         = os.Open
-	handoffReadAll      = io.ReadAll
-)
+// openedHandoffFile is the descriptor the read runs on. Stat comes from the
+// descriptor rather than from the path, so the mode decision cannot describe a
+// different file than the one that was opened.
+type openedHandoffFile interface {
+	io.ReadCloser
+	Stat() (os.FileInfo, error)
+}
 
-// handoffImageReader reads prompt-image bytes a host handed over as local files
-// under its configured root. The root is a read root: this never writes, moves,
-// or deletes anything under it, and the bytes it returns are copied into the
+var handoffOpenFile = openHandoffFile
+
+// openHandoffFile opens name beneath root. The kernel enforces containment as
+// part of this one call, and O_NONBLOCK keeps a FIFO or a device from parking
+// the turn's goroutine inside open(2) where no cancellation can reach it.
+func openHandoffFile(root *os.Root, name string) (openedHandoffFile, error) {
+	return root.OpenFile(name, os.O_RDONLY|handoffOpenFlags, 0)
+}
+
+// handoffImageReader opens prompt-image files a host handed over under its
+// configured root. The root is a read root: this never writes, moves, or
+// deletes anything under it, and the bytes the caller reads are copied into the
 // native request rather than referenced, so the host's path never outlives the
 // read.
+//
+// Containment is the kernel's answer, not this code's: every open goes through
+// os.Root, which refuses a name that resolves outside the root and refuses an
+// absolute symlink outright. It does not bound link counts, so a hardlink under
+// the root to a file outside it is readable; the declared digest, not the root,
+// is what makes handed-over bytes trustworthy.
 type handoffImageReader struct {
 	root string
 }
@@ -46,96 +63,64 @@ func validateInputHandoffRoot(root string) error {
 	return errors.New("InputHandoffRoot must be an absolute path")
 }
 
-// ReadHandoffImage resolves path inside the configured root and reads at most
-// maxBytes+1 bytes of it. Containment is checked on the cleaned path, again on
-// the symlink-resolved path, and the resolved target must be a regular file.
-func (r *handoffImageReader) ReadHandoffImage(
-	ctx context.Context,
-	path string,
-	maxBytes int64,
-) (mapper.HandoffFile, error) {
-	roots := []string{r.root}
-	if !pathWithinAnyRoot(path, roots, false) {
-		return mapper.HandoffFile{}, handoffRefused(
+// OpenHandoffImage opens path inside the configured root and hands the caller a
+// regular-file descriptor to read from. The name is made relative lexically and
+// every containment question is then answered by the open itself, so there is no
+// window between deciding a path is allowed and reading it.
+func (r *handoffImageReader) OpenHandoffImage(ctx context.Context, path string) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	name, err := filepath.Rel(r.root, filepath.Clean(path))
+	if err != nil {
+		return nil, handoffRefused(
 			mapper.HandoffPathNotAllowed,
 			"handoff path is outside the configured handoff root",
 		)
 	}
 
-	resolved, err := handoffEvalSymlinks(path)
+	root, err := os.OpenRoot(r.root)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return mapper.HandoffFile{}, handoffRefused(mapper.HandoffMissingFile, "handoff file does not exist")
+		return nil, handoffRefused(mapper.HandoffPathNotAllowed, "handoff read root cannot be opened")
+	}
+	defer root.Close()
+
+	file, err := handoffOpenFile(root, name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, handoffRefused(mapper.HandoffMissingFile, "handoff file does not exist")
 		}
 
-		return mapper.HandoffFile{}, handoffRefused(
+		return nil, handoffRefused(
 			mapper.HandoffPathNotAllowed,
-			"handoff path cannot be resolved safely",
+			"handoff path is not allowed inside the configured handoff root",
 		)
 	}
 
-	if !pathWithinAnyRoot(resolved, roots, true) {
-		return mapper.HandoffFile{}, handoffRefused(
-			mapper.HandoffPathNotAllowed,
-			"handoff path escapes the configured handoff root",
-		)
+	if err := requireRegularHandoffFile(file); err != nil {
+		_ = file.Close()
+
+		return nil, err
 	}
 
-	info, err := handoffStat(resolved)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return mapper.HandoffFile{}, handoffRefused(mapper.HandoffMissingFile, "handoff file does not exist")
-		}
+	return file, nil
+}
 
-		return mapper.HandoffFile{}, handoffRefused(
-			mapper.HandoffPathNotAllowed,
-			"handoff file cannot be inspected",
-		)
+// requireRegularHandoffFile refuses everything os.Root admits but this read
+// cannot use: a directory, and the FIFOs and device files whose containment
+// os.Root deliberately says nothing about.
+func requireRegularHandoffFile(file openedHandoffFile) error {
+	info, err := file.Stat()
+	if err != nil {
+		return handoffRefused(mapper.HandoffPathNotAllowed, "handoff file cannot be inspected")
 	}
 
 	if !info.Mode().IsRegular() {
-		return mapper.HandoffFile{}, handoffRefused(
-			mapper.HandoffPathNotAllowed,
-			"handoff path is not a regular file",
-		)
+		return handoffRefused(mapper.HandoffPathNotAllowed, "handoff path is not a regular file")
 	}
 
-	data, err := readHandoffBytes(resolved, maxBytes)
-	if err != nil {
-		return mapper.HandoffFile{}, err
-	}
-
-	if err := ctx.Err(); err != nil {
-		return mapper.HandoffFile{}, err
-	}
-
-	return mapper.HandoffFile{
-		Data:      data,
-		Size:      max(info.Size(), int64(len(data))),
-		Truncated: maxBytes > 0 && int64(len(data)) > maxBytes,
-	}, nil
-}
-
-func readHandoffBytes(path string, maxBytes int64) ([]byte, error) {
-	file, err := handoffOpen(path)
-	if err != nil {
-		return nil, handoffRefused(mapper.HandoffMissingFile, "handoff file cannot be opened")
-	}
-	defer file.Close()
-
-	// One byte past the gate distinguishes a file that fits from one that does
-	// not without holding an unbounded read.
-	var reader io.Reader = file
-	if maxBytes > 0 {
-		reader = io.LimitReader(file, maxBytes+1)
-	}
-
-	data, err := handoffReadAll(reader)
-	if err != nil {
-		return nil, handoffRefused(mapper.HandoffMissingFile, "handoff file cannot be read")
-	}
-
-	return data, nil
+	return nil
 }
 
 func handoffRefused(verdict string, message string) error {

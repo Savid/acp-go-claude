@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -537,7 +538,10 @@ func TestPromptToClaudeBlobMediaTypeNormalization(t *testing.T) {
 
 			details := requireImageInputErrorData(t, err)
 			require.Equal(t, errInvalidMediaType, details[keyErrorField])
-			require.Equal(t, fieldPromptImage, details[keyFieldField])
+
+			// The reported field names the block the bytes arrived on, not the
+			// gate chain the declared media type routed them through.
+			require.Equal(t, fieldPromptResource, details[keyFieldField])
 		})
 	}
 
@@ -545,4 +549,139 @@ func TestPromptToClaudeBlobMediaTypeNormalization(t *testing.T) {
 	blocks, err := mapPromptBlocks([]acp.ContentBlock{blobResourceBlock(mimePNG, png)}, nil, ImageInputLimits{})
 	require.NoError(t, err)
 	require.Equal(t, typeImage, blocks[0][keyType])
+
+	// A raster defect found inside a resource blob is still a resource
+	// rejection, and the same defect on an image block is an image rejection.
+	_, err = mapPromptBlocks([]acp.ContentBlock{blobResourceBlock(mimePNG, fixtureBase64(t, "mismatch.png"))}, nil, ImageInputLimits{})
+	details := requireImageInputErrorData(t, err)
+	require.Equal(t, errMediaTypeMismatch, details[keyErrorField])
+	require.Equal(t, fieldPromptResource, details[keyFieldField])
+
+	_, err = mapPromptBlocks([]acp.ContentBlock{acp.ImageBlock(fixtureBase64(t, "mismatch.png"), mimePNG)}, nil, ImageInputLimits{})
+	details = requireImageInputErrorData(t, err)
+	require.Equal(t, errMediaTypeMismatch, details[keyErrorField])
+	require.Equal(t, fieldPromptImage, details[keyFieldField])
+}
+
+// TestTextResourceIsChargedToThePromptAggregate pins the text variant against
+// the same total as every other inbound payload, so declaring bytes as text
+// rather than as a blob buys no extra budget.
+func TestTextResourceIsChargedToThePromptAggregate(t *testing.T) {
+	t.Parallel()
+
+	png := fixtureBytes(t, "valid.png")
+	text := strings.Repeat("a", len(png))
+
+	textResource := func(body string) acp.ContentBlock {
+		return acp.ResourceBlock(acp.EmbeddedResourceResource{
+			TextResourceContents: &acp.TextResourceContents{Text: body},
+		})
+	}
+
+	// One text resource inside the aggregate is inlined as before.
+	blocks, err := mapPromptBlocks(
+		[]acp.ContentBlock{textResource(text)},
+		nil,
+		ImageInputLimits{MaxBytesPerPrompt: int64(len(text))},
+	)
+	require.NoError(t, err)
+	require.Contains(t, blocks[0][keyText], text)
+
+	// One byte more than the aggregate is refused, and the refusal names the
+	// block it arrived on.
+	_, err = mapPromptBlocks(
+		[]acp.ContentBlock{textResource(text)},
+		nil,
+		ImageInputLimits{MaxBytesPerPrompt: int64(len(text)) - 1},
+	)
+	details := requireImageInputErrorData(t, err)
+	require.Equal(t, errImageTooLarge, details[keyErrorField])
+	require.Equal(t, fieldPromptResource, details[keyFieldField])
+	require.EqualValues(t, len(text), details[keySizeBytes])
+	require.EqualValues(t, len(text)-1, details[keyMaxBytes])
+
+	// Text and image bytes share one budget: an image that fits on its own is
+	// refused once a text resource ahead of it has been charged.
+	_, err = mapPromptBlocks(
+		[]acp.ContentBlock{
+			textResource(text),
+			acp.ImageBlock(base64.StdEncoding.EncodeToString(png), mimePNG),
+		},
+		nil,
+		ImageInputLimits{MaxBytesPerPrompt: int64(len(text) + len(png) - 1)},
+	)
+	details = requireImageInputErrorData(t, err)
+	require.Equal(t, errImageTooLarge, details[keyErrorField])
+	require.Equal(t, fieldPromptImage, details[keyFieldField])
+}
+
+// TestDocumentMediaTypeIsNormalized pins the document comparison to the same
+// normalization the image routing uses, so a noncanonical spelling reaches the
+// document gates instead of the refusal path.
+func TestDocumentMediaTypeIsNormalized(t *testing.T) {
+	t.Parallel()
+
+	document := base64.StdEncoding.EncodeToString([]byte("%PDF-1.7 document bytes"))
+
+	for _, declared := range []string{mimePDF, "APPLICATION/PDF", "application/pdf; charset=binary", " Application/PDF "} {
+		blocks, err := mapPromptBlocks([]acp.ContentBlock{blobResourceBlock(declared, document)}, nil, ImageInputLimits{})
+		require.NoError(t, err)
+		require.Equal(t, typeDocument, blocks[0][keyType])
+
+		source, ok := blocks[0][keySource].(map[string]any)
+		require.True(t, ok)
+
+		// The native block carries the canonical media type whatever the host
+		// spelled, so the harness never has to normalize.
+		require.Equal(t, mimePDF, source[keyMediaType])
+	}
+
+	// A media type that is neither an image nor a document is still refused.
+	_, err := mapPromptBlocks([]acp.ContentBlock{blobResourceBlock("application/zip", document)}, nil, ImageInputLimits{})
+	details := requireImageInputErrorData(t, err)
+	require.Equal(t, errValueUnsupported, details[keyErrorField])
+}
+
+// TestEmbeddedImagePastTheFrameClampIsRejectedNotTruncated pins the retention
+// bound as a gate: with the policy limit disabled the clamp still decides, and
+// an image past it is refused rather than shortened and forwarded.
+func TestEmbeddedImagePastTheFrameClampIsRejectedNotTruncated(t *testing.T) {
+	t.Parallel()
+
+	oversized := append(fixtureHeaderPNG(), make([]byte, MaxDecodedFrameBytes+1-33)...)
+	encoded := base64.StdEncoding.EncodeToString(oversized)
+
+	blocks, err := mapPromptBlocks(
+		[]acp.ContentBlock{acp.ImageBlock(encoded, mimePNG)},
+		nil,
+		ImageInputLimits{},
+	)
+	require.Nil(t, blocks)
+
+	details := requireImageInputErrorData(t, err)
+	require.Equal(t, errImageTooLarge, details[keyErrorField])
+	require.EqualValues(t, len(oversized), details[keySizeBytes])
+	require.EqualValues(t, MaxDecodedFrameBytes, details[keyMaxBytes])
+}
+
+// TestEmbeddedImageIsForwardedAsCanonicalBase64 pins the payload the harness
+// receives to the bytes that passed the gates: two legal host spellings of one
+// image build the same native request.
+func TestEmbeddedImageIsForwardedAsCanonicalBase64(t *testing.T) {
+	t.Parallel()
+
+	png := fixtureBytes(t, "valid.png")
+	canonical := base64.StdEncoding.EncodeToString(png)
+
+	spellings := []string{canonical, wrapBase64(canonical, 64), wrapBase64(canonical, 76)}
+	require.NotEqual(t, spellings[0], spellings[1])
+
+	for _, spelling := range spellings {
+		blocks, err := mapPromptBlocks([]acp.ContentBlock{acp.ImageBlock(spelling, mimePNG)}, nil, ImageInputLimits{})
+		require.NoError(t, err)
+
+		source, ok := blocks[0][keySource].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, canonical, source[keyData])
+	}
 }

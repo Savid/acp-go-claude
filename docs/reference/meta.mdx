@@ -42,7 +42,11 @@ namespace:
 
 The media envelope is always advertised. `maxBytes` and `maxPromptBytes` are the
 decoded per-image and per-prompt byte gates this adapter actually enforces, so
-they move with `WithImageLimits`. `maxDimension` is `0` because Claude enforces
+they move with `WithImageLimits`. They are the *effective* bounds, not the
+configured fields: a zero or oversized `MaxInputBytesPerImage` is enforced at the
+ACP frame clamp and `maxBytes` reports that clamp, while a zero
+`MaxInputBytesPerPrompt` enforces no total and `maxPromptBytes` truthfully
+reports `0`. `maxDimension` is `0` because Claude enforces
 no per-dimension pixel bound — `0` means "no bound", never "zero". `imageFormats`
 is the inbound media-type allowlist and `documentFormats` lists the media types
 an embedded blob resource becomes a native document block for. Every value is

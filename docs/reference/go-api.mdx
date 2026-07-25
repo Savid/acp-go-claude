@@ -117,7 +117,12 @@ Session-store surface: `SessionStore`, `SessionKey`, `SessionSummary`,
 
 `WithInputHandoffRoot` takes an absolute directory. The adapter only reads
 under it: it never creates, writes, moves, or deletes anything there, and the
-host owns the files' lifetime. A relative path makes initialization fail. When
+host owns the files' lifetime. A relative path makes initialization fail. Every
+handoff read is opened relative to that directory with the operating system
+enforcing containment, so the root is a boundary against paths and symlinks —
+but not against a process that can already create files under it, which can
+hardlink a file from anywhere the adapter's user can read. The declared digest,
+not the root, is what makes handed-over bytes trustworthy. When
 the option is set, initialize advertises
 `agentCapabilities._meta["acp-go.dev/handoff"]`, so a host can confirm the
 option arrived; see [Metadata](/docs/reference/meta).
@@ -126,6 +131,14 @@ option arrived; see [Metadata](/docs/reference/meta).
 `MaxInputBytesPerImage`, `MaxInputBytesPerPrompt`,
 `MaxOutputBytesPerImage`, and `MaxOutputBytesPerToolCall`. Omitting
 `WithImageLimits` defaults every field to 6 MiB decoded. Supplying the option
-replaces the whole struct; a zero field disables that adapter policy limit and
-a negative field makes initialization fail. The ACP Go frame bound still
-limits one emitted image even when an output policy field is zero.
+replaces the whole struct, and a negative field makes initialization fail.
+
+A zero `MaxInputBytesPerImage` does not remove the per-image bound: the ACP Go
+frame clamp becomes the bound instead, and a configured value wider than that
+clamp is narrowed to it. The advertised `maxBytes` is that effective number, so
+an inbound image is never accepted above what the advertisement promises. A zero
+`MaxInputBytesPerPrompt` genuinely removes the per-prompt total, and the
+advertisement reports `0` for it. Independently of the byte total, one prompt may
+hand over at most 64 image files; the block that crosses that count is rejected
+`too_large`. The ACP Go frame bound still limits one emitted image even when an
+output policy field is zero.

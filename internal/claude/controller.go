@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -125,6 +126,8 @@ func (c *Controller) Start(ctx context.Context) {
 			select {
 			case msg, ok := <-messages:
 				if !ok {
+					c.drainErrors(ctx, errs)
+
 					return
 				}
 
@@ -242,8 +245,20 @@ func (c *Controller) SendRequest(
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.done:
-		return nil, fmt.Errorf("claude control controller stopped")
+		return nil, controllerStoppedError(c.LastError())
 	}
+}
+
+// controllerStoppedError reports a control request that outlived its
+// controller. The bare stop says only that routing ended, so the transport
+// cause — the Claude exit status and its stderr tail — is attached whenever the
+// router recorded one.
+func controllerStoppedError(cause error) error {
+	if cause == nil {
+		return errors.New("claude control controller stopped")
+	}
+
+	return fmt.Errorf("claude control controller stopped: %w", cause)
 }
 
 func controlRequestError(subtype string, msg string) error {
@@ -255,6 +270,28 @@ func controlRequestError(subtype string, msg string) error {
 		return fmt.Errorf("%w: %w", ErrQueryClosed, err)
 	default:
 		return err
+	}
+}
+
+// drainErrors records a transport error that was queued before the message
+// channel closed. The transport publishes the process exit cause and then
+// closes both channels, so a router that observed the closed message channel
+// first would otherwise discard the only report of why Claude stopped.
+func (c *Controller) drainErrors(ctx context.Context, errs <-chan error) {
+	for {
+		select {
+		case err, ok := <-errs:
+			if !ok {
+				return
+			}
+
+			if err != nil {
+				c.setLastError(err)
+				c.log.DebugContext(ctx, "claude transport error", slog.String(keyError, err.Error()))
+			}
+		default:
+			return
+		}
 	}
 }
 

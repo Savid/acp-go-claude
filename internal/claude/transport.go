@@ -74,6 +74,8 @@ type ProcessTransport struct {
 	mu              sync.Mutex
 	closeOnce       sync.Once
 	closeErr        error
+	stdinOnce       sync.Once
+	stdinErr        error
 	stderrWG        sync.WaitGroup
 	closed          bool
 	messagesStarted bool
@@ -409,6 +411,12 @@ func (t *ProcessTransport) recoverStdoutReader(ctx context.Context, errs chan<- 
 func (t *ProcessTransport) wait() error {
 	t.waitOnce.Do(func() {
 		if t.cmd != nil {
+			// os/exec closes the parent ends of its own pipes inside Wait, so the
+			// transport must have already given up its stdin handle by then;
+			// otherwise Close would report a second close of the same descriptor
+			// as a shutdown failure.
+			_ = t.closeStdin()
+
 			if t.waitTree != nil {
 				t.waitErr = t.waitTree.wait(t.cmd)
 			} else {
@@ -418,6 +426,23 @@ func (t *ProcessTransport) wait() error {
 	})
 
 	return t.waitErr
+}
+
+// closeStdin closes the Claude stdin pipe exactly once and memoizes the result.
+// Both Close and wait reach it, and either one may run first.
+func (t *ProcessTransport) closeStdin() error {
+	t.stdinOnce.Do(func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+
+		if t.stdin == nil {
+			return
+		}
+
+		t.stdinErr = t.stdin.Close()
+	})
+
+	return t.stdinErr
 }
 
 func (t *ProcessTransport) sendError(errs chan<- error, err error) {
@@ -495,14 +520,12 @@ func (t *ProcessTransport) Close() error {
 	t.closeOnce.Do(func() {
 		t.mu.Lock()
 		t.closed = true
+		stdinClosed := t.stdin != nil
+		t.mu.Unlock()
 
-		stdinClosed := false
+		t.closeErr = t.closeStdin()
 
-		if t.stdin != nil {
-			t.closeErr = t.stdin.Close()
-			stdinClosed = true
-		}
-
+		t.mu.Lock()
 		if t.stderr != nil {
 			_ = t.stderr.Close()
 		}

@@ -112,3 +112,92 @@ func TestProcessTransportMalformedLineLogged(t *testing.T) {
 	_, ok := <-errs
 	require.False(t, ok)
 }
+
+func TestControllerSendRequestSurfacesStopCause(t *testing.T) {
+	t.Parallel()
+
+	transport := newFakeTransport()
+	controller := NewController(slog.New(slog.DiscardHandler), transport)
+	startControllerForTest(t, controller, context.Background())
+
+	exit := &ProcessExitError{
+		ExitCode:   1,
+		StderrTail: "No conversation found with session ID: 11111111-1111-4111-8111-111111111111",
+		Err:        errors.New("exit status 1"),
+	}
+	transport.errs <- exit
+
+	select {
+	case <-controller.Done():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for controller stop")
+	}
+
+	_, err := controller.SendRequest(context.Background(), "initialize", nil, time.Second)
+	require.ErrorContains(t, err, "claude control controller stopped")
+	require.ErrorIs(t, err, ErrProcessExited)
+	require.ErrorIs(t, err, exit)
+	require.Contains(t, err.Error(), "No conversation found with session ID")
+}
+
+func TestControllerSendRequestStopWithoutCause(t *testing.T) {
+	t.Parallel()
+
+	transport := newFakeTransport()
+	controller := NewController(slog.New(slog.DiscardHandler), transport)
+	startControllerForTest(t, controller, context.Background())
+
+	close(transport.incoming)
+
+	select {
+	case <-controller.Done():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for controller stop")
+	}
+
+	_, err := controller.SendRequest(context.Background(), "initialize", nil, time.Second)
+	require.EqualError(t, err, "claude control controller stopped")
+}
+
+func TestControllerDrainErrorsRecordsQueuedCause(t *testing.T) {
+	t.Parallel()
+
+	controller := NewController(slog.New(slog.DiscardHandler), newFakeTransport())
+
+	errs := make(chan error, 3)
+	errs <- nil
+	errs <- errors.New("first")
+	errs <- errors.New("second")
+	close(errs)
+
+	controller.drainErrors(context.Background(), errs)
+	require.EqualError(t, controller.LastError(), "first")
+
+	empty := NewController(slog.New(slog.DiscardHandler), newFakeTransport())
+	empty.drainErrors(context.Background(), make(chan error))
+	require.NoError(t, empty.LastError())
+}
+
+// The transport queues the exit cause and then closes both channels, so the
+// router can observe either the closed message channel or the queued error
+// first. Both orders must keep the cause.
+func TestControllerRecordsCauseWhenMessageChannelClosesFirst(t *testing.T) {
+	t.Parallel()
+
+	for range 32 {
+		transport := newFakeTransport()
+		transport.errs <- &ProcessExitError{ExitCode: 1, Err: errors.New("exit status 1")}
+		close(transport.incoming)
+
+		controller := NewController(slog.New(slog.DiscardHandler), transport)
+		startControllerForTest(t, controller, context.Background())
+
+		select {
+		case <-controller.Done():
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for controller stop")
+		}
+
+		require.ErrorIs(t, controller.LastError(), ErrProcessExited)
+	}
+}

@@ -1224,3 +1224,62 @@ func TestProcessTransportStart(t *testing.T) {
 	require.NotEmpty(t, transport.cmd.Dir)
 	require.NoError(t, transport.Close())
 }
+
+type countingWriteCloser struct {
+	mu     sync.Mutex
+	closed int
+}
+
+func (w *countingWriteCloser) Write(data []byte) (int, error) { return len(data), nil }
+
+func (w *countingWriteCloser) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.closed++
+
+	if w.closed > 1 {
+		return os.ErrClosed
+	}
+
+	return nil
+}
+
+func (w *countingWriteCloser) closeCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.closed
+}
+
+func TestProcessTransportClosesStdinOnce(t *testing.T) {
+	t.Parallel()
+
+	stdin := &countingWriteCloser{}
+	transport := &ProcessTransport{stdin: stdin}
+
+	require.NoError(t, transport.closeStdin())
+	require.NoError(t, transport.closeStdin())
+	require.NoError(t, transport.Close())
+	require.Equal(t, 1, stdin.closeCount())
+}
+
+// A Claude process that dies on its own is reaped by the stdout reader, and
+// os/exec closes the parent end of the stdin pipe inside Wait. The later
+// shutdown must not report that descriptor as closed twice.
+func TestProcessTransportCloseAfterProcessReapedReportsNoDoubleClose(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh")
+	}
+
+	cmd := exec.Command("sh", "-c", "exit 1")
+	stdin, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+
+	transport := &ProcessTransport{cmd: cmd, stdin: stdin}
+	require.Error(t, transport.wait())
+
+	closeErr := transport.Close()
+	require.NoError(t, closeErr)
+}

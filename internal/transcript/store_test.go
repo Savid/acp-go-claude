@@ -120,7 +120,7 @@ func TestStoreListForCwdFiltersSanitizedDirectoryCollisions(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "foo", "bar")
 	other := filepath.Join(root, "foo-bar")
-	require.Equal(t, sanitizeProjectPath(target), sanitizeProjectPath(other))
+	require.Equal(t, ProjectDirName(target), ProjectDirName(other))
 	require.NoError(t, os.MkdirAll(target, 0o755))
 	require.NoError(t, os.MkdirAll(other, 0o755))
 
@@ -199,7 +199,7 @@ func TestStoreListEdgeBranches(t *testing.T) {
 
 	home := t.TempDir()
 	cwd := "/repo"
-	projectDir := filepath.Join(home, projectsDirName, sanitizeProjectPath(cwd))
+	projectDir := filepath.Join(home, projectsDirName, ProjectDirName(cwd))
 	require.NoError(t, os.MkdirAll(projectDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, testSessionID+".jsonl"), []byte("{"+strings.Repeat("x", 10*1024*1024+1)), 0o600))
 
@@ -240,7 +240,7 @@ func TestStoreListEdgeBranches(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		errorHome := t.TempDir()
 		errorCwd := "/error"
-		errorDir := filepath.Join(errorHome, projectsDirName, sanitizeProjectPath(errorCwd))
+		errorDir := filepath.Join(errorHome, projectsDirName, ProjectDirName(errorCwd))
 		require.NoError(t, os.MkdirAll(errorDir, 0o755))
 		require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(errorDir, testSessionID+".jsonl")))
 
@@ -531,7 +531,7 @@ func TestTranscriptMalformedFinalLineIsTornLine(t *testing.T) {
 	t.Parallel()
 
 	home := t.TempDir()
-	projectDir := filepath.Join(home, projectsDirName, sanitizeProjectPath("/repo"))
+	projectDir := filepath.Join(home, projectsDirName, ProjectDirName("/repo"))
 	require.NoError(t, os.MkdirAll(projectDir, 0o755))
 
 	path := filepath.Join(projectDir, testSessionID+".jsonl")
@@ -741,7 +741,7 @@ func TestTranscriptHelperEdges(t *testing.T) {
 	require.False(t, updatedAfter(&invalid, &older))
 	require.False(t, updatedAfter(&newer, &invalid))
 	require.Empty(t, canonicalPath(" "))
-	require.Equal(t, "-", sanitizeProjectPath(""))
+	require.Equal(t, "-", ProjectDirName(""))
 	entry, skipped := decodeLine("")
 	require.Nil(t, entry)
 	require.False(t, skipped)
@@ -813,7 +813,7 @@ func (*fakeTranscriptFile) Close() error {
 func writeTestTranscript(t *testing.T, home string, cwd string, sessionID string, lines []string) string {
 	t.Helper()
 
-	projectDir := filepath.Join(home, projectsDirName, sanitizeProjectPath(cwd))
+	projectDir := filepath.Join(home, projectsDirName, ProjectDirName(cwd))
 	require.NoError(t, os.MkdirAll(projectDir, 0o755))
 
 	path := filepath.Join(projectDir, sessionID+".jsonl")

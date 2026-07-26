@@ -279,7 +279,7 @@ func mustAssistantMessage(msg claude.Message) *claude.AssistantMessage {
 
 func (s Store) listForCwd(ctx context.Context, cwd string) ([]Session, error) {
 	canonical := canonicalPath(cwd)
-	exact := filepath.Join(s.projectsDir(), sanitizeProjectPath(canonical))
+	exact := filepath.Join(s.projectsDir(), ProjectDirName(canonical))
 
 	var sessions []Session
 
@@ -956,24 +956,6 @@ func updatedAfter(left *string, right *string) bool {
 	rightTime, rightErr := time.Parse(time.RFC3339, *right)
 
 	return leftErr == nil && rightErr == nil && leftTime.After(rightTime)
-}
-
-func sanitizeProjectPath(path string) string {
-	var builder strings.Builder
-
-	for _, char := range path {
-		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
-			builder.WriteRune(char)
-		} else {
-			builder.WriteByte('-')
-		}
-	}
-
-	if builder.Len() == 0 {
-		return "-"
-	}
-
-	return builder.String()
 }
 
 func canonicalPath(path string) string {

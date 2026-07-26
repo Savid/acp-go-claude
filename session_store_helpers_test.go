@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,6 +28,15 @@ func TestSessionStorePathHelpers(t *testing.T) {
 	key, err := projectKeyForDirectory(t.TempDir())
 	require.NoError(t, err)
 	require.NotEmpty(t, key)
-	require.Equal(t, "-", sanitizeSessionProjectPath(""))
-	require.Equal(t, "-tmp-project-1", sanitizeSessionProjectPath("/tmp/project_1"))
+
+	// A resume materializes the transcript under this key. Claude Code truncates
+	// a project directory name longer than 200 characters and appends a hash, so
+	// an untruncated key would hide the transcript from `claude --resume`.
+	atLimit, err := projectKeyForDirectory(strings.Repeat("/deep", 40))
+	require.NoError(t, err)
+	require.Equal(t, strings.Repeat("-deep", 40), atLimit)
+
+	overLimit, err := projectKeyForDirectory(strings.Repeat("/deep", 41))
+	require.NoError(t, err)
+	require.Equal(t, strings.Repeat("-deep", 40)+"-lgqv39", overLimit)
 }

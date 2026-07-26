@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/savid/acp-go-claude/internal/transcript"
 )
 
 func (a *Agent) sessionStore() SessionStore {
@@ -74,23 +76,5 @@ func projectKeyForDirectory(cwd string) (string, error) {
 		absolute = resolved
 	}
 
-	return sanitizeSessionProjectPath(filepath.Clean(absolute)), nil
-}
-
-func sanitizeSessionProjectPath(path string) string {
-	var builder strings.Builder
-
-	for _, char := range path {
-		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
-			builder.WriteRune(char)
-		} else {
-			builder.WriteByte('-')
-		}
-	}
-
-	if builder.Len() == 0 {
-		return "-"
-	}
-
-	return builder.String()
+	return transcript.ProjectDirName(filepath.Clean(absolute)), nil
 }

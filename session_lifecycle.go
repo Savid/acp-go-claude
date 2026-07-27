@@ -510,6 +510,13 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 
 	s.cancelPendingInteractions(true)
 
+	// Pending provider-auth flows are cancelled after pending input is resolved
+	// and before the native interrupt, so a flow is never abandoned to a
+	// process that is already being torn down.
+	if s.agent != nil {
+		s.agent.providerAuth.closeSession(s.id)
+	}
+
 	s.mu.Lock()
 	cancel := s.cancel
 	s.mu.Unlock()

@@ -212,13 +212,13 @@ func TestPrepareUsageGenerationResources(t *testing.T) {
 		chmodDarwinGeneration = originalChmod
 	})
 
-	if generation, err := (*Agent)(nil).prepareUsageGeneration(t.Context()); err == nil || generation != nil {
+	if generation, err := (*Agent)(nil).prepareDiscoveryGeneration(t.Context()); err == nil || generation != nil {
 		t.Fatalf("nil agent generation=%v err=%v", generation, err)
 	}
 
 	bestEffort := NewAgent(WithScratchDir(t.TempDir()))
 	bestEffort.containmentMode = RuntimeContainmentBestEffort
-	generation, err := bestEffort.prepareUsageGeneration(t.Context())
+	generation, err := bestEffort.prepareDiscoveryGeneration(t.Context())
 	if runtime.GOOS == "darwin" {
 		require.NoError(t, err)
 		require.NoError(t, generation.Release(true))
@@ -229,7 +229,7 @@ func TestPrepareUsageGenerationResources(t *testing.T) {
 
 	unavailable := NewAgent()
 	unavailable.containmentMode = RuntimeContainmentUnavailable
-	_, err = unavailable.prepareUsageGeneration(t.Context())
+	_, err = unavailable.prepareDiscoveryGeneration(t.Context())
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 
 	wantErr := errors.New("usage generation failure")
@@ -244,7 +244,7 @@ func TestPrepareUsageGenerationResources(t *testing.T) {
 	}
 	_, err = authoritative(t.TempDir(), func(context.Context, RuntimeResourceKind) (func(), error) {
 		return nil, wantErr
-	}).prepareUsageGeneration(t.Context())
+	}).prepareDiscoveryGeneration(t.Context())
 	require.ErrorIs(t, err, wantErr)
 
 	releases := 0
@@ -253,24 +253,24 @@ func TestPrepareUsageGenerationResources(t *testing.T) {
 	}
 	fileParent := filepath.Join(t.TempDir(), "file")
 	require.NoError(t, os.WriteFile(fileParent, nil, 0o600))
-	_, err = authoritative(fileParent, reserve).prepareUsageGeneration(t.Context())
+	_, err = authoritative(fileParent, reserve).prepareDiscoveryGeneration(t.Context())
 	require.Error(t, err)
 	require.Equal(t, 1, releases)
 
 	parent := t.TempDir()
 	mkdirDarwinGeneration = func(string, string) (string, error) { return "", wantErr }
-	_, err = authoritative(parent, reserve).prepareUsageGeneration(t.Context())
+	_, err = authoritative(parent, reserve).prepareDiscoveryGeneration(t.Context())
 	require.ErrorIs(t, err, wantErr)
 	require.Equal(t, 2, releases)
 	mkdirDarwinGeneration = originalMkdir
 
 	chmodDarwinGeneration = func(string, os.FileMode) error { return wantErr }
-	_, err = authoritative(parent, reserve).prepareUsageGeneration(t.Context())
+	_, err = authoritative(parent, reserve).prepareDiscoveryGeneration(t.Context())
 	require.ErrorIs(t, err, wantErr)
 	require.Equal(t, 3, releases)
 	chmodDarwinGeneration = originalChmod
 
-	generation, err = authoritative(parent, reserve).prepareUsageGeneration(t.Context())
+	generation, err = authoritative(parent, reserve).prepareDiscoveryGeneration(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, generation.Release(false))
 	require.Equal(t, 3, releases)
@@ -279,7 +279,7 @@ func TestPrepareUsageGenerationResources(t *testing.T) {
 	require.Equal(t, 3, releases)
 	removeDarwinGeneration = originalRemove
 
-	generation, err = authoritative(parent, reserve).prepareUsageGeneration(t.Context())
+	generation, err = authoritative(parent, reserve).prepareDiscoveryGeneration(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, generation.Release(true))
 	require.Equal(t, 4, releases)

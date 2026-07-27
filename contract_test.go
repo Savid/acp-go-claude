@@ -574,3 +574,185 @@ func TestStoreOrderingUsesUnixMillis(t *testing.T) {
 	require.Equal(t, "a", summaries[0].SessionID)
 	require.Less(t, summaries[0].UpdatedAtUnixMilli, time.Now().Add(time.Second).UnixMilli())
 }
+
+// TestProviderAuthAdvertisedLegsMatchWhatAnswers pins the host's only discovery
+// surface: every advertised name answers, and every absent one returns
+// method-not-found.
+func TestProviderAuthAdvertisedLegsMatchWhatAnswers(t *testing.T) {
+	newAuthSeams(t)
+
+	home := t.TempDir()
+
+	for _, testCase := range []struct {
+		name      string
+		options   []Option
+		advertise []string
+	}{
+		{
+			name:    "without the consent gate",
+			options: []Option{WithHome(home)},
+			advertise: []string{
+				AuthMethodsMethod, AuthAuthorizeMethod, AuthCallbackMethod,
+				AuthStatusMethod, AuthCancelMethod, AuthInventoryMethod,
+			},
+		},
+		{
+			name:    "with the consent gate",
+			options: []Option{WithHome(home), WithProviderAuthDirectHome(home)},
+			advertise: []string{
+				AuthMethodsMethod, AuthAuthorizeMethod, AuthCallbackMethod,
+				AuthStatusMethod, AuthCancelMethod, AuthInventoryMethod, AuthDisconnectMethod,
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			broker, sessionID := newAuthBroker(t, testCase.options...)
+
+			response, err := broker.agent.Initialize(t.Context(), acp.InitializeRequest{})
+			require.NoError(t, err)
+
+			vendor, ok := response.AgentCapabilities.Meta[claudeMetaKey].(map[string]any)
+			require.True(t, ok)
+
+			capability, ok := vendor[providerAuthCapabilityKey].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, testCase.advertise, capability[providerAuthMethodsField])
+			require.Len(t, capability, 1)
+
+			advertised := make(map[string]struct{}, len(testCase.advertise))
+			for _, name := range testCase.advertise {
+				advertised[name] = struct{}{}
+
+				_, err := broker.agent.HandleExtensionMethod(t.Context(), name,
+					authParams(t, map[string]any{"sessionId": string(sessionID)}))
+
+				var requestErr *acp.RequestError
+				if errors.As(err, &requestErr) {
+					require.NotEqual(t, -32601, requestErr.Code, name)
+				}
+			}
+
+			for _, name := range []string{
+				AuthMethodsMethod, AuthAuthorizeMethod, AuthCallbackMethod, AuthStatusMethod,
+				AuthCancelMethod, AuthInventoryMethod, AuthDisconnectMethod,
+				"_claude/auth/credential",
+			} {
+				if _, ok := advertised[name]; ok {
+					continue
+				}
+
+				_, err := broker.agent.HandleExtensionMethod(t.Context(), name, nil)
+
+				var requestErr *acp.RequestError
+
+				require.ErrorAs(t, err, &requestErr)
+				require.Equal(t, -32601, requestErr.Code, name)
+			}
+		})
+	}
+}
+
+// TestProviderAuthStateReasonMatrixIsClosed pins the legal pairs. No pair
+// outside this matrix is producible, which is what makes the flow record
+// schema-closable.
+func TestProviderAuthStateReasonMatrixIsClosed(t *testing.T) {
+	legal := map[string][]string{
+		authStatePending:       {""},
+		authStateAuthenticated: {""},
+		authStateFailed: {
+			authReasonProviderRefused, authReasonNativeVeto, authReasonTransport,
+			authReasonProcess, authReasonAcceptanceUnknown, authReasonHarvestFailed,
+		},
+		authStateCancelled: {authReasonOwnerCancel, authReasonSuperseded, authReasonSessionClosed},
+		authStateExpired:   {authReasonDeadline},
+	}
+
+	produced := map[string]map[string]struct{}{}
+
+	for _, cause := range []string{
+		authCauseNativeVeto, authCauseProviderRefused, authCauseTransport, authCauseProcess,
+		authCauseTimeout, authCauseHarvestFailed, authCauseUnsupportedVariant,
+		authCauseFlowExpired, authCauseFlowState, authCausePolicy,
+	} {
+		for _, inFlight := range []bool{false, true} {
+			state, reason := authFlowTransition(cause, inFlight)
+			if state == "" {
+				require.Empty(t, reason, cause)
+
+				continue
+			}
+
+			if produced[state] == nil {
+				produced[state] = map[string]struct{}{}
+			}
+
+			produced[state][reason] = struct{}{}
+			require.Contains(t, legal[state], reason, "%s/%s", state, reason)
+		}
+	}
+
+	require.Contains(t, produced, authStateFailed)
+	require.Contains(t, produced, authStateExpired)
+}
+
+// TestProviderAuthFailureCarriesNoNativeText pins the closed error shape: a
+// native refusal is reported by its cause alone.
+func TestProviderAuthFailureCarriesNoNativeText(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+
+	generation := authCatalogGeneration(t, broker, sessionID)
+	seams.loginErr = errors.New("HTTP/1.1 403 Forbidden\nset-cookie: session=live-material")
+
+	_, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, err, &requestErr)
+
+	encoded, marshalErr := json.Marshal(requestErr.Data)
+	require.NoError(t, marshalErr)
+	require.NotContains(t, string(encoded), "live-material")
+	require.NotContains(t, string(encoded), "Forbidden")
+
+	data, ok := requestErr.Data.(map[string]any)
+	require.True(t, ok)
+
+	for key := range data {
+		require.Contains(t, []string{
+			jsonFieldError, failureFieldCause, authFieldRetryable,
+			authFieldProviderID, authFieldMethod, authFieldFlowID,
+		}, key)
+	}
+}
+
+// TestProviderAuthLedgerIsValuesFree pins that no credential material,
+// authorization URL, or pasted value is ever written under the ledger root.
+func TestProviderAuthLedgerIsValuesFree(t *testing.T) {
+	seams := newAuthSeams(t)
+
+	root := t.TempDir()
+	broker, sessionID := newAuthBroker(t, WithProviderAuthRoot(root))
+
+	flow := startAuthFlow(t, broker, sessionID)
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), flow.FlowID, testPastedValue)))
+	require.NoError(t, err)
+
+	banned := []string{seams.loginURL, testPastedValue, flow.Message, "canary"}
+
+	require.NoError(t, filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+
+		contents, readErr := os.ReadFile(path)
+		require.NoError(t, readErr)
+
+		for _, value := range banned {
+			require.NotContains(t, string(contents), value, path)
+		}
+
+		return nil
+	}))
+}

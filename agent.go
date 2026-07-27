@@ -89,6 +89,7 @@ type Agent struct {
 	rateLimitsCacheMu   sync.Mutex
 	rateLimitsCache     rateLimitsCacheEntry
 	descendantProcesses *runtimeProcessSnapshotTracker
+	providerAuth        *providerAuth
 
 	newClaudeClient    func(*slog.Logger, claude.Options) *claude.Client
 	queryRateLimits    func(context.Context, claude.Options) (claude.RateLimits, error)
@@ -124,7 +125,7 @@ func NewAgent(opts ...Option) *Agent {
 		)
 	}
 
-	return &Agent{
+	agent := &Agent{
 		options:          options,
 		log:              log,
 		observe:          observe,
@@ -138,6 +139,8 @@ func NewAgent(opts ...Option) *Agent {
 			validateContainmentOptions(options),
 			validateImageLimits(options.ImageLimits),
 			validateInputHandoffRoot(options.InputHandoffRoot),
+			validateProviderAuthRoot(options),
+			validateProviderAuthDirectHome(options.ProviderAuthDirectHome),
 		),
 		containmentMode:     mode,
 		descendantProcesses: newRuntimeProcessSnapshotTracker(options.RuntimeResourceHooks, mode == RuntimeContainmentAuthoritative),
@@ -147,6 +150,14 @@ func NewAgent(opts ...Option) *Agent {
 		queryRateLimits:    claude.QueryRateLimits,
 		queryRateLimitsAPI: claude.QueryRateLimitsAPI,
 	}
+
+	// A configured root is validated before it is advertised: a leg that cannot
+	// record what it does must not be offered.
+	if agent.configurationErr == nil {
+		agent.providerAuth = newProviderAuth(agent)
+	}
+
+	return agent
 }
 
 // Serve runs an ACP agent over the provided streams.
@@ -349,6 +360,15 @@ func (a *Agent) capabilityMeta() map[string]any {
 		meta[handoffMetaKey] = map[string]any{metaVersionsKey: []int{handoffVersion}}
 	}
 
+	// The methods array is the host's only discovery surface for which legs
+	// exist, so it is present only when the surface is, and it lists exactly
+	// the enabled names. There is no injection key: Claude brokers no
+	// credential back out and accepts none in.
+	if a.providerAuth != nil {
+		vendor, _ := meta[claudeMetaKey].(map[string]any)
+		vendor[providerAuthCapabilityKey] = a.providerAuth.capability()
+	}
+
 	return meta
 }
 
@@ -374,8 +394,15 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 	case RateLimitsMethod:
 		return a.handleRateLimits(ctx, params)
 	default:
-		return nil, acp.NewMethodNotFound(method)
 	}
+
+	// An unadvertised provider-auth leg is not handled here and falls through
+	// to the uniform method-not-found, exactly as an unknown method does.
+	if result, handled, err := a.handleAuthExtensionMethod(ctx, method, params); handled {
+		return result, err
+	}
+
+	return nil, acp.NewMethodNotFound(method)
 }
 
 type sessionStart struct {

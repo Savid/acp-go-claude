@@ -15,7 +15,7 @@ var (
 	chmodDarwinGeneration  = os.Chmod
 )
 
-func (a *Agent) prepareUsageGeneration(ctx context.Context) (*claude.DarwinGeneration, error) {
+func (a *Agent) prepareDiscoveryGeneration(ctx context.Context) (*claude.DarwinGeneration, error) {
 	if a == nil {
 		return nil, errors.New("prepare usage generation: agent is unavailable")
 	}

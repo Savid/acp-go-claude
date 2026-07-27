@@ -17,6 +17,55 @@ method-not-found error.
 | `_claude/session/fork` | client to agent |
 | `_claude/rawEvent` | agent to client |
 | `_claude/rateLimits` | client to agent |
+| `_claude/auth/methods` | client to agent |
+| `_claude/auth/authorize` | client to agent |
+| `_claude/auth/callback` | client to agent |
+| `_claude/auth/status` | client to agent |
+| `_claude/auth/cancel` | client to agent |
+| `_claude/auth/inventory` | client to agent |
+| `_claude/auth/disconnect` | client to agent |
+
+### `_claude/auth/*`
+
+Session-scoped methods that broker Claude's hosted paste-back login. They exist
+only while `WithProviderAuthRoot` names a usable durable directory; without it
+every one returns method-not-found, and the initialize capability lists none.
+`_claude/auth/disconnect` additionally requires `WithProviderAuthDirectHome`
+equal to `WithHome`, so an adapter without that consent advertises six methods
+rather than seven. See [Authentication](/docs/features/authentication).
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `_claude/auth/methods` | `{sessionId}` | `{providers, generation}` |
+| `_claude/auth/authorize` | `{sessionId, providerId, connectionId, methodsGeneration, method, authorizeRequestId, inputs?}` | `{interaction, url, message, callbackInput, flowId, flowExpiresAt}` |
+| `_claude/auth/callback` | `{sessionId, providerId, method, flowId, input}` | `{flowId}` |
+| `_claude/auth/status` | `{sessionId, providerId, flowId}` | `{flowId, state, reason?}` |
+| `_claude/auth/cancel` | `{sessionId, providerId, flowId}` | `{flowId}` |
+| `_claude/auth/inventory` | `{sessionId}` | `{entries}` |
+| `_claude/auth/disconnect` | `{sessionId, providerId, connectionId, bindingGeneration}` | `{}` |
+
+Every request and result object is closed: an unknown, duplicate, or misplaced
+field is rejected with `-32602` naming its path, and every time value is Unix
+epoch milliseconds. `state` is one of `pending`, `authenticated`, `failed`,
+`cancelled`, or `expired`; `reason` appears only on the three terminal-negative
+states. A failure after parameters validate is `-32000` with:
+
+```json
+{
+  "error": "claude_auth_failed",
+  "cause": "native_veto",
+  "providerId": "anthropic",
+  "method": "login",
+  "flowId": "…",
+  "retryable": false
+}
+```
+
+`cause` is one of `native_veto`, `provider_refused`, `transport`, `process`,
+`timeout`, `harvest_failed`, `unsupported_variant`, `flow_expired`,
+`flow_state`, `flow_cancelled`, or `policy`. The shape carries no native
+message, response body, or free-form field: a refusal is reported by its `cause`
+alone.
 
 ### `_claude/rateLimits`
 

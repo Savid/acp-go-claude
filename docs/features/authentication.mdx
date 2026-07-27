@@ -1,6 +1,6 @@
 ---
 title: "Authentication"
-description: "Why the adapter advertises no auth methods and how to supply Claude credentials"
+description: "How to supply Claude credentials, and how to broker a login over ACP"
 ---
 
 The adapter does not manage Claude Code account state. Authentication is owned by
@@ -50,3 +50,47 @@ auth, the adapter falls back to reading usage from the Anthropic API directly.
 Tokens minted by `claude setup-token` are inference-only, so that fallback may
 have to spend a one-token inference request to read the rate-limit response
 headers. Disable it with `WithClaudeDirectAPI(false)`.
+
+## Brokering a login over ACP
+
+A host that runs a worker with no credential of its own can drive Claude's
+hosted paste-back login through the session-scoped `_claude/auth/*` extension
+methods. The surface is a broker: Claude Code mints the authorization URL,
+exchanges the pasted value, and stores the result in the config directory it
+already owns. No credential ever crosses back out — there is no `credential`
+method and no injection key.
+
+| Option | Effect |
+| --- | --- |
+| `WithProviderAuthRoot(path)` | Absolute, durable, host-owned directory holding the values-free ledger. Required: unset, relative, or unusable leaves every method unadvertised and answering method-not-found. |
+| `WithProviderAuthDirectHome(path)` | Consent gate for `_claude/auth/disconnect`, which clears the account in a config directory the operator also uses. Must equal `WithHome` after path cleaning. |
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+	claudeacp.WithHome("/var/lib/worker/claude-home"),
+	claudeacp.WithProviderAuthRoot("/var/lib/worker/provider-auth"),
+	claudeacp.WithProviderAuthDirectHome("/var/lib/worker/claude-home"),
+)
+```
+
+The flow is `_claude/auth/methods` → `_claude/auth/authorize` →
+`_claude/auth/callback` → `_claude/auth/status`, with `_claude/auth/cancel` to
+abandon it and `_claude/auth/inventory` to ask what is resident after a restart.
+The catalog is one provider (`anthropic`) with one `oauth` method; `authorize`
+returns `interaction: "callback"` and a `claude.com` URL, and `callback` submits
+the value the browser shows. Method names, parameters, and results are listed in
+[ACP methods](/docs/reference/acp-methods).
+
+<Warning>
+The pasted value is `<code>#<state>`, not the code on its own — submitting only
+the first half cannot complete the login. `cancel` fences the adapter's own
+login process and never claims the authorization was revoked at Anthropic.
+</Warning>
+
+`inventory` answers residence for the configured config directory and nothing
+finer. It reads the ledger and probes `claude auth status`; it never reads
+`.credentials.json`, whose presence proves nothing on macOS, where the login
+Keychain is authoritative and that file is a fallback the composite store leaves
+behind. A connection the adapter did not establish — a `setup-token` in the
+environment, or a login performed out of band in the same home — writes no
+ledger entry and is therefore invisible to `inventory`.

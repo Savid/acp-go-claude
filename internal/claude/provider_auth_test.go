@@ -1,0 +1,516 @@
+package claude
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+const testAuthorizeURL = "https://claude.com/oauth/authorize?code=1&redirect_uri=" + AuthLoginRedirectURI
+
+// osc8 wraps a URL the way the harness does when a hyperlink-capable terminal
+// is inherited: the same bytes appear in the escape parameter and again as the
+// visible text.
+func osc8(url string) string {
+	return "\x1b]8;;" + url + "\x1b\\" + url + "\x1b]8;;\x1b\\"
+}
+
+func authTestOptions(t *testing.T, options Options) (Options, *DarwinGeneration) {
+	t.Helper()
+
+	root, err := os.MkdirTemp(t.TempDir(), "acp-go-claude-runtime-")
+	require.NoError(t, err)
+
+	generation := &DarwinGeneration{
+		RuntimeID:   strings.Repeat("a", 32),
+		ScratchRoot: root,
+		Release: func(complete bool) error {
+			if !complete {
+				return nil
+			}
+
+			return os.RemoveAll(root)
+		},
+	}
+
+	if runtime.GOOS == "darwin" {
+		options.DarwinBestEffort = true
+	}
+
+	return options, generation
+}
+
+func TestAuthLoginURLValidatesIndependently(t *testing.T) {
+	t.Parallel()
+
+	validated, ok := AuthLoginURL(testAuthorizeURL)
+	require.True(t, ok)
+	require.Equal(t, testAuthorizeURL, validated)
+
+	for _, candidate := range []string{
+		"",
+		strings.Repeat("h", authLoginMaxURLBytes+1),
+		"://nope",
+		"http://claude.com/?redirect_uri=" + AuthLoginRedirectURI,
+		"https://user@claude.com/?redirect_uri=" + AuthLoginRedirectURI,
+		"https://claude.com/?redirect_uri=" + AuthLoginRedirectURI + "#frag",
+		"https://evil.example/?redirect_uri=" + AuthLoginRedirectURI,
+		"https://claude.com:8443/?redirect_uri=" + AuthLoginRedirectURI,
+		"https://claude.com/?%zz=1",
+		"https://claude.com/?redirect_uri=https://evil.example/callback",
+		"https://claude.com/oauth/authorize",
+	} {
+		_, accepted := AuthLoginURL(candidate)
+		require.False(t, accepted, candidate)
+	}
+
+	// Port 443 is the same origin and stays legal.
+	_, ok = AuthLoginURL("https://claude.com:443/?redirect_uri=" + AuthLoginRedirectURI)
+	require.True(t, ok)
+}
+
+func TestAuthLoginURLCandidatesReadsBothHalvesOfAnOSC8Wrapper(t *testing.T) {
+	t.Parallel()
+
+	candidates := authLoginURLCandidates(osc8(testAuthorizeURL))
+	require.Equal(t, []string{testAuthorizeURL, testAuthorizeURL}, candidates)
+
+	require.Empty(t, authLoginURLCandidates("no url here"))
+	require.Equal(t, []string{"https://claude.com/a"}, authLoginURLCandidates(`text "https://claude.com/a" tail`))
+}
+
+func TestAuthURLTerminator(t *testing.T) {
+	t.Parallel()
+
+	for _, char := range []byte{' ', '"', '\'', '<', '>', '`', '\\', 0x7f, 0x00, 0x1b, '\n'} {
+		require.True(t, authURLTerminator(char))
+	}
+
+	for _, char := range []byte{'a', '/', ':', '?', '='} {
+		require.False(t, authURLTerminator(char))
+	}
+}
+
+func TestClassifyAuthLoginLineKillsOnAnyUnclassifiableLine(t *testing.T) {
+	t.Parallel()
+
+	found, err := classifyAuthLoginLine(osc8(testAuthorizeURL))
+	require.NoError(t, err)
+	require.Equal(t, testAuthorizeURL, found)
+
+	found, err = classifyAuthLoginLine("   \t ")
+	require.NoError(t, err)
+	require.Empty(t, found)
+
+	_, err = classifyAuthLoginLine("Opening browser to sign in…")
+	require.ErrorIs(t, err, ErrAuthLoginGrammar)
+
+	_, err = classifyAuthLoginLine("https://evil.example/authorize")
+	require.ErrorIs(t, err, ErrAuthLoginGrammar)
+
+	// Two different valid-looking URLs on one line are not the pinned shape.
+	_, err = classifyAuthLoginLine(testAuthorizeURL + " " + testAuthorizeURL + "&extra=1")
+	require.ErrorIs(t, err, ErrAuthLoginGrammar)
+}
+
+func TestReadAuthLoginPresentationDrivesThePinnedGrammar(t *testing.T) {
+	t.Parallel()
+
+	stream := "\n" + osc8(testAuthorizeURL) + "\n\n" + AuthLoginPrompt
+
+	found, err := ReadAuthLoginPresentation(strings.NewReader(stream))
+	require.NoError(t, err)
+	require.Equal(t, testAuthorizeURL, found)
+
+	// A prompt with no URL before it is not a presentation.
+	_, err = ReadAuthLoginPresentation(strings.NewReader(AuthLoginPrompt))
+	require.ErrorIs(t, err, ErrAuthLoginGrammar)
+
+	// An unclassifiable line terminates the read before the prompt arrives.
+	_, err = ReadAuthLoginPresentation(strings.NewReader("Warning: something new\n" + AuthLoginPrompt))
+	require.ErrorIs(t, err, ErrAuthLoginGrammar)
+
+	// A child that exits without prompting presented nothing.
+	_, err = ReadAuthLoginPresentation(strings.NewReader(testAuthorizeURL + "\n"))
+	require.ErrorIs(t, err, ErrAuthLoginNoURL)
+
+	_, err = ReadAuthLoginPresentation(&failingReader{})
+	require.ErrorIs(t, err, errAuthTest)
+}
+
+// failingReader reports a transport failure part-way through the stream.
+type failingReader struct{ read bool }
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, errAuthTest
+	}
+
+	r.read = true
+	copy(p, "partial")
+
+	return len("partial"), nil
+}
+
+var errAuthTest = errors.New("auth test failure")
+
+func TestAuthScrubbedEnvRemovesEveryVariableThatMovesTheBytesOrTheStore(t *testing.T) {
+	t.Parallel()
+
+	scrubbed := authScrubbedEnv([]string{
+		"PATH=/usr/bin",
+		"TERM_PROGRAM=iTerm.app",
+		"FORCE_HYPERLINK=1",
+		"CLAUDE_CODE_CUSTOM_OAUTH_URL=https://claude.fedstart.com",
+		"GOTRACEBACK=crash",
+		"malformed",
+	})
+	require.Equal(t, []string{"PATH=/usr/bin", "malformed"}, scrubbed)
+
+	require.True(t, authScrubbedEnvKey("term_program"))
+	require.False(t, authScrubbedEnvKey("HOME"))
+
+	unchanged := Options{Env: nil}
+	require.Equal(t, unchanged, authScrubbedOptions(unchanged))
+
+	options := authScrubbedOptions(Options{Env: map[string]string{
+		"KEEP":            "1",
+		"FORCE_HYPERLINK": "1",
+	}})
+	require.Equal(t, map[string]string{"KEEP": "1"}, options.Env)
+}
+
+func TestDecodeAuthStatusIgnoresUnknownAndAbsentMembers(t *testing.T) {
+	t.Parallel()
+
+	account, err := decodeAuthStatus(nil)
+	require.NoError(t, err)
+	require.Equal(t, AuthAccount{}, account)
+
+	// The logged-out shape.
+	account, err = decodeAuthStatus([]byte(`{"loggedIn":false,"authMethod":"none","apiProvider":null}`))
+	require.NoError(t, err)
+	require.False(t, account.LoggedIn)
+	require.Equal(t, "none", account.AuthMethod)
+
+	// The api-key shape.
+	account, err = decodeAuthStatus([]byte(`{"loggedIn":true,"authMethod":"api_key","apiProvider":"anthropic","apiKeySource":"env"}`))
+	require.NoError(t, err)
+	require.True(t, account.LoggedIn)
+
+	// The seven-field subscription shape, plus a member added upstream.
+	account, err = decodeAuthStatus([]byte(`{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"anthropic",` +
+		`"apiKeySource":"none","email":"a@b.c","orgId":"org","orgName":"Org","subscriptionType":"max","brandNew":1}`))
+	require.NoError(t, err)
+	require.Equal(t, "a@b.c", account.Email)
+	require.Equal(t, "org", account.OrgID)
+	require.Equal(t, "Org", account.OrgName)
+	require.Equal(t, "oauth_token", account.AuthMethod)
+
+	_, err = decodeAuthStatus([]byte("not json"))
+	require.Error(t, err)
+}
+
+func TestAuthCommandOutputSeparatesExitStatusFromFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+
+	options, generation := authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "ok"), "#!/bin/sh\nprintf '{\"loggedIn\":true}'\n")
+
+	account, code, err := AuthStatus(t.Context(), options, generation)
+	require.NoError(t, err)
+	require.Zero(t, code)
+	require.True(t, account.LoggedIn)
+
+	options, generation = authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "loggedout"), "#!/bin/sh\nprintf '{\"loggedIn\":false}'\nexit 1\n")
+
+	account, code, err = AuthStatus(t.Context(), options, generation)
+	require.NoError(t, err)
+	require.Equal(t, 1, code)
+	require.False(t, account.LoggedIn)
+
+	options, generation = authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "garbage"), "#!/bin/sh\nprintf 'not json'\n")
+
+	_, _, err = AuthStatus(t.Context(), options, generation)
+	require.Error(t, err)
+
+	options, generation = authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "logout"), "#!/bin/sh\nexit 0\n")
+
+	code, err = AuthLogout(t.Context(), options, generation)
+	require.NoError(t, err)
+	require.Zero(t, code)
+}
+
+func TestAuthCommandOutputFailsWhenTheBinaryCannotBeFound(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	options, generation := authTestOptions(t, Options{})
+
+	_, _, err := AuthStatus(t.Context(), options, generation)
+	require.Error(t, err)
+
+	options, generation = authTestOptions(t, Options{})
+
+	_, _, err = StartAuthLogin(t.Context(), options, generation)
+	require.Error(t, err)
+}
+
+func TestAuthCommandOutputSurfacesContainmentAndLaunchFailures(t *testing.T) {
+	originalPrepare := processPrepareContained
+
+	t.Cleanup(func() { processPrepareContained = originalPrepare })
+
+	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) {
+		return nil, ErrProcessContainmentIncomplete
+	}
+
+	options, generation := authTestOptions(t, Options{Cwd: t.TempDir(), CLIPath: "/bin/sh"})
+
+	_, _, err := AuthStatus(t.Context(), options, generation)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+
+	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) {
+		return nil, errAuthTest
+	}
+
+	options, generation = authTestOptions(t, Options{Cwd: t.TempDir(), CLIPath: "/bin/sh"})
+
+	_, _, err = AuthStatus(t.Context(), options, generation)
+	require.ErrorIs(t, err, errAuthTest)
+}
+
+func TestStartAuthLoginDrivesTheChildEndToEnd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+	recorded := filepath.Join(dir, "pasted")
+	script := "#!/bin/sh\n" +
+		"printf '\\n'\n" +
+		"printf '%s\\n' '" + osc8(testAuthorizeURL) + "'\n" +
+		"printf '" + AuthLoginPrompt + "'\n" +
+		"read value\n" +
+		"printf '%s' \"$value\" > " + recorded + "\n"
+
+	options, generation := authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "login"), script)
+
+	login, authorizeURL, err := StartAuthLogin(t.Context(), options, generation)
+	require.NoError(t, err)
+	require.Equal(t, testAuthorizeURL, authorizeURL)
+	require.False(t, login.Exited())
+
+	require.NoError(t, login.Submit("code-half#state-half"))
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(recorded)
+
+		return statErr == nil
+	}, 10*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, login.Close())
+	require.True(t, login.Exited())
+
+	// Close is the fence and is idempotent.
+	require.NoError(t, login.Close())
+
+	pasted, err := os.ReadFile(recorded)
+	require.NoError(t, err)
+	require.Equal(t, "code-half#state-half", string(pasted))
+}
+
+func TestStartAuthLoginFailsClosedOnAnUnclassifiableLine(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprintf 'A new warning line\\n'\nsleep 30\n"
+
+	options, generation := authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "drifted"), script)
+
+	_, _, err := StartAuthLogin(t.Context(), options, generation)
+	require.ErrorIs(t, err, ErrAuthLoginGrammar)
+}
+
+func TestStartAuthLoginKillIsTheFence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' '" + testAuthorizeURL + "'\n" +
+		"printf '" + AuthLoginPrompt + "'\n" +
+		"sleep 30\n"
+
+	options, generation := authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "hanging"), script)
+
+	login, _, err := StartAuthLogin(t.Context(), options, generation)
+	require.NoError(t, err)
+
+	start := time.Now()
+	require.NoError(t, login.Close())
+	require.Less(t, time.Since(start), authShutdownWait+2*time.Second)
+}
+
+func TestStartAuthLoginChildLaunchFailures(t *testing.T) {
+	originalGetwd := processGetwd
+	originalPrepare := processPrepareContained
+	originalStart := processStartContained
+
+	t.Cleanup(func() {
+		processGetwd = originalGetwd
+		processPrepareContained = originalPrepare
+		processStartContained = originalStart
+	})
+
+	processGetwd = func() (string, error) { return "", errAuthTest }
+
+	options, generation := authTestOptions(t, Options{CLIPath: "/bin/sh"})
+
+	_, _, err := StartAuthLogin(t.Context(), options, generation)
+	require.ErrorIs(t, err, errAuthTest)
+
+	processGetwd = originalGetwd
+
+	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) {
+		return nil, errAuthTest
+	}
+
+	options, generation = authTestOptions(t, Options{CLIPath: "/bin/sh"})
+
+	_, _, err = StartAuthLogin(t.Context(), options, generation)
+	require.ErrorIs(t, err, errAuthTest)
+
+	processPrepareContained = func(command *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
+		command.Stdin = strings.NewReader("")
+
+		return &processTreeCommand{cmd: command}, nil
+	}
+
+	options, generation = authTestOptions(t, Options{CLIPath: "/bin/sh"})
+
+	_, _, err = StartAuthLogin(t.Context(), options, generation)
+	require.ErrorContains(t, err, "open claude auth login input")
+
+	processPrepareContained = func(command *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
+		command.Stdout = io.Discard
+
+		return &processTreeCommand{cmd: command}, nil
+	}
+
+	options, generation = authTestOptions(t, Options{CLIPath: "/bin/sh"})
+
+	_, _, err = StartAuthLogin(t.Context(), options, generation)
+	require.ErrorContains(t, err, "open claude auth login output")
+
+	processPrepareContained = originalPrepare
+	processStartContained = func(*processTreeCommand) (*processContainment, error) { return nil, errAuthTest }
+
+	options, generation = authTestOptions(t, Options{CLIPath: "/bin/sh", Cwd: t.TempDir()})
+
+	_, _, err = StartAuthLogin(t.Context(), options, generation)
+	require.ErrorIs(t, err, errAuthTest)
+}
+
+func TestAuthLoginSubmitFailsWhenTheChildIsGone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' '" + testAuthorizeURL + "'\n" +
+		"printf '" + AuthLoginPrompt + "'\n" +
+		"exit 0\n"
+
+	options, generation := authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "quick"), script)
+
+	login, _, err := StartAuthLogin(t.Context(), options, generation)
+	require.NoError(t, err)
+	require.NoError(t, login.Close())
+
+	require.Error(t, login.Submit("code#state"))
+}
+
+func TestAuthCloseErrorTreatsAnExitStatusAsExpected(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, authCloseError(nil, nil, nil))
+	require.NoError(t, authCloseError(nil, &exec.ExitError{}, nil))
+	require.ErrorIs(t, authCloseError(nil, errAuthTest, nil), errAuthTest)
+	require.ErrorIs(t, authCloseError(errAuthTest, nil, nil), errAuthTest)
+	require.ErrorIs(t, authCloseError(nil, nil, errAuthTest), errAuthTest)
+}
+
+func TestDarwinGenerationFinishIsExportedForUnwind(t *testing.T) {
+	t.Parallel()
+
+	finished := 0
+	generation := &DarwinGeneration{Release: func(bool) error {
+		finished++
+
+		return nil
+	}}
+
+	require.NoError(t, generation.Finish(true))
+	require.NoError(t, generation.Finish(true))
+	require.Equal(t, 1, finished)
+}
+
+func TestStartAuthLoginFailsClosedWhenNoPresentationArrives(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	original := authLoginPresentationWait
+
+	authLoginPresentationWait = 20 * time.Millisecond
+
+	t.Cleanup(func() { authLoginPresentationWait = original })
+
+	dir := t.TempDir()
+
+	options, generation := authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "silent"), "#!/bin/sh\nsleep 30\n")
+
+	_, _, err := StartAuthLogin(t.Context(), options, generation)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestAuthCommandOutputContextTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+
+	options, generation := authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "hang"), "#!/bin/sh\nsleep 30\n")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+
+	_, _, err := AuthStatus(ctx, options, generation)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}

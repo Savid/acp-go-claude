@@ -82,7 +82,7 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
 		},
 		PrepareUsageGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
-			return a.prepareUsageGeneration(generationCtx)
+			return a.prepareDiscoveryGeneration(generationCtx)
 		},
 	}
 	processSnapshotSource := a.descendantProcesses.newSource()

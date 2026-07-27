@@ -93,6 +93,14 @@ type Options struct {
 	// bytes over in. It is a read root only: nothing is ever written, moved, or
 	// deleted under it. Empty rejects every handoff-form image block.
 	InputHandoffRoot string
+	// ProviderAuthRoot is the absolute host-owned durable directory holding the
+	// adapter's values-free provider-auth ledger. Empty leaves every
+	// `_claude/auth/*` leg unadvertised.
+	ProviderAuthRoot string
+	// ProviderAuthDirectHome is the exact canonical Claude config directory the
+	// operator consents to a provider-auth leg clearing. Empty, or unequal to
+	// Home, leaves `_claude/auth/disconnect` unadvertised.
+	ProviderAuthDirectHome string
 	// DefaultModel is passed to newly created Claude sessions when non-empty.
 	DefaultModel string
 	// Env is merged into every launched Claude process environment.
@@ -309,6 +317,32 @@ func WithScratchDir(dir string) Option {
 func WithInputHandoffRoot(dir string) Option {
 	return func(options *Options) {
 		options.InputHandoffRoot = dir
+	}
+}
+
+// WithProviderAuthRoot sets the absolute host-owned durable directory holding
+// the adapter's values-free provider-auth ledger. The ledger records which
+// native slot each connection generation owns and never credential material,
+// authorization URLs, or pasted values. The directory is created 0700 when
+// missing and entries are written 0600. Unset (the default), unusable, or
+// relative leaves every `_claude/auth/*` leg absent from the capability
+// advertisement and answering method-not-found; a relative path additionally
+// fails initialization.
+func WithProviderAuthRoot(path string) Option {
+	return func(options *Options) {
+		options.ProviderAuthRoot = path
+	}
+}
+
+// WithProviderAuthDirectHome names the exact canonical Claude config directory
+// the operator consents to `_claude/auth/disconnect` clearing, which is an
+// account-level removal in a home the operator also uses. The leg is advertised
+// and answers only while this equals the configured Home after path cleaning;
+// it authorizes exactly that directory, never a parent, a child, or a symlink
+// target of it. Unset (the default) advertises six legs instead of seven.
+func WithProviderAuthDirectHome(path string) Option {
+	return func(options *Options) {
+		options.ProviderAuthDirectHome = path
 	}
 }
 

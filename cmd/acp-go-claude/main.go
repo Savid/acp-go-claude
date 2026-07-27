@@ -88,6 +88,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	claudePath := flags.String("path", "", "path to claude CLI")
 	claudeHome := flags.String("home", "", "Claude config directory")
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
+	providerAuthRoot := flags.String("provider-auth-root", "", "durable host-owned root holding the provider-auth ledger; empty leaves the provider-auth surface unadvertised")
+	providerAuthDirectHome := flags.String("provider-auth-direct-home", "", "exact Claude config directory a provider-auth disconnect may clear; empty leaves that leg unadvertised")
 	darwinBestEffort := flags.Bool("darwin-best-effort-containment", false, "accept Darwin process-group containment and its escaped-descendant and PGID-reuse risks")
 	model := flags.String("model", "", "default Claude model")
 	bare := flags.Bool("claude-bare", false, "launch Claude sessions with --bare; requires API-key or apiKeyHelper auth")
@@ -154,6 +156,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		claudeacp.WithExecutablePath(*claudePath),
 		claudeacp.WithHome(*claudeHome),
 		claudeacp.WithScratchDir(*scratchDir),
+		claudeacp.WithProviderAuthRoot(*providerAuthRoot),
+		claudeacp.WithProviderAuthDirectHome(*providerAuthDirectHome),
 		claudeacp.WithDefaultModel(*model),
 		claudeacp.WithClaudeBareMode(*bare),
 		claudeacp.WithClaudeHideAuth(*hideClaudeAuth),

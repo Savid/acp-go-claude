@@ -16,6 +16,8 @@ acp-go-claude -path /usr/local/bin/claude -home /tmp/claude-home -model sonnet -
 | `-path` | Claude CLI executable (default: search `PATH`). |
 | `-home` | Claude config directory (`CLAUDE_CONFIG_DIR`) for launched sessions. |
 | `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
+| `-provider-auth-root` | Durable host-owned directory holding the values-free provider-auth ledger. Empty leaves every `_claude/auth/*` method unadvertised. |
+| `-provider-auth-direct-home` | Exact Claude config directory the operator consents to `_claude/auth/disconnect` clearing. Must equal `-home`; empty advertises six auth methods instead of seven. |
 | `-darwin-best-effort-containment` | On Darwin only, explicitly accept process-group containment and its escaped-descendant and numeric-PGID-reuse risks. Darwin fails closed without it; other platforms reject it. |
 | `-model` | Default Claude model. |
 | `-seed-file` | Write a host file into the config dir as `<relpath>=<hostpath>`; repeatable. Requires `-home`. |

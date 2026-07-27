@@ -128,6 +128,13 @@ func (generation *DarwinGeneration) started(pid, pgid int) error {
 	return generation.RecordStarted(pid, pgid)
 }
 
+// Finish completes and releases the generation. It is memoized, so a caller
+// that unwinds before handing the generation to a native launch may call it
+// without racing the launch path's own completion.
+func (generation *DarwinGeneration) Finish(complete bool) error {
+	return generation.finish(complete)
+}
+
 func (generation *DarwinGeneration) finish(complete bool) error {
 	if generation == nil {
 		return nil

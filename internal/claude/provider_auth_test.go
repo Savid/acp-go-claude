@@ -319,9 +319,9 @@ func TestStartAuthLoginDrivesTheChildEndToEnd(t *testing.T) {
 
 	require.NoError(t, login.Submit("code-half#state-half"))
 	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(recorded)
+		contents, readErr := os.ReadFile(recorded)
 
-		return statErr == nil
+		return readErr == nil && string(contents) == "code-half#state-half"
 	}, 10*time.Second, 10*time.Millisecond)
 
 	require.NoError(t, login.Close())

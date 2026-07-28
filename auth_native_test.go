@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -76,7 +77,8 @@ func TestNativeLegsFailClosedOnAnUnresolvableHome(t *testing.T) {
 func TestNativeLegsFailClosedWhenAdmissionIsRefused(t *testing.T) {
 	newAuthSeams(t)
 
-	broker, _ := newAuthBroker(t, WithRuntimeResourceHooks(RuntimeResourceHooks{
+	home := t.TempDir()
+	broker, _ := newAuthBroker(t, WithHome(home), WithProviderAuthDirectHome(home), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return nil, errTestRandom
 		},
@@ -119,7 +121,7 @@ func TestReadAccountReportsTheExitCodeTheLoggedInFlagAndTheAccount(t *testing.T)
 	reading, cause := broker.readAccount(t.Context())
 	require.Empty(t, cause)
 	require.True(t, reading.loggedIn)
-	require.Equal(t, seams.account, reading.account)
+	require.Equal(t, authAccountIdentityOf(seams.account), reading.identity)
 
 	seams.statusExt = 1
 
@@ -140,11 +142,11 @@ func TestReadAccountReportsTheExitCodeTheLoggedInFlagAndTheAccount(t *testing.T)
 // already held; only a reading that differs can be this flow's own login.
 func TestAccountReadingAdvancesOnlyOnAChange(t *testing.T) {
 	resident := authAccountReading{
-		account:  claude.AuthAccount{LoggedIn: true, Email: "resident@example.test"},
+		identity: authAccountIdentityOf(claude.AuthAccount{LoggedIn: true, Email: "resident@example.test"}),
 		loggedIn: true,
 	}
 	switched := authAccountReading{
-		account:  claude.AuthAccount{LoggedIn: true, Email: "switched@example.test"},
+		identity: authAccountIdentityOf(claude.AuthAccount{LoggedIn: true, Email: "switched@example.test"}),
 		loggedIn: true,
 	}
 	empty := authAccountReading{}
@@ -156,11 +158,47 @@ func TestAccountReadingAdvancesOnlyOnAChange(t *testing.T) {
 	require.True(t, switched.advancedPast(resident))
 }
 
+// TestAccountReadingComparesOnlyFieldsThisPackageChose pins what the completion
+// signal is allowed to be equality over. The signal is whole-value equality on
+// a reading, so any type reaching into it decides whether a refused
+// authorization looks like a landed login. An upstream struct there carries
+// whatever a later release adds to it — and a pointer member is comparable,
+// never equal across two decodes, and would report every refusal as a success.
+func TestAccountReadingComparesOnlyFieldsThisPackageChose(t *testing.T) {
+	reading := reflect.TypeOf(authAccountReading{})
+	owner := reading.PkgPath()
+
+	var walk func(typ reflect.Type, path string)
+
+	walk = func(typ reflect.Type, path string) {
+		switch typ.Kind() {
+		case reflect.Bool, reflect.String,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+			reflect.Float32, reflect.Float64:
+			return
+		case reflect.Struct:
+			require.Equal(t, owner, typ.PkgPath(), "%s is %s, declared outside this package", path, typ)
+
+			for index := range typ.NumField() {
+				field := typ.Field(index)
+				walk(field.Type, path+"."+field.Name)
+			}
+		default:
+			require.Failf(t, "unusable in the completion signal",
+				"%s is %s; only scalars this package chose may decide it", path, typ.Kind())
+		}
+	}
+
+	walk(reading, reading.Name())
+}
+
 func TestNativeSeamsHoldTheContainmentPermitOnAnIncompleteBoundary(t *testing.T) {
 	seams := newAuthSeams(t)
 
 	released := 0
-	broker, _ := newAuthBroker(t, WithRuntimeResourceHooks(RuntimeResourceHooks{
+	home := t.TempDir()
+	broker, _ := newAuthBroker(t, WithHome(home), WithProviderAuthDirectHome(home), WithRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return func() { released++ }, nil
 		},

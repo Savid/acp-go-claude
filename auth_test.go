@@ -40,9 +40,18 @@ type fakeAuthLogin struct {
 	refused   bool
 	submitErr error
 	closeErr  error
+	// beforeSubmit runs before the write is attempted and before the child's
+	// own lock is taken, which is where anything racing the write lands: the
+	// real child's stdin is closed by whoever terminalizes the flow, without
+	// the broker mutex held.
+	beforeSubmit func()
 }
 
 func (f *fakeAuthLogin) Submit(value string) error {
+	if f.beforeSubmit != nil {
+		f.beforeSubmit()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -74,6 +83,16 @@ func (f *fakeAuthLogin) Close() error {
 	f.exited = true
 
 	return f.closeErr
+}
+
+// markExited models the child ending on its own, which the harness's
+// unconditionally armed loopback hook makes possible before any value is
+// pasted back.
+func (f *fakeAuthLogin) markExited() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.exited = true
 }
 
 func (f *fakeAuthLogin) closeCount() int {
@@ -322,23 +341,36 @@ func TestProviderAuthRelativePathsFailConstruction(t *testing.T) {
 func TestProviderAuthDirectHomeGate(t *testing.T) {
 	home := t.TempDir()
 
-	require.False(t, providerAuthDirectHome(Options{}))
-	require.False(t, providerAuthDirectHome(Options{Home: home}))
-	require.False(t, providerAuthDirectHome(Options{Home: home, ProviderAuthDirectHome: filepath.Dir(home)}))
-	require.True(t, providerAuthDirectHome(Options{Home: home, ProviderAuthDirectHome: home + "/."}))
+	gate := func(options Options) bool {
+		return providerAuthDirectHome(options, resolveProviderAuthHome(options))
+	}
+
+	require.False(t, gate(Options{}))
+	require.False(t, gate(Options{Home: home}))
+	require.False(t, gate(Options{Home: home, ProviderAuthDirectHome: filepath.Dir(home)}))
+	require.True(t, gate(Options{Home: home, ProviderAuthDirectHome: home + "/."}))
 
 	// The gate answers about the directory the leg clears, which is the
 	// resolved one: a link and its target are the same consented home, and a
 	// home that resolves to nothing is consented to by neither spelling.
 	link := filepath.Join(t.TempDir(), "link")
 	require.NoError(t, os.Symlink(home, link))
-	require.True(t, providerAuthDirectHome(Options{Home: link, ProviderAuthDirectHome: home}))
-	require.True(t, providerAuthDirectHome(Options{Home: home, ProviderAuthDirectHome: link}))
+	require.True(t, gate(Options{Home: link, ProviderAuthDirectHome: home}))
+	require.True(t, gate(Options{Home: home, ProviderAuthDirectHome: link}))
 
 	absent := filepath.Join(t.TempDir(), "absent")
-	require.False(t, providerAuthDirectHome(Options{Home: absent, ProviderAuthDirectHome: absent}))
-	require.False(t, providerAuthDirectHome(Options{Home: home, ProviderAuthDirectHome: absent}))
-	require.False(t, providerAuthDirectHome(Options{Home: absent, ProviderAuthDirectHome: home}))
+	require.False(t, gate(Options{Home: absent, ProviderAuthDirectHome: absent}))
+	require.False(t, gate(Options{Home: home, ProviderAuthDirectHome: absent}))
+	require.False(t, gate(Options{Home: absent, ProviderAuthDirectHome: home}))
+
+	// Resolution records the directory it found, so a name that no longer
+	// reaches it is not the home consent was granted over.
+	resolved := resolveProviderAuthHome(Options{Home: home})
+	require.True(t, resolved.unchanged())
+	require.False(t, providerAuthHome{}.unchanged())
+
+	require.NoError(t, os.Rename(home, home+"-moved"))
+	require.False(t, resolved.unchanged())
 }
 
 func TestProviderAuthCapabilityListsExactlyTheEnabledLegs(t *testing.T) {

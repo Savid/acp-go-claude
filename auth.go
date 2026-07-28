@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -82,6 +83,9 @@ var (
 type providerAuth struct {
 	agent  *Agent
 	ledger *authLedger
+	// home is the native config dir every leg on this surface acts on, resolved
+	// once here rather than per leg.
+	home providerAuthHome
 	// directHome reports whether the operator named this exact native home as
 	// one a native account-level removal may clear. Without it the disconnect
 	// leg is absent from the advertisement and returns method-not-found.
@@ -115,21 +119,61 @@ func newProviderAuth(agent *Agent) *providerAuth {
 		return nil
 	}
 
+	home := resolveProviderAuthHome(agent.options)
+
 	return &providerAuth{
 		agent:      agent,
 		ledger:     ledger,
-		directHome: providerAuthDirectHome(agent.options),
+		home:       home,
+		directHome: providerAuthDirectHome(agent.options, home),
 		flows:      make(map[authFlowKey]*authFlow),
 		byID:       make(map[string]*authFlow),
 	}
 }
 
+// providerAuthHome is the native config dir this surface acts on. It is
+// resolved once, when the broker is built, and every later leg runs against
+// this exact directory: re-deriving it per leg would let a name repointed while
+// the agent runs inherit a consent decided over the directory it used to name.
+type providerAuthHome struct {
+	path     string
+	identity os.FileInfo
+	err      error
+}
+
+// resolveProviderAuthHome resolves the configured home and records which
+// directory it named. An unset home resolves to the empty path the harness
+// reads as its own default and carries no identity, so nothing consents to it.
+func resolveProviderAuthHome(options Options) providerAuthHome {
+	path, identity, err := resolveClaudeHome(options.Home)
+	if err != nil {
+		return providerAuthHome{err: err}
+	}
+
+	return providerAuthHome{path: path, identity: identity}
+}
+
+// unchanged reports whether the resolved path still names the directory
+// resolution found there.
+func (h providerAuthHome) unchanged() bool {
+	if h.identity == nil {
+		return false
+	}
+
+	identity, err := os.Stat(h.path)
+	if err != nil {
+		return false
+	}
+
+	return os.SameFile(identity, h.identity)
+}
+
 // providerAuthDirectHome reports whether the exact-home consent gate authorizes
-// this agent's native home. Both sides are resolved the way the leg itself
-// resolves the home it acts on, so consent covers exactly the directory a
-// removal clears rather than a name that happens to point at it.
-func providerAuthDirectHome(options Options) bool {
-	if strings.TrimSpace(options.ProviderAuthDirectHome) == "" || strings.TrimSpace(options.Home) == "" {
+// the home the broker resolved. Consent is granted over that resolved
+// directory, so it covers exactly what a removal clears rather than a name that
+// happens to point at it.
+func providerAuthDirectHome(options Options, home providerAuthHome) bool {
+	if strings.TrimSpace(options.ProviderAuthDirectHome) == "" || home.path == "" {
 		return false
 	}
 
@@ -138,12 +182,7 @@ func providerAuthDirectHome(options Options) bool {
 		return false
 	}
 
-	home, err := canonicalClaudeHome(options.Home)
-	if err != nil {
-		return false
-	}
-
-	return direct == home
+	return direct == home.path
 }
 
 // validateProviderAuthDirectHome fails an agent whose consent gate is relative,

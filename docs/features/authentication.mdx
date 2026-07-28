@@ -63,7 +63,7 @@ method and no injection key.
 | Option | Effect |
 | --- | --- |
 | `WithProviderAuthRoot(path)` | Absolute, durable, host-owned directory holding the values-free ledger. Required: unset, relative, or unusable leaves every method unadvertised and answering method-not-found. |
-| `WithProviderAuthDirectHome(path)` | Consent gate for `_claude/auth/disconnect`, which clears the account in a config directory the operator also uses. Must equal `WithHome` after path cleaning. |
+| `WithProviderAuthDirectHome(path)` | Consent gate for `_claude/auth/disconnect`, which clears the account in a config directory the operator also uses. Must resolve to the same directory as `WithHome`. |
 
 ```go
 err := claudeacp.Serve(ctx, input, output,
@@ -72,6 +72,13 @@ err := claudeacp.Serve(ctx, input, output,
 	claudeacp.WithProviderAuthDirectHome("/var/lib/worker/claude-home"),
 )
 ```
+
+Both sides of the consent gate are resolved when the agent starts, and every
+native call this surface makes runs against the directory that resolution found.
+`disconnect` clears an account and its platform keystore items and cannot be
+undone, so it first checks that the configured path still names that same
+directory; a path repointed while the agent runs answers `policy` and removes
+nothing.
 
 The flow is `_claude/auth/methods` → `_claude/auth/authorize` →
 `_claude/auth/callback` → `_claude/auth/status`, with `_claude/auth/cancel` to

@@ -455,6 +455,39 @@ func TestDisconnectClearsTheFencedSlotAndVerifiesAbsence(t *testing.T) {
 	require.Equal(t, int64(2), record.BindingGeneration)
 }
 
+// TestDisconnectRefusesAHomeReplacedAfterConsent pins the consent gate to the
+// directory it measured. The gate runs once when the broker is built and the
+// removal it authorizes runs whenever the owner asks, so a name repointed in
+// between would carry the consent granted over one directory onto another —
+// and an account-level logout plus a keystore wipe cannot be undone.
+func TestDisconnectRefusesAHomeReplacedAfterConsent(t *testing.T) {
+	seams := newAuthSeams(t)
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	require.NoError(t, os.Mkdir(home, 0o700))
+
+	other := filepath.Join(root, "other")
+	require.NoError(t, os.Mkdir(other, 0o700))
+
+	broker, sessionID := newAuthBroker(t, WithHome(home), WithProviderAuthDirectHome(home))
+
+	flow := startAuthFlow(t, broker, sessionID)
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), flow.FlowID, testPastedValue)))
+	require.NoError(t, err)
+
+	require.NoError(t, os.Rename(home, filepath.Join(root, "moved")))
+	require.NoError(t, os.Symlink(other, home))
+
+	seams.account = claude.AuthAccount{}
+
+	_, err = broker.disconnect(t.Context(), authParams(t, disconnectParams(sessionID, 1)))
+	requireAuthFailed(t, err, authCausePolicy)
+	require.Zero(t, seams.logoutCalls)
+	require.Zero(t, seams.removeCalls)
+}
+
 func TestDisconnectFencesEveryMismatch(t *testing.T) {
 	newAuthSeams(t)
 

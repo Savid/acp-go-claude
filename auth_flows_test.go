@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -595,6 +596,69 @@ func TestCallbackFailureMapping(t *testing.T) {
 	}
 }
 
+// TestCallbackAnswersForAFlowCancelledUnderTheWrite pins the one leg whose
+// write races a terminal transition. terminalize closes the login child's
+// stdin without the broker mutex held, so a cancel landing mid-write fails the
+// write; the answer belongs to whoever closed the flow, not to the process.
+func TestCallbackAnswersForAFlowCancelledUnderTheWrite(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+
+	flow := startAuthFlow(t, broker, sessionID)
+
+	seams.login.submitErr = os.ErrClosed
+	seams.login.beforeSubmit = func() {
+		_, err := broker.cancel(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+		require.NoError(t, err)
+	}
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), flow.FlowID, testPastedValue)))
+	requireAuthFailed(t, err, authCauseFlowCancelled)
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateCancelled, reported.State)
+	require.Equal(t, authReasonOwnerCancel, reported.Reason)
+}
+
+// TestCallbackSettlesALoginTheChildAlreadyCompleted pins the second way the
+// write fails without anything racing it. The harness arms a loopback hook
+// unconditionally, so the child can complete the login and exit before the
+// pasted value is written; the completion signal is still readable, and a leg
+// that reports an unknown acceptance over a login that landed strands the
+// connection.
+func TestCallbackSettlesALoginTheChildAlreadyCompleted(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+
+	flow := startAuthFlow(t, broker, sessionID)
+
+	seams.login.submitErr = errors.New("broken pipe")
+	seams.login.beforeSubmit = func() {
+		seams.completeLogin()
+		seams.login.markExited()
+	}
+
+	result, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), flow.FlowID, testPastedValue)))
+	require.NoError(t, err)
+	require.Equal(t, authFlowIDResult{FlowID: flow.FlowID}, result)
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateAuthenticated, reported.State)
+
+	record, found, err := broker.ledger.read(authProviderID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, authLedgerConfirmed, record.State)
+}
+
 func TestCallbackFailsWhenTheLoginChildIsGone(t *testing.T) {
 	newAuthSeams(t)
 
@@ -864,7 +928,7 @@ func TestSettleAnswersForAFlowClosedUnderIt(t *testing.T) {
 
 			broker.terminalize(flow, testCase.state, testCase.reason)
 
-			requireAuthFailed(t, broker.settle(t.Context(), flow), testCase.cause)
+			requireAuthFailed(t, broker.settle(t.Context(), flow, authCauseProviderRefused), testCase.cause)
 
 			status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), presentation.FlowID)))
 			require.NoError(t, err)

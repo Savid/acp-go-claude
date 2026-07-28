@@ -144,31 +144,41 @@ func settingsFileError(relpath string) error {
 }
 
 func canonicalClaudeHome(path string) (string, error) {
+	canonical, _, err := resolveClaudeHome(path)
+
+	return canonical, err
+}
+
+// resolveClaudeHome canonicalizes the configured home and reports which
+// directory it named. The stat follows every component, so it describes the
+// directory the canonical path reaches rather than the name that led there, and
+// a caller holding it can tell that directory apart from a later replacement.
+func resolveClaudeHome(path string) (string, os.FileInfo, error) {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
-		return "", nil
+		return "", nil, nil
 	}
 
 	absolute, err := filepathAbs(trimmed)
 	if err != nil {
-		return "", fmt.Errorf("resolve Claude home: %w", err)
+		return "", nil, fmt.Errorf("resolve Claude home: %w", err)
 	}
 
 	info, err := os.Stat(absolute)
 	if err != nil {
-		return "", fmt.Errorf("stat Claude home %q: %w", absolute, err)
+		return "", nil, fmt.Errorf("stat Claude home %q: %w", absolute, err)
 	}
 
 	if !info.IsDir() {
-		return "", fmt.Errorf("claude home %q is not a directory", absolute)
+		return "", nil, fmt.Errorf("claude home %q is not a directory", absolute)
 	}
 
 	canonical, err := filepathEvalSymlinks(absolute)
 	if err != nil {
-		return "", fmt.Errorf("canonicalize Claude home %q: %w", absolute, err)
+		return "", nil, fmt.Errorf("canonicalize Claude home %q: %w", absolute, err)
 	}
 
-	return canonical, nil
+	return canonical, info, nil
 }
 
 func loadSettingsFile(ctx context.Context, path string, log *slog.Logger) (settingsFile, bool) {

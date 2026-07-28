@@ -46,9 +46,8 @@ var authNativeUser = func() string { return os.Getenv("USER") }
 // under. Flows run in the normal session home: a completed login must land in
 // the config dir the harness already reads.
 func (p *providerAuth) nativeOptions() (claude.Options, error) {
-	home, err := canonicalClaudeHome(p.agent.options.Home)
-	if err != nil {
-		return claude.Options{}, err
+	if p.home.err != nil {
+		return claude.Options{}, p.home.err
 	}
 
 	// The login leg materialises its browser shim under this parent, so a
@@ -61,11 +60,43 @@ func (p *providerAuth) nativeOptions() (claude.Options, error) {
 
 	return claude.Options{
 		CLIPath:          p.agent.options.ExecutablePath,
-		ClaudeHome:       home,
+		ClaudeHome:       p.home.path,
 		Env:              p.agent.options.Env,
 		ScratchParent:    scratch,
 		DarwinBestEffort: p.agent.containmentMode == RuntimeContainmentBestEffort,
 	}, nil
+}
+
+// errAuthHomeReplaced ends a removal whose home no longer names the directory
+// the consent gate measured.
+var errAuthHomeReplaced = errors.New("claude home no longer names the consented directory")
+
+// nativeRemovalOptions builds the launch options an account-level removal runs
+// under. It answers only while the resolved home still names the directory
+// consent was granted over: a logout plus a keystore wipe cannot be undone, and
+// a directory swapped in under the running agent was never consented to.
+func (p *providerAuth) nativeRemovalOptions() (claude.Options, error) {
+	options, err := p.nativeOptions()
+	if err != nil {
+		return claude.Options{}, err
+	}
+
+	if !p.home.unchanged() {
+		return claude.Options{}, errAuthHomeReplaced
+	}
+
+	return options, nil
+}
+
+// authRemovalCause classifies a removal that cannot run. A home that no longer
+// names the consented directory is this adapter refusing on its own terms,
+// which reconnecting does not clear; anything else failed to launch.
+func authRemovalCause(err error) string {
+	if errors.Is(err, errAuthHomeReplaced) {
+		return authCausePolicy
+	}
+
+	return authCauseProcess
 }
 
 // authNativeAdmission admits one native root and its fresh generation. The
@@ -101,12 +132,36 @@ func (p *providerAuth) authNativeCause(err error) string {
 	return authCauseProcess
 }
 
+// authAccountIdentity is the comparable projection of one account the config
+// dir names. The native struct it is projected from is converted whole from the
+// decoded payload, so a member added upstream joins it silently — and a pointer
+// member is comparable, allocated afresh by every decode, and would make two
+// readings of one unchanged account differ. The signal compares this instead,
+// which is exactly the fields this surface chose.
+type authAccountIdentity struct {
+	loggedIn   bool
+	authMethod string
+	email      string
+	orgID      string
+	orgName    string
+}
+
+func authAccountIdentityOf(account claude.AuthAccount) authAccountIdentity {
+	return authAccountIdentity{
+		loggedIn:   account.LoggedIn,
+		authMethod: account.AuthMethod,
+		email:      account.Email,
+		orgID:      account.OrgID,
+		orgName:    account.OrgName,
+	}
+}
+
 // authAccountReading is one `claude auth status --json` answer: the account the
 // config dir names beside whether it holds a credential. The reading describes
 // the config dir and never a flow, so a flow that wants to know what its own
 // login did compares two of them.
 type authAccountReading struct {
-	account  claude.AuthAccount
+	identity authAccountIdentity
 	loggedIn bool
 }
 
@@ -148,16 +203,16 @@ func (p *providerAuth) readAccount(ctx context.Context) (authAccountReading, str
 		return authAccountReading{}, p.authNativeCause(err)
 	}
 
-	return authAccountReading{account: account, loggedIn: code == 0 && account.LoggedIn}, ""
+	return authAccountReading{identity: authAccountIdentityOf(account), loggedIn: code == 0 && account.LoggedIn}, ""
 }
 
 // nativeLogout runs the harness's own account-level removal. Its exit status is
 // an answer rather than a failure: a home that holds nothing exits non-zero and
 // there is nothing left to remove.
 func (p *providerAuth) nativeLogout(ctx context.Context) error {
-	options, err := p.nativeOptions()
+	options, err := p.nativeRemovalOptions()
 	if err != nil {
-		return authFailed(authCauseProcess, authProviderID, "", "")
+		return authFailed(authRemovalCause(err), authProviderID, "", "")
 	}
 
 	generation, release, err := p.authNativeAdmission(ctx)
@@ -186,9 +241,9 @@ func (p *providerAuth) nativeLogout(ctx context.Context) error {
 // name shapes: either may be present, and removing only the credential item
 // leaves a usable legacy API key behind.
 func (p *providerAuth) removeKeystoreItems(ctx context.Context) error {
-	options, err := p.nativeOptions()
+	options, err := p.nativeRemovalOptions()
 	if err != nil {
-		return authFailed(authCauseProcess, authProviderID, "", "")
+		return authFailed(authRemovalCause(err), authProviderID, "", "")
 	}
 
 	if err := authKeychainRemove(ctx, options.ClaudeHome, authNativeUser()); err != nil {

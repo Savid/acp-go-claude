@@ -553,8 +553,15 @@ func (p *providerAuth) submitPastedValue(ctx context.Context, flow *authFlow, in
 		return nil, p.fail(flow, authCauseProcess, false)
 	}
 
+	// The write is the one place on this surface where a resource the leg holds
+	// is destroyed by somebody else: terminalize closes the child's stdin
+	// without the broker mutex held, and the child can also have exited on its
+	// own after completing a login through the loopback hook. Neither failure
+	// is the flow's answer, so the write's outcome only chooses what an
+	// unchanged config dir means and settle decides the rest.
+	refusal := authCauseProviderRefused
 	if err := login.submit(input); err != nil {
-		return nil, p.fail(flow, authCauseProcess, true)
+		refusal = authCauseProcess
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, authChildExitWait)
@@ -562,7 +569,7 @@ func (p *providerAuth) submitPastedValue(ctx context.Context, flow *authFlow, in
 
 	p.awaitLoginExit(waitCtx, login)
 
-	if err := p.settle(ctx, flow); err != nil {
+	if err := p.settle(ctx, flow, refusal); err != nil {
 		return nil, err
 	}
 
@@ -587,9 +594,12 @@ func (p *providerAuth) awaitLoginExit(ctx context.Context, login *authLoginHandl
 }
 
 // settle reads the completion signal and terminalizes the flow. The signal is
-// the account reading having advanced past this flow's baseline; a reading that
-// matches it is a provider refusal, whatever credential the config dir holds.
-func (p *providerAuth) settle(ctx context.Context, flow *authFlow) error {
+// the account reading having advanced past this flow's baseline, whatever
+// credential the config dir holds. refusal is the cause a reading that did not
+// advance answers with: a value the child took makes an unchanged config dir
+// the provider's refusal, while a value that never crossed leaves the
+// acceptance unknown and blames nobody.
+func (p *providerAuth) settle(ctx context.Context, flow *authFlow, refusal string) error {
 	p.mu.Lock()
 	baseline := flow.baseline
 	p.mu.Unlock()
@@ -610,7 +620,7 @@ func (p *providerAuth) settle(ctx context.Context, flow *authFlow) error {
 	}
 
 	if !observed.advancedPast(baseline) {
-		return p.fail(flow, authCauseProviderRefused, true)
+		return p.fail(flow, refusal, true)
 	}
 
 	if err := p.confirmAuthorize(flow); err != nil {

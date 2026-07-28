@@ -73,7 +73,10 @@ adapter recorded — no entry, a different connection, or a generation already
 spent. Nothing is mutated: no generation bump and no native logout. Reconnect to
 get a current binding; retrying the same one never succeeds. It is deliberately
 not `policy`, which is the adapter refusing on its own terms and which
-reconnecting does not clear.
+reconnecting does not clear. `_claude/auth/disconnect` answers `policy` when the
+configured config directory no longer names the directory the consent gate
+resolved at startup: the removal is not undoable, so a repointed path is refused
+rather than cleared.
 
 ### `_claude/rateLimits`
 

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -620,3 +621,73 @@ func TestProviderAuthGoSafeRecoversPanics(t *testing.T) {
 }
 
 var errTestRandom = errors.New("no entropy")
+
+// adversarialConnectionIDs are the caller-minted values the bound refuses. Each
+// is a shape the id would otherwise carry into a durable ledger entry and into
+// the adapter's own logs, and the two replacement-rune spellings are one Go
+// string reached from two different wire encodings, which aliases one
+// connection onto another's entry.
+func adversarialConnectionIDs() map[string]string {
+	return map[string]string{
+		"empty":              "",
+		"path separators":    "../../../etc/passwd",
+		"windows separators": `..\..\connection`,
+		"newline":            "connection\n1",
+		"nul":                "connection\x00 1",
+		"bidi override":      "connection\u202e1",
+		"space":              "connection 1",
+		"colon":              "connection:1",
+		"replacement rune":   "connection-�",
+		"non ascii":          "connection-é",
+		"unbounded":          strings.Repeat("c", authConnectionIDMaxBytes+1),
+	}
+}
+
+func TestConnectionIDIsRefusedAtEverySurfaceEntry(t *testing.T) {
+	newAuthSeams(t)
+
+	broker, sessionID := newDisconnectBroker(t)
+	generation := authCatalogGeneration(t, broker, sessionID)
+
+	require.NoError(t, broker.ledger.write(authLedgerRecord{
+		ProviderID:        authProviderID,
+		ConnectionID:      testConnectionID,
+		BindingGeneration: 1,
+		State:             authLedgerConfirmed,
+	}))
+
+	for name, connectionID := range adversarialConnectionIDs() {
+		t.Run(name, func(t *testing.T) {
+			authorize := authorizeParams(sessionID, generation)
+			authorize["connectionId"] = connectionID
+
+			_, err := broker.authorize(t.Context(), authParams(t, authorize))
+			requireInvalidAuthField(t, err, authFieldConnectionID)
+
+			disconnect := disconnectParams(sessionID, 1)
+			disconnect["connectionId"] = connectionID
+
+			_, err = broker.disconnect(t.Context(), authParams(t, disconnect))
+			requireInvalidAuthField(t, err, authFieldConnectionID)
+		})
+	}
+
+	// Every refusal above landed before the leg touched the entry the live
+	// binding names.
+	live, ok, err := broker.ledger.read(authProviderID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, int64(1), live.BindingGeneration)
+	require.Equal(t, testConnectionID, live.ConnectionID)
+}
+
+func TestConnectionIDAcceptsTheOpaqueTokenAConsumerMints(t *testing.T) {
+	for _, connectionID := range []string{
+		"pac_2f1c9b4e-8d3a-4c17-9f21-0b6e5a7c8d90",
+		testConnectionID,
+		"C0",
+		strings.Repeat("c", authConnectionIDMaxBytes),
+	} {
+		require.True(t, authValidConnectionID(connectionID), connectionID)
+	}
+}

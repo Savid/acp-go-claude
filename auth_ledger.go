@@ -425,7 +425,7 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 		return nil, err
 	}
 
-	connectionID, err := authRequiredString(fields, authFieldConnectionID)
+	connectionID, err := authRequiredConnectionID(fields)
 	if err != nil {
 		return nil, err
 	}

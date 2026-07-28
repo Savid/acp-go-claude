@@ -48,7 +48,10 @@ Every request and result object is closed: an unknown, duplicate, or misplaced
 field is rejected with `-32602` naming its path, and every time value is Unix
 epoch milliseconds. `state` is one of `pending`, `authenticated`, `failed`,
 `cancelled`, or `expired`; `reason` appears only on the three terminal-negative
-states. A failure after parameters validate is `-32000` with:
+states. `connectionId` is caller-minted and bounded to at most 128 bytes of
+`A-Z`, `a-z`, `0-9`, `-`, and `_`; every leg that carries one checks it before
+the value is compared or recorded, and anything outside that shape is `-32602`
+naming `connectionId`. A failure after parameters validate is `-32000` with:
 
 ```json
 {

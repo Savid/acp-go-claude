@@ -272,7 +272,7 @@ func containedClaudeOutput(
 		}
 	}()
 
-	command := processCommandContext(ctx, path, args...)
+	command := processCommand(path, args...)
 	configureProcessCommand(command)
 	command.Dir = options.Cwd
 

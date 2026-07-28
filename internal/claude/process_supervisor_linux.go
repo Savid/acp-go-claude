@@ -297,9 +297,6 @@ func runTurnSupervisor(
 	native.Stdout = os.Stdout
 	native.Stderr = os.Stderr
 	configureProcessCommand(native)
-	// exec.Command has no context-owned cancellation hook. The supervisor's
-	// control descriptor is the sole authoritative shutdown channel.
-	native.Cancel = nil
 
 	if err := native.Start(); err != nil {
 		return fmt.Errorf("start supervised Claude native root: %w", err)

@@ -1027,6 +1027,32 @@ func (l *blockingAuthLogin) Close() error {
 	return nil
 }
 
+// The flow is addressable before its child exists, so a leg can close it while
+// the mint is still running. That leg fences a handle the mint has not
+// published, so the mint has to fence the one it is holding.
+func TestAuthorizeFencesALoginChildTheFlowClosedUnder(t *testing.T) {
+	seams := newAuthSeams(t)
+
+	broker, sessionID := newAuthBroker(t)
+	generation := authCatalogGeneration(t, broker, sessionID)
+
+	begin := authLoginBegin
+	authLoginBegin = func(
+		ctx context.Context,
+		options claude.Options,
+		flowGeneration *claude.DarwinGeneration,
+	) (authLoginSession, string, error) {
+		broker.closeSession(sessionID)
+
+		return begin(ctx, options, flowGeneration)
+	}
+
+	_, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+	requireAuthFailed(t, err, authCauseFlowCancelled)
+
+	require.Equal(t, 1, seams.login.closeCount())
+}
+
 func TestDecodeAuthorizeRequestRejectsEveryMissingField(t *testing.T) {
 	newAuthSeams(t)
 

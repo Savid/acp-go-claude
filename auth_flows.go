@@ -290,10 +290,27 @@ func (p *providerAuth) mintPresentation(ctx context.Context, flow *authFlow) (au
 		return authAuthorizeResult{}, cause
 	}
 
+	// The flow is addressable before its child exists, so a cancel, a supersede,
+	// or a session close can terminalize it while the mint runs. That leg fenced
+	// a handle this mint had not published yet, and publishing into the record it
+	// closed would leave a live child nobody ever fences. The mint terminates it
+	// here instead and owns no transition: the record already has the one it
+	// reached.
 	p.mu.Lock()
-	flow.baseline = baseline
-	flow.login = login
+
+	abandoned, orphaned := flow.abandonedCause()
+	if !orphaned {
+		flow.baseline = baseline
+		flow.login = login
+	}
+
 	p.mu.Unlock()
+
+	if orphaned {
+		login.close()
+
+		return authAuthorizeResult{}, abandoned
+	}
 
 	bounded, ok := authDisplayURL(authorizeURL)
 	if !ok {
@@ -613,10 +630,14 @@ func (p *providerAuth) abandonedCause(flow *authFlow) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	return flow.abandonedCause()
+}
+
+func (f *authFlow) abandonedCause() (string, bool) {
 	switch {
-	case !authTerminal(flow.state):
+	case !authTerminal(f.state):
 		return "", false
-	case flow.state == authStateCancelled:
+	case f.state == authStateCancelled:
 		return authCauseFlowCancelled, true
 	default:
 		return authCauseFlowState, true
@@ -636,8 +657,8 @@ func (p *providerAuth) fail(flow *authFlow, cause string, materialInFlight bool)
 // terminalize records the flow's one terminal transition. A flow that already
 // reached one keeps it: a login child still in flight when the owner cancelled
 // settles into a record the owner already closed, and what it settled on is no
-// longer the flow's outcome. The child is fenced either way, because a mint that
-// published its handle after the flow closed left one running.
+// longer the flow's outcome. The child is fenced either way, because the leg
+// that submitted a value leaves the handle published while it waits.
 func (p *providerAuth) terminalize(flow *authFlow, state string, reason string) {
 	p.mu.Lock()
 

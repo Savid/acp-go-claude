@@ -29,13 +29,10 @@ type jobBasicAccounting struct {
 	TotalTerminatedProcesses  uint32
 }
 
-func configureProcessCommandPlatform(cmd *exec.Cmd) {
-	cmd.Cancel = func() error {
-		_, err := killProcess(cmd)
-
-		return err
-	}
-}
+// configureProcessCommandPlatform has nothing to arm: the Job Object created
+// when the child starts is the whole Windows containment boundary, and closing
+// it kills every member.
+func configureProcessCommandPlatform(*exec.Cmd) {}
 
 func prepareProcessTreeCommand(cmd *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
 	if options.DarwinBestEffort {

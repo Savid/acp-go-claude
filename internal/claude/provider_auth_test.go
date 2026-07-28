@@ -432,6 +432,44 @@ func TestStartAuthLoginDrivesTheChildEndToEnd(t *testing.T) {
 	require.Equal(t, "code-half#state-half", string(pasted))
 }
 
+// A login child answers a human who has not opened the authorization URL yet,
+// so it must outlive the call that started it. The ACP SDK dispatches every
+// request on its own goroutine and cancels that request's context the moment
+// the handler returns, so a child bound to the starting context dies before the
+// URL is ever visited.
+func TestStartAuthLoginChildOutlivesTheStartingContext(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+	recorded := filepath.Join(dir, "pasted")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' '" + testAuthorizeURL + "'\n" +
+		"printf '" + AuthLoginPrompt + "'\n" +
+		"read value\n" +
+		"printf '%s' \"$value\" > " + recorded + "\n"
+
+	options, generation := authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "login"), script)
+
+	startCtx, endStart := context.WithCancel(t.Context())
+
+	login, _, err := StartAuthLogin(startCtx, options, generation)
+	require.NoError(t, err)
+
+	endStart()
+
+	require.NoError(t, login.Submit("code-half#state-half"))
+	require.Eventually(t, func() bool {
+		contents, readErr := os.ReadFile(recorded)
+
+		return readErr == nil && string(contents) == "code-half#state-half"
+	}, 10*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, login.Close())
+}
+
 func TestStartAuthLoginFailsClosedOnAnUnclassifiableLine(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")

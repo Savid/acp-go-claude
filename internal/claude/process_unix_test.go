@@ -20,15 +20,13 @@ import (
 
 const supervisorDetachedChildArg = "--claude-supervisor-detached-child"
 
-func TestConfigureProcessCommandSetsUnixProcessGroupAndCancel(t *testing.T) {
+func TestConfigureProcessCommandSetsUnixProcessGroup(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exit 0")
 
 	configureProcessCommand(cmd)
 
 	require.Equal(t, processShutdownWaitDelay, cmd.WaitDelay)
-	require.NotNil(t, cmd.Cancel)
 	require.True(t, usesProcessGroup(cmd))
-	require.NoError(t, cmd.Cancel())
 }
 
 func TestUnixSignalProcessBranches(t *testing.T) {

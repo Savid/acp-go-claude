@@ -32,7 +32,7 @@ const processWaitTimedOutMessage = "wait for claude process after kill timed out
 const stderrTailLines = 20
 
 var (
-	processCommandContext          = newProcessCommand
+	processCommand                 = newProcessCommand
 	processPrepareContained        = prepareProcessTreeCommand
 	processStartContained          = startContainedProcess
 	processAfterDecode             = func() {}
@@ -157,7 +157,7 @@ func (t *ProcessTransport) Start(ctx context.Context) (returnErr error) {
 	}()
 
 	args := BuildArgs(t.options)
-	cmd := processCommandContext(ctx, path, args...)
+	cmd := processCommand(path, args...)
 	configureProcessCommand(cmd)
 
 	cmd.Dir = t.options.Cwd

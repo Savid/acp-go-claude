@@ -422,7 +422,7 @@ func StartAuthLogin(ctx context.Context, options Options, generation *DarwinGene
 		return nil, "", errors.Join(err, generation.finish(true))
 	}
 
-	login, err := startAuthLoginChild(ctx, path, options, generation)
+	login, err := startAuthLoginChild(path, options, generation)
 	if err != nil {
 		return nil, "", err
 	}
@@ -456,7 +456,6 @@ type authPresentation struct {
 }
 
 func startAuthLoginChild(
-	ctx context.Context,
 	path string,
 	options Options,
 	generation *DarwinGeneration,
@@ -469,7 +468,7 @@ func startAuthLoginChild(
 		}
 	}()
 
-	command := processCommandContext(ctx, path, "auth", "login")
+	command := processCommand(path, "auth", "login")
 	configureProcessCommand(command)
 
 	cwd, err := processGetwd()

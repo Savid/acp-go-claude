@@ -19,7 +19,6 @@ var (
 
 func configureProcessCommandPlatform(cmd *exec.Cmd) {
 	cmd.SysProcAttr = processSysProcAttr()
-	configureProcessCommandCancel(cmd)
 }
 
 func terminateProcess(cmd *exec.Cmd) (bool, error) {

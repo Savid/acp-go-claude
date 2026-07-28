@@ -95,11 +95,3 @@ func TestDarwinUnixSignalProcessGroupIDBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-
-func TestDarwinConfigureCancelIsNoop(t *testing.T) {
-	command := exec.Command("true")
-	configureProcessCommandCancel(command)
-	if command.Cancel != nil {
-		t.Fatal("Darwin command gained a parallel cancellation path")
-	}
-}

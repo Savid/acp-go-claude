@@ -1042,12 +1042,12 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 		t.Skip("test uses /bin/sh")
 	}
 
-	commandContext := processCommandContext
+	nativeCommand := processCommand
 	prepareContained := processPrepareContained
 	startContained := processStartContained
 	getwd := processGetwd
 	t.Cleanup(func() {
-		processCommandContext = commandContext
+		processCommand = nativeCommand
 		processPrepareContained = prepareContained
 		processStartContained = startContained
 		processGetwd = getwd
@@ -1060,8 +1060,8 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 	require.Error(t, transport.Start(context.Background()))
 	processGetwd = getwd
 
-	processCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
-		cmd := commandContext(ctx, name, arg...)
+	processCommand = func(name string, arg ...string) *exec.Cmd {
+		cmd := nativeCommand(name, arg...)
 		cmd.Stdin = strings.NewReader("")
 
 		return cmd
@@ -1069,8 +1069,8 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 	transport = NewProcessTransport(nil, Options{CLIPath: "/bin/sh", Cwd: t.TempDir()})
 	require.Error(t, transport.Start(context.Background()))
 
-	processCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
-		cmd := commandContext(ctx, name, arg...)
+	processCommand = func(name string, arg ...string) *exec.Cmd {
+		cmd := nativeCommand(name, arg...)
 		cmd.Stdout = io.Discard
 
 		return cmd
@@ -1078,8 +1078,8 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 	transport = NewProcessTransport(nil, Options{CLIPath: "/bin/sh", Cwd: t.TempDir()})
 	require.Error(t, transport.Start(context.Background()))
 
-	processCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
-		cmd := commandContext(ctx, name, arg...)
+	processCommand = func(name string, arg ...string) *exec.Cmd {
+		cmd := nativeCommand(name, arg...)
 		cmd.Stderr = io.Discard
 
 		return cmd
@@ -1087,7 +1087,7 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 	transport = NewProcessTransport(nil, Options{CLIPath: "/bin/sh", Cwd: t.TempDir()})
 	require.Error(t, transport.Start(context.Background()))
 
-	processCommandContext = commandContext
+	processCommand = nativeCommand
 	var inventories []func() (int, bool)
 	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) {
 		return nil, errors.Join(ErrProcessContainmentIncomplete, errors.New("prepare failed"))

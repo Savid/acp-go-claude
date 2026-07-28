@@ -41,13 +41,9 @@ func (*processContainment) wait(command *exec.Cmd) error { return command.Wait()
 
 func (*processContainment) ownsShutdown() bool { return false }
 
-func configureProcessCommandPlatform(cmd *exec.Cmd) {
-	cmd.Cancel = func() error {
-		_, err := killProcess(cmd)
-
-		return err
-	}
-}
+// configureProcessCommandPlatform has nothing to arm on a platform that cannot
+// prove containment at all: startContainedProcess refuses to launch here.
+func configureProcessCommandPlatform(*exec.Cmd) {}
 
 func terminateProcess(cmd *exec.Cmd) (bool, error) {
 	return killProcess(cmd)

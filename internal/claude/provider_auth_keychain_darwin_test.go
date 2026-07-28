@@ -43,6 +43,12 @@ func TestRemoveAuthKeychainItemsSeparatesAbsenceFromTransientFailure(t *testing.
 	authKeychainTool = func(context.Context, []string) (int, error) { return 1, nil }
 	require.ErrorContains(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator"), "status 1")
 
+	// A keychain that refuses the delete answers 51 with the item still in it.
+	// Reported as success, the caller would tell the operator a credential was
+	// cleared that a later login still finds.
+	authKeychainTool = func(context.Context, []string) (int, error) { return 51, nil }
+	require.ErrorContains(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator"), "status 51")
+
 	want := errors.New("tool missing")
 	authKeychainTool = func(context.Context, []string) (int, error) { return 0, want }
 	require.ErrorIs(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator"), want)

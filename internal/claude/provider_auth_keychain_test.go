@@ -37,11 +37,16 @@ func TestAuthKeychainAccountFallsBackWhenTheUserFailsTheHarnessSanitiser(t *test
 	require.Equal(t, authKeychainAccountFallback, authKeychainAccount("prefix\nsuffix"))
 }
 
-func TestAuthKeychainAbsentExitCodes(t *testing.T) {
+func TestAuthKeychainAbsentIsExactlyTheTwoDocumentedStatuses(t *testing.T) {
 	t.Parallel()
 
-	require.True(t, authKeychainAbsent(36))
-	require.True(t, authKeychainAbsent(44))
-	require.False(t, authKeychainAbsent(0))
-	require.False(t, authKeychainAbsent(1))
+	// Absence is the only status the removal ladder may swallow. Widening this
+	// set makes a keychain that refused the delete — 51, the refusal a locked or
+	// denied keychain answers with — read as one that never held the item, and
+	// disconnect then reports success over a credential that is still there.
+	absent := map[int]bool{36: true, 44: true}
+
+	for code := range 128 {
+		require.Equal(t, absent[code], authKeychainAbsent(code), "status %d", code)
+	}
 }

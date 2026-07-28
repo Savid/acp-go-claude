@@ -30,6 +30,12 @@ const (
 	// keystoreDarwinService is a service name this test owns end to end, so the
 	// macOS third never reads, overwrites, or deletes a real login item.
 	keystoreDarwinService = "acp-go-claude-residence-canary"
+
+	// keystoreDarwinConfigDir is the config dir the macOS removal half derives
+	// production-shaped item names from. The names are a sha256 of this string,
+	// so a fixed synthetic value keeps them deterministic and owned by this test
+	// while putting them out of reach of the names any real config dir owns.
+	keystoreDarwinConfigDir = "/acp-go-claude/residence-matrix/synthetic-config-dir"
 )
 
 // residenceCanary is the only material this matrix ever plants. It is not a
@@ -183,10 +189,8 @@ func assertResidenceKeystoreCanary(t *testing.T) {
 	}
 }
 
-// assertDarwinResidenceCanary reads the seeded item back, then exercises the
-// removal ladder: it clears both items per config dir across both reachable name
-// shapes, and reports absence rather than failure for an item nothing ever
-// wrote.
+// assertDarwinResidenceCanary reads the seeded item back, then hands over to the
+// removal half.
 func assertDarwinResidenceCanary(t *testing.T) {
 	t.Helper()
 
@@ -199,7 +203,47 @@ func assertDarwinResidenceCanary(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, residenceCanary, strings.TrimSpace(string(value)))
 
-	require.NoError(t, claude.RemoveAuthKeychainItems(t.Context(), t.TempDir(), account))
+	assertDarwinRemovalClearsPresentItems(t, account)
+}
+
+// assertDarwinRemovalClearsPresentItems drives the removal ladder against items
+// that are actually there: both items per config dir across both reachable name
+// shapes, seeded under the synthetic config dir and read back before the removal
+// so their presence is established. Run against a config dir nothing ever wrote,
+// the ladder only ever exercises its absence answer, which holds whether or not
+// it can delete anything.
+func assertDarwinRemovalClearsPresentItems(t *testing.T, account string) {
+	t.Helper()
+
+	items := claude.AuthKeychainItems(keystoreDarwinConfigDir, account)
+	require.NotEmpty(t, items)
+
+	for _, item := range items {
+		add := exec.CommandContext(t.Context(), "security", "add-generic-password",
+			"-U", "-s", item.Service, "-a", item.Account, "-w", residenceCanary)
+
+		output, err := add.CombinedOutput()
+		require.NoError(t, err, string(output))
+
+		t.Cleanup(func() {
+			_ = exec.Command("security", "delete-generic-password",
+				"-s", item.Service, "-a", item.Account).Run()
+		})
+	}
+
+	for _, item := range items {
+		find := exec.CommandContext(t.Context(), "security", "find-generic-password",
+			"-s", item.Service, "-a", item.Account)
+		require.NoError(t, find.Run(), "item %q was not seeded, so removing it proves nothing", item.Service)
+	}
+
+	require.NoError(t, claude.RemoveAuthKeychainItems(t.Context(), keystoreDarwinConfigDir, account))
+
+	for _, item := range items {
+		find := exec.CommandContext(t.Context(), "security", "find-generic-password",
+			"-s", item.Service, "-a", item.Account)
+		require.Error(t, find.Run(), "item %q survived the removal ladder", item.Service)
+	}
 }
 
 // residenceDarwinAccount names the account half of the item this test owns.

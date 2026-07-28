@@ -55,8 +55,17 @@ test-integration-live:
 	ACP_GO_CLAUDE_RUN_INTEGRATION=1 ACP_GO_CLAUDE_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
 
 ## test-integration-attended: run provider-auth flows a human must complete in real time
+# A selector that matches nothing exits zero, so the exit status alone cannot
+# tell a completed login from a renamed test. The operator watches this tier for
+# a relayed URL, so the output streams through tee rather than being replayed
+# after the run, and the log is then read back for a per-test PASS line.
 test-integration-attended:
-	ACP_GO_CLAUDE_RUN_INTEGRATION=1 ACP_GO_CLAUDE_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run TestAttended ./integration/...
+	@log=$$(mktemp); rc=$$(mktemp); \
+	{ ACP_GO_CLAUDE_RUN_INTEGRATION=1 ACP_GO_CLAUDE_RUN_ATTENDED=1 go test -race -count=1 -tags=integration -timeout=1200s -v -run TestAttended ./integration/... 2>&1; echo $$? >"$$rc"; } | tee "$$log"; \
+	status=$$(cat "$$rc"); ran=$$(grep -c '^--- PASS: TestAttended' "$$log" || true); \
+	rm -f "$$log" "$$rc"; \
+	[ "$$status" -eq 0 ] || exit "$$status"; \
+	[ "$$ran" -gt 0 ] || { echo 'no attended provider-auth login ran: -run TestAttended selected nothing'; exit 1; }
 
 ## test-integration-keystore: run credential-residence tests against the container fixture
 test-integration-keystore:

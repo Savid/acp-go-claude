@@ -70,10 +70,12 @@ func TestKeystoreLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
 		[]string{browserShimProbePath, "-test.run", browserShimProof, "-test.v"}, tcexec.Multiplexed())
 	require.NoError(t, err)
 
-	// A Go test binary that exits zero having selected nothing prints no PASS, so
-	// the exit code and the PASS line are both needed before the absence of a
-	// launch means anything.
+	// A test binary whose selector matches nothing still prints a bare PASS and
+	// exits zero, so only the per-test line naming the proof shows it ran.
 	proof := readExecOutput(t, reader)
 	require.Zero(t, code, "the browser-shim proof failed: %s", proof)
-	require.Contains(t, proof, "PASS")
+	require.NotContains(t, proof, "testing: warning: no tests to run",
+		"the browser-shim proof selected nothing: %s", proof)
+	require.Contains(t, proof, "--- PASS: TestLoginNeverExecsABrowserLauncher",
+		"the browser-shim proof did not run: %s", proof)
 }

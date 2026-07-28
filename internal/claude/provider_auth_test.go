@@ -17,6 +17,17 @@ import (
 
 const testAuthorizeURL = "https://claude.com/oauth/authorize?code=1&redirect_uri=" + AuthLoginRedirectURI
 
+// The two banners `claude auth login` writes before the URL, measured on the
+// pinned 2.1.220 build. Both end in U+2026 rather than three periods.
+const (
+	testLoginBanner        = "Opening browser to sign in…"
+	testAccountLoginBanner = "Opening browser to sign in with your Claude account…"
+)
+
+// testVisitPrefix is the text the harness writes ahead of the URL on the line
+// that carries it.
+const testVisitPrefix = "If the browser didn't open, visit: "
+
 // osc8 wraps a URL the way the harness does when a hyperlink-capable terminal
 // is inherited: the same bytes appear in the escape parameter and again as the
 // visible text.
@@ -81,11 +92,11 @@ func TestAuthLoginURLValidatesIndependently(t *testing.T) {
 func TestAuthLoginURLCandidatesReadsBothHalvesOfAnOSC8Wrapper(t *testing.T) {
 	t.Parallel()
 
-	candidates := authLoginURLCandidates(osc8(testAuthorizeURL))
+	candidates := AuthLoginURLCandidates(osc8(testAuthorizeURL))
 	require.Equal(t, []string{testAuthorizeURL, testAuthorizeURL}, candidates)
 
-	require.Empty(t, authLoginURLCandidates("no url here"))
-	require.Equal(t, []string{"https://claude.com/a"}, authLoginURLCandidates(`text "https://claude.com/a" tail`))
+	require.Empty(t, AuthLoginURLCandidates("no url here"))
+	require.Equal(t, []string{"https://claude.com/a"}, AuthLoginURLCandidates(`text "https://claude.com/a" tail`))
 }
 
 func TestAuthURLTerminator(t *testing.T) {
@@ -111,15 +122,77 @@ func TestClassifyAuthLoginLineKillsOnAnyUnclassifiableLine(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, found)
 
-	_, err = classifyAuthLoginLine("Opening browser to sign in…")
-	require.ErrorIs(t, err, ErrAuthLoginGrammar)
+	// Both pinned banners classify, with and without the carriage return a CRLF
+	// stream leaves behind.
+	for _, banner := range []string{
+		testLoginBanner,
+		testLoginBanner + "\r",
+		testAccountLoginBanner,
+		testAccountLoginBanner + "\r",
+	} {
+		found, err = classifyAuthLoginLine(banner)
+		require.NoError(t, err, banner)
+		require.Empty(t, found)
+	}
 
-	_, err = classifyAuthLoginLine("https://evil.example/authorize")
-	require.ErrorIs(t, err, ErrAuthLoginGrammar)
+	// A banner that is only contained in the line stays unclassifiable: the
+	// patterns are anchored, never substring matches.
+	for _, line := range []string{
+		"Warning: something new",
+		"note: " + testLoginBanner,
+		testLoginBanner + " and more",
+		"https://evil.example/authorize",
+		// Two different valid-looking URLs on one line are not the pinned shape.
+		testAuthorizeURL + " " + testAuthorizeURL + "&extra=1",
+	} {
+		_, err = classifyAuthLoginLine(line)
+		require.ErrorIs(t, err, ErrAuthLoginGrammar, line)
+	}
+}
 
-	// Two different valid-looking URLs on one line are not the pinned shape.
-	_, err = classifyAuthLoginLine(testAuthorizeURL + " " + testAuthorizeURL + "&extra=1")
+// TestClassifyAuthLoginLineNamesTheLineThatKilledIt pins the diagnosability of
+// a broken pin: the refused line travels with the error, and never inside its
+// text, where a URL-bearing line would put the authorization URL into every
+// sink that renders an error.
+func TestClassifyAuthLoginLineNamesTheLineThatKilledIt(t *testing.T) {
+	t.Parallel()
+
+	_, err := classifyAuthLoginLine("Warning: something new")
+
+	var grammar *AuthLoginGrammarError
+
+	require.ErrorAs(t, err, &grammar)
+	require.Equal(t, "Warning: something new", grammar.Line)
 	require.ErrorIs(t, err, ErrAuthLoginGrammar)
+	require.Equal(t, ErrAuthLoginGrammar.Error(), err.Error())
+
+	_, err = classifyAuthLoginLine("https://evil.example/authorize?code=secret")
+
+	require.ErrorAs(t, err, &grammar)
+	require.Equal(t, "https://evil.example/authorize?code=secret", grammar.Line)
+	require.NotContains(t, err.Error(), "secret")
+}
+
+// TestReadAuthLoginPresentationAcceptsTheMeasuredStream drives the exact three
+// writes `claude auth login` makes on the pinned build, in order: the banner,
+// the visit line carrying the OSC-8 wrapped URL, and the prompt that arrives
+// without a newline.
+func TestReadAuthLoginPresentationAcceptsTheMeasuredStream(t *testing.T) {
+	t.Parallel()
+
+	for _, banner := range []string{testLoginBanner, testAccountLoginBanner} {
+		stream := banner + "\n" + testVisitPrefix + osc8(testAuthorizeURL) + "\n" + AuthLoginPrompt
+
+		found, err := ReadAuthLoginPresentation(strings.NewReader(stream))
+		require.NoError(t, err, banner)
+		require.Equal(t, testAuthorizeURL, found)
+	}
+
+	crlf := testLoginBanner + "\r\n" + testVisitPrefix + osc8(testAuthorizeURL) + "\r\n" + AuthLoginPrompt
+
+	found, err := ReadAuthLoginPresentation(strings.NewReader(crlf))
+	require.NoError(t, err)
+	require.Equal(t, testAuthorizeURL, found)
 }
 
 func TestReadAuthLoginPresentationDrivesThePinnedGrammar(t *testing.T) {

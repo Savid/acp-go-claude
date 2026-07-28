@@ -376,12 +376,24 @@ func (p *providerAuth) expire(flow *authFlow) {
 // supersede terminalizes the flow a new authorize replaces. Its login child is
 // terminated first, so a stale approval cannot land against a flow that no
 // longer addresses anything, and its id is dropped from the addressing map so
-// every later leg answering it is a caller addressing failure.
+// every later leg answering it is a caller addressing failure. A flow that
+// already reached a terminal state is dropped on the same terms: it kept
+// answering status for its whole life, and being replaced is what ends that
+// life rather than the transition it happened to end on.
 func (p *providerAuth) supersede(key authFlowKey, reason string) {
 	p.mu.Lock()
 
 	flow, ok := p.flows[key]
-	if !ok || authTerminal(flow.state) {
+	if !ok {
+		p.mu.Unlock()
+
+		return
+	}
+
+	delete(p.flows, key)
+	delete(p.byID, flow.id)
+
+	if authTerminal(flow.state) {
 		p.mu.Unlock()
 
 		return
@@ -390,9 +402,6 @@ func (p *providerAuth) supersede(key authFlowKey, reason string) {
 	flow.state = authStateCancelled
 	flow.reason = reason
 	login := flow.takeLogin()
-
-	delete(p.flows, key)
-	delete(p.byID, flow.id)
 
 	flow.stopCompleter()
 	p.mu.Unlock()
@@ -717,7 +726,8 @@ func (p *providerAuth) addressedFlowLeg(params json.RawMessage) (*authFlow, erro
 
 // closeSession cancels every pending flow the session owns, terminalizing each
 // as cancelled/session_closed and killing its login child, and drops every
-// record the session could still replay an idempotency key from. It runs after
+// record the session could still replay an idempotency key from along with the
+// id each was addressable by, so no flow outlives its session. It runs after
 // pending elicitation is resolved and before the native interrupt, so a flow is
 // never abandoned to a process already being torn down.
 func (p *providerAuth) closeSession(sessionID acp.SessionId) {
@@ -735,6 +745,7 @@ func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 		}
 
 		delete(p.flows, key)
+		delete(p.byID, flow.id)
 
 		if authTerminal(flow.state) {
 			continue

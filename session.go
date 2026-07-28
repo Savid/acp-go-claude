@@ -24,6 +24,7 @@ const (
 	jsonFieldFormat               = "format"
 	jsonFieldImportID             = "importId"
 	jsonFieldIndex                = "index"
+	jsonFieldLine                 = "line"
 	jsonFieldData                 = "data"
 	jsonFieldMediaType            = "media_type"
 	jsonFieldMessage              = "message"

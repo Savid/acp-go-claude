@@ -1,8 +1,10 @@
 package claudeacp
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -219,6 +221,40 @@ func TestAuthLoginHandleSubmitAndExited(t *testing.T) {
 
 	child.submitErr = errTestRandom
 	require.ErrorIs(t, handle.submit("value"), errTestRandom)
+}
+
+// TestStartLoginNamesTheRefusedLineAtDebug pins the one diagnostic a broken pin
+// leaves behind. Without it every grammar kill is an indistinguishable
+// native_veto and the line is only recoverable by capturing the harness out of
+// band.
+func TestStartLoginNamesTheRefusedLineAtDebug(t *testing.T) {
+	seams := newAuthSeams(t)
+
+	sink := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	broker, sessionID := newAuthBroker(t, WithLogger(logger))
+	generation := authCatalogGeneration(t, broker, sessionID)
+
+	seams.loginErr = &claude.AuthLoginGrammarError{Line: "Warning: something new"}
+
+	_, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+	requireAuthFailed(t, err, authCauseNativeVeto)
+
+	require.Contains(t, sink.String(), "claude auth login line rejected by the pinned grammar")
+	require.Contains(t, sink.String(), "Warning: something new")
+
+	// A URL-bearing line is scrubbed on the terms the flow's url is: the
+	// authorization code rides in the query and never reaches the sink.
+	sink.Reset()
+
+	authorizeURL := "https://claude.com/oauth/authorize?code=canary&redirect_uri=" + claude.AuthLoginRedirectURI
+	seams.loginErr = &claude.AuthLoginGrammarError{Line: "visit: " + authorizeURL + " now"}
+
+	_, err = broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+	requireAuthFailed(t, err, authCauseNativeVeto)
+
+	require.Contains(t, sink.String(), "https://claude.com/oauth/authorize")
+	require.NotContains(t, sink.String(), "canary")
 }
 
 func TestSessionCloseCancelsPendingProviderAuthFlows(t *testing.T) {

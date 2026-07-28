@@ -3,7 +3,9 @@ package claudeacp
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -191,6 +193,8 @@ func (p *providerAuth) startLogin(ctx context.Context) (*authLoginHandle, string
 		}
 
 		if errors.Is(err, claude.ErrAuthLoginGrammar) || errors.Is(err, claude.ErrAuthLoginNoURL) {
+			p.logAuthLoginGrammar(ctx, err)
+
 			return nil, "", authCauseNativeVeto
 		}
 
@@ -198,6 +202,26 @@ func (p *providerAuth) startLogin(ctx context.Context) (*authLoginHandle, string
 	}
 
 	return &authLoginHandle{login: login, release: release, agent: p.agent}, authorizeURL, ""
+}
+
+// logAuthLoginGrammar records which login line the pinned whole-line grammar
+// refused. Without it a broken pin is indistinguishable from every other native
+// veto, and the line is only recoverable by capturing the harness out of band.
+// Each URL candidate in the line is reduced by the diagnostic URI rule before
+// it reaches the sink, because claude's authorization URL is code-bearing for
+// the flow's life and follows userCode into every sink restriction.
+func (p *providerAuth) logAuthLoginGrammar(ctx context.Context, err error) {
+	var grammar *claude.AuthLoginGrammarError
+	if !errors.As(err, &grammar) {
+		return
+	}
+
+	line := grammar.Line
+	for _, candidate := range claude.AuthLoginURLCandidates(line) {
+		line = strings.ReplaceAll(line, candidate, redactDiagnosticURI(candidate))
+	}
+
+	p.agent.log.DebugContext(ctx, "claude auth login line rejected by the pinned grammar", slog.String(jsonFieldLine, line))
 }
 
 // authLoginHandle pairs the login child with the native-root permit it holds.

@@ -35,10 +35,19 @@ const authRedirectQueryKey = "redirect_uri"
 // authLoginURLScheme is the only scheme an authorization URL may carry.
 const authLoginURLScheme = "https"
 
-// authLoginBlankLine is the one whole-line pattern that classifies a line
-// carrying no authorization URL. It is anchored: a substring match would
-// classify a line that merely contains whitespace.
-var authLoginBlankLine = regexp.MustCompile(`\A\s*\z`)
+// authLoginNonURLLines is the exhaustive set of whole-line patterns that
+// classify a login line carrying no authorization URL: the blank padding, and
+// the two banners the harness writes ahead of the URL. Every pattern is
+// anchored end to end, because a substring match would classify a line that
+// merely contains one of them. The ellipsis is written as its code point
+// because the harness emits U+2026 rather than three periods, and the optional
+// carriage return covers a stream whose newlines crossed as CRLF, which leaves
+// the CR on the line the splitter hands over.
+var authLoginNonURLLines = []*regexp.Regexp{
+	regexp.MustCompile(`\A\s*\z`),
+	regexp.MustCompile(`\AOpening browser to sign in\x{2026}\r?\z`),
+	regexp.MustCompile(`\AOpening browser to sign in with your Claude account\x{2026}\r?\z`),
+}
 
 // authLoginURLMarker starts a candidate authorization URL inside a line. The
 // harness wraps the URL in OSC-8 escapes and emits it twice, so a line carries
@@ -50,6 +59,22 @@ const authLoginURLMarker = authLoginURLScheme + "://"
 // guessing: a patch release that turns a warning into the URL must not be
 // absorbed silently.
 var ErrAuthLoginGrammar = errors.New("claude auth login emitted an unclassifiable line")
+
+// AuthLoginGrammarError names the exact line the allowlist refused. Line is the
+// raw byte sequence and is code-bearing whenever it carries a URL candidate, so
+// it stays out of the error text and reaches a sink only after every candidate
+// in it has been scrubbed.
+type AuthLoginGrammarError struct {
+	Line string
+}
+
+func (e *AuthLoginGrammarError) Error() string {
+	return ErrAuthLoginGrammar.Error()
+}
+
+func (e *AuthLoginGrammarError) Unwrap() error {
+	return ErrAuthLoginGrammar
+}
 
 // ErrAuthLoginNoURL reports a login child that exited before it presented an
 // authorization URL and its prompt.
@@ -234,11 +259,11 @@ func AuthLoginURL(candidate string) (string, bool) {
 	return candidate, true
 }
 
-// authLoginURLCandidates extracts every https run from a raw line. A run ends
+// AuthLoginURLCandidates extracts every https run from a raw line. A run ends
 // at the first byte a URL cannot carry, which is what terminates both halves of
 // an OSC-8 wrapper: the escape parameter ends at BEL or ESC, and the visible
 // text ends at the closing escape.
-func authLoginURLCandidates(line string) []string {
+func AuthLoginURLCandidates(line string) []string {
 	candidates := make([]string, 0, 2)
 	rest := line
 
@@ -278,13 +303,15 @@ func authURLTerminator(char byte) bool {
 // runs first and independently; only a line carrying no URL candidate at all
 // reaches the allowlist, and a line the allowlist does not cover is fatal.
 func classifyAuthLoginLine(line string) (string, error) {
-	candidates := authLoginURLCandidates(line)
+	candidates := AuthLoginURLCandidates(line)
 	if len(candidates) == 0 {
-		if authLoginBlankLine.MatchString(line) {
-			return "", nil
+		for _, pattern := range authLoginNonURLLines {
+			if pattern.MatchString(line) {
+				return "", nil
+			}
 		}
 
-		return "", ErrAuthLoginGrammar
+		return "", &AuthLoginGrammarError{Line: line}
 	}
 
 	authorizeURL := ""
@@ -292,11 +319,11 @@ func classifyAuthLoginLine(line string) (string, error) {
 	for _, candidate := range candidates {
 		validated, ok := AuthLoginURL(candidate)
 		if !ok {
-			return "", ErrAuthLoginGrammar
+			return "", &AuthLoginGrammarError{Line: line}
 		}
 
 		if authorizeURL != "" && validated != authorizeURL {
-			return "", ErrAuthLoginGrammar
+			return "", &AuthLoginGrammarError{Line: line}
 		}
 
 		authorizeURL = validated

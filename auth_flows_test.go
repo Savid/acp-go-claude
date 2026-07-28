@@ -242,6 +242,95 @@ func TestAuthorizeSupersedesTheOlderFlow(t *testing.T) {
 	requireInvalidAuthField(t, err, authFieldFlowID)
 }
 
+// TestAuthorizeSupersedesAFlowThatAlreadyTerminalized pins the half a terminal
+// state used to skip. A flow stays addressable through every transition of its
+// own, but being replaced ends its life, and after that its id addresses
+// nothing whatever state it ended on.
+func TestAuthorizeSupersedesAFlowThatAlreadyTerminalized(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+
+	first := startAuthFlow(t, broker, sessionID)
+
+	seams.account = claude.AuthAccount{LoggedIn: false}
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), first.FlowID, testPastedValue)))
+	requireAuthFailed(t, err, authCauseProviderRefused)
+
+	// Terminal, and still addressable until something replaces it.
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), first.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateFailed, reported.State)
+
+	seams.account = claude.AuthAccount{LoggedIn: true}
+
+	params := authorizeParams(sessionID, broker.generation)
+	params["authorizeRequestId"] = "request-2"
+
+	second, err := broker.authorize(t.Context(), authParams(t, params))
+	require.NoError(t, err)
+
+	minted, isResult := second.(authAuthorizeResult)
+	require.True(t, isResult)
+	require.NotEqual(t, first.FlowID, minted.FlowID)
+
+	_, err = broker.status(t.Context(), authParams(t, flowParams(string(sessionID), first.FlowID)))
+	requireInvalidAuthField(t, err, authFieldFlowID)
+
+	_, err = broker.cancel(t.Context(), authParams(t, flowParams(string(sessionID), first.FlowID)))
+	requireInvalidAuthField(t, err, authFieldFlowID)
+
+	_, err = broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), first.FlowID, testPastedValue)))
+	requireInvalidAuthField(t, err, authFieldFlowID)
+
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+
+	require.Len(t, broker.byID, 1)
+	require.Contains(t, broker.byID, minted.FlowID)
+}
+
+// TestCloseSessionDropsEveryAddressingEntry pins the addressing map against the
+// flow map. A minted id that outlives its session is a record nothing can ever
+// reach and nothing ever frees.
+func TestCloseSessionDropsEveryAddressingEntry(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+
+	terminal := startAuthFlow(t, broker, sessionID)
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), terminal.FlowID, testPastedValue)))
+	require.NoError(t, err)
+
+	params := authorizeParams(sessionID, broker.generation)
+	params["authorizeRequestId"] = "request-2"
+
+	result, err := broker.authorize(t.Context(), authParams(t, params))
+	require.NoError(t, err)
+
+	pending, ok := result.(authAuthorizeResult)
+	require.True(t, ok)
+
+	closes := seams.login.closeCount()
+
+	broker.closeSession(sessionID)
+
+	broker.mu.Lock()
+	require.Empty(t, broker.flows)
+	require.Empty(t, broker.byID)
+	broker.mu.Unlock()
+
+	// Only the flow still pending owns a live child; the terminal one was
+	// fenced when it terminalized.
+	require.Equal(t, closes+1, seams.login.closeCount())
+
+	_, err = broker.status(t.Context(), authParams(t, flowParams(string(sessionID), pending.FlowID)))
+	requireInvalidAuthField(t, err, authFieldFlowID)
+}
+
 func TestAuthorizeFailsClosedOnEveryNativeRefusal(t *testing.T) {
 	seams := newAuthSeams(t)
 	broker, sessionID := newAuthBroker(t)
@@ -677,7 +766,11 @@ func TestCompleterExpiresAnAbandonedFlow(t *testing.T) {
 	require.Equal(t, authReasonDeadline, reported.Reason)
 }
 
-func TestSupersedeIgnoresAbsentAndTerminalFlows(t *testing.T) {
+// TestSupersedeDropsATerminalFlowWithoutFencingItTwice pins the two halves a
+// terminal state splits: the child was already fenced when the flow
+// terminalized, so nothing is closed again, but the record is dropped exactly
+// as a pending one is.
+func TestSupersedeDropsATerminalFlowWithoutFencingItTwice(t *testing.T) {
 	seams := newAuthSeams(t)
 	broker, sessionID := newAuthBroker(t)
 
@@ -692,6 +785,13 @@ func TestSupersedeIgnoresAbsentAndTerminalFlows(t *testing.T) {
 
 	broker.supersede(authFlowKey{sessionID: sessionID, providerID: authProviderID}, authReasonSuperseded)
 	require.Zero(t, seams.login.closeCount())
+
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+
+	require.Empty(t, broker.flows)
+	require.Empty(t, broker.byID)
+	require.Equal(t, authStateFailed, record.state)
 }
 
 func TestCloseSessionCancelsEveryPendingFlow(t *testing.T) {
@@ -701,6 +801,7 @@ func TestCloseSessionCancelsEveryPendingFlow(t *testing.T) {
 	(*providerAuth)(nil).closeSession(sessionID)
 
 	flow := startAuthFlow(t, broker, sessionID)
+	record := broker.byID[flow.FlowID]
 
 	broker.closeSession("another-session")
 	require.Zero(t, seams.login.closeCount())
@@ -708,13 +809,15 @@ func TestCloseSessionCancelsEveryPendingFlow(t *testing.T) {
 	broker.closeSession(sessionID)
 	require.Equal(t, 1, seams.login.closeCount())
 
-	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
-	require.NoError(t, err)
+	broker.mu.Lock()
+	require.Equal(t, authStateCancelled, record.state)
+	require.Equal(t, authReasonSessionClosed, record.reason)
+	broker.mu.Unlock()
 
-	reported, ok := status.(authStatusResult)
-	require.True(t, ok)
-	require.Equal(t, authStateCancelled, reported.State)
-	require.Equal(t, authReasonSessionClosed, reported.Reason)
+	// The session that owned the flow is gone, so the id it minted addresses
+	// nothing rather than answering out of a record nothing can free.
+	_, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+	requireInvalidAuthField(t, err, authFieldFlowID)
 }
 
 func TestCloseSessionSkipsAlreadyTerminalFlows(t *testing.T) {

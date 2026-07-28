@@ -432,6 +432,36 @@ func TestStartAuthLoginDrivesTheChildEndToEnd(t *testing.T) {
 	require.Equal(t, "code-half#state-half", string(pasted))
 }
 
+// A login the operator completes in the browser is answered by the harness's
+// own loopback listener: the child installs the credential and exits without
+// ever being handed a pasted value, so nothing on this surface calls Close. The
+// child's own exit is the only signal the status poll has, and reporting the
+// wrapper's teardown instead leaves that poll permanently unable to run.
+func TestAuthLoginReportsTheChildsOwnExitBeforeTheFence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+	release := filepath.Join(dir, "release")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' '" + testAuthorizeURL + "'\n" +
+		"printf '" + AuthLoginPrompt + "'\n" +
+		"while [ ! -f " + release + " ]; do sleep 0.05; done\n"
+
+	options, generation := authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "selfcompleting"), script)
+
+	login, _, err := StartAuthLogin(t.Context(), options, generation)
+	require.NoError(t, err)
+	require.False(t, login.Exited())
+
+	require.NoError(t, os.WriteFile(release, nil, 0o600))
+	require.Eventually(t, login.Exited, 10*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, login.Close())
+}
+
 // A login child answers a human who has not opened the authorization URL yet,
 // so it must outlive the call that started it. The ACP SDK dispatches every
 // request on its own goroutine and cancels that request's context the moment
@@ -593,6 +623,8 @@ func TestAuthCloseErrorTreatsAnExitStatusAsExpected(t *testing.T) {
 
 	require.NoError(t, authCloseError(nil, nil, nil))
 	require.NoError(t, authCloseError(nil, &exec.ExitError{}, nil))
+	require.NoError(t, authCloseError(nil, exec.ErrWaitDelay, nil))
+	require.ErrorIs(t, authCloseError(errAuthTest, exec.ErrWaitDelay, nil), exec.ErrWaitDelay)
 	require.ErrorIs(t, authCloseError(nil, errAuthTest, nil), errAuthTest)
 	require.ErrorIs(t, authCloseError(errAuthTest, nil, nil), errAuthTest)
 	require.ErrorIs(t, authCloseError(nil, nil, errAuthTest), errAuthTest)

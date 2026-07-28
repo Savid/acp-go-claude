@@ -403,11 +403,10 @@ func classifyAuthLoginLines(buffered string, authorizeURL string) (string, strin
 type AuthLogin struct {
 	stdin      io.WriteCloser
 	stdout     io.ReadCloser
-	launch     *processTreeCommand
 	tree       *processContainment
 	generation *DarwinGeneration
 	shim       *browserShim
-	closed     chan struct{}
+	exit       *commandWait
 
 	once     sync.Once
 	closeErr error
@@ -537,11 +536,10 @@ func startAuthLoginChild(
 	return &AuthLogin{
 		stdin:      stdin,
 		stdout:     stdout,
-		launch:     launch,
 		tree:       tree,
 		generation: generation,
 		shim:       shim,
-		closed:     make(chan struct{}),
+		exit:       startChildExit(tree, launch.cmd),
 	}, nil
 }
 
@@ -557,10 +555,13 @@ func (l *AuthLogin) Submit(value string) error {
 
 // Exited reports whether the child has already exited, which is the only signal
 // that lets a status poll run at all: the login process's stdout never signals
-// success.
+// success, and a browser that reaches the harness's loopback listener completes
+// the grant with no value ever pasted back. It reads the child's own reap, which
+// was started with the child, so it answers before and independently of the
+// fence below.
 func (l *AuthLogin) Exited() bool {
 	select {
-	case <-l.closed:
+	case <-l.exit.done:
 		return true
 	default:
 		return false
@@ -574,7 +575,7 @@ func (l *AuthLogin) Close() error {
 		_ = l.stdin.Close()
 
 		containErr := l.tree.quiesce(authShutdownWait)
-		waitErr := l.tree.wait(l.launch.cmd)
+		waitErr := l.reap()
 
 		_ = l.stdout.Close()
 
@@ -582,22 +583,39 @@ func (l *AuthLogin) Close() error {
 
 		l.closeErr = errors.Join(authCloseError(containErr, waitErr, closeErr), l.shim.remove())
 		l.closeErr = errors.Join(l.closeErr, l.generation.finish(!errors.Is(l.closeErr, ErrProcessContainmentIncomplete)))
-
-		close(l.closed)
 	})
 
 	return l.closeErr
 }
 
+// reap collects the result of the child's own exit. That exit is already being
+// observed, and it is the only wait on this child, so the fence takes its result
+// rather than starting a second one. The bound matters because the boundary has
+// just been asked to stop the child: a boundary that reports quiescence has
+// reaped it too, so waiting past the fence's own window would be waiting on a
+// boundary that already failed and said so.
+func (l *AuthLogin) reap() error {
+	ctx, cancel := context.WithTimeout(context.Background(), authShutdownWait)
+	defer cancel()
+
+	waitErr, _ := l.exit.await(ctx)
+
+	return waitErr
+}
+
 // authCloseError joins the fence's results. A fenced login child either exits
 // with a status of its own or is signalled by the fence, so an exit status is
-// the expected outcome rather than a wrapper failure; any other wait failure is
-// real and is reported.
+// the expected outcome rather than a wrapper failure. A child that exited while
+// something else still held its output pipe is reported by the wait delay the
+// spawn arms, and a boundary that completed has already accounted for whatever
+// held it. Any other wait failure is real and is reported.
 func authCloseError(containErr error, waitErr error, closeErr error) error {
 	joined := errors.Join(containErr, closeErr)
 
 	var exitErr *exec.ExitError
-	if waitErr != nil && !errors.As(waitErr, &exitErr) {
+
+	expected := errors.As(waitErr, &exitErr) || (joined == nil && errors.Is(waitErr, exec.ErrWaitDelay))
+	if waitErr != nil && !expected {
 		joined = errors.Join(joined, waitErr)
 	}
 

@@ -406,6 +406,7 @@ type AuthLogin struct {
 	launch     *processTreeCommand
 	tree       *processContainment
 	generation *DarwinGeneration
+	shim       *browserShim
 	closed     chan struct{}
 
 	once     sync.Once
@@ -482,6 +483,24 @@ func startAuthLoginChild(
 	envOptions.Cwd = cwd
 	command.Env = BuildEnv(envOptions)
 
+	// The shim is applied after BuildEnv because BuildEnv drops keys wholesale,
+	// and a PATH or BROWSER it rewrote afterwards would hand the authorization
+	// URL to a real browser. A tab that reaches this leg's loopback listener
+	// completes the grant outright, so the launch is neutralised rather than
+	// merely discouraged.
+	shim, err := newBrowserShim(options.ScratchParent)
+	if err != nil {
+		return nil, fmt.Errorf("contain claude auth login browser launch: %w", err)
+	}
+
+	defer func() {
+		if !started {
+			returnErr = errors.Join(returnErr, shim.remove())
+		}
+	}()
+
+	command.Env = shim.environ(command.Env)
+
 	launch, err := processPrepareContained(command, processLaunchOptions{
 		DarwinBestEffort: options.DarwinBestEffort,
 		Generation:       generation,
@@ -522,6 +541,7 @@ func startAuthLoginChild(
 		launch:     launch,
 		tree:       tree,
 		generation: generation,
+		shim:       shim,
 		closed:     make(chan struct{}),
 	}, nil
 }
@@ -561,7 +581,7 @@ func (l *AuthLogin) Close() error {
 
 		closeErr := processContainmentClose(l.tree)
 
-		l.closeErr = authCloseError(containErr, waitErr, closeErr)
+		l.closeErr = errors.Join(authCloseError(containErr, waitErr, closeErr), l.shim.remove())
 		l.closeErr = errors.Join(l.closeErr, l.generation.finish(!errors.Is(l.closeErr, ErrProcessContainmentIncomplete)))
 
 		close(l.closed)

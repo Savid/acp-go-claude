@@ -12,6 +12,10 @@ type Options struct {
 
 	ClaudeHome string
 	Env        map[string]string
+	// ScratchParent is the already-resolved directory every ephemeral
+	// wrapper-owned directory is created beneath. The login leg materialises
+	// its browser shim here, so it is set only where a child can launch one.
+	ScratchParent string
 
 	SessionID   string
 	ResumeID    string

@@ -41,6 +41,23 @@ func TestNativeOptionsFailsOnAnUnresolvableHome(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestNativeOptionsCarriesTheScratchParentTheLoginLegNeeds(t *testing.T) {
+	scratch := filepath.Join(t.TempDir(), "scratch")
+	broker, _ := newAuthBroker(t, WithHome(t.TempDir()), WithScratchDir(scratch))
+
+	options, err := broker.nativeOptions()
+	require.NoError(t, err)
+	require.Equal(t, scratch, options.ScratchParent)
+
+	occupied := filepath.Join(t.TempDir(), "occupied")
+	require.NoError(t, os.WriteFile(occupied, []byte("x"), 0o600))
+
+	broker, _ = newAuthBroker(t, WithHome(t.TempDir()), WithScratchDir(occupied))
+
+	_, err = broker.nativeOptions()
+	require.ErrorContains(t, err, "create scratch parent dir")
+}
+
 func TestNativeLegsFailClosedOnAnUnresolvableHome(t *testing.T) {
 	newAuthSeams(t)
 

@@ -87,6 +87,15 @@ the first half cannot complete the login. `cancel` fences the adapter's own
 login process and never claims the authorization was revoked at Anthropic.
 </Warning>
 
+The login child opens no browser on the host. Its environment carries a
+mode-`0700` directory of no-op launchers ahead of every other `PATH` entry and
+points `BROWSER` inside it, so a harness that reads `BROWSER` and one that execs
+`open` or `xdg-open` directly are both covered; the directory is removed when
+the flow's fence closes the child. Windows admits no such containment — the
+`start` that opens a URL is a `cmd.exe` builtin with no image to shadow, and the
+system directory precedes every `PATH` entry — so `authorize` fails there rather
+than opening a tab that could complete a grant unattended.
+
 `inventory` answers residence for the configured config directory and nothing
 finer. It reads the ledger and probes `claude auth status`; it never reads
 `.credentials.json`, whose presence proves nothing on macOS, where the login

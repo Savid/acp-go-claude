@@ -51,10 +51,19 @@ func (p *providerAuth) nativeOptions() (claude.Options, error) {
 		return claude.Options{}, err
 	}
 
+	// The login leg materialises its browser shim under this parent, so a
+	// scratch root that cannot be created fails the leg rather than letting a
+	// child open the operator's browser.
+	scratch, err := ensureScratchParent(p.agent.options.ScratchDir)
+	if err != nil {
+		return claude.Options{}, err
+	}
+
 	return claude.Options{
 		CLIPath:          p.agent.options.ExecutablePath,
 		ClaudeHome:       home,
 		Env:              p.agent.options.Env,
+		ScratchParent:    scratch,
 		DarwinBestEffort: p.agent.containmentMode == RuntimeContainmentBestEffort,
 	}, nil
 }

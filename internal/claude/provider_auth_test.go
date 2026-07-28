@@ -53,6 +53,10 @@ func authTestOptions(t *testing.T, options Options) (Options, *DarwinGeneration)
 		},
 	}
 
+	if options.ScratchParent == "" {
+		options.ScratchParent = t.TempDir()
+	}
+
 	if runtime.GOOS == "darwin" {
 		options.DarwinBestEffort = true
 	}

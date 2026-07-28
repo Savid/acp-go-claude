@@ -20,6 +20,7 @@ import (
 	nativeclaude "github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
@@ -374,7 +375,11 @@ func startKeystoreContainer(t *testing.T, ctx context.Context) testcontainers.Co
 func execInKeystoreContainer(t *testing.T, ctx context.Context, container testcontainers.Container, command []string) string {
 	t.Helper()
 
-	code, reader, err := container.Exec(ctx, command)
+	// The raw exec stream is frame-multiplexed, so every read carries an eight
+	// byte header before the output. A caller that feeds such a read back into
+	// the container passes the header along with it, and the command it builds
+	// fails on bytes no assertion mentions.
+	code, reader, err := container.Exec(ctx, command, tcexec.Multiplexed())
 	require.NoError(t, err)
 
 	output := make([]byte, 0, 1024)

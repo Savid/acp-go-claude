@@ -17,9 +17,11 @@ import (
 const testBrowserProbeURL = "https://example.invalid/"
 
 // TestLoginNeverExecsABrowserLauncher is the whole point of the shim: a login
-// child that execs a launcher off PATH must reach a no-op, not a browser. The
-// probe directory records every execution, and the positive control proves the
-// recorder works before the absence of a record is allowed to mean anything.
+// child that execs a launcher off PATH must reach a no-op, not a browser. Every
+// name the shim shadows is probed, because a desktop only has to answer one of
+// them for the grant to complete. The probe directory records every execution,
+// and the positive control proves the recorder works before the absence of a
+// record is allowed to mean anything.
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	dir := t.TempDir()
 	probe := filepath.Join(dir, "probe")
@@ -27,23 +29,33 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(probe, 0o700))
 
-	for _, name := range []string{"open", "xdg-open"} {
+	for _, name := range browserLauncherNames {
 		writeShellScript(t, filepath.Join(probe, name), "#!/bin/sh\necho \"$0 $*\" >> "+marker+"\nexit 0\n")
 	}
 
 	t.Setenv(browserShimPathEnv, probe+string(os.PathListSeparator)+os.Getenv(browserShimPathEnv))
 
-	control := exec.CommandContext(t.Context(), "open", testBrowserProbeURL)
-	require.NoError(t, control.Run())
+	for _, name := range browserLauncherNames {
+		control := exec.CommandContext(t.Context(), name, testBrowserProbeURL)
+		require.NoError(t, control.Run())
+	}
 
 	recorded, err := os.ReadFile(marker)
 	require.NoError(t, err)
-	require.Contains(t, string(recorded), testBrowserProbeURL)
+
+	for _, name := range browserLauncherNames {
+		require.Contains(t, string(recorded), name+" "+testBrowserProbeURL)
+	}
+
 	require.NoError(t, os.Remove(marker))
 
+	launches := make([]string, 0, len(browserLauncherNames))
+	for _, name := range browserLauncherNames {
+		launches = append(launches, name+" \""+testBrowserProbeURL+"\"")
+	}
+
 	script := "#!/bin/sh\n" +
-		"open \"" + testBrowserProbeURL + "\"\n" +
-		"xdg-open \"" + testBrowserProbeURL + "\"\n" +
+		strings.Join(launches, "\n") + "\n" +
 		"printf '%s\\n' '" + testAuthorizeURL + "'\n" +
 		"printf '" + AuthLoginPrompt + "'\n" +
 		"sleep 30\n"

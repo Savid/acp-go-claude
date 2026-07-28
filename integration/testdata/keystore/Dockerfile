@@ -1,7 +1,7 @@
 # The base image is pinned by digest. An unpinned base drifts this fixture's
 # own dependency on a schedule nobody controls, so a residence result would stop
 # describing the harness and start describing whatever the tag moved to.
-FROM debian:trixie-slim@sha256:b6dd47db7d9e8e6a5c8e64ba22b1e0a2f9e3fd4c19b5c0be3ee2e6ba3ea6a12e
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 
 ENV DEBIAN_FRONTEND=noninteractive
 

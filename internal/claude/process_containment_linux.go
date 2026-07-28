@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -146,18 +147,67 @@ func (c *processContainment) waitUntilEmpty(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 
 	for {
-		err := syscallKill(-c.processGroupID, 0)
+		signalErr := syscallKill(-c.processGroupID, 0)
+
 		switch {
-		case errors.Is(err, syscall.ESRCH):
+		case errors.Is(signalErr, syscall.ESRCH):
 			return nil
-		case err != nil && !errors.Is(err, syscall.EPERM):
+		case signalErr != nil && !errors.Is(signalErr, syscall.EPERM):
+			return fmt.Errorf("probe Claude process supervisor %d: %w", c.processGroupID, signalErr)
+		}
+
+		running, err := runningProcessGroupMembers(c.processGroupID)
+		if err != nil {
 			return fmt.Errorf("probe Claude process supervisor %d: %w", c.processGroupID, err)
-		case !time.Now().Before(deadline):
+		}
+
+		if running == 0 {
+			return nil
+		}
+
+		if !time.Now().Before(deadline) {
 			return fmt.Errorf("claude process supervisor %d did not publish quiescence before deadline", c.processGroupID)
-		default:
-			time.Sleep(10 * time.Millisecond)
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// runningProcessGroupMembers counts the members of groupID that have not exited.
+// A member that has exited lingers as a zombie until its parent reaps it, and
+// kill(2) keeps addressing a group while one is present, so a signal probe on
+// its own reports a tree that finished as a tree that never stopped. The caller
+// reaps the supervisor only after quiescence returns, which makes that zombie
+// the ordinary end of every contained login rather than an edge case.
+func runningProcessGroupMembers(groupID int) (int, error) {
+	entries, err := os.ReadDir(turnSupervisorProcRoot)
+	if err != nil {
+		return 0, err
+	}
+
+	running := 0
+
+	for _, entry := range entries {
+		pid, parseErr := strconv.Atoi(entry.Name())
+		if parseErr != nil {
+			continue
+		}
+
+		identity, readErr := turnSupervisorIdentity(pid)
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
+
+		if readErr != nil {
+			return 0, readErr
+		}
+
+		if identity.groupID == groupID && identity.state != 'Z' {
+			running++
 		}
 	}
+
+	return running, nil
 }
 
 func (c *processContainment) close() error {

@@ -38,6 +38,7 @@ type turnSupervisorConfig struct {
 type linuxProcessIdentity struct {
 	pid       int
 	parentPID int
+	groupID   int
 	state     byte
 	startTime string
 }
@@ -479,9 +480,15 @@ func readLinuxProcessIdentity(pid int) (linuxProcessIdentity, error) {
 		return linuxProcessIdentity{}, fmt.Errorf("parse /proc/%d/stat parent: %w", pid, err)
 	}
 
+	groupID, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return linuxProcessIdentity{}, fmt.Errorf("parse /proc/%d/stat group: %w", pid, err)
+	}
+
 	return linuxProcessIdentity{
 		pid:       pid,
 		parentPID: parentPID,
+		groupID:   groupID,
 		state:     fields[0][0],
 		startTime: fields[19],
 	}, nil

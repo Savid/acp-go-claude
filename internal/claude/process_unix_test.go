@@ -120,13 +120,45 @@ func TestLinuxProcessContainmentProofBranches(t *testing.T) {
 	tree = &processContainment{processGroupID: 125, control: write}
 	require.Error(t, tree.quiesce(time.Second))
 
+	// The deadline branch needs a group that still holds a running member, so
+	// the test names its own: an unoccupied group now reports quiescence
+	// whatever the signal probe is stubbed to return.
+	group, err := syscall.Getpgid(os.Getpid())
+	require.NoError(t, err)
+
 	read, write, err = os.Pipe()
 	require.NoError(t, err)
 	require.NoError(t, read.Close())
-	tree = &processContainment{processGroupID: 126, control: write, proof: supervisorProofFile(t)}
+	tree = &processContainment{processGroupID: group, control: write, proof: supervisorProofFile(t)}
 	syscallKill = func(int, syscall.Signal) error { return nil }
 	require.Error(t, tree.quiesce(time.Nanosecond))
 	require.Error(t, tree.waitUntilEmpty(time.Nanosecond))
+}
+
+// TestLinuxProcessContainmentTreatsAnUnreapedExitAsQuiesced pins the fact every
+// contained shutdown depends on: the caller reaps the supervisor only after
+// quiescence returns, so the supervisor is always an unreaped zombie at the
+// moment it is probed, and kill(2) still addresses its group.
+func TestLinuxProcessContainmentTreatsAnUnreapedExitAsQuiesced(t *testing.T) {
+	command := exec.CommandContext(t.Context(), "/bin/sh", "-c", "exit 0")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	require.NoError(t, command.Start())
+
+	group := command.Process.Pid
+
+	t.Cleanup(func() { _ = command.Wait() })
+
+	tree := &processContainment{processGroupID: group}
+
+	require.Eventually(t, func() bool {
+		identity, err := readLinuxProcessIdentity(group)
+
+		return err == nil && identity.state == 'Z'
+	}, 5*time.Second, 10*time.Millisecond, "the child never became an unreaped exit")
+
+	require.NoError(t, syscall.Kill(-group, 0), "an unreaped exit still answers a group signal probe")
+	require.NoError(t, tree.waitUntilEmpty(time.Second))
 }
 
 func TestLinuxProcessContainmentCloseBranches(t *testing.T) {

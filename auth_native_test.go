@@ -63,7 +63,7 @@ func TestNativeLegsFailClosedOnAnUnresolvableHome(t *testing.T) {
 
 	broker, _ := newAuthBroker(t, WithHome(filepath.Join(t.TempDir(), "absent")))
 
-	_, _, cause := broker.probeAccount(t.Context())
+	_, cause := broker.readAccount(t.Context())
 	require.Equal(t, authCauseProcess, cause)
 
 	requireAuthFailed(t, broker.nativeLogout(t.Context()), authCauseProcess)
@@ -83,7 +83,7 @@ func TestNativeLegsFailClosedWhenAdmissionIsRefused(t *testing.T) {
 	}))
 	broker.agent.containmentMode = RuntimeContainmentAuthoritative
 
-	_, _, cause := broker.probeAccount(t.Context())
+	_, cause := broker.readAccount(t.Context())
 	require.Equal(t, authCauseProcess, cause)
 
 	requireAuthFailed(t, broker.nativeLogout(t.Context()), authCauseProcess)
@@ -110,27 +110,50 @@ func TestAuthNativeCauseClassifiesWithoutForwardingText(t *testing.T) {
 	require.Equal(t, authCauseProcess, broker.authNativeCause(errTestRandom))
 }
 
-func TestProbeAccountReadsTheExitCodeAndTheLoggedInFlag(t *testing.T) {
+func TestReadAccountReportsTheExitCodeTheLoggedInFlagAndTheAccount(t *testing.T) {
 	seams := newAuthSeams(t)
 	broker, _ := newAuthBroker(t)
 
-	account, present, cause := broker.probeAccount(t.Context())
+	seams.account = claude.AuthAccount{LoggedIn: true, AuthMethod: "oauth", Email: "owner@example.test"}
+
+	reading, cause := broker.readAccount(t.Context())
 	require.Empty(t, cause)
-	require.True(t, present)
-	require.True(t, account.LoggedIn)
+	require.True(t, reading.loggedIn)
+	require.Equal(t, seams.account, reading.account)
 
 	seams.statusExt = 1
 
-	_, present, cause = broker.probeAccount(t.Context())
+	reading, cause = broker.readAccount(t.Context())
 	require.Empty(t, cause)
-	require.False(t, present)
+	require.False(t, reading.loggedIn)
 
 	seams.statusExt = 0
 	seams.account = claude.AuthAccount{LoggedIn: false, AuthMethod: "oauth_token"}
 
-	_, present, cause = broker.probeAccount(t.Context())
+	reading, cause = broker.readAccount(t.Context())
 	require.Empty(t, cause)
-	require.False(t, present)
+	require.False(t, reading.loggedIn)
+}
+
+// TestAccountReadingAdvancesOnlyOnAChange pins the completion rule itself. A
+// logged-in reading identical to the baseline is the credential the config dir
+// already held; only a reading that differs can be this flow's own login.
+func TestAccountReadingAdvancesOnlyOnAChange(t *testing.T) {
+	resident := authAccountReading{
+		account:  claude.AuthAccount{LoggedIn: true, Email: "resident@example.test"},
+		loggedIn: true,
+	}
+	switched := authAccountReading{
+		account:  claude.AuthAccount{LoggedIn: true, Email: "switched@example.test"},
+		loggedIn: true,
+	}
+	empty := authAccountReading{}
+
+	require.False(t, resident.advancedPast(resident))
+	require.False(t, empty.advancedPast(empty))
+	require.False(t, empty.advancedPast(resident))
+	require.True(t, resident.advancedPast(empty))
+	require.True(t, switched.advancedPast(resident))
 }
 
 func TestNativeSeamsHoldTheContainmentPermitOnAnIncompleteBoundary(t *testing.T) {
@@ -146,7 +169,7 @@ func TestNativeSeamsHoldTheContainmentPermitOnAnIncompleteBoundary(t *testing.T)
 
 	seams.statusErr = claude.ErrProcessContainmentIncomplete
 
-	_, _, cause := broker.probeAccount(t.Context())
+	_, cause := broker.readAccount(t.Context())
 	require.Equal(t, authCauseProcess, cause)
 	require.Zero(t, released)
 
@@ -229,7 +252,7 @@ func TestAuthLoginHandleClose(t *testing.T) {
 }
 
 func TestAuthLoginHandleSubmitAndExited(t *testing.T) {
-	child := &fakeAuthLogin{}
+	child := &fakeAuthLogin{seams: &authTestSeams{}}
 	handle := &authLoginHandle{login: child}
 
 	require.NoError(t, handle.submit("value"))

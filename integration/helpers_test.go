@@ -457,6 +457,56 @@ func isolatedClaudeRuntime(t *testing.T) isolatedClaudeRuntimeConfig {
 	}
 }
 
+// emptyClaudeRuntime is a Claude config directory nothing was copied into and
+// no auth environment reaches. Every other runtime here is seeded with portable
+// auth so live turns can run, which makes a login driven against one
+// indistinguishable from the credential that was already there.
+func emptyClaudeRuntime(t *testing.T) isolatedClaudeRuntimeConfig {
+	t.Helper()
+
+	base, err := filepath.Abs(filepath.Join("..", ".tmp", "integration-claude-home"))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(base, 0o700))
+
+	target, err := os.MkdirTemp(base, "empty-home-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(target) })
+
+	return isolatedClaudeRuntimeConfig{home: target}
+}
+
+// requireClaudeHomeHoldsNoCredential fails unless the config dir answers logged
+// out and no environment variable supplies a credential in its place. It is
+// what makes a later `authenticated` mean the login under test: `auth status`
+// answers for the config dir, so one that already holds a credential answers
+// the same whatever value was pasted.
+func requireClaudeHomeHoldsNoCredential(t *testing.T, home string) {
+	t.Helper()
+
+	require.Empty(t, strings.TrimSpace(os.Getenv(envAnthropicAuthToken)),
+		"%s supplies a credential to every child; unset it before driving a login", envAnthropicAuthToken)
+	require.Empty(t, strings.TrimSpace(os.Getenv(envAnthropicAPIKey)),
+		"%s supplies a credential to every child; unset it before driving a login", envAnthropicAPIKey)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	command := exec.CommandContext(ctx, integrationClaudePath(t), "auth", "status", "--json") // #nosec G204 -- path is the discovered Claude CLI.
+	command.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+home)
+
+	output, err := command.Output()
+	if err != nil {
+		return
+	}
+
+	var payload struct {
+		LoggedIn bool `json:"loggedIn"`
+	}
+
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(output), &payload))
+	require.False(t, payload.LoggedIn, "config dir %s already holds a credential", home)
+}
+
 func copyClaudeHomeFile(sourceDir string, targetDir string, name string) error {
 	source := filepath.Join(sourceDir, name)
 	data, err := os.ReadFile(source)
@@ -792,8 +842,18 @@ func serveLiveAgentRawForTest(
 ) liveAgentPipes {
 	t.Helper()
 
+	return serveLiveAgentInRuntimeForTest(t, ctx, isolatedClaudeRuntime(t), opts...)
+}
+
+func serveLiveAgentInRuntimeForTest(
+	t *testing.T,
+	ctx context.Context,
+	runtime isolatedClaudeRuntimeConfig,
+	opts ...claudeacp.Option,
+) liveAgentPipes {
+	t.Helper()
+
 	claudePath := integrationClaudePath(t)
-	runtime := isolatedClaudeRuntime(t)
 	base := []claudeacp.Option{
 		claudeacp.WithExecutablePath(claudePath),
 		claudeacp.WithHome(runtime.home),

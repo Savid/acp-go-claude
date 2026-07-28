@@ -91,6 +91,12 @@ type authFlow struct {
 
 	login *authLoginHandle
 
+	// baseline is the account reading taken before this flow's login child
+	// started. Completion is measured against it and never against the bare
+	// reading, so a credential the config dir already held cannot answer for a
+	// login this flow never completed.
+	baseline authAccountReading
+
 	nextProbeAt time.Time
 
 	disarm chan struct{}
@@ -271,12 +277,21 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 // line matching, then bounded again here before it is relayed. A non-empty
 // cause is the leg's failure, and the flow it names owns the transition.
 func (p *providerAuth) mintPresentation(ctx context.Context, flow *authFlow) (authAuthorizeResult, string) {
+	// The baseline is read before the child that could change it exists, so the
+	// value the completion signal is measured against describes the config dir
+	// this flow inherited rather than one it may already have mutated.
+	baseline, cause := p.readAccount(ctx)
+	if cause != "" {
+		return authAuthorizeResult{}, cause
+	}
+
 	login, authorizeURL, cause := p.startLogin(ctx)
 	if cause != "" {
 		return authAuthorizeResult{}, cause
 	}
 
 	p.mu.Lock()
+	flow.baseline = baseline
 	flow.login = login
 	p.mu.Unlock()
 
@@ -554,15 +569,20 @@ func (p *providerAuth) awaitLoginExit(ctx context.Context, login *authLoginHandl
 	}
 }
 
-// settle reads the completion signal and terminalizes the flow. A logged-in
-// config dir is authenticated; anything else is a provider refusal.
+// settle reads the completion signal and terminalizes the flow. The signal is
+// the account reading having advanced past this flow's baseline; a reading that
+// matches it is a provider refusal, whatever credential the config dir holds.
 func (p *providerAuth) settle(ctx context.Context, flow *authFlow) error {
-	_, loggedIn, cause := p.probeAccount(ctx)
+	p.mu.Lock()
+	baseline := flow.baseline
+	p.mu.Unlock()
+
+	observed, cause := p.readAccount(ctx)
 	if cause != "" {
 		return p.fail(flow, cause, true)
 	}
 
-	if !loggedIn {
+	if !observed.advancedPast(baseline) {
 		return p.fail(flow, authCauseProviderRefused, true)
 	}
 
@@ -647,14 +667,15 @@ func (p *providerAuth) probe(ctx context.Context, flow *authFlow) {
 
 	flow.nextProbeAt = now.Add(authPollFloor)
 	login := flow.login
+	baseline := flow.baseline
 	p.mu.Unlock()
 
 	if !login.exited() {
 		return
 	}
 
-	_, loggedIn, cause := p.probeAccount(ctx)
-	if cause != "" || !loggedIn {
+	observed, cause := p.readAccount(ctx)
+	if cause != "" || !observed.advancedPast(baseline) {
 		return
 	}
 

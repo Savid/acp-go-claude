@@ -101,21 +101,38 @@ func (p *providerAuth) authNativeCause(err error) string {
 	return authCauseProcess
 }
 
-// probeAccount runs `claude auth status --json` and reports whether this config
-// dir holds a credential. The exit code is the completion signal on this
-// surface; the payload is decoded allowlist-and-ignore because its field set
-// varies with credential state rather than with version. A non-empty cause is
-// the classified native failure, which every caller carries through rather than
-// flattening: a wrapper deadline is a timeout and never a transport answer.
-func (p *providerAuth) probeAccount(ctx context.Context) (claude.AuthAccount, bool, string) {
+// authAccountReading is one `claude auth status --json` answer: the account the
+// config dir names beside whether it holds a credential. The reading describes
+// the config dir and never a flow, so a flow that wants to know what its own
+// login did compares two of them.
+type authAccountReading struct {
+	account  claude.AuthAccount
+	loggedIn bool
+}
+
+// advancedPast reports whether this reading can only have been produced by a
+// login that landed after the baseline was taken. A rejected authorization code
+// leaves the config dir exactly as the baseline found it, so an unchanged
+// reading is a refusal however plainly the config dir is logged in.
+func (r authAccountReading) advancedPast(baseline authAccountReading) bool {
+	return r.loggedIn && r != baseline
+}
+
+// readAccount runs `claude auth status --json` and reports the config dir's
+// account beside whether it holds a credential. The payload is decoded
+// allowlist-and-ignore because its field set varies with credential state
+// rather than with version. A non-empty cause is the classified native failure,
+// which every caller carries through rather than flattening: a wrapper deadline
+// is a timeout and never a transport answer.
+func (p *providerAuth) readAccount(ctx context.Context) (authAccountReading, string) {
 	options, err := p.nativeOptions()
 	if err != nil {
-		return claude.AuthAccount{}, false, authCauseProcess
+		return authAccountReading{}, authCauseProcess
 	}
 
 	generation, release, err := p.authNativeAdmission(ctx)
 	if err != nil {
-		return claude.AuthAccount{}, false, p.authNativeCause(err)
+		return authAccountReading{}, p.authNativeCause(err)
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, authNativeTimeout)
@@ -128,10 +145,10 @@ func (p *providerAuth) probeAccount(ctx context.Context) (claude.AuthAccount, bo
 	}
 
 	if err != nil {
-		return claude.AuthAccount{}, false, p.authNativeCause(err)
+		return authAccountReading{}, p.authNativeCause(err)
 	}
 
-	return account, code == 0 && account.LoggedIn, ""
+	return authAccountReading{account: account, loggedIn: code == 0 && account.LoggedIn}, ""
 }
 
 // nativeLogout runs the harness's own account-level removal. Its exit status is

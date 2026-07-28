@@ -370,13 +370,12 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 		}
 
 		if !probed {
-			var cause string
-
-			_, present, cause = p.probeAccount(ctx)
+			reading, cause := p.readAccount(ctx)
 			if cause != "" {
 				return nil, authFailed(cause, record.ProviderID, "", "")
 			}
 
+			present = reading.loggedIn
 			probed = true
 		}
 
@@ -467,12 +466,12 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 		return nil, err
 	}
 
-	_, present, cause := p.probeAccount(ctx)
+	reading, cause := p.readAccount(ctx)
 	if cause != "" {
 		return nil, authFailed(cause, providerID, "", "")
 	}
 
-	if present {
+	if reading.loggedIn {
 		return nil, authFailed(authCauseHarvestFailed, providerID, "", "")
 	}
 

@@ -252,7 +252,7 @@ func TestAuthorizeSupersedesAFlowThatAlreadyTerminalized(t *testing.T) {
 
 	first := startAuthFlow(t, broker, sessionID)
 
-	seams.account = claude.AuthAccount{LoggedIn: false}
+	seams.login.refused = true
 
 	_, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), first.FlowID, testPastedValue)))
 	requireAuthFailed(t, err, authCauseProviderRefused)
@@ -264,8 +264,6 @@ func TestAuthorizeSupersedesAFlowThatAlreadyTerminalized(t *testing.T) {
 	reported, ok := status.(authStatusResult)
 	require.True(t, ok)
 	require.Equal(t, authStateFailed, reported.State)
-
-	seams.account = claude.AuthAccount{LoggedIn: true}
 
 	params := authorizeParams(sessionID, broker.generation)
 	params["authorizeRequestId"] = "request-2"
@@ -423,6 +421,65 @@ func TestCallbackCompletesTheFlowFromTheStatusExitCode(t *testing.T) {
 	requireAuthFailed(t, err, authCauseFlowState)
 }
 
+// TestCallbackRefusesAValueTheProviderRejectedOnAPopulatedConfigDir pins the
+// completion signal against the flow rather than against the config dir. The
+// config dir already holds a credential and the pasted value changes nothing:
+// `auth status` answers logged-in either way, so a leg reading only the current
+// state binds the new connection to the credential that was already there.
+func TestCallbackRefusesAValueTheProviderRejectedOnAPopulatedConfigDir(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+
+	seams.account = claude.AuthAccount{LoggedIn: true, AuthMethod: "oauth", Email: "resident@example.test"}
+
+	flow := startAuthFlow(t, broker, sessionID)
+
+	seams.login.refused = true
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), flow.FlowID, testPastedValue)))
+	requireAuthFailed(t, err, authCauseProviderRefused)
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateFailed, reported.State)
+	require.Equal(t, authReasonProviderRefused, reported.Reason)
+
+	// The refused flow never earned a confirmation, so the connection it names
+	// stays unproven instead of inheriting the resident credential.
+	record, found, err := broker.ledger.read(authProviderID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, authLedgerIntent, record.State)
+}
+
+// TestStatusProbeRefusesAConfigDirThatDidNotChange pins the same rule on the
+// backstop the status poll drives: a login child that exited without completing
+// the exchange leaves the resident credential exactly where it was.
+func TestStatusProbeRefusesAConfigDirThatDidNotChange(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+
+	seams.account = claude.AuthAccount{LoggedIn: true, AuthMethod: "oauth", Email: "resident@example.test"}
+
+	flow := startAuthFlow(t, broker, sessionID)
+
+	seams.login.exited = true
+
+	broker.mu.Lock()
+	broker.byID[flow.FlowID].nextProbeAt = time.Time{}
+	broker.mu.Unlock()
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStatePending, reported.State)
+}
+
 func TestCallbackRejectsMalformedPastedValues(t *testing.T) {
 	newAuthSeams(t)
 
@@ -504,7 +561,7 @@ func TestCallbackFailureMapping(t *testing.T) {
 		},
 		{
 			name:    "the provider refused",
-			arrange: func(seams *authTestSeams) { seams.account = claude.AuthAccount{} },
+			arrange: func(seams *authTestSeams) { seams.login.refused = true },
 			cause:   authCauseProviderRefused,
 			reason:  authReasonProviderRefused,
 		},
@@ -573,15 +630,23 @@ func TestStatusPollsOnlyAfterTheLoginChildExitedAndNoFasterThanTheFloor(t *testi
 	broker, sessionID := newAuthBroker(t)
 	flow := startAuthFlow(t, broker, sessionID)
 
+	// authorize read the baseline the completion signal is measured against;
+	// every later read is a poll and is counted from here.
+	baselineReads := seams.statusCalls
+
 	// A live login child is not a completion signal, and the probe never runs.
 	_, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
 	require.NoError(t, err)
-	require.Zero(t, seams.statusCalls)
+	require.Equal(t, baselineReads, seams.statusCalls)
 
 	// Within the floor the cached state is served without a native read.
 	_, err = broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
 	require.NoError(t, err)
-	require.Zero(t, seams.statusCalls)
+	require.Equal(t, baselineReads, seams.statusCalls)
+
+	// The harness arms a loopback hook unconditionally, so a URL opened on this
+	// host completes the login and the child exits without a callback.
+	seams.completeLogin()
 
 	seams.login.exited = true
 
@@ -591,7 +656,7 @@ func TestStatusPollsOnlyAfterTheLoginChildExitedAndNoFasterThanTheFloor(t *testi
 
 	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
 	require.NoError(t, err)
-	require.Equal(t, 1, seams.statusCalls)
+	require.Equal(t, baselineReads+1, seams.statusCalls)
 
 	reported, ok := status.(authStatusResult)
 	require.True(t, ok)
@@ -600,7 +665,7 @@ func TestStatusPollsOnlyAfterTheLoginChildExitedAndNoFasterThanTheFloor(t *testi
 	// A terminal flow drives no further native read.
 	_, err = broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
 	require.NoError(t, err)
-	require.Equal(t, 1, seams.statusCalls)
+	require.Equal(t, baselineReads+1, seams.statusCalls)
 }
 
 func TestStatusProbeLeavesThePendingFlowAloneOnEveryNegativeAnswer(t *testing.T) {
@@ -645,6 +710,8 @@ func TestStatusProbeFailsTheFlowWhenTheConfirmationCannotBePersisted(t *testing.
 	seams := newAuthSeams(t)
 	broker, sessionID := newAuthBroker(t)
 	flow := startAuthFlow(t, broker, sessionID)
+
+	seams.completeLogin()
 
 	seams.login.exited = true
 

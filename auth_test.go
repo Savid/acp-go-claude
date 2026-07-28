@@ -23,12 +23,21 @@ const (
 )
 
 // fakeAuthLogin stands in for the running login child so every flow path is
-// drivable without a Claude CLI.
+// drivable without a Claude CLI. Accepting a value is the only thing in the
+// fixture that puts a credential in the config dir, exactly as the real child
+// is the only thing that does: a flow reporting a login the child never
+// performed is reporting one that did not happen.
 type fakeAuthLogin struct {
+	seams *authTestSeams
+
 	mu        sync.Mutex
 	submitted []string
 	closes    int
 	exited    bool
+	// refused makes the child reject the submitted value the way the provider
+	// rejects a wrong or expired authorization code: the value crosses and the
+	// config dir is left exactly as it was.
+	refused   bool
 	submitErr error
 	closeErr  error
 }
@@ -39,7 +48,15 @@ func (f *fakeAuthLogin) Submit(value string) error {
 
 	f.submitted = append(f.submitted, value)
 
-	return f.submitErr
+	if f.submitErr != nil {
+		return f.submitErr
+	}
+
+	if !f.refused {
+		f.seams.completeLogin()
+	}
+
+	return nil
 }
 
 func (f *fakeAuthLogin) Exited() bool {
@@ -92,14 +109,22 @@ type authTestSeams struct {
 	removedUser string
 }
 
+// completeLogin models the login child installing this login's credential in
+// the config dir.
+func (s *authTestSeams) completeLogin() {
+	s.account = claude.AuthAccount{LoggedIn: true, AuthMethod: "oauth", Email: "owner@example.test"}
+}
+
 func newAuthSeams(t *testing.T) *authTestSeams {
 	t.Helper()
 
+	// The config dir starts empty. Nothing but an accepted login puts an account
+	// in it, so a leg that reports a login has to have caused one.
 	seams := &authTestSeams{
 		login:    &fakeAuthLogin{},
 		loginURL: "https://claude.com/oauth/authorize?redirect_uri=" + claude.AuthLoginRedirectURI,
-		account:  claude.AuthAccount{LoggedIn: true},
 	}
+	seams.login.seams = seams
 
 	beginOriginal := authLoginBegin
 	statusOriginal := authStatusProbe

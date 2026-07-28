@@ -71,30 +71,17 @@ func callAuthLeg(t *testing.T, ctx context.Context, conn *acp.ClientSideConnecti
 	return nil
 }
 
-// TestAttendedProviderAuthLoginCompletes drives the hosted paste-back login end
-// to end against the real CLI. The operator opens the relayed URL and pastes
-// the `<code>#<state>` value back before the flow's deadline.
-func TestAttendedProviderAuthLoginCompletes(t *testing.T) {
-	requireRunAttended(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-
-	client := &recordingClient{}
-	authRoot := t.TempDir()
-	conn := serveLiveAgentForTest(t, ctx, client, claudeacp.WithProviderAuthRoot(authRoot))
-
-	response, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
-	require.NoError(t, err)
-
-	vendor, ok := response.AgentCapabilities.Meta["claude"].(map[string]any)
-	require.True(t, ok)
-	require.Contains(t, vendor, "providerAuth")
-
-	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}})
-	require.NoError(t, err)
-
-	sessionID := string(session.SessionId)
+// startAuthFlowForTest drives methods plus authorize against a live agent and
+// returns the minted presentation beside the method it names.
+func startAuthFlowForTest(
+	t *testing.T,
+	ctx context.Context,
+	conn *acp.ClientSideConnection,
+	sessionID string,
+	connectionID string,
+	requestID string,
+) (authAuthorizeWire, string) {
+	t.Helper()
 
 	var methods authMethodsWire
 	require.NoError(t, callAuthLeg(t, ctx, conn, claudeacp.AuthMethodsMethod,
@@ -108,15 +95,72 @@ func TestAttendedProviderAuthLoginCompletes(t *testing.T) {
 	require.NoError(t, callAuthLeg(t, ctx, conn, claudeacp.AuthAuthorizeMethod, map[string]any{
 		"sessionId":          sessionID,
 		"providerId":         "anthropic",
-		"connectionId":       "attended-connection",
+		"connectionId":       connectionID,
 		"methodsGeneration":  methods.Generation,
 		"method":             entries[0].ID,
-		"authorizeRequestId": "attended-request",
+		"authorizeRequestId": requestID,
 	}, &authorization))
 
 	require.Equal(t, "callback", authorization.Interaction)
 	require.Equal(t, "code", authorization.CallbackInput)
 	require.True(t, strings.HasPrefix(authorization.URL, "https://claude.com/"))
+
+	return authorization, entries[0].ID
+}
+
+func liveAuthSession(t *testing.T, ctx context.Context, conn *acp.ClientSideConnection) string {
+	t.Helper()
+
+	response, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	require.NoError(t, err)
+
+	vendor, ok := response.AgentCapabilities.Meta["claude"].(map[string]any)
+	require.True(t, ok)
+	require.Contains(t, vendor, "providerAuth")
+
+	session, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{}})
+	require.NoError(t, err)
+
+	return string(session.SessionId)
+}
+
+func authFlowState(t *testing.T, ctx context.Context, conn *acp.ClientSideConnection, sessionID string, flowID string) authStatusWire {
+	t.Helper()
+
+	var status authStatusWire
+	require.NoError(t, callAuthLeg(t, ctx, conn, claudeacp.AuthStatusMethod, map[string]any{
+		"sessionId":  sessionID,
+		"providerId": "anthropic",
+		"flowId":     flowID,
+	}, &status))
+
+	return status
+}
+
+// TestAttendedProviderAuthLoginCompletes drives the hosted paste-back login end
+// to end against the real CLI. The operator opens the relayed URL and pastes
+// the `<code>#<state>` value back before the flow's deadline.
+//
+// It runs against a config dir proved empty first. Seeded with the operator's
+// own credential — as every other live test here is, so its turns can run — the
+// assertion below would hold for any pasted value at all, because `auth status`
+// answers for the config dir rather than for the flow.
+func TestAttendedProviderAuthLoginCompletes(t *testing.T) {
+	requireRunAttended(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	runtime := emptyClaudeRuntime(t)
+	requireClaudeHomeHoldsNoCredential(t, runtime.home)
+
+	client := &recordingClient{}
+	authRoot := t.TempDir()
+	pipes := serveLiveAgentInRuntimeForTest(t, ctx, runtime, claudeacp.WithProviderAuthRoot(authRoot))
+	conn := acp.NewClientSideConnection(client, pipes.clientInput, pipes.agentOutput)
+
+	sessionID := liveAuthSession(t, ctx, conn)
+	authorization, methodID := startAuthFlowForTest(t, ctx, conn, sessionID, "attended-connection", "attended-request")
 
 	t.Logf("open this url, approve, and paste the <code>#<state> value on stdin before %s:\n  %s",
 		time.UnixMilli(authorization.FlowExpiresAt).Format(time.RFC3339), authorization.URL)
@@ -126,20 +170,51 @@ func TestAttendedProviderAuthLoginCompletes(t *testing.T) {
 	require.NoError(t, callAuthLeg(t, ctx, conn, claudeacp.AuthCallbackMethod, map[string]any{
 		"sessionId":  sessionID,
 		"providerId": "anthropic",
-		"method":     entries[0].ID,
+		"method":     methodID,
 		"flowId":     authorization.FlowID,
 		"input":      pasted,
 	}, nil))
 
-	var status authStatusWire
-	require.NoError(t, callAuthLeg(t, ctx, conn, claudeacp.AuthStatusMethod, map[string]any{
-		"sessionId":  sessionID,
-		"providerId": "anthropic",
-		"flowId":     authorization.FlowID,
-	}, &status))
+	status := authFlowState(t, ctx, conn, sessionID, authorization.FlowID)
 	require.Equal(t, "authenticated", status.State, "reason %q", status.Reason)
 
 	assertLedgerIsValuesFree(t, authRoot, authorization)
+}
+
+// TestProviderAuthRejectedCodeNeverCompletesOnAPopulatedConfigDir is the case
+// the attended tier cannot reach: a config dir that already holds the
+// operator's credential, and a pasted value the provider rejects. It needs no
+// human — nobody approves anything at the provider — and it fails whenever the
+// completion signal is the config dir's state rather than this flow's own
+// login, because that state is `logged in` both before and after.
+func TestProviderAuthRejectedCodeNeverCompletesOnAPopulatedConfigDir(t *testing.T) {
+	if os.Getenv(envRunIntegration) != "1" {
+		t.Skipf("set %s=1 to run provider-auth integration tests", envRunIntegration)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	client := &recordingClient{}
+	conn := serveLiveAgentForTest(t, ctx, client, claudeacp.WithProviderAuthRoot(t.TempDir()))
+
+	sessionID := liveAuthSession(t, ctx, conn)
+	authorization, methodID := startAuthFlowForTest(t, ctx, conn, sessionID, "rejected-connection", "rejected-request")
+
+	// A value shaped like the harness's `<code>#<state>` and issued by nobody.
+	err := callAuthLeg(t, ctx, conn, claudeacp.AuthCallbackMethod, map[string]any{
+		"sessionId":  sessionID,
+		"providerId": "anthropic",
+		"method":     methodID,
+		"flowId":     authorization.FlowID,
+		"input":      "not-an-authorization-code#not-a-state",
+	}, nil)
+	require.Error(t, err, "the leg accepted a value no provider issued")
+
+	status := authFlowState(t, ctx, conn, sessionID, authorization.FlowID)
+	require.NotEqual(t, "authenticated", status.State,
+		"a rejected authorization code was reported as a completed login")
+	require.Equal(t, "failed", status.State, "reason %q", status.Reason)
 }
 
 // waitForAttendedPaste reads the operator's pasted value from stdin. It fails

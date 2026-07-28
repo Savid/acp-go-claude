@@ -471,6 +471,7 @@ func TestAuthCauseRetryable(t *testing.T) {
 
 	for _, cause := range []string{
 		authCauseNativeVeto, authCauseProviderRefused, authCausePolicy, authCauseBindingConflict,
+		authCauseFlowState, authCauseFlowCancelled,
 	} {
 		require.False(t, authCauseRetryable(cause))
 	}
@@ -497,6 +498,7 @@ func TestAuthFlowTransitionIsTotalOverTheClosedCauses(t *testing.T) {
 		{authCausePolicy, false, "", ""},
 		{authCauseBindingConflict, false, "", ""},
 		{authCauseFlowState, false, "", ""},
+		{authCauseFlowCancelled, false, "", ""},
 	}
 
 	for _, testCase := range cases {

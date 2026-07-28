@@ -788,6 +788,100 @@ func TestCancelIsWrapperOwnedAndIdempotent(t *testing.T) {
 	requireInvalidAuthField(t, err, "nope")
 }
 
+// TestTerminalizeKeepsTheFirstTerminalTransition pins the record itself: a flow
+// has one terminal transition, and a later one is dropped rather than
+// overwriting the owner's.
+func TestTerminalizeKeepsTheFirstTerminalTransition(t *testing.T) {
+	newAuthSeams(t)
+
+	broker, sessionID := newAuthBroker(t)
+	presentation := startAuthFlow(t, broker, sessionID)
+
+	flow := broker.byID[presentation.FlowID]
+	require.NotNil(t, flow)
+
+	broker.terminalize(flow, authStateCancelled, authReasonOwnerCancel)
+	broker.terminalize(flow, authStateAuthenticated, "")
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), presentation.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateCancelled, reported.State)
+	require.Equal(t, authReasonOwnerCancel, reported.Reason)
+}
+
+// TestSettleAnswersForAFlowClosedUnderIt pins the leg against the record: a
+// login child that settled after the owner closed the flow owns no transition
+// and writes no confirmation. Reporting the account it left behind would bind a
+// resident credential to a connection generation the owner already ended, and
+// terminalizing over the closed record would report success for a login the
+// owner abandoned.
+func TestSettleAnswersForAFlowClosedUnderIt(t *testing.T) {
+	cases := []struct {
+		name      string
+		completed bool
+		state     string
+		reason    string
+		cause     string
+	}{
+		{
+			name:      "cancelled while the login completed",
+			completed: true,
+			state:     authStateCancelled,
+			reason:    authReasonOwnerCancel,
+			cause:     authCauseFlowCancelled,
+		},
+		{
+			name:      "expired while the login completed",
+			completed: true,
+			state:     authStateExpired,
+			reason:    authReasonDeadline,
+			cause:     authCauseFlowState,
+		},
+		{
+			name:      "cancelled while the provider refused",
+			completed: false,
+			state:     authStateCancelled,
+			reason:    authReasonOwnerCancel,
+			cause:     authCauseFlowCancelled,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			seams := newAuthSeams(t)
+			broker, sessionID := newAuthBroker(t)
+			presentation := startAuthFlow(t, broker, sessionID)
+
+			flow := broker.byID[presentation.FlowID]
+			require.NotNil(t, flow)
+
+			if testCase.completed {
+				seams.completeLogin()
+			}
+
+			broker.terminalize(flow, testCase.state, testCase.reason)
+
+			requireAuthFailed(t, broker.settle(t.Context(), flow), testCase.cause)
+
+			status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), presentation.FlowID)))
+			require.NoError(t, err)
+
+			reported, ok := status.(authStatusResult)
+			require.True(t, ok)
+			require.Equal(t, testCase.state, reported.State)
+			require.Equal(t, testCase.reason, reported.Reason)
+
+			record, found, err := broker.ledger.read(authProviderID)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, authLedgerIntent, record.State)
+		})
+	}
+}
+
 func TestFlowExpiresOnTheEffectiveDeadline(t *testing.T) {
 	seams := newAuthSeams(t)
 	broker, sessionID := newAuthBroker(t)

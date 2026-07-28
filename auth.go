@@ -62,6 +62,7 @@ const (
 	authCauseUnsupportedVariant = "unsupported_variant"
 	authCauseFlowExpired        = "flow_expired"
 	authCauseFlowState          = "flow_state"
+	authCauseFlowCancelled      = "flow_cancelled"
 	authCausePolicy             = "policy"
 	authCauseBindingConflict    = "binding_conflict"
 )

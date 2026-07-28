@@ -586,6 +586,10 @@ func (p *providerAuth) settle(ctx context.Context, flow *authFlow) error {
 		return p.fail(flow, authCauseProviderRefused, true)
 	}
 
+	if cause, abandoned := p.abandonedCause(flow); abandoned {
+		return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
+	}
+
 	if err := p.confirmAuthorize(flow); err != nil {
 		return err
 	}
@@ -595,9 +599,34 @@ func (p *providerAuth) settle(ctx context.Context, flow *authFlow) error {
 	return nil
 }
 
+// abandonedCause reports the cause a leg answers with when the flow reached a
+// terminal state while the native call this leg started was still in flight.
+// Such a leg owns no transition and confirms nothing: the record it addressed
+// is already closed, and the outcome it carries is no longer the flow's.
+func (p *providerAuth) abandonedCause(flow *authFlow) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	switch {
+	case !authTerminal(flow.state):
+		return "", false
+	case flow.state == authStateCancelled:
+		return authCauseFlowCancelled, true
+	default:
+		return authCauseFlowState, true
+	}
+}
+
 // fail returns the leg's closed error and performs the transition its cause
-// pairs with. A cause with no transition consumes nothing.
+// pairs with. A cause with no transition consumes nothing. A flow closed while
+// this leg's native call was in flight is answered for the record that closed
+// it: the transition belongs to whoever closed the flow first, and a cause that
+// pairs with one would claim a transition this leg never made.
 func (p *providerAuth) fail(flow *authFlow, cause string, materialInFlight bool) error {
+	if abandoned, ok := p.abandonedCause(flow); ok {
+		return authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
+	}
+
 	if state, reason := authFlowTransition(cause, materialInFlight); state != "" {
 		p.terminalize(flow, state, reason)
 	}
@@ -605,14 +634,22 @@ func (p *providerAuth) fail(flow *authFlow, cause string, materialInFlight bool)
 	return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
 }
 
+// terminalize records the flow's one terminal transition. A flow that already
+// reached one keeps it: a login child still in flight when the owner cancelled
+// settles into a record the owner already closed, and what it settled on is no
+// longer the flow's outcome. The child is fenced either way, because a mint that
+// published its handle after the flow closed left one running.
 func (p *providerAuth) terminalize(flow *authFlow, state string, reason string) {
 	p.mu.Lock()
 
-	flow.state = state
-	flow.reason = reason
-	login := flow.takeLogin()
+	if !authTerminal(flow.state) {
+		flow.state = state
+		flow.reason = reason
 
-	flow.stopCompleter()
+		flow.stopCompleter()
+	}
+
+	login := flow.takeLogin()
 	p.mu.Unlock()
 
 	login.close()

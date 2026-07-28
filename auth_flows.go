@@ -578,16 +578,22 @@ func (p *providerAuth) settle(ctx context.Context, flow *authFlow) error {
 	p.mu.Unlock()
 
 	observed, cause := p.readAccount(ctx)
+
+	// Waiting for the login child to exit and reading the account after it are
+	// both unbounded from the owner's side, so the flow can have been cancelled,
+	// superseded, or expired while they ran. Whatever the config dir now holds,
+	// this answer owns no transition and confirms nothing: it arrived into a
+	// record somebody else already closed.
+	if abandoned, ok := p.abandonedCause(flow); ok {
+		return authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
+	}
+
 	if cause != "" {
 		return p.fail(flow, cause, true)
 	}
 
 	if !observed.advancedPast(baseline) {
 		return p.fail(flow, authCauseProviderRefused, true)
-	}
-
-	if cause, abandoned := p.abandonedCause(flow); abandoned {
-		return authFailed(cause, flow.providerID, flow.method.ID, flow.id)
 	}
 
 	if err := p.confirmAuthorize(flow); err != nil {
@@ -618,15 +624,8 @@ func (p *providerAuth) abandonedCause(flow *authFlow) (string, bool) {
 }
 
 // fail returns the leg's closed error and performs the transition its cause
-// pairs with. A cause with no transition consumes nothing. A flow closed while
-// this leg's native call was in flight is answered for the record that closed
-// it: the transition belongs to whoever closed the flow first, and a cause that
-// pairs with one would claim a transition this leg never made.
+// pairs with. A cause with no transition consumes nothing.
 func (p *providerAuth) fail(flow *authFlow, cause string, materialInFlight bool) error {
-	if abandoned, ok := p.abandonedCause(flow); ok {
-		return authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
-	}
-
 	if state, reason := authFlowTransition(cause, materialInFlight); state != "" {
 		p.terminalize(flow, state, reason)
 	}

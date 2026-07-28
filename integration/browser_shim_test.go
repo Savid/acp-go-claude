@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
 )
 
 // containerGoArch maps the machine name the fixture reports to the Go
@@ -28,6 +29,10 @@ var containerGoArch = map[string]string{
 // and runs unchanged on Linux.
 const browserShimProof = "^TestLoginNeverExecsABrowserLauncher$"
 
+// browserShimProbePath is where the proof binary lands inside the fixture, which
+// runs as root and owns no home outside /root.
+const browserShimProbePath = "/usr/local/bin/browser-shim.test"
+
 // TestKeystoreLinuxLoginNeverExecsABrowserLauncher runs that proof inside the
 // Linux fixture. `xdg-open`, `x-www-browser`, `www-browser` and
 // `sensible-browser` are the names a Linux desktop answers, and a macOS run
@@ -35,14 +40,18 @@ const browserShimProof = "^TestLoginNeverExecsABrowserLauncher$"
 // asserted rather than executed. Only a Linux process on a Linux PATH decides
 // whether the login child reaches a real launcher.
 func TestKeystoreLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
-	requireRunKeystore(t)
+	requireKeystoreRuntime(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	container := startKeystoreContainer(t, ctx)
+	container := startKeystoreFixture(ctx, t)
 
-	machine := strings.TrimSpace(execInKeystoreContainer(t, ctx, container, []string{"uname", "-m"}))
+	code, reader, err := container.Exec(ctx, []string{"uname", "-m"}, tcexec.Multiplexed())
+	require.NoError(t, err)
+
+	machine := strings.TrimSpace(readExecOutput(t, reader))
+	require.Zero(t, code, "uname failed: %s", machine)
 
 	goArch, ok := containerGoArch[machine]
 	require.True(t, ok, "no Go architecture is mapped for machine %q", machine)
@@ -55,13 +64,16 @@ func TestKeystoreLinuxLoginNeverExecsABrowserLauncher(t *testing.T) {
 	output, err := build.CombinedOutput()
 	require.NoError(t, err, string(output))
 
-	const target = "/home/canary/browser-shim.test"
+	require.NoError(t, container.CopyFileToContainer(ctx, binary, browserShimProbePath, 0o755))
 
-	require.NoError(t, container.CopyFileToContainer(ctx, binary, target, 0o755))
+	code, reader, err = container.Exec(ctx,
+		[]string{browserShimProbePath, "-test.run", browserShimProof, "-test.v"}, tcexec.Multiplexed())
+	require.NoError(t, err)
 
-	// execInKeystoreContainer already fails on a non-zero exit code, and a Go
-	// test binary that exits zero having selected nothing prints no PASS, so both
-	// halves are needed before the absence of a launch means anything.
-	proof := execInKeystoreContainer(t, ctx, container, []string{target, "-test.run", browserShimProof, "-test.v"})
+	// A Go test binary that exits zero having selected nothing prints no PASS, so
+	// the exit code and the PASS line are both needed before the absence of a
+	// launch means anything.
+	proof := readExecOutput(t, reader)
+	require.Zero(t, code, "the browser-shim proof failed: %s", proof)
 	require.Contains(t, proof, "PASS")
 }

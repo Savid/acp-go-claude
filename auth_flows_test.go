@@ -152,23 +152,21 @@ func TestAuthorizeReplaysTheRecordedPresentationAfterTheFlowTerminalized(t *test
 }
 
 // TestAuthorizeStopsReplayingOnceTheSessionCloses pins the other half: the
-// record lives exactly as long as the session that owns it.
+// record lives exactly as long as the session that owns it, and the lifetime
+// whose flows were swept admits nothing more rather than minting a login into a
+// session already being torn down.
 func TestAuthorizeStopsReplayingOnceTheSessionCloses(t *testing.T) {
 	newAuthSeams(t)
 
 	broker, sessionID := newAuthBroker(t)
 
-	first := startAuthFlow(t, broker, sessionID)
+	startAuthFlow(t, broker, sessionID)
 	generation := broker.generation
 
 	broker.closeSession(sessionID)
 
-	result, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
-	require.NoError(t, err)
-
-	minted, ok := result.(authAuthorizeResult)
-	require.True(t, ok)
-	require.NotEqual(t, first.FlowID, minted.FlowID)
+	_, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+	requireInvalidAuthField(t, err, acpFieldSessionID)
 }
 
 // TestAuthorizeMintFailureAddressesTheFlowItNames pins the flowId a failed mint
@@ -327,7 +325,7 @@ func TestCloseSessionDropsEveryAddressingEntry(t *testing.T) {
 	require.Equal(t, closes+1, seams.login.closeCount())
 
 	_, err = broker.status(t.Context(), authParams(t, flowParams(string(sessionID), pending.FlowID)))
-	requireInvalidAuthField(t, err, authFieldFlowID)
+	requireInvalidAuthField(t, err, acpFieldSessionID)
 }
 
 func TestAuthorizeFailsClosedOnEveryNativeRefusal(t *testing.T) {
@@ -335,9 +333,19 @@ func TestAuthorizeFailsClosedOnEveryNativeRefusal(t *testing.T) {
 	broker, sessionID := newAuthBroker(t)
 	generation := authCatalogGeneration(t, broker, sessionID)
 
-	seams.loginErr = claude.ErrAuthLoginGrammar
+	// The baseline reading is what every later completion signal is measured
+	// against, so a mint that cannot take one has nothing to measure and starts
+	// no child at all.
+	seams.statusErr = errors.New("probe failed")
 
 	_, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+	requireAuthFailed(t, err, authCauseProcess)
+	require.Zero(t, seams.login.closeCount())
+
+	seams.statusErr = nil
+	seams.loginErr = claude.ErrAuthLoginGrammar
+
+	_, err = broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
 	requireAuthFailed(t, err, authCauseNativeVeto)
 
 	seams.loginErr = claude.ErrAuthLoginNoURL
@@ -999,7 +1007,7 @@ func TestSupersedeDropsATerminalFlowWithoutFencingItTwice(t *testing.T) {
 	seams := newAuthSeams(t)
 	broker, sessionID := newAuthBroker(t)
 
-	broker.supersede(authFlowKey{sessionID: sessionID, providerID: authProviderID}, authReasonSuperseded)
+	broker.supersede(authFlowKey{sessionID: sessionID, providerID: authProviderID}, authReasonSuperseded, "successor-request")
 
 	flow := startAuthFlow(t, broker, sessionID)
 	record := broker.byID[flow.FlowID]
@@ -1008,7 +1016,7 @@ func TestSupersedeDropsATerminalFlowWithoutFencingItTwice(t *testing.T) {
 	record.state = authStateFailed
 	broker.mu.Unlock()
 
-	broker.supersede(authFlowKey{sessionID: sessionID, providerID: authProviderID}, authReasonSuperseded)
+	broker.supersede(authFlowKey{sessionID: sessionID, providerID: authProviderID}, authReasonSuperseded, "successor-request")
 	require.Zero(t, seams.login.closeCount())
 
 	broker.mu.Lock()
@@ -1042,7 +1050,7 @@ func TestCloseSessionCancelsEveryPendingFlow(t *testing.T) {
 	// The session that owned the flow is gone, so the id it minted addresses
 	// nothing rather than answering out of a record nothing can free.
 	_, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
-	requireInvalidAuthField(t, err, authFieldFlowID)
+	requireInvalidAuthField(t, err, acpFieldSessionID)
 }
 
 func TestCloseSessionSkipsAlreadyTerminalFlows(t *testing.T) {

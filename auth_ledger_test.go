@@ -650,7 +650,7 @@ func TestRecordAuthorizeIntentCarriesTheEarlierBinding(t *testing.T) {
 		State:             authLedgerConfirmed,
 	}))
 
-	record, err := broker.recordAuthorizeIntent(authorizeRequest{
+	record, err := broker.recordAuthorizeIntent(t.Context(), authorizeRequest{
 		providerID:         authProviderID,
 		connectionID:       testConnectionID,
 		authorizeRequestID: testRequestID,
@@ -667,7 +667,7 @@ func TestRecordAuthorizeIntentCarriesTheEarlierBinding(t *testing.T) {
 
 	t.Cleanup(func() { ledgerMarshal = original })
 
-	_, err = broker.recordAuthorizeIntent(authorizeRequest{providerID: authProviderID}, "flow-3")
+	_, err = broker.recordAuthorizeIntent(t.Context(), authorizeRequest{providerID: authProviderID}, "flow-3")
 	requireAuthFailed(t, err, authCauseProcess)
 }
 

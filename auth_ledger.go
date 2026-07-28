@@ -268,7 +268,19 @@ func (l *authLedger) list() ([]authLedgerRecord, error) {
 
 // recordAuthorizeIntent persists the write-ahead intent naming the exact native
 // slot this flow targets. It has been fsynced before authorize returns.
-func (p *providerAuth) recordAuthorizeIntent(request authorizeRequest, flowID string) (authLedgerRecord, error) {
+//
+// The read that carries the prior generation forward and the write that
+// supersedes it are one sequence under the slot gate: a disconnect landing
+// between them would have its own bump read back as this flow's generation and
+// silently undone by the write that follows.
+func (p *providerAuth) recordAuthorizeIntent(ctx context.Context, request authorizeRequest, flowID string) (authLedgerRecord, error) {
+	release, admitted := p.admitSlot(ctx)
+	if !admitted {
+		return authLedgerRecord{}, authFailed(authCauseTimeout, request.providerID, request.method, "")
+	}
+
+	defer release()
+
 	now := authNow().UnixMilli()
 	record := authLedgerRecord{
 		ProviderID:         request.providerID,
@@ -297,8 +309,13 @@ func (p *providerAuth) recordAuthorizeIntent(request authorizeRequest, flowID st
 
 // confirmAuthorize writes the post-mutation confirmation. Until it lands the
 // ledger holds intent only, and a residence answer over intent is
-// not_confirmed however plainly the slot is occupied.
+// not_confirmed however plainly the slot is occupied. Its caller holds the slot
+// gate, so the binding checked here cannot move before the write below lands.
 func (p *providerAuth) confirmAuthorize(flow *authFlow) error {
+	if !p.lineageCurrent(flow) {
+		return authFailed(authCauseBindingConflict, flow.providerID, flow.method.ID, flow.id)
+	}
+
 	record := authLedgerRecord{
 		ProviderID:         flow.providerID,
 		ConnectionID:       flow.connectionID,
@@ -439,6 +456,13 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 		return nil, sessionErr
 	}
 
+	release, admitted := p.admitSlot(ctx)
+	if !admitted {
+		return nil, authFailed(authCauseTimeout, providerID, "", "")
+	}
+
+	defer release()
+
 	record, ok, err := p.ledger.read(providerID)
 	if err != nil {
 		return nil, authFailed(authCauseHarvestFailed, providerID, "", "")
@@ -455,6 +479,8 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 	if err := p.ledger.write(record); err != nil {
 		return nil, authFailed(authCauseProcess, providerID, "", "")
 	}
+
+	p.fenceLogins()
 
 	if err := p.nativeLogout(ctx); err != nil {
 		return nil, err

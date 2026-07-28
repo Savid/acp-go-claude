@@ -495,7 +495,16 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) 
 			a.recordContainmentError(err)
 			a.log.WarnContext(ctx, "close replaced Claude session failed", slog.String(jsonFieldError, err.Error()))
 		}
+	}
 
+	// This is the one place an id becomes live, so it is where the provider-auth
+	// close mark is cleared: session/close drops an id without tombstoning it and
+	// load, resume, and fork all republish a caller-supplied one. The clear runs
+	// after the replaced instance's close because that close marks this very id
+	// on its way out.
+	a.providerAuth.reopenSession(session.id)
+
+	if previous != nil {
 		return nil
 	}
 

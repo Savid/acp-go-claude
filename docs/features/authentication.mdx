@@ -94,6 +94,25 @@ the first half cannot complete the login. `cancel` fences the adapter's own
 login process and never claims the authorization was revoked at Anthropic.
 </Warning>
 
+`authorizeRequestId` is the caller-minted idempotency key for one
+(`sessionId`, `providerId`) pair. A repeat of the newest key replays the same
+presentation verbatim — no second login child, no native call — while a key a
+later `authorize` replaced is refused with `-32602` naming
+`authorizeRequestId`, because minting in its place would tear down the live
+flow whose URL the operator is looking at.
+
+`session/close` cancels every pending flow the session owns and kills its login
+child, and the id then answers unknown-session on every `_claude/auth/*` method,
+including an `authorize` that was already in flight. A `session/load`,
+`session/resume`, or `session/fork` that rebuilds a session under that id serves
+the surface again; only `session/delete` refuses it for good.
+
+`disconnect` cancels every pending login on the config directory before it
+clears the account, because the harness arms its loopback listener
+unconditionally: a browser tab reaching a still-running login child installs a
+credential with no method call driving it, and an absence proof taken beside one
+would be true only for the instant it was read.
+
 The login child opens no browser on the host. Its environment carries a
 mode-`0700` directory of no-op launchers ahead of every other `PATH` entry and
 points `BROWSER` inside it, so a harness that reads `BROWSER` and one that execs

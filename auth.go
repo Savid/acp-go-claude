@@ -96,6 +96,16 @@ type providerAuth struct {
 	catalog    map[string][]authCatalogMethod
 	flows      map[authFlowKey]*authFlow
 	byID       map[string]*authFlow
+	// closedSessions marks every session whose flows a close already swept. The
+	// id survives the session, because the leg that has to be refused is the one
+	// still in flight when the sweep ran.
+	closedSessions map[acp.SessionId]struct{}
+	// retired holds, per flow key, the idempotency keys a later authorize
+	// replaced. They are kept for the session's whole life: a retry can be
+	// arbitrarily delayed and is still unanswerable when it lands.
+	retired    map[authFlowKey]map[string]struct{}
+	admissions map[authFlowKey]*authGate
+	slots      map[string]*authGate
 }
 
 type authFlowKey struct {
@@ -122,12 +132,16 @@ func newProviderAuth(agent *Agent) *providerAuth {
 	home := resolveProviderAuthHome(agent.options)
 
 	return &providerAuth{
-		agent:      agent,
-		ledger:     ledger,
-		home:       home,
-		directHome: providerAuthDirectHome(agent.options, home),
-		flows:      make(map[authFlowKey]*authFlow),
-		byID:       make(map[string]*authFlow),
+		agent:          agent,
+		ledger:         ledger,
+		home:           home,
+		directHome:     providerAuthDirectHome(agent.options, home),
+		flows:          make(map[authFlowKey]*authFlow),
+		byID:           make(map[string]*authFlow),
+		closedSessions: make(map[acp.SessionId]struct{}),
+		retired:        make(map[authFlowKey]map[string]struct{}),
+		admissions:     make(map[authFlowKey]*authGate),
+		slots:          make(map[string]*authGate),
 	}
 }
 
@@ -365,9 +379,21 @@ func authFlowTransition(cause string, materialInFlight bool) (string, string) {
 }
 
 // authSession resolves the session a leg addresses. An unknown, unloaded, or
-// tombstoned session gets the uniform unknown-session rejection.
+// tombstoned session gets the uniform unknown-session rejection, and so does one
+// whose close already swept its flows: session/close terminalizes them before it
+// drops the id from the live map, so between those two the id still resolves to
+// a session that can no longer own a login.
 func (p *providerAuth) authSession(id string) (*agentSession, error) {
-	return p.agent.session(acp.SessionId(id))
+	session, err := p.agent.session(acp.SessionId(id))
+	if err != nil {
+		return nil, err
+	}
+
+	if p.sessionClosed(session.id) {
+		return nil, unknownSessionError()
+	}
+
+	return session, nil
 }
 
 // authParamFields walks a leg's params object once, rejecting an unknown field,

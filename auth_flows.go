@@ -88,6 +88,8 @@ type authFlow struct {
 	// presented reports whether the mint published this record's presentation.
 	// A record that never reached one has no verbatim answer to replay.
 	presented bool
+	// claimed reports whether a leg is already driving this flow's login child.
+	claimed bool
 
 	login *authLoginHandle
 
@@ -208,6 +210,20 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 
 	key := authFlowKey{sessionID: session.id, providerID: request.providerID}
 
+	releaseKey, admitted := p.admitKey(ctx, key)
+	if !admitted {
+		return nil, authFailed(authCauseTimeout, request.providerID, request.method, "")
+	}
+
+	defer releaseKey()
+
+	// The retired check precedes the replay because the two can never both
+	// answer: a supersede retires the key it replaced, and the successor is the
+	// only record left to replay from.
+	if p.requestRetired(key, request.authorizeRequestID) {
+		return nil, invalidAuthField(authFieldAuthorizeRequestID)
+	}
+
 	if replay, ok := p.replayAuthorize(key, request.authorizeRequestID); ok {
 		return replay, nil
 	}
@@ -226,9 +242,9 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		return nil, authFailed(authCauseProcess, request.providerID, request.method, "")
 	}
 
-	p.supersede(key, authReasonSuperseded)
+	p.supersede(key, authReasonSuperseded, request.authorizeRequestID)
 
-	record, err := p.recordAuthorizeIntent(request, flowID)
+	record, err := p.recordAuthorizeIntent(ctx, request, flowID)
 	if err != nil {
 		return nil, err
 	}
@@ -252,10 +268,9 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 	// The flow is registered against the ledger entry that already names it, so
 	// the flowId every later answer carries — a mint failure's included —
 	// addresses a real record.
-	p.mu.Lock()
-	p.flows[key] = flow
-	p.byID[flowID] = flow
-	p.mu.Unlock()
+	if !p.publishFlow(key, flow) {
+		return nil, unknownSessionError()
+	}
 
 	presentation, cause := p.mintPresentation(ctx, flow)
 	if cause != "" {
@@ -412,7 +427,12 @@ func (p *providerAuth) expire(flow *authFlow) {
 // already reached a terminal state is dropped on the same terms: it kept
 // answering status for its whole life, and being replaced is what ends that
 // life rather than the transition it happened to end on.
-func (p *providerAuth) supersede(key authFlowKey, reason string) {
+//
+// Its idempotency key is retired with it, unless the successor carries the same
+// one — a mint that failed leaves a record nothing can replay, so the caller's
+// own retry rebuilds the flow under the key it already owns, and retiring that
+// would make the caller's next repeat unanswerable.
+func (p *providerAuth) supersede(key authFlowKey, reason string, successor string) {
 	p.mu.Lock()
 
 	flow, ok := p.flows[key]
@@ -424,6 +444,10 @@ func (p *providerAuth) supersede(key authFlowKey, reason string) {
 
 	delete(p.flows, key)
 	delete(p.byID, flow.id)
+
+	if flow.authorizeRequestID != successor {
+		p.retire(key, flow.authorizeRequestID)
+	}
 
 	if authTerminal(flow.state) {
 		p.mu.Unlock()
@@ -538,14 +562,13 @@ func validateAuthPastedValue(input string) error {
 // `auth status --json` exit code. The login process's stdout never signals
 // success.
 func (p *providerAuth) submitPastedValue(ctx context.Context, flow *authFlow, input string) (any, error) {
-	p.mu.Lock()
-
-	if authTerminal(flow.state) {
-		p.mu.Unlock()
-
-		return nil, authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
+	if err := p.claimFlow(flow); err != nil {
+		return nil, err
 	}
 
+	defer p.releaseFlow(flow)
+
+	p.mu.Lock()
 	login := flow.login
 	p.mu.Unlock()
 
@@ -603,6 +626,18 @@ func (p *providerAuth) settle(ctx context.Context, flow *authFlow, refusal strin
 	p.mu.Lock()
 	baseline := flow.baseline
 	p.mu.Unlock()
+
+	// The reading, the lineage check, and the confirmation are one sequence
+	// against a disconnect: the slot the completion is about to claim is the one
+	// a disconnect empties and proves empty, and the two deciding from readings
+	// taken before the other wrote leaves a resident credential under a record
+	// that says removed.
+	releaseSlot, admitted := p.admitSlot(ctx)
+	if !admitted {
+		return authFailed(authCauseTimeout, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	defer releaseSlot()
 
 	observed, cause := p.readAccount(ctx)
 
@@ -726,7 +761,7 @@ func (p *providerAuth) probe(ctx context.Context, flow *authFlow) {
 	p.mu.Lock()
 
 	now := authNow()
-	if authTerminal(flow.state) || flow.login == nil || now.Before(flow.nextProbeAt) {
+	if authTerminal(flow.state) || flow.login == nil || now.Before(flow.nextProbeAt) || flow.claimed {
 		p.mu.Unlock()
 
 		return
@@ -735,11 +770,21 @@ func (p *providerAuth) probe(ctx context.Context, flow *authFlow) {
 	flow.nextProbeAt = now.Add(authPollFloor)
 	login := flow.login
 	baseline := flow.baseline
+	flow.claimed = true
 	p.mu.Unlock()
+
+	defer p.releaseFlow(flow)
 
 	if !login.exited() {
 		return
 	}
+
+	releaseSlot, admitted := p.admitSlot(ctx)
+	if !admitted {
+		return
+	}
+
+	defer releaseSlot()
 
 	observed, cause := p.readAccount(ctx)
 	if cause != "" || !observed.advancedPast(baseline) {
@@ -818,12 +863,19 @@ func (p *providerAuth) addressedFlowLeg(params json.RawMessage) (*authFlow, erro
 // id each was addressable by, so no flow outlives its session. It runs after
 // pending elicitation is resolved and before the native interrupt, so a flow is
 // never abandoned to a process already being torn down.
+//
+// The mark and the cleanup set are taken in one critical section. A leg that
+// passed its session lookup a moment earlier has not published yet, and the mark
+// is what refuses it when it tries: without it the sweep set is merely the flows
+// that happened to exist when close looked.
 func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 	if p == nil {
 		return
 	}
 
 	p.mu.Lock()
+
+	p.closedSessions[sessionID] = struct{}{}
 
 	logins := make([]*authLoginHandle, 0, len(p.flows))
 
@@ -844,6 +896,12 @@ func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 
 		flow.stopCompleter()
 		logins = append(logins, flow.takeLogin())
+	}
+
+	for key := range p.retired {
+		if key.sessionID == sessionID {
+			delete(p.retired, key)
+		}
 	}
 
 	p.mu.Unlock()

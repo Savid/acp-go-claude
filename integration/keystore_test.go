@@ -142,22 +142,24 @@ func buildResidenceProbe(t *testing.T) string {
 func runResidenceMatrix(ctx context.Context, t *testing.T, container testcontainers.Container, bus bool) {
 	t.Helper()
 
-	prelude := ""
+	name, prelude := "keystore-absent", ""
 	if bus {
-		prelude = ". " + keystoreEnvFile + "; export DBUS_SESSION_BUS_ADDRESS; "
+		name, prelude = "keystore-present", ". "+keystoreEnvFile+"; export DBUS_SESSION_BUS_ADDRESS; "
 	}
 
 	script := fmt.Sprintf("%sexport %s=1 %s=1; exec %s -test.v -test.run '^TestKeystoreResidenceMatrix$'",
 		prelude, envRunIntegration, envRunKeystore, keystoreProbePath)
 
-	code, reader, err := container.Exec(ctx, []string{"sh", "-c", script}, tcexec.Multiplexed())
-	require.NoError(t, err)
+	t.Run(name, func(t *testing.T) {
+		code, reader, err := container.Exec(ctx, []string{"sh", "-c", script}, tcexec.Multiplexed())
+		require.NoError(t, err)
 
-	logs := readExecOutput(t, reader)
+		logs := readExecOutput(t, reader)
 
-	require.Zero(t, code, "session bus exported=%t: %s", bus, logs)
-	require.Contains(t, logs, "--- PASS: TestKeystoreResidenceMatrix",
-		"session bus exported=%t: the matrix reported no pass", bus)
+		require.Zero(t, code, logs)
+		require.Contains(t, logs, "--- PASS: TestKeystoreResidenceMatrix",
+			"the matrix reported no pass")
+	})
 }
 
 // readExecOutput drains a container exec stream. The stream ends in a read error

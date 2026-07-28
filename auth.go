@@ -63,6 +63,7 @@ const (
 	authCauseFlowExpired        = "flow_expired"
 	authCauseFlowState          = "flow_state"
 	authCausePolicy             = "policy"
+	authCauseBindingConflict    = "binding_conflict"
 )
 
 // Native seams. Every provider-auth native read and mutation crosses one of

@@ -476,7 +476,7 @@ func TestDisconnectFencesEveryMismatch(t *testing.T) {
 
 	// No ledger entry at all.
 	_, err = broker.disconnect(t.Context(), authParams(t, disconnectParams(sessionID, 1)))
-	requireAuthFailed(t, err, authCausePolicy)
+	requireAuthFailed(t, err, authCauseBindingConflict)
 
 	require.NoError(t, broker.ledger.write(authLedgerRecord{
 		ProviderID:        authProviderID,
@@ -487,13 +487,21 @@ func TestDisconnectFencesEveryMismatch(t *testing.T) {
 
 	// A differently fenced generation is refused before anything is touched.
 	_, err = broker.disconnect(t.Context(), authParams(t, disconnectParams(sessionID, 99)))
-	requireAuthFailed(t, err, authCausePolicy)
+	requireAuthFailed(t, err, authCauseBindingConflict)
 
 	wrongConnection := disconnectParams(sessionID, 1)
 	wrongConnection["connectionId"] = "other"
 
 	_, err = broker.disconnect(t.Context(), authParams(t, wrongConnection))
-	requireAuthFailed(t, err, authCausePolicy)
+	requireAuthFailed(t, err, authCauseBindingConflict)
+
+	// Every refusal above landed before the bump, so the entry the live binding
+	// names is untouched.
+	live, ok, readErr := broker.ledger.read(authProviderID)
+	require.NoError(t, readErr)
+	require.True(t, ok)
+	require.Equal(t, int64(1), live.BindingGeneration)
+	require.Equal(t, authLedgerConfirmed, live.State)
 }
 
 func TestDisconnectNativeFailures(t *testing.T) {

@@ -672,7 +672,7 @@ func TestProviderAuthStateReasonMatrixIsClosed(t *testing.T) {
 	for _, cause := range []string{
 		authCauseNativeVeto, authCauseProviderRefused, authCauseTransport, authCauseProcess,
 		authCauseTimeout, authCauseHarvestFailed, authCauseUnsupportedVariant,
-		authCauseFlowExpired, authCauseFlowState, authCausePolicy,
+		authCauseFlowExpired, authCauseFlowState, authCausePolicy, authCauseBindingConflict,
 	} {
 		for _, inFlight := range []bool{false, true} {
 			state, reason := authFlowTransition(cause, inFlight)

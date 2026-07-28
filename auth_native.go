@@ -93,16 +93,18 @@ func (p *providerAuth) authNativeCause(err error) string {
 // probeAccount runs `claude auth status --json` and reports whether this config
 // dir holds a credential. The exit code is the completion signal on this
 // surface; the payload is decoded allowlist-and-ignore because its field set
-// varies with credential state rather than with version.
-func (p *providerAuth) probeAccount(ctx context.Context) (claude.AuthAccount, bool, error) {
+// varies with credential state rather than with version. A non-empty cause is
+// the classified native failure, which every caller carries through rather than
+// flattening: a wrapper deadline is a timeout and never a transport answer.
+func (p *providerAuth) probeAccount(ctx context.Context) (claude.AuthAccount, bool, string) {
 	options, err := p.nativeOptions()
 	if err != nil {
-		return claude.AuthAccount{}, false, authFailed(authCauseProcess, "", "", "")
+		return claude.AuthAccount{}, false, authCauseProcess
 	}
 
 	generation, release, err := p.authNativeAdmission(ctx)
 	if err != nil {
-		return claude.AuthAccount{}, false, authFailed(p.authNativeCause(err), "", "", "")
+		return claude.AuthAccount{}, false, p.authNativeCause(err)
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, authNativeTimeout)
@@ -115,10 +117,10 @@ func (p *providerAuth) probeAccount(ctx context.Context) (claude.AuthAccount, bo
 	}
 
 	if err != nil {
-		return claude.AuthAccount{}, false, authFailed(p.authNativeCause(err), "", "", "")
+		return claude.AuthAccount{}, false, p.authNativeCause(err)
 	}
 
-	return account, code == 0 && account.LoggedIn, nil
+	return account, code == 0 && account.LoggedIn, ""
 }
 
 // nativeLogout runs the harness's own account-level removal. Its exit status is
@@ -169,16 +171,17 @@ func (p *providerAuth) removeKeystoreItems(ctx context.Context) error {
 }
 
 // startLogin spawns the login child and returns the validated authorization URL
-// beside the handle that fences it.
-func (p *providerAuth) startLogin(ctx context.Context) (*authLoginHandle, string, error) {
+// beside the handle that fences it. A non-empty cause is the classified native
+// failure; the flow the caller owns performs the transition it pairs with.
+func (p *providerAuth) startLogin(ctx context.Context) (*authLoginHandle, string, string) {
 	options, err := p.nativeOptions()
 	if err != nil {
-		return nil, "", authFailed(authCauseProcess, authProviderID, authMethodID, "")
+		return nil, "", authCauseProcess
 	}
 
 	generation, release, err := p.authNativeAdmission(ctx)
 	if err != nil {
-		return nil, "", authFailed(p.authNativeCause(err), authProviderID, authMethodID, "")
+		return nil, "", p.authNativeCause(err)
 	}
 
 	login, authorizeURL, err := authLoginBegin(ctx, options, generation)
@@ -188,13 +191,13 @@ func (p *providerAuth) startLogin(ctx context.Context) (*authLoginHandle, string
 		}
 
 		if errors.Is(err, claude.ErrAuthLoginGrammar) || errors.Is(err, claude.ErrAuthLoginNoURL) {
-			return nil, "", authFailed(authCauseNativeVeto, authProviderID, authMethodID, "")
+			return nil, "", authCauseNativeVeto
 		}
 
-		return nil, "", authFailed(p.authNativeCause(err), authProviderID, authMethodID, "")
+		return nil, "", p.authNativeCause(err)
 	}
 
-	return &authLoginHandle{login: login, release: release, agent: p.agent}, authorizeURL, nil
+	return &authLoginHandle{login: login, release: release, agent: p.agent}, authorizeURL, ""
 }
 
 // authLoginHandle pairs the login child with the native-root permit it holds.

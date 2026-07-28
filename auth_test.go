@@ -301,6 +301,19 @@ func TestProviderAuthDirectHomeGate(t *testing.T) {
 	require.False(t, providerAuthDirectHome(Options{Home: home}))
 	require.False(t, providerAuthDirectHome(Options{Home: home, ProviderAuthDirectHome: filepath.Dir(home)}))
 	require.True(t, providerAuthDirectHome(Options{Home: home, ProviderAuthDirectHome: home + "/."}))
+
+	// The gate answers about the directory the leg clears, which is the
+	// resolved one: a link and its target are the same consented home, and a
+	// home that resolves to nothing is consented to by neither spelling.
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(home, link))
+	require.True(t, providerAuthDirectHome(Options{Home: link, ProviderAuthDirectHome: home}))
+	require.True(t, providerAuthDirectHome(Options{Home: home, ProviderAuthDirectHome: link}))
+
+	absent := filepath.Join(t.TempDir(), "absent")
+	require.False(t, providerAuthDirectHome(Options{Home: absent, ProviderAuthDirectHome: absent}))
+	require.False(t, providerAuthDirectHome(Options{Home: home, ProviderAuthDirectHome: absent}))
+	require.False(t, providerAuthDirectHome(Options{Home: absent, ProviderAuthDirectHome: home}))
 }
 
 func TestProviderAuthCapabilityListsExactlyTheEnabledLegs(t *testing.T) {

@@ -123,18 +123,25 @@ func newProviderAuth(agent *Agent) *providerAuth {
 }
 
 // providerAuthDirectHome reports whether the exact-home consent gate authorizes
-// this agent's native home. The comparison is lexical on purpose: the gate
-// authorizes exactly the named home, never a parent, a child, or a symlink
-// target of it.
+// this agent's native home. Both sides are resolved the way the leg itself
+// resolves the home it acts on, so consent covers exactly the directory a
+// removal clears rather than a name that happens to point at it.
 func providerAuthDirectHome(options Options) bool {
-	direct := strings.TrimSpace(options.ProviderAuthDirectHome)
-	home := strings.TrimSpace(options.Home)
-
-	if direct == "" || home == "" {
+	if strings.TrimSpace(options.ProviderAuthDirectHome) == "" || strings.TrimSpace(options.Home) == "" {
 		return false
 	}
 
-	return filepath.Clean(direct) == filepath.Clean(home)
+	direct, err := canonicalClaudeHome(options.ProviderAuthDirectHome)
+	if err != nil {
+		return false
+	}
+
+	home, err := canonicalClaudeHome(options.Home)
+	if err != nil {
+		return false
+	}
+
+	return direct == home
 }
 
 // validateProviderAuthDirectHome fails an agent whose consent gate is relative,

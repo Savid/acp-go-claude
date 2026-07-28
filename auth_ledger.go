@@ -110,6 +110,18 @@ func newAuthLedger(options Options) (*authLedger, error) {
 		return nil, errors.New("provider auth root must be an absolute path")
 	}
 
+	// The configured root is restricted in its own right, not merely the leaf
+	// under it: an operator-supplied directory that already exists keeps
+	// whatever mode it was created with, and the ledger under it is only as
+	// private as the directory holding it.
+	if err := ledgerMkdirAll(root, authLedgerDirMode); err != nil {
+		return nil, fmt.Errorf("create provider auth root: %w", err)
+	}
+
+	if err := ledgerChmod(root, authLedgerDirMode); err != nil {
+		return nil, fmt.Errorf("restrict provider auth root: %w", err)
+	}
+
 	dir := filepath.Join(root, authLedgerVendorDir, authLedgerHomeKey(options.Home), authLedgerLeafDir)
 	if err := ledgerMkdirAll(dir, authLedgerDirMode); err != nil {
 		return nil, fmt.Errorf("create provider auth ledger root: %w", err)
@@ -358,9 +370,11 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 		}
 
 		if !probed {
-			_, present, err = p.probeAccount(ctx)
-			if err != nil {
-				return nil, err
+			var cause string
+
+			_, present, cause = p.probeAccount(ctx)
+			if cause != "" {
+				return nil, authFailed(cause, record.ProviderID, "", "")
 			}
 
 			probed = true
@@ -453,7 +467,12 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 		return nil, err
 	}
 
-	if _, present, err := p.probeAccount(ctx); err != nil || present {
+	_, present, cause := p.probeAccount(ctx)
+	if cause != "" {
+		return nil, authFailed(cause, providerID, "", "")
+	}
+
+	if present {
 		return nil, authFailed(authCauseHarvestFailed, providerID, "", "")
 	}
 

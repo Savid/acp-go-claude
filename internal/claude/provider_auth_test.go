@@ -163,30 +163,50 @@ func (r *failingReader) Read(p []byte) (int, error) {
 
 var errAuthTest = errors.New("auth test failure")
 
-func TestAuthScrubbedEnvRemovesEveryVariableThatMovesTheBytesOrTheStore(t *testing.T) {
+// envCustomOAuthURL is the scrubbed variable whose value repoints the store.
+const envCustomOAuthURL = "CLAUDE_CODE_CUSTOM_OAUTH_URL"
+
+func TestAuthScrubbedEnvKeyCoversEveryVariableThatMovesTheBytesOrTheStore(t *testing.T) {
 	t.Parallel()
 
-	scrubbed := authScrubbedEnv([]string{
-		"PATH=/usr/bin",
-		"TERM_PROGRAM=iTerm.app",
-		"FORCE_HYPERLINK=1",
-		"CLAUDE_CODE_CUSTOM_OAUTH_URL=https://claude.fedstart.com",
-		"GOTRACEBACK=crash",
-		"malformed",
-	})
-	require.Equal(t, []string{"PATH=/usr/bin", "malformed"}, scrubbed)
+	for _, key := range []string{"term_program", "FORCE_HYPERLINK", envCustomOAuthURL, "GOTRACEBACK"} {
+		require.True(t, authScrubbedEnvKey(key))
+	}
 
-	require.True(t, authScrubbedEnvKey("term_program"))
 	require.False(t, authScrubbedEnvKey("HOME"))
+}
 
-	unchanged := Options{Env: nil}
-	require.Equal(t, unchanged, authScrubbedOptions(unchanged))
+// TestBuildEnvScrubsEveryChildNotJustTheLoginOne pins the scrub at the one seam
+// every spawn crosses: the status and logout children read the store a custom
+// OAuth URL repoints, so a login scrubbed alone reports success about a store
+// the other two never described.
+func TestBuildEnvScrubsEveryChildNotJustTheLoginOne(t *testing.T) {
+	original := commandEnviron
 
-	options := authScrubbedOptions(Options{Env: map[string]string{
+	commandEnviron = func() []string {
+		return []string{
+			"PATH=/usr/bin",
+			"TERM_PROGRAM=iTerm.app",
+			"FORCE_HYPERLINK=1",
+			envCustomOAuthURL + "=https://claude.example",
+			"GOTRACEBACK=crash",
+		}
+	}
+
+	t.Cleanup(func() { commandEnviron = original })
+
+	env := BuildEnv(Options{Env: map[string]string{
 		"KEEP":            "1",
-		"FORCE_HYPERLINK": "1",
+		envCustomOAuthURL: "https://claude.example",
 	}})
-	require.Equal(t, map[string]string{"KEEP": "1"}, options.Env)
+
+	require.Contains(t, env, "PATH=/usr/bin")
+	require.Contains(t, env, "KEEP=1")
+
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		require.False(t, authScrubbedEnvKey(key), entry)
+	}
 }
 
 func TestDecodeAuthStatusIgnoresUnknownAndAbsentMembers(t *testing.T) {

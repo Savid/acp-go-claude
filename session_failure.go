@@ -177,10 +177,11 @@ func (s *agentSession) settlePromptTurn(
 
 // providerTurnFailure maps a Claude result frame that reports an error into the
 // uniform failure shape. Every provider error — including an authentication
-// failure — is -32603 with cause "provider"; this adapter advertises no ACP
-// auth methods, so it never emits the -32000 AuthRequired variant. The singular
-// result error field is parsed so the provider cause is not lost when result is
-// empty.
+// failure — is -32603 with cause "provider": this adapter advertises no
+// agent-level ACP auth methods, and the -32000 variant of this envelope is
+// scoped to a sibling that does. The session-scoped provider-auth legs are a
+// separate surface with an error shape of their own. The singular result error
+// field is parsed so the provider cause is not lost when result is empty.
 func providerTurnFailure(result *claude.ResultMessage) error {
 	if result == nil {
 		return nil

@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -38,11 +39,19 @@ func TestAuthLedgerRootValidation(t *testing.T) {
 	_, err := newAuthLedger(Options{ProviderAuthRoot: "relative"})
 	require.Error(t, err)
 
-	root := t.TempDir()
+	// The configured root is a pre-existing directory whose mode the operator
+	// chose; the ledger under it is only as private as the directory holding
+	// it, so the root is restricted too rather than only its leaf.
+	root := filepath.Join(t.TempDir(), "root")
+	require.NoError(t, os.Mkdir(root, 0o755))
 
 	ledger, err := newAuthLedger(Options{ProviderAuthRoot: root, Home: "/home"})
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(root, authLedgerVendorDir, authLedgerHomeKey("/home"), authLedgerLeafDir), ledger.dir)
+
+	rootInfo, err := os.Stat(root)
+	require.NoError(t, err)
+	require.Equal(t, fs.FileMode(authLedgerDirMode), rootInfo.Mode().Perm())
 
 	info, err := os.Stat(ledger.dir)
 	require.NoError(t, err)
@@ -59,7 +68,7 @@ func TestNewAuthLedgerFailsClosedOnEveryUnusableRoot(t *testing.T) {
 		name    string
 		arrange func(t *testing.T)
 	}{
-		{"the directory cannot be created", func(t *testing.T) {
+		{"the configured root cannot be created", func(t *testing.T) {
 			t.Helper()
 
 			original := ledgerMkdirAll
@@ -67,11 +76,39 @@ func TestNewAuthLedgerFailsClosedOnEveryUnusableRoot(t *testing.T) {
 
 			t.Cleanup(func() { ledgerMkdirAll = original })
 		}},
-		{"the directory cannot be restricted", func(t *testing.T) {
+		{"the configured root cannot be restricted", func(t *testing.T) {
 			t.Helper()
 
 			original := ledgerChmod
 			ledgerChmod = func(string, fs.FileMode) error { return errTestRandom }
+
+			t.Cleanup(func() { ledgerChmod = original })
+		}},
+		{"the ledger directory cannot be created", func(t *testing.T) {
+			t.Helper()
+
+			original := ledgerMkdirAll
+			ledgerMkdirAll = func(path string, mode fs.FileMode) error {
+				if path == root {
+					return original(path, mode)
+				}
+
+				return errTestRandom
+			}
+
+			t.Cleanup(func() { ledgerMkdirAll = original })
+		}},
+		{"the ledger directory cannot be restricted", func(t *testing.T) {
+			t.Helper()
+
+			original := ledgerChmod
+			ledgerChmod = func(path string, mode fs.FileMode) error {
+				if path == root {
+					return original(path, mode)
+				}
+
+				return errTestRandom
+			}
 
 			t.Cleanup(func() { ledgerChmod = original })
 		}},
@@ -496,6 +533,18 @@ func TestDisconnectNativeFailures(t *testing.T) {
 
 			seams.account = claude.AuthAccount{LoggedIn: true}
 		}, authCauseHarvestFailed},
+		{
+			// A verification that never ran is not a verification that found
+			// the slot empty or occupied, and the deadline that stopped it is
+			// the answer rather than a harvest verdict.
+			"the absence check hit the wrapper deadline",
+			func(t *testing.T, seams *authTestSeams) {
+				t.Helper()
+
+				seams.statusErr = context.DeadlineExceeded
+			},
+			authCauseTimeout,
+		},
 	}
 
 	for _, testCase := range cases {

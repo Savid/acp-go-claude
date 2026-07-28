@@ -44,14 +44,14 @@ func TestNativeLegsFailClosedOnAnUnresolvableHome(t *testing.T) {
 
 	broker, _ := newAuthBroker(t, WithHome(filepath.Join(t.TempDir(), "absent")))
 
-	_, _, err := broker.probeAccount(t.Context())
-	requireAuthFailed(t, err, authCauseProcess)
+	_, _, cause := broker.probeAccount(t.Context())
+	require.Equal(t, authCauseProcess, cause)
 
 	requireAuthFailed(t, broker.nativeLogout(t.Context()), authCauseProcess)
 	requireAuthFailed(t, broker.removeKeystoreItems(t.Context()), authCauseProcess)
 
-	_, _, err = broker.startLogin(t.Context())
-	requireAuthFailed(t, err, authCauseProcess)
+	_, _, cause = broker.startLogin(t.Context())
+	require.Equal(t, authCauseProcess, cause)
 }
 
 func TestNativeLegsFailClosedWhenAdmissionIsRefused(t *testing.T) {
@@ -64,13 +64,13 @@ func TestNativeLegsFailClosedWhenAdmissionIsRefused(t *testing.T) {
 	}))
 	broker.agent.containmentMode = RuntimeContainmentAuthoritative
 
-	_, _, err := broker.probeAccount(t.Context())
-	requireAuthFailed(t, err, authCauseProcess)
+	_, _, cause := broker.probeAccount(t.Context())
+	require.Equal(t, authCauseProcess, cause)
 
 	requireAuthFailed(t, broker.nativeLogout(t.Context()), authCauseProcess)
 
-	_, _, err = broker.startLogin(t.Context())
-	requireAuthFailed(t, err, authCauseProcess)
+	_, _, cause = broker.startLogin(t.Context())
+	require.Equal(t, authCauseProcess, cause)
 }
 
 func TestAuthNativeAdmissionFailsWhenNoGenerationCanBePrepared(t *testing.T) {
@@ -95,22 +95,22 @@ func TestProbeAccountReadsTheExitCodeAndTheLoggedInFlag(t *testing.T) {
 	seams := newAuthSeams(t)
 	broker, _ := newAuthBroker(t)
 
-	account, present, err := broker.probeAccount(t.Context())
-	require.NoError(t, err)
+	account, present, cause := broker.probeAccount(t.Context())
+	require.Empty(t, cause)
 	require.True(t, present)
 	require.True(t, account.LoggedIn)
 
 	seams.statusExt = 1
 
-	_, present, err = broker.probeAccount(t.Context())
-	require.NoError(t, err)
+	_, present, cause = broker.probeAccount(t.Context())
+	require.Empty(t, cause)
 	require.False(t, present)
 
 	seams.statusExt = 0
 	seams.account = claude.AuthAccount{LoggedIn: false, AuthMethod: "oauth_token"}
 
-	_, present, err = broker.probeAccount(t.Context())
-	require.NoError(t, err)
+	_, present, cause = broker.probeAccount(t.Context())
+	require.Empty(t, cause)
 	require.False(t, present)
 }
 
@@ -127,8 +127,8 @@ func TestNativeSeamsHoldTheContainmentPermitOnAnIncompleteBoundary(t *testing.T)
 
 	seams.statusErr = claude.ErrProcessContainmentIncomplete
 
-	_, _, err := broker.probeAccount(t.Context())
-	requireAuthFailed(t, err, authCauseProcess)
+	_, _, cause := broker.probeAccount(t.Context())
+	require.Equal(t, authCauseProcess, cause)
 	require.Zero(t, released)
 
 	seams.logoutErr = claude.ErrProcessContainmentIncomplete
@@ -137,8 +137,8 @@ func TestNativeSeamsHoldTheContainmentPermitOnAnIncompleteBoundary(t *testing.T)
 
 	seams.loginErr = claude.ErrProcessContainmentIncomplete
 
-	_, _, err = broker.startLogin(t.Context())
-	requireAuthFailed(t, err, authCauseProcess)
+	_, _, cause = broker.startLogin(t.Context())
+	require.Equal(t, authCauseProcess, cause)
 	require.Zero(t, released)
 }
 

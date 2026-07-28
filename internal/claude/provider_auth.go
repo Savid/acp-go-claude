@@ -55,11 +55,12 @@ var ErrAuthLoginGrammar = errors.New("claude auth login emitted an unclassifiabl
 // authorization URL and its prompt.
 var ErrAuthLoginNoURL = errors.New("claude auth login presented no authorization url")
 
-// authLoginScrubbedEnv names the variables removed from the login child's
-// environment. The prompt line is byte-identical only under a scrubbed
+// authScrubbedEnvNames names the variables removed from every child's
+// environment. The login prompt line is byte-identical only under a scrubbed
 // environment, and the OSC-8 wrapper is not gated on isatty, so redirecting to
-// a pipe or a file is no protection on its own.
-var authLoginScrubbedEnv = []string{
+// a pipe or a file is no protection on its own; a custom OAuth URL repoints the
+// credential store, which every child that reads or writes it must agree on.
+var authScrubbedEnvNames = []string{
 	"TERM_PROGRAM",
 	"FORCE_HYPERLINK",
 	"CLAUDE_CODE_CUSTOM_OAUTH_URL",
@@ -162,7 +163,7 @@ func authCommandOutput(
 		return nil, 0, errors.Join(err, generation.finish(true))
 	}
 
-	output, err := containedClaudeOutput(ctx, path, args, authScrubbedOptions(options), generation, operation)
+	output, err := containedClaudeOutput(ctx, path, args, options, generation, operation)
 	if err == nil {
 		return output, 0, nil
 	}
@@ -186,55 +187,17 @@ func authCommandOutput(
 	return nil, 0, err
 }
 
-// authScrubbedEnv drops the variables that change the login child's own output
-// bytes or its target store. None is disarmable in-process, so the spawner owns
-// all of them.
-func authScrubbedEnv(entries []string) []string {
-	scrubbed := make([]string, 0, len(entries))
-
-	for _, entry := range entries {
-		key, _, ok := strings.Cut(entry, "=")
-		if ok && authScrubbedEnvKey(key) {
-			continue
-		}
-
-		scrubbed = append(scrubbed, entry)
-	}
-
-	return scrubbed
-}
-
+// authScrubbedEnvKey reports whether a variable is dropped from every child's
+// environment. None is disarmable in-process, so the spawner owns all of them.
 func authScrubbedEnvKey(key string) bool {
 	upper := strings.ToUpper(key)
-	for _, scrubbed := range authLoginScrubbedEnv {
+	for _, scrubbed := range authScrubbedEnvNames {
 		if upper == scrubbed {
 			return true
 		}
 	}
 
 	return false
-}
-
-// authScrubbedOptions removes every scrubbed variable a caller supplied through
-// Options.Env, so an inherited value cannot be reintroduced by configuration.
-func authScrubbedOptions(options Options) Options {
-	if len(options.Env) == 0 {
-		return options
-	}
-
-	env := make(map[string]string, len(options.Env))
-
-	for key, value := range options.Env {
-		if authScrubbedEnvKey(key) {
-			continue
-		}
-
-		env[key] = value
-	}
-
-	options.Env = env
-
-	return options
 }
 
 // AuthLoginURL validates a candidate authorization URL independently of, and
@@ -431,7 +394,7 @@ func StartAuthLogin(ctx context.Context, options Options, generation *DarwinGene
 		return nil, "", errors.Join(err, generation.finish(true))
 	}
 
-	login, err := startAuthLoginChild(ctx, path, authScrubbedOptions(options), generation)
+	login, err := startAuthLoginChild(ctx, path, options, generation)
 	if err != nil {
 		return nil, "", err
 	}
@@ -490,7 +453,7 @@ func startAuthLoginChild(
 
 	envOptions := options
 	envOptions.Cwd = cwd
-	command.Env = authScrubbedEnv(BuildEnv(envOptions))
+	command.Env = BuildEnv(envOptions)
 
 	launch, err := processPrepareContained(command, processLaunchOptions{
 		DarwinBestEffort: options.DarwinBestEffort,

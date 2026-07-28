@@ -85,6 +85,9 @@ type authFlow struct {
 	state     string
 	reason    string
 	expiresAt time.Time
+	// presented reports whether the mint published this record's presentation.
+	// A record that never reached one has no verbatim answer to replay.
+	presented bool
 
 	login *authLoginHandle
 
@@ -240,16 +243,22 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 		disarm:             make(chan struct{}),
 	}
 
-	presentation, err := p.mintPresentation(ctx, flow)
-	if err != nil {
-		return nil, err
-	}
-
-	flow.presentation = presentation
-
+	// The flow is registered against the ledger entry that already names it, so
+	// the flowId every later answer carries — a mint failure's included —
+	// addresses a real record.
 	p.mu.Lock()
 	p.flows[key] = flow
 	p.byID[flowID] = flow
+	p.mu.Unlock()
+
+	presentation, cause := p.mintPresentation(ctx, flow)
+	if cause != "" {
+		return nil, p.fail(flow, cause, false)
+	}
+
+	p.mu.Lock()
+	flow.presentation = presentation
+	flow.presented = true
 	p.mu.Unlock()
 
 	p.armCompleter(flow)
@@ -259,28 +268,27 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 
 // mintPresentation starts the login child and builds the wire presentation. The
 // authorization URL is validated by the grammar independently and before any
-// line matching, then bounded again here before it is relayed.
-func (p *providerAuth) mintPresentation(ctx context.Context, flow *authFlow) (authAuthorizeResult, error) {
-	login, authorizeURL, err := p.startLogin(ctx)
-	if err != nil {
-		return authAuthorizeResult{}, err
+// line matching, then bounded again here before it is relayed. A non-empty
+// cause is the leg's failure, and the flow it names owns the transition.
+func (p *providerAuth) mintPresentation(ctx context.Context, flow *authFlow) (authAuthorizeResult, string) {
+	login, authorizeURL, cause := p.startLogin(ctx)
+	if cause != "" {
+		return authAuthorizeResult{}, cause
 	}
+
+	p.mu.Lock()
+	flow.login = login
+	p.mu.Unlock()
 
 	bounded, ok := authDisplayURL(authorizeURL)
 	if !ok {
-		login.close()
-
-		return authAuthorizeResult{}, authFailed(authCauseNativeVeto, flow.providerID, flow.method.ID, flow.id)
+		return authAuthorizeResult{}, authCauseNativeVeto
 	}
 
 	message, ok := authDisplayText(flow.method.Label, authMaxMessageBytes)
 	if !ok {
-		login.close()
-
-		return authAuthorizeResult{}, authFailed(authCauseNativeVeto, flow.providerID, flow.method.ID, flow.id)
+		return authAuthorizeResult{}, authCauseNativeVeto
 	}
-
-	flow.login = login
 
 	return authAuthorizeResult{
 		Interaction:   flow.method.Interaction,
@@ -289,18 +297,21 @@ func (p *providerAuth) mintPresentation(ctx context.Context, flow *authFlow) (au
 		CallbackInput: authCallbackInputCode,
 		FlowID:        flow.id,
 		FlowExpiresAt: flow.expiresAt.UnixMilli(),
-	}, nil
+	}, ""
 }
 
 // replayAuthorize answers a repeated idempotency key verbatim from memory: no
 // supersede, no completer disarm, no destruction of flow state, and no native
-// call.
+// call. The record it answers from survives every terminal transition and is
+// dropped only when the session closes, so a repeat after completion returns
+// what the first call returned instead of driving a second login. A record
+// whose mint never published a presentation has nothing to replay.
 func (p *providerAuth) replayAuthorize(key authFlowKey, requestID string) (authAuthorizeResult, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	flow, ok := p.flows[key]
-	if !ok || flow.authorizeRequestID != requestID {
+	if !ok || !flow.presented || flow.authorizeRequestID != requestID {
 		return authAuthorizeResult{}, false
 	}
 
@@ -357,7 +368,6 @@ func (p *providerAuth) expire(flow *authFlow) {
 	flow.reason = authReasonDeadline
 	login := flow.takeLogin()
 
-	delete(p.flows, authFlowKey{sessionID: flow.sessionID, providerID: flow.providerID})
 	p.mu.Unlock()
 
 	login.close()
@@ -365,20 +375,13 @@ func (p *providerAuth) expire(flow *authFlow) {
 
 // supersede terminalizes the flow a new authorize replaces. Its login child is
 // terminated first, so a stale approval cannot land against a flow that no
-// longer addresses anything.
+// longer addresses anything, and its id is dropped from the addressing map so
+// every later leg answering it is a caller addressing failure.
 func (p *providerAuth) supersede(key authFlowKey, reason string) {
 	p.mu.Lock()
 
 	flow, ok := p.flows[key]
-	if !ok {
-		p.mu.Unlock()
-
-		return
-	}
-
-	delete(p.flows, key)
-
-	if authTerminal(flow.state) {
+	if !ok || authTerminal(flow.state) {
 		p.mu.Unlock()
 
 		return
@@ -387,6 +390,9 @@ func (p *providerAuth) supersede(key authFlowKey, reason string) {
 	flow.state = authStateCancelled
 	flow.reason = reason
 	login := flow.takeLogin()
+
+	delete(p.flows, key)
+	delete(p.byID, flow.id)
 
 	flow.stopCompleter()
 	p.mu.Unlock()
@@ -542,9 +548,9 @@ func (p *providerAuth) awaitLoginExit(ctx context.Context, login *authLoginHandl
 // settle reads the completion signal and terminalizes the flow. A logged-in
 // config dir is authenticated; anything else is a provider refusal.
 func (p *providerAuth) settle(ctx context.Context, flow *authFlow) error {
-	_, loggedIn, err := p.probeAccount(ctx)
-	if err != nil {
-		return p.fail(flow, authCauseTransport, true)
+	_, loggedIn, cause := p.probeAccount(ctx)
+	if cause != "" {
+		return p.fail(flow, cause, true)
 	}
 
 	if !loggedIn {
@@ -578,7 +584,6 @@ func (p *providerAuth) terminalize(flow *authFlow, state string, reason string) 
 	login := flow.takeLogin()
 
 	flow.stopCompleter()
-	delete(p.flows, authFlowKey{sessionID: flow.sessionID, providerID: flow.providerID})
 	p.mu.Unlock()
 
 	login.close()
@@ -639,8 +644,8 @@ func (p *providerAuth) probe(ctx context.Context, flow *authFlow) {
 		return
 	}
 
-	_, loggedIn, err := p.probeAccount(ctx)
-	if err != nil || !loggedIn {
+	_, loggedIn, cause := p.probeAccount(ctx)
+	if cause != "" || !loggedIn {
 		return
 	}
 
@@ -674,7 +679,6 @@ func (p *providerAuth) cancel(_ context.Context, params json.RawMessage) (any, e
 	login := flow.takeLogin()
 
 	flow.stopCompleter()
-	delete(p.flows, authFlowKey{sessionID: flow.sessionID, providerID: flow.providerID})
 	p.mu.Unlock()
 
 	login.close()
@@ -712,7 +716,8 @@ func (p *providerAuth) addressedFlowLeg(params json.RawMessage) (*authFlow, erro
 }
 
 // closeSession cancels every pending flow the session owns, terminalizing each
-// as cancelled/session_closed and killing its login child. It runs after
+// as cancelled/session_closed and killing its login child, and drops every
+// record the session could still replay an idempotency key from. It runs after
 // pending elicitation is resolved and before the native interrupt, so a flow is
 // never abandoned to a process already being torn down.
 func (p *providerAuth) closeSession(sessionID acp.SessionId) {

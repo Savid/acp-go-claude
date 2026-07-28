@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
@@ -108,6 +109,111 @@ func TestAuthorizeReplaysTheRecordedPresentationVerbatim(t *testing.T) {
 	require.Zero(t, seams.login.closeCount())
 }
 
+// TestAuthorizeReplaysTheRecordedPresentationAfterTheFlowTerminalized pins the
+// whole point of the idempotency key: the repeat that matters is the one a
+// caller sends after the first answer was lost, which is exactly when the flow
+// it names has already completed.
+func TestAuthorizeReplaysTheRecordedPresentationAfterTheFlowTerminalized(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+
+	first := startAuthFlow(t, broker, sessionID)
+	generation := broker.generation
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), first.FlowID, testPastedValue)))
+	require.NoError(t, err)
+
+	record, found, err := broker.ledger.read(authProviderID)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	closes, statusCalls := seams.login.closeCount(), seams.statusCalls
+
+	replayed, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+	require.NoError(t, err)
+	require.Equal(t, first, replayed)
+
+	// No supersede, no fresh login child, no native read, and no ledger
+	// revision: the repeat consumed nothing the first call had earned.
+	require.Equal(t, closes, seams.login.closeCount())
+	require.Equal(t, statusCalls, seams.statusCalls)
+
+	after, _, err := broker.ledger.read(authProviderID)
+	require.NoError(t, err)
+	require.Equal(t, record, after)
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), first.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateAuthenticated, reported.State)
+}
+
+// TestAuthorizeStopsReplayingOnceTheSessionCloses pins the other half: the
+// record lives exactly as long as the session that owns it.
+func TestAuthorizeStopsReplayingOnceTheSessionCloses(t *testing.T) {
+	newAuthSeams(t)
+
+	broker, sessionID := newAuthBroker(t)
+
+	first := startAuthFlow(t, broker, sessionID)
+	generation := broker.generation
+
+	broker.closeSession(sessionID)
+
+	result, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+	require.NoError(t, err)
+
+	minted, ok := result.(authAuthorizeResult)
+	require.True(t, ok)
+	require.NotEqual(t, first.FlowID, minted.FlowID)
+}
+
+// TestAuthorizeMintFailureAddressesTheFlowItNames pins the flowId a failed mint
+// returns against a record a caller can actually address, and pins that the
+// same key retries rather than replaying a presentation that was never
+// published.
+func TestAuthorizeMintFailureAddressesTheFlowItNames(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+	generation := authCatalogGeneration(t, broker, sessionID)
+
+	seams.loginErr = errors.New("spawn failed")
+
+	_, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+	requireAuthFailed(t, err, authCauseProcess)
+
+	var requestErr *acp.RequestError
+
+	require.ErrorAs(t, err, &requestErr)
+
+	data, ok := requestErr.Data.(map[string]any)
+	require.True(t, ok)
+
+	flowID, ok := data[authFieldFlowID].(string)
+	require.True(t, ok)
+	require.NotEmpty(t, flowID)
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flowID)))
+	require.NoError(t, err)
+
+	reported, isStatus := status.(authStatusResult)
+	require.True(t, isStatus)
+	require.Equal(t, authStateFailed, reported.State)
+	require.Equal(t, authReasonProcess, reported.Reason)
+
+	seams.loginErr = nil
+
+	retried, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+	require.NoError(t, err)
+
+	minted, isResult := retried.(authAuthorizeResult)
+	require.True(t, isResult)
+	require.NotEqual(t, flowID, minted.FlowID)
+	require.NotEmpty(t, minted.URL)
+}
+
 func TestAuthorizeSupersedesTheOlderFlow(t *testing.T) {
 	seams := newAuthSeams(t)
 	broker, sessionID := newAuthBroker(t)
@@ -125,14 +231,15 @@ func TestAuthorizeSupersedesTheOlderFlow(t *testing.T) {
 	require.NotEqual(t, first.FlowID, superseded.FlowID)
 	require.Equal(t, 1, seams.login.closeCount())
 
-	// The superseded flow stays addressable and reports its terminal state.
-	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), first.FlowID)))
-	require.NoError(t, err)
+	// The superseded flowId addresses nothing on every leg that takes one.
+	_, err = broker.status(t.Context(), authParams(t, flowParams(string(sessionID), first.FlowID)))
+	requireInvalidAuthField(t, err, authFieldFlowID)
 
-	reported, ok := status.(authStatusResult)
-	require.True(t, ok)
-	require.Equal(t, authStateCancelled, reported.State)
-	require.Equal(t, authReasonSuperseded, reported.Reason)
+	_, err = broker.cancel(t.Context(), authParams(t, flowParams(string(sessionID), first.FlowID)))
+	requireInvalidAuthField(t, err, authFieldFlowID)
+
+	_, err = broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), first.FlowID, testPastedValue)))
+	requireInvalidAuthField(t, err, authFieldFlowID)
 }
 
 func TestAuthorizeFailsClosedOnEveryNativeRefusal(t *testing.T) {
@@ -295,7 +402,15 @@ func TestCallbackFailureMapping(t *testing.T) {
 		{
 			name:    "the completion probe cannot run",
 			arrange: func(seams *authTestSeams) { seams.statusErr = errors.New("probe failed") },
-			cause:   authCauseTransport,
+			cause:   authCauseProcess,
+			reason:  authReasonAcceptanceUnknown,
+		},
+		{
+			// The wrapper's own deadline is carried through rather than
+			// flattened: a probe that never answered is not a refusal.
+			name:    "the completion probe hit the wrapper deadline",
+			arrange: func(seams *authTestSeams) { seams.statusErr = context.DeadlineExceeded },
+			cause:   authCauseTimeout,
 			reason:  authReasonAcceptanceUnknown,
 		},
 		{

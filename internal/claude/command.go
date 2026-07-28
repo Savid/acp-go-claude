@@ -108,13 +108,22 @@ func compactJSON(value any) string {
 	return string(data)
 }
 
-// BuildEnv returns the environment for a Claude CLI process.
+// BuildEnv returns the environment for a Claude CLI process. The scrubbed
+// variables are dropped here rather than at one spawn site, because a value
+// that repoints the credential store or rewrites the child's own output bytes
+// is inherited by every child alike: a login writing the default store while
+// the residence probe describes a different one reports success about a store
+// nobody asked about.
 func BuildEnv(options Options) []string {
 	values := make(map[string]string)
 	keys := make([]string, 0, len(os.Environ())+len(options.Env)+3)
 
 	set := func(key string, value string) {
 		if key == envClaudeCodeNested || strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) {
+			return
+		}
+
+		if authScrubbedEnvKey(key) {
 			return
 		}
 

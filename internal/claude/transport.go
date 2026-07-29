@@ -35,6 +35,7 @@ var (
 	processCommand                 = newProcessCommand
 	processPrepareContained        = prepareProcessTreeCommand
 	processStartContained          = startContainedProcess
+	processWaitContained           = func(tree *processContainment, cmd *exec.Cmd) error { return tree.wait(cmd) }
 	processAfterDecode             = func() {}
 	processGetwd                   = os.Getwd
 	processTerminate               = terminateProcess

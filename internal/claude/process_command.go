@@ -11,5 +11,5 @@ import "os/exec"
 // containment boundary is the sole authoritative shutdown channel — quiesce,
 // wait, close — and it is driven by the owner whose lifetime the child shares.
 func newProcessCommand(path string, args ...string) *exec.Cmd {
-	return exec.Command(path, args...) // #nosec G204 -- launches the configured Claude binary.
+	return exec.Command(path, args...) //nolint:gosec // Launches the configured Claude binary.
 }

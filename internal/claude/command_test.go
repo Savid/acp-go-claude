@@ -236,6 +236,57 @@ func TestValidateClaudeVersion(t *testing.T) {
 	require.Error(t, validateClaudeVersion(context.Background(), failing, options))
 }
 
+func TestContainedClaudeOutputSurvivesWaitBeforeRead(t *testing.T) {
+	const (
+		helperEnv = "CLAUDE_TEST_CONTAINED_OUTPUT_HELPER"
+		sentinel  = "contained-output-survived"
+	)
+	if os.Getenv(helperEnv) == "1" {
+		_, err := io.WriteString(os.Stdout, sentinel)
+		require.NoError(t, err)
+
+		return
+	}
+
+	originalPrepare := processPrepareContained
+	originalStart := processStartContained
+	originalWait := processWaitContained
+	originalQuiesce := processContainmentQuiesce
+	originalClose := processContainmentClose
+	t.Cleanup(func() {
+		processPrepareContained = originalPrepare
+		processStartContained = originalStart
+		processWaitContained = originalWait
+		processContainmentQuiesce = originalQuiesce
+		processContainmentClose = originalClose
+	})
+
+	processPrepareContained = func(command *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
+		return &processTreeCommand{cmd: command}, nil
+	}
+	processStartContained = func(launch *processTreeCommand) (*processContainment, error) {
+		require.NoError(t, launch.cmd.Start())
+		require.NoError(t, launch.cmd.Wait())
+
+		return &processContainment{}, nil
+	}
+	processWaitContained = func(*processContainment, *exec.Cmd) error { return nil }
+	processContainmentQuiesce = func(*processContainment, time.Duration) error { return nil }
+	processContainmentClose = func(*processContainment) error { return nil }
+	t.Setenv(helperEnv, "1")
+
+	output, err := containedClaudeOutput(
+		t.Context(),
+		os.Args[0],
+		[]string{"-test.run=^TestContainedClaudeOutputSurvivesWaitBeforeRead$"},
+		Options{Cwd: t.TempDir()},
+		nil,
+		"contained output regression",
+	)
+	require.NoError(t, err)
+	require.Contains(t, string(output), sentinel)
+}
+
 func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 	want := errors.New("version seam")
 	releases := 0

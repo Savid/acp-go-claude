@@ -287,37 +287,55 @@ func containedClaudeOutput(
 	envOptions.Cwd = command.Dir
 	command.Env = BuildEnv(envOptions)
 
+	stdout, childStdout, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("capture %s output: %w", operation, err)
+	}
+
+	command.Stdout = childStdout
+
 	launch, err := processPrepareContained(command, processLaunchOptions{
 		DarwinBestEffort: options.DarwinBestEffort,
 		Generation:       generation,
 	})
 	if err != nil {
+		closeErr := errors.Join(stdout.Close(), childStdout.Close())
+
 		if errors.Is(err, ErrProcessContainmentIncomplete) && options.ObserveProcessInventory != nil {
 			options.ObserveProcessInventory(ctx, unavailableProcessInventory)
 		}
 
-		return nil, fmt.Errorf("prepare %s containment: %w", operation, err)
+		return nil, errors.Join(fmt.Errorf("prepare %s containment: %w", operation, err), closeErr)
 	}
 
-	stdout, err := launch.cmd.StdoutPipe()
-	if err != nil {
+	if launch.cmd.Stdout != childStdout {
 		launch.close()
 
-		return nil, fmt.Errorf("capture %s output: %w", operation, err)
+		closeErr := errors.Join(stdout.Close(), childStdout.Close())
+
+		return nil, errors.Join(
+			errors.New("capture "+operation+" output: containment replaced stdout"),
+			closeErr,
+		)
 	}
 
 	tree, err := processStartContained(launch)
 	if err != nil {
-		_ = stdout.Close()
+		closeErr := errors.Join(stdout.Close(), childStdout.Close())
 
 		if errors.Is(err, ErrProcessContainmentIncomplete) && options.ObserveProcessInventory != nil {
 			options.ObserveProcessInventory(ctx, unavailableProcessInventory)
 		}
 
-		return nil, fmt.Errorf("start %s: %w", operation, err)
+		return nil, errors.Join(fmt.Errorf("start %s: %w", operation, err), closeErr)
 	}
 
 	generationOwnedByTree = true
+
+	childStdoutCloseErr := childStdout.Close()
+	defer func() {
+		returnErr = errors.Join(returnErr, stdout.Close())
+	}()
 
 	if options.ObserveProcessInventory != nil {
 		options.ObserveProcessInventory(ctx, tree.processSnapshot)
@@ -344,23 +362,25 @@ func containedClaudeOutput(
 	case read = <-readDone:
 	case <-ctx.Done():
 		contextErr = ctx.Err()
-		containErr := tree.quiesce(processShutdownWaitDelay)
-		waitErr := tree.wait(launch.cmd)
+		containErr := processContainmentQuiesce(tree, processShutdownWaitDelay)
+		waitErr := processWaitContained(tree, launch.cmd)
 		read = <-readDone
 		closeErr := processContainmentClose(tree)
 
 		observeAuxiliaryQuiescence(options, containErr)
 
-		return read.data, errors.Join(contextErr, read.err, waitErr, containErr, closeErr)
+		return read.data, errors.Join(
+			contextErr, read.err, waitErr, containErr, closeErr, childStdoutCloseErr,
+		)
 	}
 
-	waitErr := tree.wait(launch.cmd)
-	containErr := tree.quiesce(processShutdownWaitDelay)
+	waitErr := processWaitContained(tree, launch.cmd)
+	containErr := processContainmentQuiesce(tree, processShutdownWaitDelay)
 	closeErr := processContainmentClose(tree)
 
 	observeAuxiliaryQuiescence(options, containErr)
 
-	return read.data, errors.Join(read.err, waitErr, containErr, closeErr)
+	return read.data, errors.Join(read.err, waitErr, containErr, closeErr, childStdoutCloseErr)
 }
 
 func observeAuxiliaryQuiescence(options Options, containmentErr error) {

@@ -93,6 +93,23 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 	})
 }
 
+func TestLinuxSupervisorPreservesCapturedNativeOutput(t *testing.T) {
+	output, err := containedClaudeOutput(
+		t.Context(),
+		"/bin/sh",
+		[]string{"-c", `printf '2.1.80 (Claude Code)\n'`},
+		Options{Cwd: t.TempDir()},
+		nil,
+		"claude version",
+	)
+	if err != nil {
+		t.Fatalf("capture supervised output: %v", err)
+	}
+	if got := string(output); got != "2.1.80 (Claude Code)\n" {
+		t.Fatalf("output = %q", got)
+	}
+}
+
 func TestTurnSupervisorBootstrapBranches(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
 	t.Setenv(turnSupervisorModeEnv, turnSupervisorMode)

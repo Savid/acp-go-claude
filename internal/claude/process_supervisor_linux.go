@@ -202,6 +202,9 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	helper := turnSupervisorCommand(executable) // #nosec G204 -- the current executable hosts the private supervisor mode.
 	helper.Env = turnSupervisorEnvironment()
 	helper.Dir = native.Dir
+	helper.Stdin = native.Stdin
+	helper.Stdout = native.Stdout
+	helper.Stderr = native.Stderr
 	helper.ExtraFiles = []*os.File{configFile, controlRead, readyWrite, proofWrite}
 	helper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 

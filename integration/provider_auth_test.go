@@ -181,13 +181,9 @@ func TestAttendedProviderAuthLoginCompletes(t *testing.T) {
 	assertLedgerIsValuesFree(t, authRoot, authorization)
 }
 
-// TestProviderAuthRejectedCodeNeverCompletesOnAPopulatedConfigDir is the case
-// the attended tier cannot reach: a config dir that already holds the
-// operator's credential, and a pasted value the provider rejects. It needs no
-// human — nobody approves anything at the provider — and it fails whenever the
-// completion signal is the config dir's state rather than this flow's own
-// login, because that state is `logged in` both before and after.
-func TestProviderAuthRejectedCodeNeverCompletesOnAPopulatedConfigDir(t *testing.T) {
+// TestProviderAuthRejectedCodeDoesNotComplete drives a provider refusal without
+// spending model tokens or requiring an operator.
+func TestProviderAuthRejectedCodeDoesNotComplete(t *testing.T) {
 	if os.Getenv(envRunIntegration) != "1" {
 		t.Skipf("set %s=1 to run provider-auth integration tests", envRunIntegration)
 	}
@@ -195,8 +191,12 @@ func TestProviderAuthRejectedCodeNeverCompletesOnAPopulatedConfigDir(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	runtime := emptyClaudeRuntime(t)
+	requireClaudeHomeHoldsNoCredential(t, runtime.home)
+
 	client := &recordingClient{}
-	conn := serveLiveAgentForTest(t, ctx, client, claudeacp.WithProviderAuthRoot(t.TempDir()))
+	pipes := serveLiveAgentInRuntimeForTest(t, ctx, runtime, claudeacp.WithProviderAuthRoot(t.TempDir()))
+	conn := acp.NewClientSideConnection(client, pipes.clientInput, pipes.agentOutput)
 
 	sessionID := liveAuthSession(t, ctx, conn)
 	authorization, methodID := startAuthFlowForTest(t, ctx, conn, sessionID, "rejected-connection", "rejected-request")
@@ -215,6 +215,57 @@ func TestProviderAuthRejectedCodeNeverCompletesOnAPopulatedConfigDir(t *testing.
 	require.NotEqual(t, "authenticated", status.State,
 		"a rejected authorization code was reported as a completed login")
 	require.Equal(t, "failed", status.State, "reason %q", status.Reason)
+}
+
+// TestProviderAuthRejectedCodeNeverCompletesOnAPopulatedConfigDir pins the
+// direct login child's nonzero exit against an already logged-in home. The
+// resident account cannot answer for a value the provider rejected.
+func TestProviderAuthRejectedCodeNeverCompletesOnAPopulatedConfigDir(t *testing.T) {
+	if os.Getenv(envRunIntegration) != "1" {
+		t.Skipf("set %s=1 to run provider-auth integration tests", envRunIntegration)
+	}
+
+	source, _ := integrationClaudeSourceHome(t)
+	if !portableClaudeAuthAvailable(t, source) {
+		t.Skip("no portable Claude credential is available for the populated-home provider-auth test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	runtime := isolatedClaudeRuntime(t)
+	runtime.env = emptyClaudeCredentialEnv()
+	require.NoError(t, os.RemoveAll(filepath.Join(runtime.home, "settings.json")))
+	if !claudeHomeLoggedInWithoutCredentialEnv(t, runtime.home) {
+		t.Skip("the isolated Claude home has no durable credential independent of static environment or settings auth")
+	}
+
+	client := &recordingClient{}
+	pipes := serveLiveAgentInRuntimeForTest(t, ctx, runtime, claudeacp.WithProviderAuthRoot(t.TempDir()))
+	conn := acp.NewClientSideConnection(client, pipes.clientInput, pipes.agentOutput)
+
+	sessionID := liveAuthSession(t, ctx, conn)
+	authorization, methodID := startAuthFlowForTest(
+		t,
+		ctx,
+		conn,
+		sessionID,
+		"populated-rejected-connection",
+		"populated-rejected-request",
+	)
+
+	err := callAuthLeg(t, ctx, conn, claudeacp.AuthCallbackMethod, map[string]any{
+		"sessionId":  sessionID,
+		"providerId": "anthropic",
+		"method":     methodID,
+		"flowId":     authorization.FlowID,
+		"input":      "not-an-authorization-code#not-a-state",
+	}, nil)
+	require.Error(t, err, "the leg accepted a value no provider issued")
+
+	status := authFlowState(t, ctx, conn, sessionID, authorization.FlowID)
+	require.Equal(t, "failed", status.State, "reason %q", status.Reason)
+	require.Equal(t, "provider_refused", status.Reason)
 }
 
 // waitForAttendedPaste reads the operator's pasted value from stdin. It fails

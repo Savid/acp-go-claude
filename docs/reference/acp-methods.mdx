@@ -28,8 +28,10 @@ method-not-found error.
 ### `_claude/auth/*`
 
 Session-scoped methods that broker Claude's hosted paste-back login. They exist
-only while `WithProviderAuthRoot` names a usable durable directory; without it
-every one returns method-not-found, and the initialize capability lists none.
+only while `WithProviderAuthRoot` names a usable durable directory, bare mode
+is disabled, and no agent-wide static authentication overrides that directory's login;
+otherwise every one returns method-not-found, and the initialize capability
+lists none.
 `_claude/auth/disconnect` additionally requires `WithProviderAuthDirectHome`
 equal to `WithHome`, so an adapter without that consent advertises six methods
 rather than seven. See [Authentication](/docs/features/authentication).

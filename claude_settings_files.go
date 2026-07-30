@@ -23,6 +23,7 @@ const (
 	settingsDirName       = ".claude"
 
 	settingsFieldAvailableModels = "availableModels"
+	settingsFieldAPIKeyHelper    = "apiKeyHelper"
 	settingsFieldDefaultMode     = "defaultMode"
 	settingsFieldEffortLevel     = "effortLevel"
 	settingsFieldEnv             = "env"
@@ -54,6 +55,7 @@ type settingsFile struct {
 	Model              string
 	Effort             string
 	PermissionMode     string
+	APIKeyHelper       string
 	AvailableModels    []string
 	HasAvailableModels bool
 	Env                map[string]string
@@ -209,9 +211,10 @@ func loadSettingsFile(ctx context.Context, path string, log *slog.Logger) (setti
 
 func decodeSettingsFile(ctx context.Context, raw map[string]any, log *slog.Logger) settingsFile {
 	settings := settingsFile{
-		Model:  stringSetting(raw, settingsFieldModel),
-		Effort: stringSetting(raw, settingsFieldEffortLevel),
-		Env:    stringMapSetting(ctx, raw, settingsFieldEnv, log),
+		Model:        stringSetting(raw, settingsFieldModel),
+		Effort:       stringSetting(raw, settingsFieldEffortLevel),
+		APIKeyHelper: stringSetting(raw, settingsFieldAPIKeyHelper),
+		Env:          stringMapSetting(ctx, raw, settingsFieldEnv, log),
 	}
 
 	if permissions, _ := raw[settingsFieldPermissions].(map[string]any); permissions != nil {

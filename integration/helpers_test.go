@@ -28,8 +28,9 @@ const livePromptRefusalRetries = 1
 const envRunIntegration = "ACP_GO_CLAUDE_RUN_INTEGRATION"
 const envRunLiveTokens = "ACP_GO_CLAUDE_RUN_LIVE_TOKENS" //nolint:gosec // Environment variable name, not a credential value.
 const envClaudeHome = "ACP_GO_CLAUDE_HOME"
-const envAnthropicAuthToken = "ANTHROPIC_AUTH_TOKEN" //nolint:gosec // Environment variable name, not a credential value.
-const envAnthropicAPIKey = "ANTHROPIC_API_KEY"       //nolint:gosec // Environment variable name, not a credential value.
+const envAnthropicAuthToken = "ANTHROPIC_AUTH_TOKEN"      //nolint:gosec // Environment variable name, not a credential value.
+const envAnthropicAPIKey = "ANTHROPIC_API_KEY"            //nolint:gosec // Environment variable name, not a credential value.
+const envClaudeCodeOAuthToken = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // Environment variable name, not a credential value.
 
 var integrationLogger = slog.New(slog.DiscardHandler)
 
@@ -429,9 +430,10 @@ func isolatedClaudeRuntime(t *testing.T) isolatedClaudeRuntimeConfig {
 	if len(env) == 0 && !portableClaudeAuthAvailable(t, source) {
 		t.Fatalf(
 			"live Claude integration requires portable file/env auth; refusing to launch against the real Claude home. "+
-				"Set %s, %s, or provide .credentials.json/settings.json auth in %s",
+				"Set %s, %s, %s, or provide .credentials.json/settings.json auth in %s",
 			envAnthropicAuthToken,
 			envAnthropicAPIKey,
+			envClaudeCodeOAuthToken,
 			envClaudeHome,
 		)
 	}
@@ -473,31 +475,38 @@ func emptyClaudeRuntime(t *testing.T) isolatedClaudeRuntimeConfig {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(target) })
 
-	return isolatedClaudeRuntimeConfig{home: target}
+	return isolatedClaudeRuntimeConfig{home: target, env: emptyClaudeCredentialEnv()}
+}
+
+func emptyClaudeCredentialEnv() map[string]string {
+	return map[string]string{
+		envAnthropicAuthToken:   "",
+		envAnthropicAPIKey:      "",
+		envClaudeCodeOAuthToken: "",
+	}
 }
 
 // requireClaudeHomeHoldsNoCredential fails unless the config dir answers logged
-// out and no environment variable supplies a credential in its place. It is
-// what makes a later `authenticated` mean the login under test: `auth status`
-// answers for the config dir, so one that already holds a credential answers
-// the same whatever value was pasted.
+// out with every credential environment variable explicitly cleared.
 func requireClaudeHomeHoldsNoCredential(t *testing.T, home string) {
 	t.Helper()
 
-	require.Empty(t, strings.TrimSpace(os.Getenv(envAnthropicAuthToken)),
-		"%s supplies a credential to every child; unset it before driving a login", envAnthropicAuthToken)
-	require.Empty(t, strings.TrimSpace(os.Getenv(envAnthropicAPIKey)),
-		"%s supplies a credential to every child; unset it before driving a login", envAnthropicAPIKey)
+	require.False(t, claudeHomeLoggedInWithoutCredentialEnv(t, home),
+		"config dir %s already holds a credential", home)
+}
+
+func claudeHomeLoggedInWithoutCredentialEnv(t *testing.T, home string) bool {
+	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
 	command := exec.CommandContext(ctx, integrationClaudePath(t), "auth", "status", "--json") // #nosec G204 -- path is the discovered Claude CLI.
-	command.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+home)
+	command.Env = claudeEnvWithoutCredentials(home)
 
 	output, err := command.Output()
 	if err != nil {
-		return
+		return false
 	}
 
 	var payload struct {
@@ -505,7 +514,44 @@ func requireClaudeHomeHoldsNoCredential(t *testing.T, home string) {
 	}
 
 	require.NoError(t, json.Unmarshal(bytes.TrimSpace(output), &payload))
-	require.False(t, payload.LoggedIn, "config dir %s already holds a credential", home)
+
+	return payload.LoggedIn
+}
+
+func claudeEnvWithoutCredentials(home string) []string {
+	blocked := map[string]struct{}{
+		envAnthropicAuthToken:   {},
+		envAnthropicAPIKey:      {},
+		envClaudeCodeOAuthToken: {},
+		"CLAUDE_CONFIG_DIR":     {},
+	}
+
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, entry := range os.Environ() {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+
+		remove := false
+		for blockedName := range blocked {
+			if strings.EqualFold(name, blockedName) {
+				remove = true
+
+				break
+			}
+		}
+		if !remove {
+			env = append(env, entry)
+		}
+	}
+
+	return append(env,
+		envAnthropicAuthToken+"=",
+		envAnthropicAPIKey+"=",
+		envClaudeCodeOAuthToken+"=",
+		"CLAUDE_CONFIG_DIR="+home,
+	)
 }
 
 func copyClaudeHomeFile(sourceDir string, targetDir string, name string) error {
@@ -668,7 +714,8 @@ func portableClaudeAuthAvailable(t *testing.T, sourceDir string) bool {
 
 func processClaudeAuthAvailable() bool {
 	return strings.TrimSpace(os.Getenv(envAnthropicAuthToken)) != "" ||
-		strings.TrimSpace(os.Getenv(envAnthropicAPIKey)) != ""
+		strings.TrimSpace(os.Getenv(envAnthropicAPIKey)) != "" ||
+		strings.TrimSpace(os.Getenv(envClaudeCodeOAuthToken)) != ""
 }
 
 func claudeAccessTokenFromFile(t *testing.T, path string) string {
@@ -700,7 +747,8 @@ func claudeSettingsAuthAvailable(t *testing.T, path string) bool {
 
 	env, _ := raw["env"].(map[string]any)
 	return strings.TrimSpace(stringValue(env[envAnthropicAuthToken])) != "" ||
-		strings.TrimSpace(stringValue(env[envAnthropicAPIKey])) != ""
+		strings.TrimSpace(stringValue(env[envAnthropicAPIKey])) != "" ||
+		strings.TrimSpace(stringValue(env[envClaudeCodeOAuthToken])) != ""
 }
 
 func stringValue(value any) string {

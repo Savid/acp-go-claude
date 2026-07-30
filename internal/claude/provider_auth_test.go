@@ -456,10 +456,60 @@ func TestAuthLoginReportsTheChildsOwnExitBeforeTheFence(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, login.Exited())
 
+	waitCtx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	exit, err := login.Wait(waitCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, AuthLoginExitUnknown, exit)
+	require.False(t, login.Exited())
+
 	require.NoError(t, os.WriteFile(release, nil, 0o600))
-	require.Eventually(t, login.Exited, 10*time.Second, 10*time.Millisecond)
+	exitCtx, stop := context.WithTimeout(t.Context(), 10*time.Second)
+	defer stop()
+	exit, err = login.Wait(exitCtx)
+	require.NoError(t, err)
+	require.Equal(t, AuthLoginExitZero, exit)
+	require.True(t, login.Exited())
 
 	require.NoError(t, login.Close())
+}
+
+func TestAuthLoginWaitReportsANaturalNonzeroExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' '" + testAuthorizeURL + "'\n" +
+		"printf '" + AuthLoginPrompt + "'\n" +
+		"read value\n" +
+		"exit 7\n"
+
+	options, generation := authTestOptions(t, Options{Cwd: dir})
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "refused"), script)
+
+	login, _, err := StartAuthLogin(t.Context(), options, generation)
+	require.NoError(t, err)
+	require.NoError(t, login.Submit("code-half#state-half"))
+
+	waitCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	exit, err := login.Wait(waitCtx)
+	require.NoError(t, err)
+	require.Equal(t, AuthLoginExitNonzero, exit)
+	require.NoError(t, login.Close())
+}
+
+func TestAuthLoginWaitDoesNotClassifyAWaitFailureAsAnExit(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+
+	login := &AuthLogin{exit: &commandWait{done: done, err: exec.ErrWaitDelay}}
+	exit, err := login.Wait(t.Context())
+	require.ErrorIs(t, err, exec.ErrWaitDelay)
+	require.Equal(t, AuthLoginExitUnknown, exit)
 }
 
 // A login child answers a human who has not opened the authorization URL yet,

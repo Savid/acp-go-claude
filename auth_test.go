@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,14 +39,18 @@ type fakeAuthLogin struct {
 	// refused makes the child reject the submitted value the way the provider
 	// rejects a wrong or expired authorization code: the value crosses and the
 	// config dir is left exactly as it was.
-	refused   bool
-	submitErr error
-	closeErr  error
+	refused     bool
+	submitErr   error
+	waitErr     error
+	closeErr    error
+	exitUnknown bool
 	// beforeSubmit runs before the write is attempted and before the child's
 	// own lock is taken, which is where anything racing the write lands: the
 	// real child's stdin is closed by whoever terminalizes the flow, without
 	// the broker mutex held.
 	beforeSubmit func()
+	beforeWait   func()
+	beforeClose  func()
 }
 
 func (f *fakeAuthLogin) Submit(value string) error {
@@ -76,7 +81,37 @@ func (f *fakeAuthLogin) Exited() bool {
 	return f.exited
 }
 
+func (f *fakeAuthLogin) Wait(ctx context.Context) (claude.AuthLoginExit, error) {
+	if f.beforeWait != nil {
+		f.beforeWait()
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return claude.AuthLoginExitUnknown, err
+	}
+	if f.waitErr != nil {
+		return claude.AuthLoginExitUnknown, f.waitErr
+	}
+	if f.exitUnknown {
+		return claude.AuthLoginExitUnknown, nil
+	}
+
+	f.exited = true
+	if f.refused {
+		return claude.AuthLoginExitNonzero, nil
+	}
+
+	return claude.AuthLoginExitZero, nil
+}
+
 func (f *fakeAuthLogin) Close() error {
+	if f.beforeClose != nil {
+		f.beforeClose()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -113,14 +148,15 @@ func (f *fakeAuthLogin) values() []string {
 // authTestSeams swaps every native seam for a deterministic one and restores
 // the originals when the test ends.
 type authTestSeams struct {
-	login     *fakeAuthLogin
-	loginURL  string
-	loginErr  error
-	account   claude.AuthAccount
-	statusExt int
-	statusErr error
-	logoutErr error
-	removeErr error
+	login        *fakeAuthLogin
+	loginSession authLoginSession
+	loginURL     string
+	loginErr     error
+	account      claude.AuthAccount
+	statusExt    int
+	statusErr    error
+	logoutErr    error
+	removeErr    error
 
 	statusCalls int
 	logoutCalls int
@@ -155,6 +191,10 @@ func newAuthSeams(t *testing.T) *authTestSeams {
 	authLoginBegin = func(context.Context, claude.Options, *claude.DarwinGeneration) (authLoginSession, string, error) {
 		if seams.loginErr != nil {
 			return nil, "", seams.loginErr
+		}
+
+		if seams.loginSession != nil {
+			return seams.loginSession, seams.loginURL, nil
 		}
 
 		return seams.login, seams.loginURL, nil
@@ -200,8 +240,14 @@ func newAuthAgent(t *testing.T, opts ...Option) *Agent {
 
 	options := append([]Option{
 		WithProviderAuthRoot(t.TempDir()),
+		WithHome(t.TempDir()),
 		WithScratchDir(t.TempDir()),
 		WithLogger(slog.New(slog.DiscardHandler)),
+		WithEnv(map[string]string{
+			providerAuthEnvAnthropicAPIKey:  "",
+			providerAuthEnvAnthropicToken:   "",
+			providerAuthEnvClaudeOAuthToken: "",
+		}),
 	}, opts...)
 
 	agent := NewAgent(options...)
@@ -313,6 +359,154 @@ func TestProviderAuthUnadvertisedWithoutRoot(t *testing.T) {
 
 	require.ErrorAs(t, err, &requestErr)
 	require.Equal(t, -32601, requestErr.Code)
+}
+
+func TestProviderAuthUnadvertisedWithCredentialEnvironment(t *testing.T) {
+	for _, name := range providerAuthCredentialEnvNames {
+		t.Setenv(name, "")
+	}
+
+	for _, name := range providerAuthCredentialEnvNames {
+		t.Run(name, func(t *testing.T) {
+			agent := NewAgent(
+				WithProviderAuthRoot(t.TempDir()),
+				WithHome(t.TempDir()),
+				WithEnv(map[string]string{name: "configured"}),
+				WithLogger(slog.New(slog.DiscardHandler)),
+			)
+			require.Nil(t, agent.providerAuth)
+		})
+	}
+
+	t.Setenv(providerAuthEnvClaudeOAuthToken, "inherited")
+	require.True(t, providerAuthCredentialEnvironmentConfigured(Options{}))
+	require.False(t, providerAuthCredentialEnvironmentConfigured(Options{
+		Env: map[string]string{providerAuthEnvClaudeOAuthToken: ""},
+	}))
+}
+
+func TestProviderAuthUnadvertisedWithAgentWideStaticAuthentication(t *testing.T) {
+	for _, name := range providerAuthCredentialEnvNames {
+		t.Setenv(name, "")
+	}
+
+	t.Run("bare mode", func(t *testing.T) {
+		agent := NewAgent(
+			WithProviderAuthRoot(t.TempDir()),
+			WithHome(t.TempDir()),
+			WithClaudeBareMode(true),
+			WithLogger(slog.New(slog.DiscardHandler)),
+		)
+		require.Nil(t, agent.providerAuth)
+	})
+
+	t.Run("user settings environment", func(t *testing.T) {
+		home := t.TempDir()
+		require.NoError(t, os.WriteFile(
+			filepath.Join(home, settingsFileName),
+			[]byte(`{"env":{"ANTHROPIC_AUTH_TOKEN":"configured"}}`),
+			0o600,
+		))
+
+		agent := NewAgent(
+			WithProviderAuthRoot(t.TempDir()),
+			WithHome(home),
+			WithLogger(slog.New(slog.DiscardHandler)),
+		)
+		require.Nil(t, agent.providerAuth)
+	})
+
+	t.Run("api key helper", func(t *testing.T) {
+		home := t.TempDir()
+		require.NoError(t, os.WriteFile(
+			filepath.Join(home, settingsFileName),
+			[]byte(`{"apiKeyHelper":"/usr/local/bin/claude-key"}`),
+			0o600,
+		))
+
+		agent := NewAgent(
+			WithProviderAuthRoot(t.TempDir()),
+			WithHome(home),
+			WithLogger(slog.New(slog.DiscardHandler)),
+		)
+		require.Nil(t, agent.providerAuth)
+	})
+
+	t.Run("seeded settings", func(t *testing.T) {
+		agent := NewAgent(
+			WithProviderAuthRoot(t.TempDir()),
+			WithHome(t.TempDir()),
+			WithSeedFiles(map[string]string{
+				settingsFileName: `{"env":{"CLAUDE_CODE_OAUTH_TOKEN":"configured"}}`,
+			}),
+			WithLogger(slog.New(slog.DiscardHandler)),
+		)
+		require.Nil(t, agent.providerAuth)
+	})
+
+	t.Run("settings overlay", func(t *testing.T) {
+		home := t.TempDir()
+		const overlay = "worker.settings.json"
+		require.NoError(t, os.WriteFile(
+			filepath.Join(home, overlay),
+			[]byte(`{"env":{"ANTHROPIC_API_KEY":"configured"}}`),
+			0o600,
+		))
+
+		agent := NewAgent(
+			WithProviderAuthRoot(t.TempDir()),
+			WithHome(home),
+			WithClaudeSettingsFile(overlay),
+			WithLogger(slog.New(slog.DiscardHandler)),
+		)
+		require.Nil(t, agent.providerAuth)
+	})
+
+	t.Run("managed settings", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "managed-settings.json")
+		require.NoError(t, os.WriteFile(
+			path,
+			[]byte(`{"apiKeyHelper":"/usr/local/bin/managed-claude-key"}`),
+			0o600,
+		))
+
+		original := managedSettingsPath
+		managedSettingsPath = func() string { return path }
+		t.Cleanup(func() { managedSettingsPath = original })
+
+		agent := NewAgent(
+			WithProviderAuthRoot(t.TempDir()),
+			WithHome(t.TempDir()),
+			WithLogger(slog.New(slog.DiscardHandler)),
+		)
+		require.Nil(t, agent.providerAuth)
+	})
+
+	require.False(t, providerAuthSettingsContentConfigured([]byte("{")))
+}
+
+func TestProviderAuthSuppressionLogsInfoWithoutTheCredential(t *testing.T) {
+	for _, name := range providerAuthCredentialEnvNames {
+		t.Setenv(name, "")
+	}
+
+	const credential = "must-not-appear"
+
+	var logs bytes.Buffer
+	agent := NewAgent(
+		WithProviderAuthRoot(t.TempDir()),
+		WithHome(t.TempDir()),
+		WithEnv(map[string]string{providerAuthEnvClaudeOAuthToken: credential}),
+		WithLogger(slog.New(slog.NewTextHandler(&logs, nil))),
+	)
+	require.Nil(t, agent.providerAuth)
+	logged := logs.String()
+	require.Contains(t, logged, "level=INFO")
+	require.Contains(t, logged, "interactive provider auth disabled")
+	require.Contains(t, logged, "reason=\""+providerAuthUnavailableEnv+"\"")
+	require.NotContains(t, logged, "level=WARN")
+	require.NotContains(t, logged, "error=")
+	require.NotContains(t, logged, credential)
 }
 
 func TestProviderAuthUnusableRootStaysUnadvertised(t *testing.T) {

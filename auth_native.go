@@ -21,6 +21,7 @@ const authNativeTimeout = 60 * time.Second
 type authLoginSession interface {
 	Submit(value string) error
 	Exited() bool
+	Wait(context.Context) (claude.AuthLoginExit, error)
 	Close() error
 }
 
@@ -166,9 +167,8 @@ type authAccountReading struct {
 }
 
 // advancedPast reports whether this reading can only have been produced by a
-// login that landed after the baseline was taken. A rejected authorization code
-// leaves the config dir exactly as the baseline found it, so an unchanged
-// reading is a refusal however plainly the config dir is logged in.
+// login that landed after the baseline was taken. It is the no-callback
+// completion witness, where no submitted child exit status is available.
 func (r authAccountReading) advancedPast(baseline authAccountReading) bool {
 	return r.loggedIn && r != baseline
 }
@@ -321,19 +321,27 @@ func (h *authLoginHandle) exited() bool {
 	return h.login.Exited()
 }
 
-// close terminates the login child. It is the flow's fence and runs on every
-// terminal transition, so a flow is never abandoned to a live child.
-func (h *authLoginHandle) close() {
+func (h *authLoginHandle) wait(ctx context.Context) (claude.AuthLoginExit, error) {
+	return h.login.Wait(ctx)
+}
+
+func (h *authLoginHandle) fence() error {
 	if h == nil {
-		return
+		return nil
 	}
 
 	err := h.login.Close()
-	if errors.Is(err, claude.ErrProcessContainmentIncomplete) {
-		h.agent.recordContainmentError(err)
-
-		return
+	if !errors.Is(err, claude.ErrProcessContainmentIncomplete) {
+		h.release()
 	}
 
-	h.release()
+	return err
+}
+
+// close terminates the login child. It is the flow's fence and runs on every
+// terminal transition, so a flow is never abandoned to a live child.
+func (h *authLoginHandle) close() {
+	if err := h.fence(); errors.Is(err, claude.ErrProcessContainmentIncomplete) {
+		h.agent.recordContainmentError(err)
+	}
 }

@@ -134,7 +134,7 @@ type authStatusPayload struct {
 
 // AuthStatus runs `claude auth status --json` under the selected containment
 // boundary and reports the account projection beside the child's exit code.
-// The exit code is the only completion signal on this surface.
+// Both values are needed to decide whether the configured home is logged in.
 func AuthStatus(ctx context.Context, options Options, generation *DarwinGeneration) (AuthAccount, int, error) {
 	// --json is passed explicitly even though it is the documented default, so
 	// a future default flip changes nothing here.
@@ -412,6 +412,17 @@ type AuthLogin struct {
 	closeErr error
 }
 
+// AuthLoginExit is the direct login child's natural exit outcome. Zero is only
+// a post-write barrier; the caller still requires the account to advance past
+// this flow's baseline before confirming a login.
+type AuthLoginExit uint8
+
+const (
+	AuthLoginExitUnknown AuthLoginExit = iota
+	AuthLoginExitZero
+	AuthLoginExitNonzero
+)
+
 // StartAuthLogin spawns the login child under the selected containment boundary
 // with a scrubbed environment and returns once the grammar has yielded the
 // validated authorization URL.
@@ -566,6 +577,27 @@ func (l *AuthLogin) Exited() bool {
 	default:
 		return false
 	}
+}
+
+// Wait blocks until the login child exits on its own and reports its exit
+// status class. It never signals the process; Close remains the sole
+// containment and shutdown boundary.
+func (l *AuthLogin) Wait(ctx context.Context) (AuthLoginExit, error) {
+	waitErr, completed := l.exit.await(ctx)
+	if !completed {
+		return AuthLoginExitUnknown, ctx.Err()
+	}
+
+	if waitErr == nil {
+		return AuthLoginExitZero, nil
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(waitErr, &exitErr) && exitErr.ExitCode() >= 0 {
+		return AuthLoginExitNonzero, nil
+	}
+
+	return AuthLoginExitUnknown, waitErr
 }
 
 // Close terminates the login child and completes its containment boundary. It

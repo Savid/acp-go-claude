@@ -60,9 +60,16 @@ exchanges the pasted value, and stores the result in the config directory it
 already owns. No credential ever crosses back out — there is no `credential`
 method and no injection key.
 
+The provider-auth surface is absent when `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN` is configured. Those
+variables override a login stored in the config directory, so offering a
+durable connection beside one would advertise a credential the agent cannot
+use. It is also absent in bare mode and when agent-wide user, managed, seeded,
+or overlay settings configure one of those variables or `apiKeyHelper`.
+
 | Option | Effect |
 | --- | --- |
-| `WithProviderAuthRoot(path)` | Absolute, durable, host-owned directory holding the values-free ledger. Required: unset, relative, or unusable leaves every method unadvertised and answering method-not-found. |
+| `WithProviderAuthRoot(path)` | Absolute, durable, host-owned directory holding the values-free ledger. Required: unset, relative, unusable, bare mode, or agent-wide static authentication leaves every method unadvertised and answering method-not-found. |
 | `WithProviderAuthDirectHome(path)` | Consent gate for `_claude/auth/disconnect`, which clears the account in a config directory the operator also uses. Must resolve to the same directory as `WithHome`. |
 
 ```go
@@ -87,6 +94,17 @@ The catalog is one provider (`anthropic`) with one `oauth` method; `authorize`
 returns `interaction: "callback"` and a `claude.com` URL, and `callback` submits
 the value the browser shows. Method names, parameters, and results are listed in
 [ACP methods](/docs/reference/acp-methods).
+
+`callback` waits for the login child to exit naturally, then requires a zero
+exit and a native account reading that advanced past the one captured before
+the flow. An unchanged logged-in account is reported as acceptance-unknown
+rather than attributed to this flow. A nonzero exit, internal timeout, or
+incomplete containment fence never authenticates.
+Cancellation of the request carrying the pasted value does not cancel the
+flow; `_claude/auth/cancel`, supersession, session close, and flow expiry own
+that lifecycle. When the browser completes through Claude's loopback hook and no callback arrives,
+`status` additionally requires the account reading to differ from the one taken
+before the flow started.
 
 <Warning>
 The pasted value is `<code>#<state>`, not the code on its own — submitting only

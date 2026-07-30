@@ -94,8 +94,9 @@ type Options struct {
 	// deleted under it. Empty rejects every handoff-form image block.
 	InputHandoffRoot string
 	// ProviderAuthRoot is the absolute host-owned durable directory holding the
-	// adapter's values-free provider-auth ledger. Empty leaves every
-	// `_claude/auth/*` leg unadvertised.
+	// adapter's values-free provider-auth ledger. Empty, bare mode, or
+	// agent-wide static authentication leaves every `_claude/auth/*` leg
+	// unadvertised.
 	ProviderAuthRoot string
 	// ProviderAuthDirectHome is the exact canonical Claude config directory the
 	// operator consents to a provider-auth leg clearing. Empty, or unequal to
@@ -326,8 +327,11 @@ func WithInputHandoffRoot(dir string) Option {
 // authorization URLs, or pasted values. The directory is created 0700 when
 // missing and entries are written 0600. Unset (the default), unusable, or
 // relative leaves every `_claude/auth/*` leg absent from the capability
-// advertisement and answering method-not-found; a relative path additionally
-// fails initialization.
+// advertisement and answering method-not-found. A configured
+// ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, an
+// agent-wide settings credential, apiKeyHelper, or bare mode does the same
+// because it overrides or ignores the durable login this surface installs; a
+// relative path additionally fails initialization.
 func WithProviderAuthRoot(path string) Option {
 	return func(options *Options) {
 		options.ProviderAuthRoot = path
@@ -481,7 +485,7 @@ func WithTurnTimeout(timeout time.Duration) Option {
 // WithEnv adds environment variables to every launched Claude process.
 func WithEnv(env map[string]string) Option {
 	return func(options *Options) {
-		options.Env = env
+		options.Env = cloneStringMap(env)
 	}
 }
 

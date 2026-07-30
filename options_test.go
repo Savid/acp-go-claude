@@ -83,6 +83,8 @@ func TestApplyOptionsBranches(t *testing.T) {
 	require.Equal(t, 4*time.Second, options.ControlHandlerTimeout)
 	require.Equal(t, 90*time.Second, options.TurnTimeout)
 	require.Equal(t, env, options.Env)
+	env["ANTHROPIC_BASE_URL"] = "https://mutated.example.test"
+	require.Equal(t, "https://example.test", options.Env["ANTHROPIC_BASE_URL"])
 	require.Equal(t, 2, options.ConcurrencyLimits.MaxActiveSessions)
 	require.Equal(t, 4, options.ConcurrencyLimits.MaxConcurrentClientCalls)
 	require.Equal(t, ImageLimits{

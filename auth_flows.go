@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 // Closed flow states.
@@ -42,6 +43,15 @@ const (
 const authInteractionCallback = "callback"
 
 const authCallbackInputCode = "code"
+
+type authCompletionWitness uint8
+
+const (
+	authCompletionUnknown authCompletionWitness = iota
+	authCompletionStatusAdvance
+	authCompletionLoginZero
+	authCompletionLoginNonzero
+)
 
 // authPasteSeparator joins the two halves of the pasted value. The harness
 // expects `<code>#<state>`: a leg relaying only the code half cannot complete
@@ -94,9 +104,8 @@ type authFlow struct {
 	login *authLoginHandle
 
 	// baseline is the account reading taken before this flow's login child
-	// started. Completion is measured against it and never against the bare
-	// reading, so a credential the config dir already held cannot answer for a
-	// login this flow never completed.
+	// started. A no-callback completion must advance past it, so a credential the
+	// config dir already held cannot answer for a login this flow never completed.
 	baseline authAccountReading
 
 	nextProbeAt time.Time
@@ -293,8 +302,8 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 // cause is the leg's failure, and the flow it names owns the transition.
 func (p *providerAuth) mintPresentation(ctx context.Context, flow *authFlow) (authAuthorizeResult, string) {
 	// The baseline is read before the child that could change it exists, so the
-	// value the completion signal is measured against describes the config dir
-	// this flow inherited rather than one it may already have mutated.
+	// no-callback completion signal describes the config dir this flow inherited
+	// rather than one it may already have mutated.
 	baseline, cause := p.readAccount(ctx)
 	if cause != "" {
 		return authAuthorizeResult{}, cause
@@ -557,10 +566,8 @@ func validateAuthPastedValue(input string) error {
 	return nil
 }
 
-// submitPastedValue writes the value to the login child, waits for it to
-// settle, and then reads the one completion signal this surface has: the
-// `auth status --json` exit code. The login process's stdout never signals
-// success.
+// submitPastedValue writes the value to the login child, waits for its natural
+// exit, fences its containment boundary, and verifies the resulting account.
 func (p *providerAuth) submitPastedValue(ctx context.Context, flow *authFlow, input string) (any, error) {
 	if err := p.claimFlow(flow); err != nil {
 		return nil, err
@@ -580,49 +587,87 @@ func (p *providerAuth) submitPastedValue(ctx context.Context, flow *authFlow, in
 	// is destroyed by somebody else: terminalize closes the child's stdin
 	// without the broker mutex held, and the child can also have exited on its
 	// own after completing a login through the loopback hook. Neither failure
-	// is the flow's answer, so the write's outcome only chooses what an
-	// unchanged config dir means and settle decides the rest.
+	// is the flow's answer, so the write's outcome only chooses the cause when
+	// the later exit-and-status witness rejects the flow.
 	refusal := authCauseProviderRefused
 	if err := login.submit(input); err != nil {
 		refusal = authCauseProcess
 	}
 
-	waitCtx, cancel := context.WithTimeout(ctx, authChildExitWait)
+	// The submitted value belongs to the flow, not to the transport request
+	// that carried it. Once the write crosses, only the flow's cancel,
+	// supersession, session close, or deadline may abort the native exchange.
+	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), authChildExitWait)
 	defer cancel()
 
-	p.awaitLoginExit(waitCtx, login)
+	exit, err := login.wait(waitCtx)
+	if err != nil {
+		if abandoned, ok := p.abandonedCause(flow); ok {
+			return nil, authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
+		}
 
-	if err := p.settle(ctx, flow, refusal); err != nil {
+		return nil, p.fail(flow, p.authNativeCause(err), true)
+	}
+
+	if !p.takeFlowLogin(flow, login) {
+		if abandoned, ok := p.abandonedCause(flow); ok {
+			return nil, authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
+		}
+
+		return nil, p.fail(flow, authCauseProcess, true)
+	}
+
+	if err := login.fence(); err != nil {
+		if abandoned, ok := p.abandonedCause(flow); ok {
+			p.authNativeCause(err)
+
+			return nil, authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
+		}
+
+		return nil, p.fail(flow, p.authNativeCause(err), true)
+	}
+
+	if abandoned, ok := p.abandonedCause(flow); ok {
+		return nil, authFailed(abandoned, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	witness := authCompletionLoginNonzero
+	if exit == claude.AuthLoginExitZero {
+		witness = authCompletionLoginZero
+	} else if exit != claude.AuthLoginExitNonzero {
+		return nil, p.fail(flow, authCauseProcess, true)
+	}
+
+	if err := p.settle(waitCtx, flow, refusal, witness); err != nil {
 		return nil, err
 	}
 
 	return authFlowIDResult{FlowID: flow.id}, nil
 }
 
-// awaitLoginExit closes the login child and waits for its containment boundary,
-// bounded by the caller's deadline. The child exits by itself once the harness
-// finishes the exchange; the close is the fence for every other outcome.
-func (p *providerAuth) awaitLoginExit(ctx context.Context, login *authLoginHandle) {
-	done := make(chan struct{})
+func (p *providerAuth) takeFlowLogin(flow *authFlow, expected *authLoginHandle) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	p.goSafe(func() {
-		login.close()
-		close(done)
-	})
-
-	select {
-	case <-done:
-	case <-ctx.Done():
+	if flow.login != expected {
+		return false
 	}
+
+	flow.takeLogin()
+
+	return true
 }
 
-// settle reads the completion signal and terminalizes the flow. The signal is
-// the account reading having advanced past this flow's baseline, whatever
-// credential the config dir holds. refusal is the cause a reading that did not
-// advance answers with: a value the child took makes an unchanged config dir
-// the provider's refusal, while a value that never crossed leaves the
-// acceptance unknown and blames nobody.
-func (p *providerAuth) settle(ctx context.Context, flow *authFlow, refusal string) error {
+// settle reads the account after the login child exits and terminalizes the
+// flow. A natural zero exit is the post-write barrier, but only an account
+// reading that advanced past this flow's baseline can authenticate. A nonzero
+// exit never authenticates.
+func (p *providerAuth) settle(
+	ctx context.Context,
+	flow *authFlow,
+	refusal string,
+	witness authCompletionWitness,
+) error {
 	p.mu.Lock()
 	baseline := flow.baseline
 	p.mu.Unlock()
@@ -654,7 +699,13 @@ func (p *providerAuth) settle(ctx context.Context, flow *authFlow, refusal strin
 		return p.fail(flow, cause, true)
 	}
 
-	if !observed.advancedPast(baseline) {
+	if !witness.accepts(observed, baseline) {
+		if witness == authCompletionLoginZero && observed.loggedIn && refusal == authCauseProviderRefused {
+			// Zero carries no per-flow receipt. An unchanged resident account
+			// is unknowable rather than evidence that the provider refused.
+			refusal = authCauseProcess
+		}
+
 		return p.fail(flow, refusal, true)
 	}
 
@@ -665,6 +716,17 @@ func (p *providerAuth) settle(ctx context.Context, flow *authFlow, refusal strin
 	p.terminalize(flow, authStateAuthenticated, "")
 
 	return nil
+}
+
+func (w authCompletionWitness) accepts(observed authAccountReading, baseline authAccountReading) bool {
+	switch w {
+	case authCompletionStatusAdvance:
+		return observed.advancedPast(baseline)
+	case authCompletionLoginZero:
+		return observed.advancedPast(baseline)
+	default:
+		return false
+	}
 }
 
 // abandonedCause reports the cause a leg answers with when the flow reached a
@@ -702,8 +764,7 @@ func (p *providerAuth) fail(flow *authFlow, cause string, materialInFlight bool)
 // terminalize records the flow's one terminal transition. A flow that already
 // reached one keeps it: a login child still in flight when the owner cancelled
 // settles into a record the owner already closed, and what it settled on is no
-// longer the flow's outcome. The child is fenced either way, because the leg
-// that submitted a value leaves the handle published while it waits.
+// longer the flow's outcome. Any published child is fenced either way.
 func (p *providerAuth) terminalize(flow *authFlow, state string, reason string) {
 	p.mu.Lock()
 
@@ -787,7 +848,7 @@ func (p *providerAuth) probe(ctx context.Context, flow *authFlow) {
 	defer releaseSlot()
 
 	observed, cause := p.readAccount(ctx)
-	if cause != "" || !observed.advancedPast(baseline) {
+	if cause != "" || !authCompletionStatusAdvance.accepts(observed, baseline) {
 		return
 	}
 

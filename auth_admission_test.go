@@ -488,10 +488,10 @@ func TestAGateOutlivesEveryWaiterButItsLast(t *testing.T) {
 	require.Empty(t, broker.admissions)
 }
 
-// TestAdmissionRefusesEveryLegTheCallerAbandoned walks each gated leg with a
-// context that has already ended while the gate it needs is held elsewhere. A
-// leg that leaves the queue without the gate has no right to mutate what the
-// gate names, so it answers rather than proceeding.
+// TestAdmissionRefusesEveryLegTheCallerAbandoned walks each gate reached before
+// credential material crosses with a context that has already ended. A leg
+// that leaves the queue without the gate has no right to mutate what the gate
+// names, so it answers rather than proceeding.
 func TestAdmissionRefusesEveryLegTheCallerAbandoned(t *testing.T) {
 	t.Run("authorize", func(t *testing.T) {
 		newAuthSeams(t)
@@ -541,18 +541,6 @@ func TestAdmissionRefusesEveryLegTheCallerAbandoned(t *testing.T) {
 		close(barrier.release)
 
 		requireAuthFailed(t, <-answered, authCauseTimeout)
-	})
-
-	t.Run("callback", func(t *testing.T) {
-		newAuthSeams(t)
-
-		broker, sessionID := newAuthBroker(t)
-		flow := startAuthFlow(t, broker, sessionID)
-
-		holdAuthSlot(t, broker)
-
-		_, err := broker.callback(cancelledContext(t), authParams(t, callbackParams(string(sessionID), flow.FlowID, testPastedValue)))
-		requireAuthFailed(t, err, authCauseTimeout)
 	})
 
 	t.Run("status", func(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -333,9 +334,8 @@ func TestAuthorizeFailsClosedOnEveryNativeRefusal(t *testing.T) {
 	broker, sessionID := newAuthBroker(t)
 	generation := authCatalogGeneration(t, broker, sessionID)
 
-	// The baseline reading is what every later completion signal is measured
-	// against, so a mint that cannot take one has nothing to measure and starts
-	// no child at all.
+	// The baseline reading is what a no-callback completion is measured against,
+	// so a mint that cannot take one starts no child at all.
 	seams.statusErr = errors.New("probe failed")
 
 	_, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
@@ -401,7 +401,7 @@ func TestAuthorizeFailsClosedWhenNoFlowTokenCanBeMinted(t *testing.T) {
 	requireAuthFailed(t, err, authCauseProcess)
 }
 
-func TestCallbackCompletesTheFlowFromTheStatusExitCode(t *testing.T) {
+func TestCallbackCompletesFromNaturalZeroExitAndLoggedInStatus(t *testing.T) {
 	seams := newAuthSeams(t)
 	broker, sessionID := newAuthBroker(t)
 
@@ -411,6 +411,11 @@ func TestCallbackCompletesTheFlowFromTheStatusExitCode(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, authFlowIDResult{FlowID: flow.FlowID}, result)
 	require.Equal(t, []string{testPastedValue}, seams.login.values())
+	require.Equal(t, 1, seams.login.closeCount())
+
+	broker.mu.Lock()
+	require.Nil(t, broker.byID[flow.FlowID].login)
+	broker.mu.Unlock()
 
 	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
 	require.NoError(t, err)
@@ -430,11 +435,37 @@ func TestCallbackCompletesTheFlowFromTheStatusExitCode(t *testing.T) {
 	requireAuthFailed(t, err, authCauseFlowState)
 }
 
+func TestCallbackDoesNotAttributeAnUnchangedAccountToAZeroExit(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+
+	seams.completeLogin()
+	flow := startAuthFlow(t, broker, sessionID)
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(
+		string(sessionID),
+		flow.FlowID,
+		testPastedValue,
+	)))
+	requireAuthFailed(t, err, authCauseProcess)
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateFailed, reported.State)
+	require.Equal(t, authReasonAcceptanceUnknown, reported.Reason)
+
+	record, found, err := broker.ledger.read(authProviderID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, authLedgerIntent, record.State)
+}
+
 // TestCallbackRefusesAValueTheProviderRejectedOnAPopulatedConfigDir pins the
-// completion signal against the flow rather than against the config dir. The
-// config dir already holds a credential and the pasted value changes nothing:
-// `auth status` answers logged-in either way, so a leg reading only the current
-// state binds the new connection to the credential that was already there.
+// direct child's nonzero exit against the resident account. The config dir
+// remains logged in, but that credential cannot answer for a rejected flow.
 func TestCallbackRefusesAValueTheProviderRejectedOnAPopulatedConfigDir(t *testing.T) {
 	seams := newAuthSeams(t)
 	broker, sessionID := newAuthBroker(t)
@@ -462,6 +493,30 @@ func TestCallbackRefusesAValueTheProviderRejectedOnAPopulatedConfigDir(t *testin
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, authLedgerIntent, record.State)
+}
+
+func TestCallbackNeverAcceptsANonzeroLoginExit(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+
+	seams.login.refused = true
+	seams.login.beforeSubmit = seams.completeLogin
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(
+		string(sessionID),
+		flow.FlowID,
+		testPastedValue,
+	)))
+	requireAuthFailed(t, err, authCauseProviderRefused)
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateFailed, reported.State)
+	require.Equal(t, authReasonProviderRefused, reported.Reason)
 }
 
 // TestStatusProbeRefusesAConfigDirThatDidNotChange pins the same rule on the
@@ -575,7 +630,7 @@ func TestCallbackFailureMapping(t *testing.T) {
 			reason:  authReasonProviderRefused,
 		},
 		{
-			name:    "the harness exited non-zero",
+			name:    "auth status exited non-zero",
 			arrange: func(seams *authTestSeams) { seams.statusExt = 1 },
 			cause:   authCauseProviderRefused,
 			reason:  authReasonProviderRefused,
@@ -667,6 +722,323 @@ func TestCallbackSettlesALoginTheChildAlreadyCompleted(t *testing.T) {
 	require.Equal(t, authLedgerConfirmed, record.State)
 }
 
+func TestCallbackWaitsForNaturalLoginExitBeforeFencing(t *testing.T) {
+	seams := newAuthSeams(t)
+	login := &delayedAuthLogin{
+		submitted: make(chan struct{}),
+		waiting:   make(chan struct{}),
+		release:   make(chan struct{}),
+		complete:  seams.completeLogin,
+	}
+	seams.loginSession = login
+
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+	params := authParams(t, callbackParams(string(sessionID), flow.FlowID, testPastedValue))
+
+	type callbackAnswer struct {
+		result any
+		err    error
+	}
+
+	answered := make(chan callbackAnswer, 1)
+	go func() {
+		result, err := broker.callback(context.Background(), params)
+		answered <- callbackAnswer{result: result, err: err}
+	}()
+
+	select {
+	case <-login.submitted:
+	case <-time.After(time.Second):
+		t.Fatal("callback did not submit the pasted value")
+	}
+
+	select {
+	case <-login.waiting:
+	case <-time.After(time.Second):
+		t.Fatal("callback did not wait for the login child")
+	}
+
+	select {
+	case answer := <-answered:
+		t.Fatalf("callback returned while the login child was still running: %v", answer.err)
+	default:
+	}
+
+	require.False(t, login.wasClosed(), "the callback signalled the login child before its natural exit")
+	close(login.release)
+
+	select {
+	case answer := <-answered:
+		require.NoError(t, answer.err)
+		require.Equal(t, authFlowIDResult{FlowID: flow.FlowID}, answer.result)
+	case <-time.After(time.Second):
+		t.Fatal("callback did not settle after the login child exited")
+	}
+
+	require.True(t, login.wasClosed())
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateAuthenticated, reported.State)
+}
+
+type delayedAuthLogin struct {
+	submitted chan struct{}
+	waiting   chan struct{}
+	release   chan struct{}
+	complete  func()
+
+	mu     sync.Mutex
+	closed bool
+	exited bool
+}
+
+func (l *delayedAuthLogin) Submit(string) error {
+	close(l.submitted)
+
+	return nil
+}
+
+func (l *delayedAuthLogin) Exited() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.exited
+}
+
+func (l *delayedAuthLogin) Wait(ctx context.Context) (claude.AuthLoginExit, error) {
+	close(l.waiting)
+
+	select {
+	case <-l.release:
+	case <-ctx.Done():
+		return claude.AuthLoginExitUnknown, ctx.Err()
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.closed {
+		return claude.AuthLoginExitUnknown, errors.New("login child was fenced before completion")
+	}
+
+	l.complete()
+	l.exited = true
+
+	return claude.AuthLoginExitZero, nil
+}
+
+func (l *delayedAuthLogin) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.closed = true
+
+	return nil
+}
+
+func (l *delayedAuthLogin) wasClosed() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.closed
+}
+
+func TestCallbackInternalDeadlineFencesTheLoginAndReportsTimeout(t *testing.T) {
+	seams := newAuthSeams(t)
+	seams.login.waitErr = context.DeadlineExceeded
+
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), flow.FlowID, testPastedValue)))
+	requireAuthFailed(t, err, authCauseTimeout)
+	require.Equal(t, 1, seams.login.closeCount())
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateFailed, reported.State)
+	require.Equal(t, authReasonAcceptanceUnknown, reported.Reason)
+}
+
+func TestCallbackCallerCancellationDoesNotDestroyARecoverableLogin(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	result, err := broker.callback(ctx, authParams(t, callbackParams(
+		string(sessionID),
+		flow.FlowID,
+		testPastedValue,
+	)))
+	require.NoError(t, err)
+	require.Equal(t, authFlowIDResult{FlowID: flow.FlowID}, result)
+	require.Equal(t, 1, seams.login.closeCount())
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateAuthenticated, reported.State)
+}
+
+func TestCallbackAnswersForAFlowCancelledWhileItsWaitFails(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+
+	seams.login.waitErr = errors.New("wait failed")
+	seams.login.beforeWait = func() {
+		_, err := broker.cancel(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+		require.NoError(t, err)
+	}
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(
+		string(sessionID),
+		flow.FlowID,
+		testPastedValue,
+	)))
+	requireAuthFailed(t, err, authCauseFlowCancelled)
+	require.Equal(t, 1, seams.login.closeCount())
+}
+
+func TestCallbackAnswersForAFlowCancelledDuringItsFence(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+
+	seams.login.beforeClose = func() {
+		_, err := broker.cancel(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+		require.NoError(t, err)
+	}
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(
+		string(sessionID),
+		flow.FlowID,
+		testPastedValue,
+	)))
+	requireAuthFailed(t, err, authCauseFlowCancelled)
+	require.Equal(t, 1, seams.login.closeCount())
+}
+
+func TestCallbackRecordsAnIncompleteFenceAfterTheFlowWasCancelled(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+
+	seams.login.closeErr = claude.ErrProcessContainmentIncomplete
+	seams.login.beforeClose = func() {
+		_, err := broker.cancel(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+		require.NoError(t, err)
+	}
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(
+		string(sessionID),
+		flow.FlowID,
+		testPastedValue,
+	)))
+	requireAuthFailed(t, err, authCauseFlowCancelled)
+	require.ErrorIs(t, broker.agent.containmentErr, claude.ErrProcessContainmentIncomplete)
+}
+
+func TestCallbackFailsClosedOnAnUnknownNaturalExit(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+
+	seams.login.exitUnknown = true
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(
+		string(sessionID),
+		flow.FlowID,
+		testPastedValue,
+	)))
+	requireAuthFailed(t, err, authCauseProcess)
+}
+
+func TestCallbackFailsClosedWhenItsPublishedLoginWasReplaced(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+
+	replacement := &fakeAuthLogin{seams: seams}
+	replacementHandle := &authLoginHandle{
+		login:   replacement,
+		release: func() {},
+		agent:   broker.agent,
+	}
+	seams.login.beforeWait = func() {
+		broker.mu.Lock()
+		broker.byID[flow.FlowID].login = replacementHandle
+		broker.mu.Unlock()
+	}
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(
+		string(sessionID),
+		flow.FlowID,
+		testPastedValue,
+	)))
+	requireAuthFailed(t, err, authCauseProcess)
+	require.Equal(t, 1, replacement.closeCount())
+}
+
+func TestSettleRefusesTheCredentialSlotWithoutAdmission(t *testing.T) {
+	newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+
+	release, admitted := broker.admitSlot(t.Context())
+	require.True(t, admitted)
+	defer release()
+
+	broker.mu.Lock()
+	record := broker.byID[flow.FlowID]
+	broker.mu.Unlock()
+
+	err := broker.settle(
+		cancelledContext(t),
+		record,
+		authCauseProviderRefused,
+		authCompletionLoginZero,
+	)
+	requireAuthFailed(t, err, authCauseTimeout)
+}
+
+func TestCallbackNeverAcceptsAnIncompleteContainmentFence(t *testing.T) {
+	seams := newAuthSeams(t)
+	seams.login.closeErr = claude.ErrProcessContainmentIncomplete
+
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(
+		string(sessionID),
+		flow.FlowID,
+		testPastedValue,
+	)))
+	requireAuthFailed(t, err, authCauseProcess)
+	require.ErrorIs(t, broker.agent.containmentErr, claude.ErrProcessContainmentIncomplete)
+
+	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
+	require.NoError(t, err)
+
+	reported, ok := status.(authStatusResult)
+	require.True(t, ok)
+	require.Equal(t, authStateFailed, reported.State)
+	require.Equal(t, authReasonAcceptanceUnknown, reported.Reason)
+}
+
 func TestCallbackFailsWhenTheLoginChildIsGone(t *testing.T) {
 	newAuthSeams(t)
 
@@ -702,7 +1074,7 @@ func TestStatusPollsOnlyAfterTheLoginChildExitedAndNoFasterThanTheFloor(t *testi
 	broker, sessionID := newAuthBroker(t)
 	flow := startAuthFlow(t, broker, sessionID)
 
-	// authorize read the baseline the completion signal is measured against;
+	// authorize read the baseline a no-callback completion is measured against;
 	// every later read is a poll and is counted from here.
 	baselineReads := seams.statusCalls
 
@@ -936,7 +1308,12 @@ func TestSettleAnswersForAFlowClosedUnderIt(t *testing.T) {
 
 			broker.terminalize(flow, testCase.state, testCase.reason)
 
-			requireAuthFailed(t, broker.settle(t.Context(), flow, authCauseProviderRefused), testCase.cause)
+			requireAuthFailed(t, broker.settle(
+				t.Context(),
+				flow,
+				authCauseProviderRefused,
+				authCompletionStatusAdvance,
+			), testCase.cause)
 
 			status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), presentation.FlowID)))
 			require.NoError(t, err)
@@ -1066,37 +1443,62 @@ func TestCloseSessionSkipsAlreadyTerminalFlows(t *testing.T) {
 	require.Zero(t, seams.login.closeCount())
 }
 
-func TestAwaitLoginExitReturnsOnADeadline(t *testing.T) {
+func TestLoginWaitReturnsOnADeadlineWithoutClosingTheChild(t *testing.T) {
 	newAuthSeams(t)
 
 	broker, _ := newAuthBroker(t)
 	blocked := make(chan struct{})
+	login := &blockingAuthLogin{release: blocked}
 
 	handle := &authLoginHandle{
 		agent:   broker.agent,
 		release: func() {},
-		login:   &blockingAuthLogin{release: blocked},
+		login:   login,
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	broker.awaitLoginExit(ctx, handle)
+	exit, err := handle.wait(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, claude.AuthLoginExitUnknown, exit)
+	require.Zero(t, login.closeCount())
 	close(blocked)
 }
 
-// blockingAuthLogin never completes its close until the test releases it.
+// blockingAuthLogin never exits until the test releases it.
 type blockingAuthLogin struct {
 	release chan struct{}
+	mu      sync.Mutex
+	closes  int
 }
 
 func (*blockingAuthLogin) Submit(string) error { return nil }
 func (*blockingAuthLogin) Exited() bool        { return false }
 
+func (l *blockingAuthLogin) Wait(ctx context.Context) (claude.AuthLoginExit, error) {
+	select {
+	case <-l.release:
+		return claude.AuthLoginExitZero, nil
+	case <-ctx.Done():
+		return claude.AuthLoginExitUnknown, ctx.Err()
+	}
+}
+
 func (l *blockingAuthLogin) Close() error {
-	<-l.release
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.closes++
 
 	return nil
+}
+
+func (l *blockingAuthLogin) closeCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.closes
 }
 
 // The flow is addressable before its child exists, so a leg can close it while

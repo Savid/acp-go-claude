@@ -137,9 +137,9 @@ func TestReadAccountReportsTheExitCodeTheLoggedInFlagAndTheAccount(t *testing.T)
 	require.False(t, reading.loggedIn)
 }
 
-// TestAccountReadingAdvancesOnlyOnAChange pins the completion rule itself. A
-// logged-in reading identical to the baseline is the credential the config dir
-// already held; only a reading that differs can be this flow's own login.
+// TestAccountReadingAdvancesOnlyOnAChange pins the no-callback completion rule.
+// A logged-in reading identical to the baseline is the credential the config
+// dir already held; only a reading that differs can answer an unattended flow.
 func TestAccountReadingAdvancesOnlyOnAChange(t *testing.T) {
 	resident := authAccountReading{
 		identity: authAccountIdentityOf(claude.AuthAccount{LoggedIn: true, Email: "resident@example.test"}),

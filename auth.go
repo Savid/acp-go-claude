@@ -68,6 +68,24 @@ const (
 	authCauseBindingConflict    = "binding_conflict"
 )
 
+const (
+	providerAuthEnvAnthropicAPIKey  = "ANTHROPIC_API_KEY"       //nolint:gosec // Environment variable name, not a credential.
+	providerAuthEnvAnthropicToken   = "ANTHROPIC_AUTH_TOKEN"    //nolint:gosec // Environment variable name, not a credential.
+	providerAuthEnvClaudeOAuthToken = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // Environment variable name, not a credential.
+)
+
+var providerAuthCredentialEnvNames = [...]string{
+	providerAuthEnvAnthropicAPIKey,
+	providerAuthEnvAnthropicToken,
+	providerAuthEnvClaudeOAuthToken,
+}
+
+const (
+	providerAuthUnavailableBareMode = "bare mode"
+	providerAuthUnavailableEnv      = "configured credential"
+	providerAuthUnavailableSettings = "static settings"
+)
+
 // Native seams. Every provider-auth native read and mutation crosses one of
 // these, so the whole surface is drivable without a Claude CLI.
 var (
@@ -122,14 +140,19 @@ func newProviderAuth(agent *Agent) *providerAuth {
 		return nil
 	}
 
+	home := resolveProviderAuthHome(agent.options)
+	if reason := providerAuthUnavailableReason(agent.options, home); reason != "" {
+		agent.log.Info("interactive provider auth disabled", slog.String("reason", reason))
+
+		return nil
+	}
+
 	ledger, err := newAuthLedger(agent.options)
 	if err != nil {
 		agent.log.Warn("provider auth surface is unavailable", slog.String(jsonFieldError, err.Error()))
 
 		return nil
 	}
-
-	home := resolveProviderAuthHome(agent.options)
 
 	return &providerAuth{
 		agent:          agent,
@@ -143,6 +166,99 @@ func newProviderAuth(agent *Agent) *providerAuth {
 		admissions:     make(map[authFlowKey]*authGate),
 		slots:          make(map[string]*authGate),
 	}
+}
+
+func providerAuthUnavailableReason(options Options, home providerAuthHome) string {
+	if options.BareMode {
+		return providerAuthUnavailableBareMode
+	}
+
+	if providerAuthCredentialEnvironmentConfigured(options) {
+		return providerAuthUnavailableEnv
+	}
+
+	if providerAuthStaticSettingsConfigured(options, home) {
+		return providerAuthUnavailableSettings
+	}
+
+	return ""
+}
+
+func providerAuthCredentialEnvironmentConfigured(options Options) bool {
+	for _, name := range providerAuthCredentialEnvNames {
+		if value, overridden := options.Env[name]; overridden {
+			if strings.TrimSpace(value) != "" {
+				return true
+			}
+
+			continue
+		}
+
+		if value, inherited := os.LookupEnv(name); inherited && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func providerAuthStaticSettingsConfigured(options Options, home providerAuthHome) bool {
+	if home.err == nil && providerAuthSettingsFileConfigured(userSettingsPath(home.path)) {
+		return true
+	}
+
+	if providerAuthSettingsFileConfigured(managedSettingsPath()) {
+		return true
+	}
+
+	settingsFiles := map[string]struct{}{settingsFileName: {}}
+	if options.SettingsFile != "" {
+		settingsFiles[options.SettingsFile] = struct{}{}
+
+		if home.err == nil && home.path != "" {
+			path, err := resolveClaudeSettingsFile(home.path, options.SettingsFile)
+			if err == nil && providerAuthSettingsFileConfigured(path) {
+				return true
+			}
+		}
+	}
+
+	for path, content := range options.SeedFiles {
+		if _, loaded := settingsFiles[path]; loaded && providerAuthSettingsContentConfigured([]byte(content)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func providerAuthSettingsFileConfigured(path string) bool {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+
+	return providerAuthSettingsContentConfigured(content)
+}
+
+func providerAuthSettingsContentConfigured(content []byte) bool {
+	var raw map[string]any
+	if json.Unmarshal(content, &raw) != nil {
+		return false
+	}
+
+	settings := decodeSettingsFile(context.Background(), raw, nil)
+	if settings.APIKeyHelper != "" {
+		return true
+	}
+
+	for _, name := range providerAuthCredentialEnvNames {
+		if strings.TrimSpace(settings.Env[name]) != "" {
+			return true
+		}
+	}
+
+	return false
 }
 
 // providerAuthHome is the native config dir this surface acts on. It is

@@ -37,6 +37,8 @@ type ClaudeOptions struct {
 	SystemPrompt string `json:"systemPrompt,omitempty"`
 	// PermissionMode selects the initial Claude permission mode for this session.
 	PermissionMode string `json:"permissionMode,omitempty"`
+	// ProviderAuth carries host-owned credentials into one session launch.
+	ProviderAuth map[string]ProviderAuthBinding `json:"providerAuth,omitempty"`
 }
 
 // Meta returns an ACP _meta object for the supported Claude-specific options.
@@ -66,6 +68,10 @@ func (options ClaudeOptions) Meta() map[string]any {
 		values[metaPermissionModeKey] = options.PermissionMode
 	}
 
+	if len(options.ProviderAuth) > 0 {
+		values["providerAuth"] = cloneProviderAuthBindings(options.ProviderAuth)
+	}
+
 	return map[string]any{
 		claudeMetaKey: map[string]any{
 			metaOptionsKey: values,
@@ -74,6 +80,10 @@ func (options ClaudeOptions) Meta() map[string]any {
 }
 
 func claudeOptionsFromMeta(meta map[string]any) (ClaudeOptions, error) {
+	return claudeOptionsFromMetaWithProviderAuth(meta, false)
+}
+
+func claudeOptionsFromMetaWithProviderAuth(meta map[string]any, providerAuthEnabled bool) (ClaudeOptions, error) {
 	options := ClaudeOptions{}
 
 	claude, ok := meta[claudeMetaKey].(map[string]any)
@@ -88,7 +98,7 @@ func claudeOptionsFromMeta(meta map[string]any) (ClaudeOptions, error) {
 	}
 
 	if rawOptions, ok := claude[metaOptionsKey]; ok {
-		parsed, err := parseClaudeOptions(rawOptions)
+		parsed, err := parseClaudeOptions(rawOptions, providerAuthEnabled)
 		if err != nil {
 			return ClaudeOptions{}, err
 		}
@@ -153,16 +163,16 @@ func outputSchemaJSONSchema(schema map[string]any) map[string]any {
 	return cloneAnyMap(schema)
 }
 
-func parseClaudeOptions(value any) (ClaudeOptions, error) {
+func parseClaudeOptions(value any, providerAuthEnabled bool) (ClaudeOptions, error) {
 	switch typed := value.(type) {
 	case map[string]any:
-		return parseClaudeOptionsMap(typed)
+		return parseClaudeOptionsMap(typed, providerAuthEnabled)
 	default:
 		return ClaudeOptions{}, unsupportedField("_meta." + claudeMetaKey + "." + metaOptionsKey)
 	}
 }
 
-func parseClaudeOptionsMap(raw map[string]any) (ClaudeOptions, error) {
+func parseClaudeOptionsMap(raw map[string]any, providerAuthEnabled bool) (ClaudeOptions, error) {
 	options := ClaudeOptions{}
 
 	for key, value := range raw {
@@ -209,12 +219,85 @@ func parseClaudeOptionsMap(raw map[string]any) (ClaudeOptions, error) {
 			}
 
 			options.OutputSchema = cloneAnyMap(schema)
+		case "providerAuth":
+			if !providerAuthEnabled {
+				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
+			}
+
+			bindings, err := providerAuthBindingsOption(value)
+			if err != nil {
+				return ClaudeOptions{}, err
+			}
+
+			options.ProviderAuth = bindings
 		default:
 			return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
 		}
 	}
 
 	return validateClaudeOptions(options)
+}
+
+func providerAuthBindingsOption(value any) (map[string]ProviderAuthBinding, error) {
+	if typed, ok := value.(map[string]ProviderAuthBinding); ok {
+		if len(typed) != 1 || !validProviderCredential(typed[authProviderID].Credential) {
+			return nil, unsupportedField(providerAuthOptionPath)
+		}
+
+		binding := typed[authProviderID]
+		if !authValidConnectionID(binding.ConnectionID) || binding.Revision <= 0 || binding.BindingGeneration <= 0 {
+			return nil, unsupportedField(providerAuthOptionPath + "." + authProviderID)
+		}
+
+		return cloneProviderAuthBindings(typed), nil
+	}
+
+	raw, ok := value.(map[string]any)
+	if !ok || len(raw) != 1 {
+		return nil, unsupportedField(providerAuthOptionPath)
+	}
+
+	wire, ok := raw[authProviderID]
+	if !ok {
+		return nil, unsupportedField(providerAuthOptionPath)
+	}
+
+	encoded, err := json.Marshal(wire)
+	if err != nil {
+		return nil, unsupportedField(providerAuthOptionPath + "." + authProviderID)
+	}
+
+	var binding ProviderAuthBinding
+
+	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
+	decoder.DisallowUnknownFields()
+
+	if decoder.Decode(&binding) != nil || !authValidConnectionID(binding.ConnectionID) ||
+		binding.Revision <= 0 || binding.BindingGeneration <= 0 ||
+		!validProviderCredential(binding.Credential) {
+		return nil, unsupportedField(providerAuthOptionPath + "." + authProviderID)
+	}
+
+	return map[string]ProviderAuthBinding{authProviderID: binding}, nil
+}
+
+func cloneProviderAuthBindings(source map[string]ProviderAuthBinding) map[string]ProviderAuthBinding {
+	if len(source) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]ProviderAuthBinding, len(source))
+	for providerID, binding := range source {
+		if binding.Credential.API != nil {
+			api := *binding.Credential.API
+			api.Metadata = maps.Clone(api.Metadata)
+			binding.Credential.API = &api
+		}
+
+		cloned[providerID] = binding
+	}
+
+	return cloned
 }
 
 func unsupportedField(path string) error {

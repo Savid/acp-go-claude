@@ -39,7 +39,7 @@ accidentally release the quarantined admission.
 | `WithScratchDir` | Parent directory for ephemeral on-disk materialization, created `0700` when missing (default: system temp). |
 | `WithInputHandoffRoot` | Absolute directory prompt images may be handed over in as local files. Read-only to the adapter; unset rejects every handoff-form block. |
 | `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Unset, relative, unusable, bare mode, or agent-wide static authentication leaves every `_claude/auth/*` method unadvertised. |
-| `WithProviderAuthDirectHome` | Consent gate for `_claude/auth/disconnect`. Advertises the method only while it equals `WithHome` after path cleaning. |
+| `WithProviderAuthDirectHome` | Consent gate for native-login disconnect. Secret-backed disconnect never clears the native home. |
 | `WithDarwinBestEffortContainment` | Explicitly accept Darwin's process-group boundary. Invalid off Darwin; without it Darwin native launch fails closed. |
 | `WithDefaultModel` | Default Claude model for new sessions. |
 | `WithEnv` | Merge environment variables into every Claude child. |

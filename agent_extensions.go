@@ -194,7 +194,7 @@ func (a *Agent) handleForkSession(
 		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
-	metaOptions, err := claudeOptionsFromMeta(params.Meta)
+	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, lifecycleMetaError(err)
 	}

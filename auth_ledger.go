@@ -41,6 +41,7 @@ const (
 // native text.
 type authLedgerRecord struct {
 	ProviderID         string `json:"providerId"`
+	Method             string `json:"method"`
 	ConnectionID       string `json:"connectionId"`
 	Revision           int64  `json:"revision"`
 	BindingGeneration  int64  `json:"bindingGeneration"`
@@ -284,6 +285,7 @@ func (p *providerAuth) recordAuthorizeIntent(ctx context.Context, request author
 	now := authNow().UnixMilli()
 	record := authLedgerRecord{
 		ProviderID:         request.providerID,
+		Method:             request.method,
 		ConnectionID:       request.connectionID,
 		Revision:           1,
 		BindingGeneration:  1,
@@ -318,6 +320,7 @@ func (p *providerAuth) confirmAuthorize(flow *authFlow) error {
 
 	record := authLedgerRecord{
 		ProviderID:         flow.providerID,
+		Method:             flow.method.ID,
 		ConnectionID:       flow.connectionID,
 		Revision:           flow.revision,
 		BindingGeneration:  flow.bindingGeneration,
@@ -347,16 +350,9 @@ type authInventoryResult struct {
 	Entries []authInventoryEntry `json:"entries"`
 }
 
-// inventory reads the ledger and probes the named native slot. The probe is the
-// harness's own `auth status --json`, never the plaintext credential file: on
-// Darwin that file is a fallback the composite store leaves behind, so its
-// presence proves nothing and its expiry is not the live credential's expiry.
-//
-// The probe answers residence for this config dir and nothing finer. Identity
-// and credential are unbound here — the account the harness reports is a cached
-// echo of the last successful login rather than something derived from the
-// resident token — so no entry claims more than the ledger's own provenance
-// plus a present-or-absent slot.
+// inventory crosses the ledger with the residence each method actually uses.
+// Native login probes `auth status --json`; saved material compares the exact
+// binding lineage injected into this session.
 func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (any, error) {
 	fields, err := authParamFields(params, authFieldSessionID)
 	if err != nil {
@@ -368,7 +364,8 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 		return nil, err
 	}
 
-	if _, sessionErr := p.authSession(sessionID); sessionErr != nil {
+	session, sessionErr := p.authSession(sessionID)
+	if sessionErr != nil {
 		return nil, sessionErr
 	}
 
@@ -381,12 +378,23 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 	probed := false
 	present := false
 
-	for _, record := range records {
+	for index := range records {
+		record := &records[index]
+
 		if record.State == authLedgerRemoved {
 			continue
 		}
 
-		if !probed {
+		if record.Method != authMethodLogin {
+			session.mu.Lock()
+			resident := session.providerAuthResident[record.ProviderID]
+			session.mu.Unlock()
+
+			present = resident.connectionID == record.ConnectionID &&
+				resident.revision == record.Revision &&
+				resident.bindingGeneration == record.BindingGeneration &&
+				resident.method == record.Method
+		} else if !probed {
 			reading, cause := p.readAccount(ctx)
 			if cause != "" {
 				return nil, authFailed(cause, record.ProviderID, "", "")
@@ -408,8 +416,7 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 	return authInventoryResult{Entries: entries}, nil
 }
 
-// authProofSource is the total function of ledger state and native probe. A
-// sibling reports exactly the cell the two select and never chooses a value.
+// authProofSource is the total function of ledger state and residence.
 func authProofSource(state string, present bool) string {
 	if state != authLedgerConfirmed {
 		return authProofNotConfirmed
@@ -422,10 +429,9 @@ func authProofSource(state string, present bool) string {
 	return authProofConfirmedAbsent
 }
 
-// disconnect bumps the binding generation before it touches anything else, then
-// clears the exactly-fenced slot and verifies absence. It removes the account
-// this config dir names and nothing else, and it promises no provider-side
-// revocation: the harness's connected-apps entry names the harness.
+// disconnect bumps the binding generation before touching the residence.
+// Material bindings are tombstoned; native login additionally clears the
+// consented config directory and verifies absence.
 func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (any, error) {
 	fields, err := authParamFields(params, authFieldSessionID, authFieldProviderID, authFieldConnectionID, authFieldBindingGeneration)
 	if err != nil {
@@ -472,6 +478,10 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 		return nil, authFailed(authCauseBindingConflict, providerID, "", "")
 	}
 
+	if record.Method == authMethodLogin && !p.directHome {
+		return nil, authFailed(authCausePolicy, providerID, "", "")
+	}
+
 	record.BindingGeneration++
 	record.UpdatedAt = authNow().UnixMilli()
 	record.State = authLedgerIntent
@@ -481,6 +491,17 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 	}
 
 	p.fenceLogins()
+
+	if record.Method != authMethodLogin {
+		record.State = authLedgerRemoved
+		record.UpdatedAt = authNow().UnixMilli()
+
+		if err := p.ledger.write(record); err != nil {
+			return nil, authFailed(authCauseProcess, providerID, "", "")
+		}
+
+		return struct{}{}, nil
+	}
 
 	if err := p.nativeLogout(ctx); err != nil {
 		return nil, err

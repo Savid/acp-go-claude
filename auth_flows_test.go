@@ -27,7 +27,7 @@ func callbackParams(sessionID, flowID, input string) map[string]any {
 	return map[string]any{
 		"sessionId":     sessionID,
 		"providerId":    authProviderID,
-		authFieldMethod: authMethodID,
+		authFieldMethod: authMethodLogin,
 		"flowId":        flowID,
 		"input":         input,
 	}
@@ -40,9 +40,9 @@ func TestAuthorizeReturnsTheHostedPasteBackPresentation(t *testing.T) {
 	flow := startAuthFlow(t, broker, sessionID)
 
 	require.Equal(t, authInteractionCallback, flow.Interaction)
-	require.Equal(t, authCallbackInputCode, flow.CallbackInput)
+	require.Equal(t, authMethodLoginInput, flow.CallbackInput)
 	require.Equal(t, seams.loginURL, flow.URL)
-	require.Equal(t, authMethodLabel, flow.Message)
+	require.Equal(t, authMethodLoginMessage, flow.Message)
 	require.NotEmpty(t, flow.FlowID)
 	require.Positive(t, flow.FlowExpiresAt)
 
@@ -374,7 +374,7 @@ func TestAuthorizeFailsClosedWhenTheMessageBoundIsViolated(t *testing.T) {
 
 	broker.mu.Lock()
 	broker.catalog = map[string][]authCatalogMethod{authProviderID: {{
-		ID:          authMethodID,
+		ID:          authMethodLogin,
 		Type:        authMethodTypeOAuth,
 		Label:       strings.Repeat("a", authMaxMessageBytes+1),
 		Interaction: authInteractionCallback,

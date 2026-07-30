@@ -19,6 +19,7 @@ import (
 const (
 	authStatePending       = "pending"
 	authStateAuthenticated = "authenticated"
+	authStateSaved         = "saved"
 	authStateFailed        = "failed"
 	authStateCancelled     = "cancelled"
 	authStateExpired       = "expired"
@@ -38,11 +39,10 @@ const (
 	authReasonDeadline          = "deadline"
 )
 
-// Closed interaction discriminator. Claude's single method is a hosted
-// paste-back login, so the only value this adapter ever emits is "callback".
-const authInteractionCallback = "callback"
-
-const authCallbackInputCode = "code"
+const (
+	authInteractionCallback = "callback"
+	authInteractionSecret   = "secret"
+)
 
 type authCompletionWitness uint8
 
@@ -102,6 +102,10 @@ type authFlow struct {
 	claimed bool
 
 	login *authLoginHandle
+	// credential is held only between a successful secret callback and its
+	// one credential harvest. Every terminal cleanup path wipes it.
+	credential []byte
+	harvested  bool
 
 	// baseline is the account reading taken before this flow's login child
 	// started. A no-callback completion must advance past it, so a credential the
@@ -301,6 +305,21 @@ func (p *providerAuth) authorize(ctx context.Context, params json.RawMessage) (a
 // line matching, then bounded again here before it is relayed. A non-empty
 // cause is the leg's failure, and the flow it names owns the transition.
 func (p *providerAuth) mintPresentation(ctx context.Context, flow *authFlow) (authAuthorizeResult, string) {
+	if flow.method.Type == authMethodTypeAPI {
+		message, ok := authDisplayText(flow.method.Message, authMaxMessageBytes)
+		if !ok {
+			return authAuthorizeResult{}, authCauseNativeVeto
+		}
+
+		return authAuthorizeResult{
+			Interaction:   authInteractionSecret,
+			Message:       message,
+			CallbackInput: flow.method.CallbackInput,
+			FlowID:        flow.id,
+			FlowExpiresAt: flow.expiresAt.UnixMilli(),
+		}, ""
+	}
+
 	// The baseline is read before the child that could change it exists, so the
 	// no-callback completion signal describes the config dir this flow inherited
 	// rather than one it may already have mutated.
@@ -341,7 +360,7 @@ func (p *providerAuth) mintPresentation(ctx context.Context, flow *authFlow) (au
 		return authAuthorizeResult{}, authCauseNativeVeto
 	}
 
-	message, ok := authDisplayText(flow.method.Label, authMaxMessageBytes)
+	message, ok := authDisplayText(flow.method.Message, authMaxMessageBytes)
 	if !ok {
 		return authAuthorizeResult{}, authCauseNativeVeto
 	}
@@ -350,7 +369,7 @@ func (p *providerAuth) mintPresentation(ctx context.Context, flow *authFlow) (au
 		Interaction:   flow.method.Interaction,
 		URL:           bounded,
 		Message:       message,
-		CallbackInput: authCallbackInputCode,
+		CallbackInput: flow.method.CallbackInput,
 		FlowID:        flow.id,
 		FlowExpiresAt: flow.expiresAt.UnixMilli(),
 	}, ""
@@ -415,6 +434,7 @@ func (p *providerAuth) expire(flow *authFlow) {
 	p.mu.Lock()
 
 	if authTerminal(flow.state) {
+		flow.dropCredential()
 		p.mu.Unlock()
 
 		return
@@ -423,6 +443,7 @@ func (p *providerAuth) expire(flow *authFlow) {
 	flow.state = authStateExpired
 	flow.reason = authReasonDeadline
 	login := flow.takeLogin()
+	flow.dropCredential()
 
 	p.mu.Unlock()
 
@@ -467,6 +488,7 @@ func (p *providerAuth) supersede(key authFlowKey, reason string, successor strin
 	flow.state = authStateCancelled
 	flow.reason = reason
 	login := flow.takeLogin()
+	flow.dropCredential()
 
 	flow.stopCompleter()
 	p.mu.Unlock()
@@ -487,6 +509,14 @@ func (f *authFlow) takeLogin() *authLoginHandle {
 	f.login = nil
 
 	return login
+}
+
+func (f *authFlow) dropCredential() {
+	for index := range f.credential {
+		f.credential[index] = 0
+	}
+
+	f.credential = nil
 }
 
 // callback submits the flow's expected value. The submitted input is
@@ -537,11 +567,67 @@ func (p *providerAuth) callback(ctx context.Context, params json.RawMessage) (an
 		return nil, invalidAuthField(authFieldMethod)
 	}
 
+	if flow.method.Type == authMethodTypeAPI {
+		if err := validateAuthSecretValue(input); err != nil {
+			return nil, err
+		}
+
+		return p.saveCredential(ctx, flow, input)
+	}
+
 	if err := validateAuthPastedValue(input); err != nil {
 		return nil, err
 	}
 
 	return p.submitPastedValue(ctx, flow, input)
+}
+
+func validateAuthSecretValue(input string) error {
+	if input == "" || len(input) > authMaxTextInputBytes || !utf8.ValidString(input) {
+		return invalidAuthField(authFieldInput)
+	}
+
+	for _, char := range input {
+		if char == '\n' || char == '\r' || unicode.IsControl(char) {
+			return invalidAuthField(authFieldInput)
+		}
+	}
+
+	return nil
+}
+
+func (p *providerAuth) saveCredential(ctx context.Context, flow *authFlow, input string) (any, error) {
+	if err := p.claimFlow(flow); err != nil {
+		return nil, err
+	}
+
+	defer p.releaseFlow(flow)
+
+	release, admitted := p.admitSlot(ctx)
+	if !admitted {
+		return nil, authFailed(authCauseTimeout, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	defer release()
+
+	if err := p.confirmAuthorize(flow); err != nil {
+		return nil, err
+	}
+
+	p.mu.Lock()
+	if authTerminal(flow.state) {
+		p.mu.Unlock()
+
+		return nil, authFailed(authCauseFlowState, flow.providerID, flow.method.ID, flow.id)
+	}
+
+	flow.credential = []byte(input)
+	flow.state = authStateSaved
+	flow.reason = ""
+	flow.stopCompleter()
+	p.mu.Unlock()
+
+	return authFlowIDResult{FlowID: flow.id}, nil
 }
 
 // validateAuthPastedValue bounds the pasted value and pins its shape. The
@@ -772,6 +858,10 @@ func (p *providerAuth) terminalize(flow *authFlow, state string, reason string) 
 		flow.state = state
 		flow.reason = reason
 
+		if state != authStateSaved {
+			flow.dropCredential()
+		}
+
 		flow.stopCompleter()
 	}
 
@@ -872,6 +962,11 @@ func (p *providerAuth) cancel(_ context.Context, params json.RawMessage) (any, e
 	p.mu.Lock()
 
 	if authTerminal(flow.state) {
+		if flow.state == authStateSaved {
+			flow.dropCredential()
+			flow.state = authStateCancelled
+			flow.reason = authReasonOwnerCancel
+		}
 		p.mu.Unlock()
 
 		return authFlowIDResult{FlowID: flow.id}, nil
@@ -880,6 +975,7 @@ func (p *providerAuth) cancel(_ context.Context, params json.RawMessage) (any, e
 	flow.state = authStateCancelled
 	flow.reason = authReasonOwnerCancel
 	login := flow.takeLogin()
+	flow.dropCredential()
 
 	flow.stopCompleter()
 	p.mu.Unlock()
@@ -949,11 +1045,14 @@ func (p *providerAuth) closeSession(sessionID acp.SessionId) {
 		delete(p.byID, flow.id)
 
 		if authTerminal(flow.state) {
+			flow.dropCredential()
+
 			continue
 		}
 
 		flow.state = authStateCancelled
 		flow.reason = authReasonSessionClosed
+		flow.dropCredential()
 
 		flow.stopCompleter()
 		logins = append(logins, flow.takeLogin())

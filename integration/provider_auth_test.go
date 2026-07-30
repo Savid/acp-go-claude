@@ -89,7 +89,15 @@ func startAuthFlowForTest(
 	require.Len(t, methods.Providers, 1)
 
 	entries := methods.Providers["anthropic"]
-	require.Len(t, entries, 1)
+	require.Equal(t, []struct {
+		ID    string `json:"id"`
+		Type  string `json:"type"`
+		Label string `json:"label"`
+	}{
+		{ID: "login", Type: "oauth", Label: "Claude subscription"},
+		{ID: "setup-token", Type: "api", Label: "Claude setup token"},
+		{ID: "api-key", Type: "api", Label: "Anthropic API key"},
+	}, entries)
 
 	var authorization authAuthorizeWire
 	require.NoError(t, callAuthLeg(t, ctx, conn, claudeacp.AuthAuthorizeMethod, map[string]any{

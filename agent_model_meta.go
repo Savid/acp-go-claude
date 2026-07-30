@@ -26,13 +26,67 @@ const (
 var modelConfigCategory = acp.SessionConfigOptionCategory("model_config")
 
 func sessionResponseMeta(session *agentSession) map[string]any {
+	return sessionResponseMetaWithInjection(session, "")
+}
+
+func sessionReuseResponseMeta(session *agentSession, bindings map[string]ProviderAuthBinding) map[string]any {
+	if len(bindings) == 0 {
+		return sessionResponseMeta(session)
+	}
+
+	session.mu.Lock()
+	applied := session.providerAuthInjection == authInjectionApplied
+	session.mu.Unlock()
+
+	if applied {
+		return sessionResponseMetaWithInjection(session, authInjectionNoop)
+	}
+
+	return sessionResponseMeta(session)
+}
+
+func sessionLoadResponseMeta(
+	session *agentSession,
+	bindings map[string]ProviderAuthBinding,
+	started bool,
+) map[string]any {
+	if started {
+		return sessionResponseMeta(session)
+	}
+
+	return sessionReuseResponseMeta(session, bindings)
+}
+
+func sessionResponseMetaWithInjection(session *agentSession, override string) map[string]any {
 	session.mu.Lock()
 	model := session.model
 	available := append([]claude.AvailableModelInfo(nil), session.availableModels...)
 	effort := session.effort
+	injection := session.providerAuthInjection
 	session.mu.Unlock()
 
-	return claudeModelVariantMeta(model, available, effort)
+	if override != "" {
+		injection = override
+	}
+
+	meta := claudeModelVariantMeta(model, available, effort)
+	if injection == "" {
+		return meta
+	}
+
+	if meta == nil {
+		meta = map[string]any{}
+	}
+
+	claudeMeta, _ := meta[claudeMetaKey].(map[string]any)
+	if claudeMeta == nil {
+		claudeMeta = map[string]any{}
+		meta[claudeMetaKey] = claudeMeta
+	}
+
+	claudeMeta[providerAuthCapabilityKey] = map[string]any{"injection": injection}
+
+	return meta
 }
 
 func claudeModelVariantMeta(model string, available []claude.AvailableModelInfo, effort string) map[string]any {

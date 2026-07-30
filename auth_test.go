@@ -159,6 +159,7 @@ type authTestSeams struct {
 	removeErr    error
 
 	statusCalls int
+	loginCalls  int
 	logoutCalls int
 	removeCalls int
 	removedDir  string
@@ -189,6 +190,7 @@ func newAuthSeams(t *testing.T) *authTestSeams {
 	userOriginal := authNativeUser
 
 	authLoginBegin = func(context.Context, claude.Options, *claude.DarwinGeneration) (authLoginSession, string, error) {
+		seams.loginCalls++
 		if seams.loginErr != nil {
 			return nil, "", seams.loginErr
 		}
@@ -297,7 +299,7 @@ func authorizeParams(sessionID acp.SessionId, generation string) map[string]any 
 		"providerId":         authProviderID,
 		"connectionId":       testConnectionID,
 		"methodsGeneration":  generation,
-		authFieldMethod:      authMethodID,
+		authFieldMethod:      authMethodLogin,
 		"authorizeRequestId": testRequestID,
 	}
 }
@@ -577,6 +579,8 @@ func TestProviderAuthCapabilityListsExactlyTheEnabledLegs(t *testing.T) {
 		AuthStatusMethod,
 		AuthCancelMethod,
 		AuthInventoryMethod,
+		AuthCredentialMethod,
+		AuthDisconnectMethod,
 	}, broker.authMethodNames())
 
 	meta := broker.agent.capabilityMeta()
@@ -586,14 +590,7 @@ func TestProviderAuthCapabilityListsExactlyTheEnabledLegs(t *testing.T) {
 	capability, ok := vendor[providerAuthCapabilityKey].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, broker.authMethodNames(), capability[providerAuthMethodsField])
-	require.NotContains(t, capability, "injectionKey")
-
-	_, err := broker.agent.HandleExtensionMethod(t.Context(), AuthDisconnectMethod, nil)
-
-	var requestErr *acp.RequestError
-
-	require.ErrorAs(t, err, &requestErr)
-	require.Equal(t, -32601, requestErr.Code)
+	require.Equal(t, providerAuthOptionPath, capability[providerAuthInjectionKey])
 }
 
 func TestProviderAuthDisconnectAdvertisedUnderTheConsentGate(t *testing.T) {
@@ -602,7 +599,8 @@ func TestProviderAuthDisconnectAdvertisedUnderTheConsentGate(t *testing.T) {
 
 	require.Contains(t, broker.authMethodNames(), AuthDisconnectMethod)
 	require.True(t, broker.advertises(AuthDisconnectMethod))
-	require.False(t, broker.advertises("_claude/auth/credential"))
+	require.True(t, broker.advertises(AuthCredentialMethod))
+	require.False(t, broker.advertises("_claude/auth/unknown"))
 }
 
 func TestProviderAuthInjectionOptionFailsClosed(t *testing.T) {
@@ -651,7 +649,7 @@ func TestProviderAuthDispatchRoutesEveryAdvertisedLeg(t *testing.T) {
 	_, err = agent.HandleExtensionMethod(t.Context(), AuthCallbackMethod, authParams(t, map[string]any{
 		"sessionId":     string(sessionID),
 		"providerId":    authProviderID,
-		authFieldMethod: authMethodID,
+		authFieldMethod: authMethodLogin,
 		"flowId":        flow.FlowID,
 		"input":         testPastedValue,
 	}))
@@ -670,7 +668,7 @@ func TestProviderAuthDispatchRoutesEveryAdvertisedLeg(t *testing.T) {
 }
 
 func TestAuthFailedErrorCarriesTheClosedShape(t *testing.T) {
-	failure := &authFailedError{cause: authCauseTransport, providerID: authProviderID, method: authMethodID, flowID: "flow"}
+	failure := &authFailedError{cause: authCauseTransport, providerID: authProviderID, method: authMethodLogin, flowID: "flow"}
 	require.Equal(t, "claude_auth_failed: transport", failure.Error())
 
 	data, ok := failure.requestError().Data.(map[string]any)
@@ -678,7 +676,7 @@ func TestAuthFailedErrorCarriesTheClosedShape(t *testing.T) {
 	require.Equal(t, authFailedErrorTag, data[jsonFieldError])
 	require.Equal(t, true, data[authFieldRetryable])
 	require.Equal(t, authProviderID, data[authFieldProviderID])
-	require.Equal(t, authMethodID, data[authFieldMethod])
+	require.Equal(t, authMethodLogin, data[authFieldMethod])
 	require.Equal(t, "flow", data[authFieldFlowID])
 
 	bare := &authFailedError{cause: authCauseNativeVeto}
@@ -845,6 +843,7 @@ func TestConnectionIDIsRefusedAtEverySurfaceEntry(t *testing.T) {
 
 	require.NoError(t, broker.ledger.write(authLedgerRecord{
 		ProviderID:        authProviderID,
+		Method:            authMethodLogin,
 		ConnectionID:      testConnectionID,
 		BindingGeneration: 1,
 		State:             authLedgerConfirmed,

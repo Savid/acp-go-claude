@@ -329,7 +329,7 @@ func (a *Agent) capabilityMeta() map[string]any {
 		claudeMetaKey: map[string]any{
 			"fork": map[string]any{
 				"unstable":        true,
-				"method":          ForkSessionMethod,
+				jsonFieldMethod:   ForkSessionMethod,
 				"request":         "acp.UnstableForkSessionRequest JSON payload only",
 				jsonFieldResponse: "acp.UnstableForkSessionResponse JSON payload only",
 			},
@@ -339,14 +339,14 @@ func (a *Agent) capabilityMeta() map[string]any {
 				"tracks":   "in-progress ACP elicitation RFD",
 			},
 			"rawEvent": map[string]any{
-				"method":         RawEventMethod,
+				jsonFieldMethod:  RawEventMethod,
 				"enabledBy":      "_meta.claude.rawEvent.enabled",
 				"maxBytes":       rawEventMaxBytes,
 				"defaultEnabled": false,
 			},
 			"sessionStore": map[string]any{
-				"format": SessionStoreFormat,
-				"key":    []string{acpFieldSessionID, "subpath"},
+				"format":     SessionStoreFormat,
+				jsonFieldKey: []string{acpFieldSessionID, "subpath"},
 			},
 			"structuredOutput": map[string]any{
 				acpFieldConfig:  "_meta.claude.options.outputSchema",

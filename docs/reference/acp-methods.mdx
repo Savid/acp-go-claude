@@ -23,18 +23,19 @@ method-not-found error.
 | `_claude/auth/status` | client to agent |
 | `_claude/auth/cancel` | client to agent |
 | `_claude/auth/inventory` | client to agent |
+| `_claude/auth/credential` | client to agent |
 | `_claude/auth/disconnect` | client to agent |
 
 ### `_claude/auth/*`
 
-Session-scoped methods that broker Claude's hosted paste-back login. They exist
+Session-scoped methods that broker Claude's native login, setup tokens, and
+Anthropic API keys. They exist
 only while `WithProviderAuthRoot` names a usable durable directory, bare mode
 is disabled, and no agent-wide static authentication overrides that directory's login;
 otherwise every one returns method-not-found, and the initialize capability
-lists none.
-`_claude/auth/disconnect` additionally requires `WithProviderAuthDirectHome`
-equal to `WithHome`, so an adapter without that consent advertises six methods
-rather than seven. See [Authentication](/docs/features/authentication).
+lists none. Native-login disconnect requires `WithProviderAuthDirectHome`
+equal to `WithHome`; secret-backed disconnect only ends the recorded lineage.
+See [Authentication](/docs/features/authentication).
 
 | Method | Params | Result |
 | --- | --- | --- |
@@ -44,11 +45,12 @@ rather than seven. See [Authentication](/docs/features/authentication).
 | `_claude/auth/status` | `{sessionId, providerId, flowId}` | `{flowId, state, reason?}` |
 | `_claude/auth/cancel` | `{sessionId, providerId, flowId}` | `{flowId}` |
 | `_claude/auth/inventory` | `{sessionId}` | `{entries}` |
+| `_claude/auth/credential` | `{sessionId, providerId, flowId}` | `{connectionId, revision, bindingGeneration, credential}` |
 | `_claude/auth/disconnect` | `{sessionId, providerId, connectionId, bindingGeneration}` | `{}` |
 
 Every request and result object is closed: an unknown, duplicate, or misplaced
 field is rejected with `-32602` naming its path, and every time value is Unix
-epoch milliseconds. `state` is one of `pending`, `authenticated`, `failed`,
+epoch milliseconds. `state` is one of `pending`, `authenticated`, `saved`, `failed`,
 `cancelled`, or `expired`; `reason` appears only on the three terminal-negative
 states. `connectionId` is caller-minted and bounded to at most 128 bytes of
 `A-Z`, `a-z`, `0-9`, `-`, and `_`; every leg that carries one checks it before

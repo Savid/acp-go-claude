@@ -26,7 +26,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/new")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	metaOptions, err := claudeOptionsFromMeta(params.Meta)
+	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
 		return acp.NewSessionResponse{}, lifecycleMetaError(err)
 	}
@@ -70,7 +70,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/resume")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	metaOptions, err := claudeOptionsFromMeta(params.Meta)
+	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
 	}
@@ -92,7 +92,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		session.emitCurrentUsageUpdate(ctx)
 
 		resp = acp.ResumeSessionResponse{
-			Meta:          sessionResponseMeta(session),
+			Meta:          sessionReuseResponseMeta(session, metaOptions.ProviderAuth),
 			ConfigOptions: sessionConfigOptions(session),
 		}
 
@@ -134,7 +134,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/load")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	metaOptions, err := claudeOptionsFromMeta(params.Meta)
+	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
 		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
 	}
@@ -190,7 +190,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	session.emitCurrentUsageUpdate(ctx)
 
 	resp = acp.LoadSessionResponse{
-		Meta:          sessionResponseMeta(session),
+		Meta:          sessionLoadResponseMeta(session, metaOptions.ProviderAuth, startedSession),
 		ConfigOptions: sessionConfigOptions(session),
 	}
 
@@ -598,17 +598,22 @@ func sessionStartFingerprint(start sessionStart) string {
 		return strings.Compare(mcpServerName(left), mcpServerName(right))
 	})
 
+	metaOptions := start.MetaOptions
+	metaOptions.ProviderAuth = nil
+
 	data := struct {
 		Cwd                   string           `json:"cwd"`
 		AdditionalDirectories []string         `json:"additionalDirectories,omitempty"`
 		McpServers            []acp.McpServer  `json:"mcpServers,omitempty"`
 		MetaOptions           ClaudeOptions    `json:"metaOptions,omitzero"`
+		ProviderAuth          string           `json:"providerAuth,omitempty"`
 		RawMessages           rawMessageConfig `json:"rawMessages,omitzero"`
 	}{
 		Cwd:                   start.Cwd,
 		AdditionalDirectories: slices.Clone(start.AdditionalDirectories),
 		McpServers:            servers,
-		MetaOptions:           start.MetaOptions,
+		MetaOptions:           metaOptions,
+		ProviderAuth:          providerAuthFingerprint(start.MetaOptions.ProviderAuth),
 		RawMessages:           start.RawMessages,
 	}
 
@@ -722,6 +727,12 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 
 	env := mergeEnv(discoveredSettings.Env, a.options.Env)
 	env = mergeEnv(env, start.MetaOptions.Env)
+
+	injection := authInjectionResult{}
+	if a.providerAuth != nil {
+		injection = a.providerAuth.inject(ctx, env, start.MetaOptions.ProviderAuth)
+	}
+
 	env = a.observe.InjectTraceEnv(ctx, env)
 
 	if len(start.StoreEntries) > 0 {
@@ -860,6 +871,8 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		emittedAgentImages:    make(map[string]struct{}),
 		rawMessages:           start.RawMessages,
 		mcpRefreshPending:     len(start.McpServers) > 0,
+		providerAuthInjection: injection.outcome,
+		providerAuthResident:  injection.resident,
 	}
 	session.mirror = newSessionMirror(a.log, a.sessionStore(), processClaudeHome, session)
 	options.PermissionHandler = session.handlePermission

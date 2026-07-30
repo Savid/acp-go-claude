@@ -20,7 +20,7 @@ Initialize advertises capability descriptors under `_meta.claude`:
 | `rawEvent` | The raw-event opt-in (`enabledBy`, `maxBytes`, `defaultEnabled`). |
 | `sessionStore` | Store `format` and key shape. |
 | `structuredOutput` | Where the output schema is supplied and the result is emitted. |
-| `providerAuth` | Present only while `WithProviderAuthRoot` is usable, bare mode is disabled, and no agent-wide static authentication overrides the durable login. Carries `methods`, listing exactly the enabled `_claude/auth/*` names; an absent method is omitted and returns method-not-found. There is no `injectionKey`: this adapter accepts no credential injection, so `_meta.claude.options.providerAuth` is rejected like any other unknown option key. |
+| `providerAuth` | Present only while `WithProviderAuthRoot` is usable, bare mode is disabled, and no agent-wide static authentication owns the process. Carries `methods` and `injectionKey: "_meta.claude.options.providerAuth"`. Lifecycle injection accepts one strictly decoded `anthropic` binding with an `api` credential whose sole metadata entry is `env: "CLAUDE_CODE_OAUTH_TOKEN"` or `env: "ANTHROPIC_API_KEY"`. Responses report `_meta.claude.providerAuth.injection` as `applied`, `noop`, or `conflict`. |
 
 Initialize also advertises reserved envelopes separately from the Claude
 namespace:

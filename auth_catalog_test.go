@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -18,17 +19,17 @@ func TestAuthMethodsEnumeratesThePinnedCatalog(t *testing.T) {
 	require.True(t, ok)
 	require.NotEmpty(t, methods.Generation)
 	require.Len(t, methods.Providers, 1)
-	require.Equal(t, []authMethodEntry{{
-		ID:    authMethodID,
-		Type:  authMethodTypeOAuth,
-		Label: authMethodLabel,
-	}}, methods.Providers[authProviderID])
+	require.Equal(t, []authMethodEntry{
+		{ID: authMethodLogin, Type: authMethodTypeOAuth, Label: authMethodLoginLabel},
+		{ID: authMethodSetupToken, Type: authMethodTypeAPI, Label: authMethodSetupTokenLabel},
+		{ID: authMethodAPIKey, Type: authMethodTypeAPI, Label: authMethodAPIKeyLabel},
+	}, methods.Providers[authProviderID])
 
 	// The published entry is closed: no source, completeness, or prompt field
 	// rides along.
 	encoded, err := json.Marshal(methods.Providers[authProviderID][0])
 	require.NoError(t, err)
-	require.JSONEq(t, `{"id":"login","type":"oauth","label":"Claude account"}`, string(encoded))
+	require.JSONEq(t, `{"id":"login","type":"oauth","label":"Claude subscription"}`, string(encoded))
 
 	second := authCatalogGeneration(t, broker, sessionID)
 	require.NotEqual(t, methods.Generation, second)
@@ -75,6 +76,15 @@ func TestPublishAuthCatalogDropsAndFailsClosed(t *testing.T) {
 		authProviderID: {{ID: "only", Type: authMethodTypeOAuth, Label: "\u0000"}},
 	})
 	requireAuthFailed(t, err, authCauseNativeVeto)
+}
+
+func TestSecretPresentationRejectsAnUnsafeCatalogMessage(t *testing.T) {
+	broker, _ := newAuthBroker(t)
+	_, cause := broker.mintPresentation(t.Context(), &authFlow{
+		method:    authCatalogMethod{Type: authMethodTypeAPI, Message: "\x00"},
+		expiresAt: authNow().Add(time.Minute),
+	})
+	require.Equal(t, authCauseNativeVeto, cause)
 }
 
 func TestAuthDisplayTextNormalisesFirstAndBoundsTheNormalisedForm(t *testing.T) {
@@ -135,7 +145,7 @@ func TestAuthMethodsFailsClosedWhenNoCatalogCanBeProduced(t *testing.T) {
 	original := pinnedAuthCatalog
 
 	pinnedAuthCatalog = func() map[string][]authCatalogMethod {
-		return map[string][]authCatalogMethod{authProviderID: {{ID: authMethodID, Label: ""}}}
+		return map[string][]authCatalogMethod{authProviderID: {{ID: authMethodLogin, Label: ""}}}
 	}
 
 	t.Cleanup(func() { pinnedAuthCatalog = original })

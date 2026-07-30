@@ -99,9 +99,10 @@ providers.
 - Permission modes, permission prompts, plan mode, elicitation, and
   `AskUserQuestion` bridging.
 - MCP stdio and HTTP server declarations.
-- Brokered Claude login over session-scoped `_claude/auth/*` extension methods,
-  advertised only with a durable provider-auth root and no agent-wide static
-  authentication or bare mode.
+- Brokered Claude subscription login, setup-token entry, and Anthropic API-key
+  entry over session-scoped `_claude/auth/*` extension methods. Secret methods
+  use one-shot typed credential harvest and session injection; they never write
+  native credential files.
 - Store-authoritative transcript mirroring, in-memory by default and replaceable
   with a host-provided `SessionStore` for cross-process durability.
 - Optional raw Claude stream-json extension notifications.

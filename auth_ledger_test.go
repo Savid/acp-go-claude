@@ -158,6 +158,7 @@ func TestAuthLedgerWriteIsAtomicAndValuesFree(t *testing.T) {
 
 	record := authLedgerRecord{
 		ProviderID:         authProviderID,
+		Method:             authMethodLogin,
 		ConnectionID:       testConnectionID,
 		Revision:           2,
 		BindingGeneration:  3,
@@ -181,7 +182,7 @@ func TestAuthLedgerWriteIsAtomicAndValuesFree(t *testing.T) {
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(contents, &decoded))
 	require.ElementsMatch(t, []string{
-		"providerId", "connectionId", "revision", "bindingGeneration",
+		"providerId", "method", "connectionId", "revision", "bindingGeneration",
 		"flowId", "authorizeRequestId", "state", "createdAt", "updatedAt",
 	}, keysOf(decoded))
 
@@ -409,7 +410,11 @@ func TestInventoryFailures(t *testing.T) {
 
 	ledgerReadDir = original
 
-	require.NoError(t, broker.ledger.write(authLedgerRecord{ProviderID: authProviderID, State: authLedgerConfirmed}))
+	require.NoError(t, broker.ledger.write(authLedgerRecord{
+		ProviderID: authProviderID,
+		Method:     authMethodLogin,
+		State:      authLedgerConfirmed,
+	}))
 
 	seams.statusErr = errTestRandom
 
@@ -488,6 +493,28 @@ func TestDisconnectRefusesAHomeReplacedAfterConsent(t *testing.T) {
 	require.Zero(t, seams.removeCalls)
 }
 
+func TestNativeDisconnectWithoutDirectHomeConsentFailsBeforeMutation(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+	flow := startAuthFlow(t, broker, sessionID)
+	_, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), flow.FlowID, testPastedValue)))
+	require.NoError(t, err)
+
+	before, ok, err := broker.ledger.read(authProviderID)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	_, err = broker.disconnect(t.Context(), authParams(t, disconnectParams(sessionID, before.BindingGeneration)))
+	requireAuthFailed(t, err, authCausePolicy)
+
+	after, ok, err := broker.ledger.read(authProviderID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, before, after)
+	require.Zero(t, seams.logoutCalls)
+	require.Zero(t, seams.removeCalls)
+}
+
 func TestDisconnectFencesEveryMismatch(t *testing.T) {
 	newAuthSeams(t)
 
@@ -513,6 +540,7 @@ func TestDisconnectFencesEveryMismatch(t *testing.T) {
 
 	require.NoError(t, broker.ledger.write(authLedgerRecord{
 		ProviderID:        authProviderID,
+		Method:            authMethodLogin,
 		ConnectionID:      testConnectionID,
 		BindingGeneration: 1,
 		State:             authLedgerConfirmed,
@@ -596,6 +624,7 @@ func TestDisconnectNativeFailures(t *testing.T) {
 			broker, sessionID := newDisconnectBroker(t)
 			require.NoError(t, broker.ledger.write(authLedgerRecord{
 				ProviderID:        authProviderID,
+				Method:            authMethodLogin,
 				ConnectionID:      testConnectionID,
 				BindingGeneration: 1,
 				State:             authLedgerConfirmed,
@@ -616,6 +645,7 @@ func TestDisconnectFailsWhenTheRemovalCannotBeRecorded(t *testing.T) {
 	broker, sessionID := newDisconnectBroker(t)
 	require.NoError(t, broker.ledger.write(authLedgerRecord{
 		ProviderID:        authProviderID,
+		Method:            authMethodLogin,
 		ConnectionID:      testConnectionID,
 		BindingGeneration: 1,
 		State:             authLedgerConfirmed,
@@ -644,6 +674,7 @@ func TestRecordAuthorizeIntentCarriesTheEarlierBinding(t *testing.T) {
 
 	require.NoError(t, broker.ledger.write(authLedgerRecord{
 		ProviderID:        authProviderID,
+		Method:            authMethodLogin,
 		Revision:          4,
 		BindingGeneration: 7,
 		CreatedAt:         11,

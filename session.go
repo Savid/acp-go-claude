@@ -37,6 +37,7 @@ const (
 	jsonFieldRequest              = "request"
 	jsonFieldResponse             = "response"
 	jsonFieldResult               = "result"
+	jsonFieldKey                  = "key"
 	jsonFieldSHA256               = "sha256"
 	jsonFieldServer               = "server"
 	jsonFieldSubpath              = "subpath"
@@ -156,6 +157,8 @@ type agentSession struct {
 	advertisedCommands    []acp.AvailableCommand
 	contextWindowSize     int
 	poisonCause           string
+	providerAuthInjection string
+	providerAuthResident  map[string]authInjectedLineage
 
 	client *claude.Client
 	// clientOptions holds the fully-built options used to launch the Claude

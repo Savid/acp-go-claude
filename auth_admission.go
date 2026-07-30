@@ -236,6 +236,14 @@ func (p *providerAuth) fenceLogins() {
 	logins := make([]*authLoginHandle, 0, len(p.flows))
 
 	for _, flow := range p.flows {
+		if flow.state == authStateSaved {
+			flow.dropCredential()
+			flow.state = authStateCancelled
+			flow.reason = authReasonOwnerCancel
+
+			continue
+		}
+
 		if authTerminal(flow.state) {
 			continue
 		}

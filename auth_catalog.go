@@ -10,18 +10,32 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// The catalog is pinned and singular: the harness exposes one hosted paste-back
-// login, driven through the `auth login` line grammar, against the account the
-// config dir already names.
+// The pinned catalog exposes Claude's three first-party authentication paths.
 const (
-	authProviderID  = "anthropic"
-	authMethodID    = "login"
-	authMethodLabel = "Claude account"
+	authProviderID = "anthropic"
+
+	authMethodLogin      = "login"
+	authMethodSetupToken = "setup-token"
+	authMethodAPIKey     = "api-key"
 )
 
-// authMethodTypeOAuth is the only method type in this catalog. There is no
-// api-type entry, so no leg here ever presents an interaction of "secret".
-const authMethodTypeOAuth = "oauth"
+const (
+	authMethodTypeOAuth = "oauth"
+	authMethodTypeAPI   = "api"
+)
+
+const (
+	authMethodLoginLabel      = "Claude subscription"
+	authMethodSetupTokenLabel = "Claude setup token"
+	authMethodAPIKeyLabel     = "Anthropic API key" //nolint:gosec // UI label, not a credential.
+
+	authMethodLoginMessage      = "Sign in with your Claude subscription."
+	authMethodSetupTokenMessage = "Run `claude setup-token`, then paste the generated token." //nolint:gosec // UI guidance, not a credential.
+	authMethodAPIKeyMessage     = "Paste an API key from the Anthropic Console."              //nolint:gosec // UI guidance, not a credential.
+	authMethodLoginInput        = "code"
+	authMethodSetupTokenInput   = "setup token"
+	authMethodAPIKeyInput       = "API key"
+)
 
 // Display-field bounds. A value violating its bound is dropped, never
 // truncated, and the leg then fails closed.
@@ -33,15 +47,17 @@ const (
 
 // authCatalogMethod is one entry of the current catalog.
 type authCatalogMethod struct {
-	ID          string
-	Type        string
-	Label       string
-	Interaction string
+	ID            string
+	Type          string
+	Label         string
+	Message       string
+	Interaction   string
+	CallbackInput string
+	Environment   string
 }
 
-// authMethodEntry is one published catalog entry. The pinned method asks no
-// prompts, so the object carries none: `prompts` is optional on this surface and
-// an empty array would claim a schema nobody has.
+// authMethodEntry is one published catalog entry. Credentials are submitted
+// through callback, so none of the methods carries pre-authorize prompts.
 type authMethodEntry struct {
 	ID    string `json:"id"`
 	Type  string `json:"type"`
@@ -57,12 +73,34 @@ type authMethodsResult struct {
 // and no source label, and free entry of an unlisted provider is never offered.
 var pinnedAuthCatalog = func() map[string][]authCatalogMethod {
 	return map[string][]authCatalogMethod{
-		authProviderID: {{
-			ID:          authMethodID,
-			Type:        authMethodTypeOAuth,
-			Label:       authMethodLabel,
-			Interaction: authInteractionCallback,
-		}},
+		authProviderID: {
+			{
+				ID:            authMethodLogin,
+				Type:          authMethodTypeOAuth,
+				Label:         authMethodLoginLabel,
+				Message:       authMethodLoginMessage,
+				Interaction:   authInteractionCallback,
+				CallbackInput: authMethodLoginInput,
+			},
+			{
+				ID:            authMethodSetupToken,
+				Type:          authMethodTypeAPI,
+				Label:         authMethodSetupTokenLabel,
+				Message:       authMethodSetupTokenMessage,
+				Interaction:   authInteractionSecret,
+				CallbackInput: authMethodSetupTokenInput,
+				Environment:   providerAuthEnvClaudeOAuthToken,
+			},
+			{
+				ID:            authMethodAPIKey,
+				Type:          authMethodTypeAPI,
+				Label:         authMethodAPIKeyLabel,
+				Message:       authMethodAPIKeyMessage,
+				Interaction:   authInteractionSecret,
+				CallbackInput: authMethodAPIKeyInput,
+				Environment:   providerAuthEnvAnthropicAPIKey,
+			},
+		},
 	}
 }
 
@@ -187,10 +225,8 @@ func authDisplayURL(value string) (string, bool) {
 	return normalized, true
 }
 
-// validateAuthInputs checks values, not merely the key set. The pinned method
-// advertises no prompts, so every supplied key answers a prompt nobody asked and
-// the whole object is rejected. A rejected value is never persisted, logged, or
-// echoed.
+// validateAuthInputs rejects answers to prompts the pinned catalog does not
+// advertise.
 func validateAuthInputs(inputs map[string]string) error {
 	if len(inputs) > 0 {
 		return invalidAuthField(authFieldInputs)

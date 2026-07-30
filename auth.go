@@ -16,9 +16,7 @@ import (
 	"github.com/savid/acp-go-claude/internal/claude"
 )
 
-// Session-scoped provider-auth extension methods. Claude brokers no credential
-// back out — a completed login installs into the config dir the harness already
-// owns — so there is no credential leg and no injection key.
+// Session-scoped provider-auth extension methods.
 const (
 	AuthMethodsMethod    = "_claude/auth/methods"
 	AuthAuthorizeMethod  = "_claude/auth/authorize"
@@ -26,12 +24,15 @@ const (
 	AuthStatusMethod     = "_claude/auth/status"
 	AuthCancelMethod     = "_claude/auth/cancel"
 	AuthInventoryMethod  = "_claude/auth/inventory"
+	AuthCredentialMethod = "_claude/auth/credential" //nolint:gosec // Protocol method name, not a credential.
 	AuthDisconnectMethod = "_claude/auth/disconnect"
 )
 
 const (
 	providerAuthCapabilityKey = "providerAuth"
 	providerAuthMethodsField  = "methods"
+	providerAuthInjectionKey  = "injectionKey"
+	providerAuthOptionPath    = "_meta.claude.options.providerAuth"
 
 	authFailedErrorTag = "claude_auth_failed"
 
@@ -69,15 +70,29 @@ const (
 )
 
 const (
-	providerAuthEnvAnthropicAPIKey  = "ANTHROPIC_API_KEY"       //nolint:gosec // Environment variable name, not a credential.
-	providerAuthEnvAnthropicToken   = "ANTHROPIC_AUTH_TOKEN"    //nolint:gosec // Environment variable name, not a credential.
-	providerAuthEnvClaudeOAuthToken = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // Environment variable name, not a credential.
+	providerAuthEnvAnthropicAPIKey  = "ANTHROPIC_API_KEY"     //nolint:gosec // Environment variable name, not a credential.
+	providerAuthEnvAnthropicToken   = "ANTHROPIC_AUTH_TOKEN"  //nolint:gosec // Environment variable name, not a credential.
+	providerAuthEnvAnthropicAWSKey  = "ANTHROPIC_AWS_API_KEY" //nolint:gosec // Environment variable name, not a credential.
+	providerAuthEnvAnthropicFoundry = "ANTHROPIC_FOUNDRY_API_KEY"
+	providerAuthEnvFoundryToken     = "ANTHROPIC_FOUNDRY_AUTH_TOKEN" //nolint:gosec // Environment variable name, not a credential.
+	providerAuthEnvBedrockToken     = "AWS_BEARER_TOKEN_BEDROCK"     //nolint:gosec // Environment variable name, not a credential.
+	providerAuthEnvClaudeOAuthToken = "CLAUDE_CODE_OAUTH_TOKEN"      //nolint:gosec // Environment variable name, not a credential.
+	providerAuthEnvUseBedrock       = "CLAUDE_CODE_USE_BEDROCK"      //nolint:gosec // Environment variable name, not a credential.
+	providerAuthEnvUseFoundry       = "CLAUDE_CODE_USE_FOUNDRY"
+	providerAuthEnvUseVertex        = "CLAUDE_CODE_USE_VERTEX"
 )
 
 var providerAuthCredentialEnvNames = [...]string{
 	providerAuthEnvAnthropicAPIKey,
 	providerAuthEnvAnthropicToken,
+	providerAuthEnvAnthropicAWSKey,
+	providerAuthEnvAnthropicFoundry,
+	providerAuthEnvFoundryToken,
+	providerAuthEnvBedrockToken,
 	providerAuthEnvClaudeOAuthToken,
+	providerAuthEnvUseBedrock,
+	providerAuthEnvUseFoundry,
+	providerAuthEnvUseVertex,
 }
 
 const (
@@ -105,8 +120,7 @@ type providerAuth struct {
 	// once here rather than per leg.
 	home providerAuthHome
 	// directHome reports whether the operator named this exact native home as
-	// one a native account-level removal may clear. Without it the disconnect
-	// leg is absent from the advertisement and returns method-not-found.
+	// one a native account-level removal may clear.
 	directHome bool
 
 	mu         sync.Mutex
@@ -330,27 +344,23 @@ func validateProviderAuthDirectHome(directHome string) error {
 // reports them. An absent leg is omitted rather than reported false, because
 // the array is the host's only discovery surface for which legs exist.
 func (p *providerAuth) authMethodNames() []string {
-	names := []string{
+	return []string{
 		AuthMethodsMethod,
 		AuthAuthorizeMethod,
 		AuthCallbackMethod,
 		AuthStatusMethod,
 		AuthCancelMethod,
 		AuthInventoryMethod,
+		AuthCredentialMethod,
+		AuthDisconnectMethod,
 	}
-
-	if p.directHome {
-		names = append(names, AuthDisconnectMethod)
-	}
-
-	return names
 }
 
-// capability reports the enabled leg names. Claude carries no injection key:
-// the option field is unsupported and fails closed with its path like any other
-// unknown key.
 func (p *providerAuth) capability() map[string]any {
-	return map[string]any{providerAuthMethodsField: p.authMethodNames()}
+	return map[string]any{
+		providerAuthMethodsField: p.authMethodNames(),
+		providerAuthInjectionKey: providerAuthOptionPath,
+	}
 }
 
 func (p *providerAuth) advertises(method string) bool {
@@ -368,7 +378,7 @@ func (p *providerAuth) advertises(method string) bool {
 // falls through to the uniform method-not-found.
 func (a *Agent) handleAuthExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, bool, error) {
 	broker := a.providerAuth
-	if broker == nil || !broker.advertises(method) {
+	if broker == nil {
 		return nil, false, nil
 	}
 
@@ -397,10 +407,16 @@ func (a *Agent) handleAuthExtensionMethod(ctx context.Context, method string, pa
 		result, err := broker.inventory(ctx, params)
 
 		return result, true, err
-	default:
+	case AuthCredentialMethod:
+		result, err := broker.credential(ctx, params)
+
+		return result, true, err
+	case AuthDisconnectMethod:
 		result, err := broker.disconnect(ctx, params)
 
 		return result, true, err
+	default:
+		return nil, false, nil
 	}
 }
 

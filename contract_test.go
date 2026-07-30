@@ -594,6 +594,7 @@ func TestProviderAuthAdvertisedLegsMatchWhatAnswers(t *testing.T) {
 			advertise: []string{
 				AuthMethodsMethod, AuthAuthorizeMethod, AuthCallbackMethod,
 				AuthStatusMethod, AuthCancelMethod, AuthInventoryMethod,
+				AuthCredentialMethod, AuthDisconnectMethod,
 			},
 		},
 		{
@@ -601,7 +602,8 @@ func TestProviderAuthAdvertisedLegsMatchWhatAnswers(t *testing.T) {
 			options: []Option{WithHome(home), WithProviderAuthDirectHome(home)},
 			advertise: []string{
 				AuthMethodsMethod, AuthAuthorizeMethod, AuthCallbackMethod,
-				AuthStatusMethod, AuthCancelMethod, AuthInventoryMethod, AuthDisconnectMethod,
+				AuthStatusMethod, AuthCancelMethod, AuthInventoryMethod,
+				AuthCredentialMethod, AuthDisconnectMethod,
 			},
 		},
 	} {
@@ -617,7 +619,8 @@ func TestProviderAuthAdvertisedLegsMatchWhatAnswers(t *testing.T) {
 			capability, ok := vendor[providerAuthCapabilityKey].(map[string]any)
 			require.True(t, ok)
 			require.Equal(t, testCase.advertise, capability[providerAuthMethodsField])
-			require.Len(t, capability, 1)
+			require.Len(t, capability, 2)
+			require.Equal(t, providerAuthOptionPath, capability[providerAuthInjectionKey])
 
 			advertised := make(map[string]struct{}, len(testCase.advertise))
 			for _, name := range testCase.advertise {
@@ -659,6 +662,7 @@ func TestProviderAuthStateReasonMatrixIsClosed(t *testing.T) {
 	legal := map[string][]string{
 		authStatePending:       {""},
 		authStateAuthenticated: {""},
+		authStateSaved:         {""},
 		authStateFailed: {
 			authReasonProviderRefused, authReasonNativeVeto, authReasonTransport,
 			authReasonProcess, authReasonAcceptanceUnknown, authReasonHarvestFailed,

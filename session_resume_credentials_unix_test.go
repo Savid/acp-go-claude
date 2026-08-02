@@ -56,10 +56,13 @@ const (
 
 // TestKeystoreResidenceMatrix pins where a claude credential lives, in all three
 // configurations the tier drives: keystore-absent Linux, keystore-present Linux,
-// and macOS. The plaintext store under the config dir is unconditionally
-// authoritative — a live keystore holding a canary under every documented claude
-// service name changes no answer the read path gives — and the file it reads is
-// 0600.
+// and macOS. On Linux the plaintext store under the config dir is
+// unconditionally authoritative — a live Secret Service holding a canary under
+// every documented claude service name changes no answer the read path gives —
+// and the file it reads is 0600. On macOS the file leg keeps that same answer,
+// while the resume copy prefers the login keychain item the config dir owns,
+// because a native login writes only the keychain and the CLI prefers that item
+// over any file beside it.
 func TestKeystoreResidenceMatrix(t *testing.T) {
 	requireResidenceTier(t)
 	seedResidenceKeystore(t)
@@ -237,6 +240,8 @@ func assertDarwinRemovalClearsPresentItems(t *testing.T, account string) {
 		require.NoError(t, find.Run(), "item %q was not seeded, so removing it proves nothing", item.Service)
 	}
 
+	assertDarwinReadLegCarriesSeededItems(t, account)
+
 	require.NoError(t, claude.RemoveAuthKeychainItems(t.Context(), keystoreDarwinConfigDir, account))
 
 	for _, item := range items {
@@ -244,6 +249,33 @@ func assertDarwinRemovalClearsPresentItems(t *testing.T, account string) {
 			"-s", item.Service, "-a", item.Account)
 		require.Error(t, find.Run(), "item %q survived the removal ladder", item.Service)
 	}
+
+	absent, err := claude.ReadAuthKeychainCredential(t.Context(), keystoreDarwinConfigDir, account)
+	require.NoError(t, err)
+	require.Nil(t, absent, "the read leg answered from an item the removal ladder cleared")
+}
+
+// assertDarwinReadLegCarriesSeededItems drives the read leg against the seeded
+// production-shaped items while they are present: first the raw keystore read,
+// then the resume copy end to end, which must land the blob as the plaintext
+// credential file a materialized temp home runs on.
+func assertDarwinReadLegCarriesSeededItems(t *testing.T, account string) {
+	t.Helper()
+
+	data, err := claude.ReadAuthKeychainCredential(t.Context(), keystoreDarwinConfigDir, account)
+	require.NoError(t, err)
+	require.Equal(t, residenceCanary, string(data))
+
+	if account != os.Getenv("USER") {
+		return
+	}
+
+	destination := t.TempDir()
+	require.NoError(t, copyClaudeResumeCredential(keystoreDarwinConfigDir, destination))
+
+	carried, err := os.ReadFile(filepath.Join(destination, claudeResumeCredentialFile))
+	require.NoError(t, err)
+	require.Equal(t, residenceCanary, string(carried))
 }
 
 // residenceDarwinAccount names the account half of the item this test owns.

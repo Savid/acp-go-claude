@@ -56,6 +56,23 @@ func AuthKeychainItems(configDir string, user string) []AuthKeychainItem {
 	return items
 }
 
+// AuthKeychainCredentialItems lists the items that may hold a config dir's
+// composite OAuth credential blob, across both reachable name shapes. The
+// legacy API-key item is excluded: it never holds the composite credential,
+// so a read that consulted it would hand a bare key to a caller expecting the
+// blob.
+func AuthKeychainCredentialItems(configDir string, user string) []AuthKeychainItem {
+	hash := authKeychainHash(configDir)
+	account := authKeychainAccount(user)
+	items := make([]AuthKeychainItem, 0, len(authKeychainServicePrefixes))
+
+	for _, prefix := range authKeychainServicePrefixes {
+		items = append(items, AuthKeychainItem{Service: prefix + "-credentials-" + hash, Account: account})
+	}
+
+	return items
+}
+
 func authKeychainHash(configDir string) string {
 	sum := sha256.Sum256([]byte(configDir))
 

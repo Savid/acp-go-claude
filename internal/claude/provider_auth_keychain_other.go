@@ -17,3 +17,12 @@ import "context"
 func RemoveAuthKeychainItems(_ context.Context, _ string, _ string) error {
 	return nil
 }
+
+// ReadAuthKeychainCredential has nothing to read outside Darwin, for the same
+// residence reasons removal has nothing to remove: on Linux the plaintext
+// store under the config dir is the only credential residence, and on Windows
+// no Credential Manager item-name shape is pinned here. Absence, not an
+// error, is the truthful answer.
+func ReadAuthKeychainCredential(_ context.Context, _ string, _ string) ([]byte, error) {
+	return nil, nil
+}

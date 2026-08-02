@@ -37,12 +37,29 @@ var (
 	resumeCredentialRootRemove = func(root *os.Root, name string) error { return root.Remove(name) }
 	resumeCredentialFileWrite  = func(file *os.File, data []byte) (int, error) { return file.Write(data) }
 	resumeCredentialFileChmod  = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
+
+	// resumeCredentialKeystore is the platform keystore leg of the resume
+	// copy. On darwin it reads the login Keychain item a native login stores
+	// for the source config dir; elsewhere it answers absence. A package
+	// variable so unit tests exercise the precedence without a real keystore.
+	resumeCredentialKeystore = readClaudeResumeKeychainCredential
 )
 
 func copyClaudeResumeCredential(source string, destination string) error {
-	data, err := readClaudeResumeCredential(source)
-	if err != nil || data == nil {
+	// The keystore is consulted before the plaintext file because the CLI
+	// itself prefers its Keychain item when both exist: a config dir can hold
+	// a stale credential file beside a live Keychain item, and carrying the
+	// file would resume the session logged out.
+	data, err := resumeCredentialKeystore(source)
+	if err != nil {
 		return err
+	}
+
+	if data == nil {
+		data, err = readClaudeResumeCredential(source)
+		if err != nil || data == nil {
+			return err
+		}
 	}
 	defer clear(data)
 

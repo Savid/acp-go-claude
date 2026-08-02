@@ -27,7 +27,11 @@ The adapter mirrors Claude transcript rows into the store as the turn streams
 and uses the store as the sole authority for `session/list`, `session/load`,
 `session/resume`, and inactive-session fork. Restore always hydrates the
 authoritative rows into an isolated temporary Claude config directory under the
-scratch directory (default: system temp).
+scratch directory (default: system temp). The source config directory's
+credential travels into that temporary directory as `.credentials.json`; on
+macOS the login Keychain item the config directory owns is read first, because
+a native login stores the credential only there and the CLI prefers that item
+over any file beside it.
 
 Claude's native transcript is a process cache, not a discovery or restore
 authority. An inactive native transcript whose session id has no main store

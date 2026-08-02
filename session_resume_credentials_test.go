@@ -65,6 +65,104 @@ func TestCopyClaudeResumeCredentialMissingPreservesFirstTurnAuthContract(t *test
 	require.NoFileExists(t, filepath.Join(destination, claudeResumeCredentialFile))
 }
 
+func TestCopyClaudeResumeCredentialCarriesTheKeystoreBlobWithoutASourceFile(t *testing.T) {
+	stubResumeCredentialKeystore(t, func(string) ([]byte, error) {
+		return []byte(`{"claudeAiOauth":{"accessToken":"keystore-secret"}}`), nil
+	})
+
+	// A natively logged-in darwin home holds no credential file at all; the
+	// keystore leg is the only way a resumed session stays logged in.
+	source := t.TempDir()
+	destination := t.TempDir()
+
+	require.NoError(t, copyClaudeResumeCredential(source, destination))
+
+	copied, err := os.ReadFile(filepath.Join(destination, claudeResumeCredentialFile))
+	require.NoError(t, err)
+	require.JSONEq(t, `{"claudeAiOauth":{"accessToken":"keystore-secret"}}`, string(copied))
+}
+
+func TestCopyClaudeResumeCredentialPrefersTheKeystoreOverAStaleFile(t *testing.T) {
+	stubResumeCredentialKeystore(t, func(string) ([]byte, error) {
+		return []byte(`{"claudeAiOauth":{"accessToken":"keystore-fresh"}}`), nil
+	})
+
+	source := t.TempDir()
+	destination := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(source, claudeResumeCredentialFile),
+		[]byte(`{"claudeAiOauth":{"accessToken":"file-stale"}}`),
+		0o600,
+	))
+
+	require.NoError(t, copyClaudeResumeCredential(source, destination))
+
+	copied, err := os.ReadFile(filepath.Join(destination, claudeResumeCredentialFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(copied), "file-stale")
+	require.JSONEq(t, `{"claudeAiOauth":{"accessToken":"keystore-fresh"}}`, string(copied))
+}
+
+func TestCopyClaudeResumeCredentialFallsBackToTheFileWhenTheKeystoreIsAbsent(t *testing.T) {
+	stubResumeCredentialKeystore(t, func(string) ([]byte, error) { return nil, nil })
+
+	source := t.TempDir()
+	destination := t.TempDir()
+	credential := []byte(`{"claudeAiOauth":{"accessToken":"file-secret"}}`)
+	require.NoError(t, os.WriteFile(filepath.Join(source, claudeResumeCredentialFile), credential, 0o600))
+
+	require.NoError(t, copyClaudeResumeCredential(source, destination))
+
+	copied, err := os.ReadFile(filepath.Join(destination, claudeResumeCredentialFile))
+	require.NoError(t, err)
+	require.Equal(t, credential, copied)
+}
+
+func TestCopyClaudeResumeCredentialReportsAKeystoreFailureWithoutFallingBack(t *testing.T) {
+	want := errors.New("keystore refused")
+
+	stubResumeCredentialKeystore(t, func(string) ([]byte, error) { return nil, want })
+
+	// Falling back to the file here could silently resume on a stale
+	// credential the CLI itself would not have used.
+	source := t.TempDir()
+	destination := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(source, claudeResumeCredentialFile),
+		[]byte(`{"claudeAiOauth":{"accessToken":"file-stale"}}`),
+		0o600,
+	))
+
+	err := copyClaudeResumeCredential(source, destination)
+	require.ErrorIs(t, err, want)
+	require.NoFileExists(t, filepath.Join(destination, claudeResumeCredentialFile))
+}
+
+func TestCopyClaudeResumeCredentialRejectsAMalformedKeystoreBlob(t *testing.T) {
+	secret := "keystore-secret-malformed"
+
+	stubResumeCredentialKeystore(t, func(string) ([]byte, error) {
+		return []byte(`{"accessToken":"` + secret + `"`), nil
+	})
+
+	source := t.TempDir()
+	destination := t.TempDir()
+
+	err := copyClaudeResumeCredential(source, destination)
+	require.ErrorIs(t, err, errClaudeResumeCredentialMalformed)
+	requireSecretSafeCredentialError(t, err, source, secret)
+	require.NoFileExists(t, filepath.Join(destination, claudeResumeCredentialFile))
+}
+
+func stubResumeCredentialKeystore(t *testing.T, stub func(string) ([]byte, error)) {
+	t.Helper()
+
+	original := resumeCredentialKeystore
+	t.Cleanup(func() { resumeCredentialKeystore = original })
+
+	resumeCredentialKeystore = stub
+}
+
 func TestCopyClaudeResumeCredentialRejectsUnsafeSources(t *testing.T) {
 	t.Run("symlink", func(t *testing.T) {
 		source := t.TempDir()

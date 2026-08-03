@@ -128,6 +128,49 @@ func TestBuildEnv(t *testing.T) {
 	require.Contains(t, env, "X_TEST=1")
 }
 
+func TestBuildEnvPrependsExtraPathDirs(t *testing.T) {
+	separator := string(os.PathListSeparator)
+
+	t.Setenv(envSearchPath, "/usr/bin"+separator+"/bin")
+
+	env := BuildEnv(Options{ExtraPathDirs: []string{"/session/bin", "/shared/bin"}})
+
+	require.Equal(t, 1, countEnvKey(env, envSearchPath))
+	require.Contains(t, env, envSearchPath+"=/session/bin"+separator+"/shared/bin"+separator+"/usr/bin"+separator+"/bin")
+}
+
+// TestBuildEnvExtraPathDirsOutrankAnOverriddenPath pins the precedence between
+// the two ways a PATH reaches the child: an explicit Env override replaces the
+// inherited value, and the extra dirs still lead it.
+func TestBuildEnvExtraPathDirsOutrankAnOverriddenPath(t *testing.T) {
+	separator := string(os.PathListSeparator)
+
+	t.Setenv(envSearchPath, "/inherited/bin")
+
+	env := BuildEnv(Options{
+		Env:           map[string]string{envSearchPath: "/override/bin"},
+		ExtraPathDirs: []string{"/session/bin"},
+	})
+
+	require.Equal(t, 1, countEnvKey(env, envSearchPath))
+	require.Contains(t, env, envSearchPath+"=/session/bin"+separator+"/override/bin")
+}
+
+func TestBuildEnvExtraPathDirsWithoutInheritedPath(t *testing.T) {
+	originalEnviron := commandEnviron
+	t.Cleanup(func() {
+		commandEnviron = originalEnviron
+	})
+
+	commandEnviron = func() []string {
+		return []string{"GOOD=1"}
+	}
+
+	env := BuildEnv(Options{ExtraPathDirs: []string{"/session/bin"}})
+
+	require.Contains(t, env, envSearchPath+"=/session/bin")
+}
+
 func TestBuildEnvSkipsInvalidProcessEntries(t *testing.T) {
 	originalEnviron := commandEnviron
 	t.Cleanup(func() {

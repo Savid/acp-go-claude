@@ -12,6 +12,10 @@ type Options struct {
 
 	ClaudeHome string
 	Env        map[string]string
+	// ExtraPathDirs are absolute directories prepended, in order, to the child's
+	// PATH. They shadow every inherited entry, so an executable named here wins
+	// over the one the operator's PATH would otherwise resolve.
+	ExtraPathDirs []string
 	// ScratchParent is the already-resolved directory every ephemeral
 	// wrapper-owned directory is created beneath. The login leg materialises
 	// its browser shim here, so it is set only where a child can launch one.

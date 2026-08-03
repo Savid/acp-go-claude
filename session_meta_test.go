@@ -1,8 +1,12 @@
 package claudeacp
 
 import (
+	"context"
+	"log/slog"
 	"testing"
 
+	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
 
@@ -13,6 +17,7 @@ func TestClaudeOptionsMetaAndParsing(t *testing.T) {
 		Model:          "sonnet",
 		Bare:           true,
 		Env:            map[string]string{"ANTHROPIC_BASE_URL": "https://example.test"},
+		ExtraPathDirs:  []string{"/opt/session/bin"},
 		OutputSchema:   map[string]any{"type": "object"},
 		SystemPrompt:   "system",
 		PermissionMode: permissionModeDontAsk,
@@ -23,14 +28,47 @@ func TestClaudeOptionsMetaAndParsing(t *testing.T) {
 	require.Equal(t, options, parsed)
 
 	options.Env["ANTHROPIC_BASE_URL"] = "changed"
+	options.ExtraPathDirs[0] = "/changed"
 	options.OutputSchema["type"] = "changed"
 	require.Equal(t, "https://example.test", parsed.Env["ANTHROPIC_BASE_URL"])
+	require.Equal(t, []string{"/opt/session/bin"}, parsed.ExtraPathDirs)
 	require.Equal(t, "object", parsed.OutputSchema["type"])
 
 	jsonSchema := outputSchemaJSONSchema(parsed.OutputSchema)
 	jsonSchema["type"] = "changed-again"
 	require.Equal(t, "object", parsed.OutputSchema["type"])
 	require.Nil(t, outputSchemaJSONSchema(nil))
+}
+
+// TestStartSessionCarriesExtraPathDirsToLaunch pins the plumbing seam: the
+// session-scoped dirs must reach the launched process options in request order,
+// because that order is what makes the caller's directory shadow the harness's
+// own resolution.
+func TestStartSessionCarriesExtraPathDirsToLaunch(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
+	sessionID := acp.SessionId("17171717-1717-4717-8717-171717171717")
+
+	agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+
+	var captured claude.Options
+	transport := newFakeClaudeTransport()
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		captured = options
+
+		return claude.NewClient(log, options, transport)
+	}
+
+	session, err := agent.startSession(ctx, sessionID, sessionStart{
+		Cwd: cwd,
+		MetaOptions: ClaudeOptions{
+			ExtraPathDirs: []string{"/opt/session/bin", "/opt/shared/bin"},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"/opt/session/bin", "/opt/shared/bin"}, captured.ExtraPathDirs)
+
+	require.NoError(t, session.Close(ctx))
 }
 
 func TestCloneStringMap(t *testing.T) {
@@ -144,6 +182,26 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 			wantErr: "is not a valid environment variable name",
 		},
 		{
+			name:    "extra path dirs not array",
+			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: "/opt/bin"}}},
+			wantErr: "_meta.claude.options.extraPathDirs",
+		},
+		{
+			name:    "extra path dirs entry not string",
+			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{"/opt/bin", 1}}}},
+			wantErr: "_meta.claude.options.extraPathDirs[1]",
+		},
+		{
+			name:    "extra path dirs entry relative",
+			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{"/opt/bin", "relative/bin"}}}},
+			wantErr: `_meta.claude.options.extraPathDirs[1] must be an absolute path: "relative/bin"`,
+		},
+		{
+			name:    "extra path dirs entry empty",
+			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{""}}}},
+			wantErr: "must be an absolute path",
+		},
+		{
 			name:    "unknown option",
 			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{"extra": true}}},
 			wantErr: "_meta.claude.options.extra",
@@ -179,6 +237,14 @@ func TestClaudeMetaSmallHelpers(t *testing.T) {
 	env, err := stringMapOption(map[string]string{"A": "B"}, "env")
 	require.NoError(t, err)
 	require.Equal(t, map[string]string{"A": "B"}, env)
+
+	dirs, err := stringSliceOption([]string{"/a"}, metaExtraPathDirsKey)
+	require.NoError(t, err)
+	require.Equal(t, []string{"/a"}, dirs)
+
+	dirs, err = stringSliceOption([]any{"/a", "/b"}, metaExtraPathDirsKey)
+	require.NoError(t, err)
+	require.Equal(t, []string{"/a", "/b"}, dirs)
 
 	_, err = validateOutputSchema(map[string]any{})
 	require.ErrorContains(t, err, "must be a non-empty object")

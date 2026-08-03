@@ -111,6 +111,7 @@ Session-lifecycle requests accept options and raw-event opt-in:
         "permissionMode": "default",
         "systemPrompt": "Use concise answers.",
         "bare": true,
+        "extraPathDirs": ["/run/session-42/bin"],
         "outputSchema": {}
       },
       "rawEvent": {
@@ -120,6 +121,12 @@ Session-lifecycle requests accept options and raw-event opt-in:
   }
 }
 ```
+
+`extraPathDirs` prepends absolute directories, in the order given, to the PATH
+of that session's Claude process. They precede every inherited entry, so an
+executable placed in one shadows the one PATH would otherwise resolve. A
+relative or empty entry fails the session-lifecycle request. Raw `PATH` stays
+rejected in `env`; this is the supported way to extend the child's search path.
 
 ## Model metadata
 

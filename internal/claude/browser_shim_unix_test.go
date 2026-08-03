@@ -33,7 +33,7 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 		writeShellScript(t, filepath.Join(probe, name), "#!/bin/sh\necho \"$0 $*\" >> "+marker+"\nexit 0\n")
 	}
 
-	t.Setenv(browserShimPathEnv, probe+string(os.PathListSeparator)+os.Getenv(browserShimPathEnv))
+	t.Setenv(envSearchPath, probe+string(os.PathListSeparator)+os.Getenv(envSearchPath))
 
 	for _, name := range browserLauncherNames {
 		control := exec.CommandContext(t.Context(), name, testBrowserProbeURL)

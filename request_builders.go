@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"encoding/json"
+	"slices"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -319,6 +320,17 @@ func WithClaudeEnv(env map[string]string) ClaudeOption {
 	}
 }
 
+// WithClaudeExtraPathDirs prepends absolute directories to the PATH of this
+// session's Claude process, in the order given and ahead of every inherited
+// entry. A relative or empty entry fails the session-lifecycle request.
+func WithClaudeExtraPathDirs(dirs ...string) ClaudeOption {
+	cloned := slices.Clone(dirs)
+
+	return func(options *ClaudeOptions) {
+		options.ExtraPathDirs = slices.Clone(cloned)
+	}
+}
+
 // WithClaudeOutputSchema configures Claude JSON Schema structured output.
 func WithClaudeOutputSchema(schema map[string]any) ClaudeOption {
 	cloned := cloneAnyMap(schema)
@@ -352,6 +364,7 @@ func WithClaudePermissionMode(mode string) ClaudeOption {
 func cloneClaudeOptions(options ClaudeOptions) ClaudeOptions {
 	cloned := options
 	cloned.Env = cloneStringMap(options.Env)
+	cloned.ExtraPathDirs = slices.Clone(options.ExtraPathDirs)
 	cloned.OutputSchema = cloneAnyMap(options.OutputSchema)
 
 	return cloned

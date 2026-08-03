@@ -17,6 +17,7 @@ func TestRequestBuilderClones(t *testing.T) {
 
 	meta := map[string]any{"x": []any{map[string]any{"y": "z"}}}
 	env := map[string]string{"ANTHROPIC_BASE_URL": "https://example.test"}
+	pathDirs := []string{"/opt/shim/bin"}
 	schema := map[string]any{"type": "object", "properties": map[string]any{"ok": map[string]any{"type": "boolean"}}}
 
 	req := NewSessionRequest("/repo",
@@ -28,6 +29,7 @@ func TestRequestBuilderClones(t *testing.T) {
 			WithClaudePermissionMode(permissionModeAcceptEdits),
 			WithClaudeBare(true),
 			WithClaudeEnv(env),
+			WithClaudeExtraPathDirs(pathDirs...),
 			WithClaudeOutputSchema(schema),
 			WithClaudeSystemPrompt("system"),
 		)),
@@ -39,6 +41,7 @@ func TestRequestBuilderClones(t *testing.T) {
 	require.True(t, ok)
 	metaX0["y"] = "changed"
 	env["ANTHROPIC_BASE_URL"] = "changed"
+	pathDirs[0] = "/changed"
 	schema["type"] = "changed"
 
 	reqMetaX, ok := req.Meta["x"].([]any)
@@ -53,6 +56,7 @@ func TestRequestBuilderClones(t *testing.T) {
 	optionsEnv, ok := options[settingsFieldEnv].(map[string]string)
 	require.True(t, ok)
 	require.Equal(t, "https://example.test", optionsEnv["ANTHROPIC_BASE_URL"])
+	require.Equal(t, []string{"/opt/shim/bin"}, options[metaExtraPathDirsKey])
 	optionsSchema, ok := options[metaOutputSchemaKey].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "object", optionsSchema["type"])

@@ -799,6 +799,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		Cwd:                     start.Cwd,
 		ClaudeHome:              processClaudeHome,
 		Env:                     env,
+		ExtraPathDirs:           slices.Clone(start.MetaOptions.ExtraPathDirs),
 		SessionID:               string(id),
 		ResumeID:                start.ResumeID,
 		ForkSession:             start.ForkSession,

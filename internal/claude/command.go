@@ -15,6 +15,7 @@ import (
 )
 
 const envClaudeCodeNested = "CLAUDECODE"
+const envSearchPath = "PATH"
 const cliArgOutputFormat = "--output-format"
 
 // minClaudeVersion is the oldest Claude CLI the adapter supports. The adapter's
@@ -164,12 +165,30 @@ func BuildEnv(options Options) []string {
 		set("PWD", options.Cwd)
 	}
 
+	if len(options.ExtraPathDirs) > 0 {
+		set(envSearchPath, prependSearchPath(options.ExtraPathDirs, values[envSearchPath]))
+	}
+
 	env := make([]string, 0, len(keys))
 	for _, key := range keys {
 		env = append(env, key+"="+values[key])
 	}
 
 	return env
+}
+
+// prependSearchPath returns a PATH value carrying dirs ahead of every entry
+// already in search, in the order given. Callers own absoluteness: a relative
+// entry here would resolve against the child's working directory.
+func prependSearchPath(dirs []string, search string) string {
+	entries := make([]string, 0, len(dirs)+1)
+	entries = append(entries, dirs...)
+
+	if search != "" {
+		entries = append(entries, search)
+	}
+
+	return strings.Join(entries, string(os.PathListSeparator))
 }
 
 // Discover finds the Claude executable.

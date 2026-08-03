@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -12,6 +15,7 @@ import (
 const (
 	metaAdditionalDirectoriesKey = "additionalDirectories"
 	metaBareKey                  = "bare"
+	metaExtraPathDirsKey         = "extraPathDirs"
 	metaModelKey                 = "model"
 	metaOptionsKey               = "options"
 	metaOutputSchemaKey          = "outputSchema"
@@ -31,6 +35,11 @@ type ClaudeOptions struct {
 	Bare bool `json:"bare,omitempty"`
 	// Env adds environment variables for this Claude session.
 	Env map[string]string `json:"env,omitempty"`
+	// ExtraPathDirs are absolute directories prepended, in order, to the PATH of
+	// this session's Claude process. They precede every inherited entry, so an
+	// executable placed here shadows the one PATH would otherwise resolve. Raw
+	// PATH stays rejected in Env: this is the only supported way to extend it.
+	ExtraPathDirs []string `json:"extraPathDirs,omitempty"`
 	// OutputSchema configures Claude Code JSON Schema structured output.
 	OutputSchema map[string]any `json:"outputSchema,omitempty"`
 	// SystemPrompt overrides the default system prompt for this Claude session.
@@ -50,6 +59,10 @@ func (options ClaudeOptions) Meta() map[string]any {
 
 	if len(options.Env) > 0 {
 		values[settingsFieldEnv] = cloneStringMap(options.Env)
+	}
+
+	if len(options.ExtraPathDirs) > 0 {
+		values[metaExtraPathDirsKey] = slices.Clone(options.ExtraPathDirs)
 	}
 
 	if len(options.OutputSchema) > 0 {
@@ -191,6 +204,13 @@ func parseClaudeOptionsMap(raw map[string]any, providerAuthEnabled bool) (Claude
 			}
 
 			options.Env = env
+		case metaExtraPathDirsKey:
+			dirs, err := stringSliceOption(value, metaOptionPath(key))
+			if err != nil {
+				return ClaudeOptions{}, err
+			}
+
+			options.ExtraPathDirs = dirs
 		case metaSystemPromptKey:
 			systemPrompt, ok := value.(string)
 			if !ok {
@@ -322,6 +342,14 @@ func validateClaudeOptions(options ClaudeOptions) (ClaudeOptions, error) {
 		}
 	}
 
+	for index, dir := range options.ExtraPathDirs {
+		if !filepath.IsAbs(dir) {
+			return ClaudeOptions{}, fmt.Errorf(
+				"%s[%d] must be an absolute path: %q", metaOptionPath(metaExtraPathDirsKey), index, dir,
+			)
+		}
+	}
+
 	if len(options.OutputSchema) > 0 {
 		outputSchema, err := validateOutputSchema(options.OutputSchema)
 		if err != nil {
@@ -374,6 +402,27 @@ func stringMapOption(value any, path string) (map[string]string, error) {
 			}
 
 			result[key] = text
+		}
+
+		return result, nil
+	default:
+		return nil, unsupportedField(path)
+	}
+}
+
+func stringSliceOption(value any, path string) ([]string, error) {
+	switch typed := value.(type) {
+	case []string:
+		return slices.Clone(typed), nil
+	case []any:
+		result := make([]string, 0, len(typed))
+		for index, item := range typed {
+			text, ok := item.(string)
+			if !ok {
+				return nil, unsupportedField(path + "[" + strconv.Itoa(index) + "]")
+			}
+
+			result = append(result, text)
 		}
 
 		return result, nil

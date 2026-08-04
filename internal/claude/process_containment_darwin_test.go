@@ -223,6 +223,7 @@ func prepareDarwinTestLaunch(t *testing.T, generation *DarwinGeneration) *proces
 }
 
 func TestDarwinStartValidationAndFastExitBranches(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	originalGetpgid := syscallGetpgid
 	originalKill := syscallKill
 	originalAbortWait := darwinAbortWait
@@ -289,6 +290,7 @@ func TestDarwinStartValidationAndFastExitBranches(t *testing.T) {
 }
 
 func TestDarwinGateReleaseFailureCleansGroup(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	originalKill := syscallKill
 	originalGetpgid := syscallGetpgid
 	originalWait := startPausedCommandWaitFn
@@ -445,6 +447,7 @@ func TestProcessTransportDarwinContainmentShutdownBranches(t *testing.T) {
 }
 
 func TestDarwinStartContainedProcessRealBoundaries(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if tree, err := startContainedProcess(nil); tree != nil || !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("nil launch tree=%v error=%v", tree, err)
 	}
@@ -484,6 +487,7 @@ func TestDarwinStartContainedProcessRealBoundaries(t *testing.T) {
 }
 
 func TestDarwinSetsidEscapeSurvivesSelectedBoundary(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	readyFile := filepath.Join(t.TempDir(), "ready")
 	command := exec.Command(os.Args[0], "-test.run=TestDarwinContainmentSetsidHelper")
@@ -569,6 +573,7 @@ func TestDarwinContainmentSetsidHelper(t *testing.T) {
 }
 
 func TestDarwinRecordActivationFailureCleansCapturedGroup(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	want := errors.New("record")
 	generation := &DarwinGeneration{
 		ScratchRoot:   t.TempDir(),

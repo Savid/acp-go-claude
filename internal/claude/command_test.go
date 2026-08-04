@@ -16,8 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var commandEnviron = os.Environ
-
 func TestBuildArgs(t *testing.T) {
 	t.Parallel()
 
@@ -109,7 +107,7 @@ func TestBuildEnv(t *testing.T) {
 	t.Setenv("CLAUDECODE", "nested")
 	t.Setenv("PWD", "/process/cwd")
 
-	env := BuildEnv(Options{
+	env := BuildEnv(withTestProcessIsolation(Options{
 		ClaudeHome: "/tmp/claude-home",
 		Cwd:        "/repo",
 		Env: map[string]string{
@@ -118,7 +116,7 @@ func TestBuildEnv(t *testing.T) {
 			"PWD":               "/override/cwd",
 			"X_TEST":            "1",
 		},
-	})
+	}))
 
 	require.Equal(t, 1, countEnvKey(env, "CLAUDE_CONFIG_DIR"))
 	require.Equal(t, 1, countEnvKey(env, "CLAUDE_CODE_ENTRYPOINT"))
@@ -135,7 +133,7 @@ func TestBuildEnvPrependsExtraPathDirs(t *testing.T) {
 
 	t.Setenv(envSearchPath, "/usr/bin"+separator+"/bin")
 
-	env := BuildEnv(Options{ExtraPathDirs: []string{"/session/bin", "/shared/bin"}})
+	env := BuildEnv(withTestProcessIsolation(Options{ExtraPathDirs: []string{"/session/bin", "/shared/bin"}}))
 
 	require.Equal(t, 1, countEnvKey(env, envSearchPath))
 	require.Contains(t, env, envSearchPath+"=/session/bin"+separator+"/shared/bin"+separator+"/usr/bin"+separator+"/bin")
@@ -149,41 +147,28 @@ func TestBuildEnvExtraPathDirsOutrankAnOverriddenPath(t *testing.T) {
 
 	t.Setenv(envSearchPath, "/inherited/bin")
 
-	env := BuildEnv(Options{
+	env := BuildEnv(withTestProcessIsolation(Options{
 		Env:           map[string]string{envSearchPath: "/override/bin"},
 		ExtraPathDirs: []string{"/session/bin"},
-	})
+	}))
 
 	require.Equal(t, 1, countEnvKey(env, envSearchPath))
 	require.Contains(t, env, envSearchPath+"=/session/bin"+separator+"/override/bin")
 }
 
 func TestBuildEnvExtraPathDirsWithoutInheritedPath(t *testing.T) {
-	originalEnviron := commandEnviron
-	t.Cleanup(func() {
-		commandEnviron = originalEnviron
+	env := BuildEnv(Options{
+		ProcessIsolation: &ProcessIsolation{UID: 1, GID: 2, BaseEnvironment: map[string]string{"GOOD": "1"}},
+		ExtraPathDirs:    []string{"/session/bin"},
 	})
-
-	commandEnviron = func() []string {
-		return []string{"GOOD=1"}
-	}
-
-	env := BuildEnv(Options{ExtraPathDirs: []string{"/session/bin"}})
 
 	require.Contains(t, env, envSearchPath+"=/session/bin")
 }
 
-func TestBuildEnvSkipsInvalidProcessEntries(t *testing.T) {
-	originalEnviron := commandEnviron
-	t.Cleanup(func() {
-		commandEnviron = originalEnviron
-	})
-
-	commandEnviron = func() []string {
-		return []string{"", "BROKEN", "=empty", "GOOD=1"}
-	}
-
-	env := BuildEnv(Options{})
+func TestBuildEnvUsesOnlyPolicyEntries(t *testing.T) {
+	env := BuildEnv(Options{ProcessIsolation: &ProcessIsolation{
+		UID: 1, GID: 2, BaseEnvironment: map[string]string{"GOOD": "1"},
+	}})
 
 	require.Contains(t, env, "GOOD=1")
 	require.NotContains(t, env, "")
@@ -206,9 +191,9 @@ func countEnvKey(env []string, key string) int {
 func TestDiscover(t *testing.T) {
 	t.Parallel()
 
-	path, err := Discover(context.Background(), "/custom/claude", nil)
+	path, err := Discover(context.Background(), "/bin/sh", withTestProcessIsolation(Options{}))
 	require.NoError(t, err)
-	require.Equal(t, "/custom/claude", path)
+	require.Equal(t, "/bin/sh", path)
 }
 
 func TestDiscoverCancelledExplicitPath(t *testing.T) {
@@ -217,17 +202,17 @@ func TestDiscoverCancelledExplicitPath(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := Discover(ctx, "/custom/claude", nil)
+	_, err := Discover(ctx, "/bin/sh", withTestProcessIsolation(Options{}))
 	require.ErrorIs(t, err, context.Canceled)
 
-	_, err = Discover(ctx, "", nil)
+	_, err = Discover(ctx, "", withTestProcessIsolation(Options{}))
 	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestDiscoverMissingFromPath(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
-	_, err := Discover(context.Background(), "", nil)
+	_, err := Discover(context.Background(), "", withTestProcessIsolation(Options{}))
 	require.Error(t, err)
 }
 
@@ -261,6 +246,7 @@ func TestCompareSemver(t *testing.T) {
 }
 
 func TestValidateClaudeVersion(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -324,7 +310,7 @@ func TestContainedClaudeOutputSurvivesWaitBeforeRead(t *testing.T) {
 		t.Context(),
 		os.Args[0],
 		[]string{"-test.run=^TestContainedClaudeOutputSurvivesWaitBeforeRead$"},
-		Options{Cwd: t.TempDir()},
+		withTestProcessIsolation(Options{Cwd: t.TempDir()}),
 		nil,
 		"contained output regression",
 	)
@@ -333,32 +319,33 @@ func TestContainedClaudeOutputSurvivesWaitBeforeRead(t *testing.T) {
 }
 
 func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	want := errors.New("version seam")
 	releases := 0
-	err := validateClaudeVersion(t.Context(), "/bin/sh", Options{
+	err := validateClaudeVersion(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
 		AcquireVersionDiscovery: func(context.Context) (func(), error) { return nil, want },
-	})
+	}))
 	require.ErrorIs(t, err, want)
-	err = validateClaudeVersion(t.Context(), "/bin/sh", Options{
+	err = validateClaudeVersion(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
 		AcquireVersionDiscovery: func(context.Context) (func(), error) { return nil, nil }, //nolint:nilnil // Invalid callback result under test.
-	})
+	}))
 	require.ErrorContains(t, err, "nil release")
 
-	err = validateClaudeVersion(t.Context(), "/bin/sh", Options{
+	err = validateClaudeVersion(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
 		DarwinBestEffort: true,
 		AcquireVersionDiscovery: func(context.Context) (func(), error) {
 			return func() { releases++ }, nil
 		},
-	})
+	}))
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	require.Zero(t, releases)
 
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
 		DarwinBestEffort: true,
 		PrepareDarwinVersionGeneration: func(context.Context) (*DarwinGeneration, error) {
 			return nil, want
 		},
-	})
+	}))
 	require.ErrorIs(t, err, want)
 
 	originalGetwd := processGetwd
@@ -371,7 +358,7 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 	})
 
 	finished := 0
-	generationOptions := Options{
+	generationOptions := withTestProcessIsolation(Options{
 		DarwinBestEffort: true,
 		PrepareDarwinVersionGeneration: func(context.Context) (*DarwinGeneration, error) {
 			return &DarwinGeneration{RecordFinished: func(bool) error {
@@ -380,7 +367,7 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 				return nil
 			}}, nil
 		},
-	}
+	})
 	processGetwd = func() (string, error) { return "", want }
 	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", generationOptions)
 	require.ErrorIs(t, err, want)
@@ -388,18 +375,18 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 	processGetwd = originalGetwd
 
 	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) { return nil, want }
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{Cwd: t.TempDir()})
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{Cwd: t.TempDir()}))
 	require.ErrorIs(t, err, want)
 	observedUnavailable := 0
 	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) {
 		return nil, ErrProcessContainmentIncomplete
 	}
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
 		Cwd: t.TempDir(),
 		ObserveProcessInventory: func(context.Context, func() (int, bool)) {
 			observedUnavailable++
 		},
-	})
+	}))
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	require.Equal(t, 1, observedUnavailable)
 
@@ -408,24 +395,24 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 
 		return &processTreeCommand{cmd: command}, nil
 	}
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{Cwd: t.TempDir()})
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{Cwd: t.TempDir()}))
 	require.ErrorContains(t, err, "capture claude version output")
 
 	processPrepareContained = func(command *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
 		return &processTreeCommand{cmd: command}, nil
 	}
 	processStartContained = func(*processTreeCommand) (*processContainment, error) { return nil, want }
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{Cwd: t.TempDir()})
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{Cwd: t.TempDir()}))
 	require.ErrorIs(t, err, want)
 	processStartContained = func(*processTreeCommand) (*processContainment, error) {
 		return nil, ErrProcessContainmentIncomplete
 	}
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", Options{
+	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
 		Cwd: t.TempDir(),
 		ObserveProcessInventory: func(context.Context, func() (int, bool)) {
 			observedUnavailable++
 		},
-	})
+	}))
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	require.Equal(t, 2, observedUnavailable)
 
@@ -468,7 +455,7 @@ func TestDiscoverFromPath(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 	t.Setenv("PATH", binDir)
 
-	found, err := Discover(context.Background(), "", nil)
+	found, err := Discover(context.Background(), "", withTestProcessIsolation(Options{}))
 	require.NoError(t, err)
 	require.Equal(t, path, found)
 }

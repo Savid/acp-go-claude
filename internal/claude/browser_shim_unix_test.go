@@ -23,6 +23,7 @@ const testBrowserProbeURL = "https://example.invalid/"
 // and the positive control proves the recorder works before the absence of a
 // record is allowed to mean anything.
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	dir := t.TempDir()
 	probe := filepath.Join(dir, "probe")
 	marker := filepath.Join(dir, "launched")

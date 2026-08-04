@@ -154,6 +154,7 @@ func TestParseUsageOutput(t *testing.T) {
 }
 
 func TestQueryRateLimits(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -217,11 +218,12 @@ func TestQueryRateLimits(t *testing.T) {
 }
 
 func TestQueryRateLimitsFailsClosedWithoutContainedResources(t *testing.T) {
-	_, err := QueryRateLimits(context.Background(), Options{CLIPath: "must-not-run"})
+	_, err := QueryRateLimits(context.Background(), withTestProcessIsolation(Options{CLIPath: "/bin/sh"}))
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 
 	options := Options{
-		CLIPath: "must-not-run",
+		CLIPath:          "/bin/sh",
+		ProcessIsolation: testProcessIsolation(),
 		PrepareUsageGeneration: func(context.Context) (*DarwinGeneration, error) {
 			return &DarwinGeneration{}, nil
 		},

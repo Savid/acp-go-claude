@@ -53,6 +53,7 @@ type deadlineWriteCloser struct {
 
 func platformTestTransportOptions(t *testing.T, options Options) Options {
 	t.Helper()
+	options = withTestProcessIsolation(options)
 	options.AcquireUsageDiscovery = func(context.Context) (func(), error) {
 		return func() {}, nil
 	}
@@ -677,6 +678,7 @@ func TestProcessTransportShutdownGraceReturnsUnexpectedWaitError(t *testing.T) {
 }
 
 func TestProcessTransportCloseSendsTermBeforeKill(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
@@ -712,6 +714,7 @@ while :; do :; done
 }
 
 func TestProcessTransportCloseKillsAfterTermTimeout(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
@@ -791,6 +794,7 @@ func TestProcessTransportCloseReportsKillError(t *testing.T) {
 }
 
 func TestProcessTransportCloseWithoutWaitDelay(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
@@ -842,6 +846,7 @@ func TestProcessTransportWaitForShutdownRecordsSuccessfulKill(t *testing.T) {
 }
 
 func TestProcessTransportCloseWaitsForVoluntaryExitBeforeTerm(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
@@ -972,6 +977,7 @@ func writeShellScript(t *testing.T, path string, script string) string {
 }
 
 func TestProcessTransportStartProbesVersion(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -1038,6 +1044,7 @@ func TestProcessTransportStartBadWorkingDirectory(t *testing.T) {
 }
 
 func TestProcessTransportStartSetupErrors(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
@@ -1141,6 +1148,7 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 }
 
 func TestProcessTransportStartDarwinGenerationFailureBranches(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	want := errors.New("generation")
 	transport := NewProcessTransport(nil, Options{
 		CLIPath:          "/bin/sh",
@@ -1187,6 +1195,7 @@ func TestProcessTransportStartDarwinGenerationFailureBranches(t *testing.T) {
 }
 
 func TestProcessTransportStart(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	t.Parallel()
 
 	dir := t.TempDir()

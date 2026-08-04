@@ -15,6 +15,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	testForceHyperlinkEnv = "FORCE_HYPERLINK"
+	testGoTracebackEnv    = "GOTRACEBACK"
+)
+
 const testAuthorizeURL = "https://claude.com/oauth/authorize?code=1&redirect_uri=" + AuthLoginRedirectURI
 
 // The two banners `claude auth login` writes before the URL, measured on the
@@ -37,6 +42,7 @@ func osc8(url string) string {
 
 func authTestOptions(t *testing.T, options Options) (Options, *DarwinGeneration) {
 	t.Helper()
+	options = withTestProcessIsolation(options)
 
 	root, err := os.MkdirTemp(t.TempDir(), "acp-go-claude-runtime-")
 	require.NoError(t, err)
@@ -246,7 +252,7 @@ const envCustomOAuthURL = "CLAUDE_CODE_CUSTOM_OAUTH_URL"
 func TestAuthScrubbedEnvKeyCoversEveryVariableThatMovesTheBytesOrTheStore(t *testing.T) {
 	t.Parallel()
 
-	for _, key := range []string{"term_program", "FORCE_HYPERLINK", envCustomOAuthURL, "GOTRACEBACK"} {
+	for _, key := range []string{"term_program", testForceHyperlinkEnv, envCustomOAuthURL, testGoTracebackEnv} {
 		require.True(t, authScrubbedEnvKey(key))
 	}
 
@@ -258,21 +264,12 @@ func TestAuthScrubbedEnvKeyCoversEveryVariableThatMovesTheBytesOrTheStore(t *tes
 // OAuth URL repoints, so a login scrubbed alone reports success about a store
 // the other two never described.
 func TestBuildEnvScrubsEveryChildNotJustTheLoginOne(t *testing.T) {
-	original := commandEnviron
-
-	commandEnviron = func() []string {
-		return []string{
-			"PATH=/usr/bin",
-			"TERM_PROGRAM=iTerm.app",
-			"FORCE_HYPERLINK=1",
-			envCustomOAuthURL + "=https://claude.example",
-			"GOTRACEBACK=crash",
-		}
-	}
-
-	t.Cleanup(func() { commandEnviron = original })
-
-	env := BuildEnv(Options{Env: map[string]string{
+	env := BuildEnv(Options{ProcessIsolation: &ProcessIsolation{
+		UID: 1, GID: 2, BaseEnvironment: map[string]string{
+			"PATH": "/usr/bin", "TERM_PROGRAM": "iTerm.app", testForceHyperlinkEnv: "1",
+			envCustomOAuthURL: "https://claude.example", testGoTracebackEnv: "crash",
+		},
+	}, Env: map[string]string{
 		"KEEP":            "1",
 		envCustomOAuthURL: "https://claude.example",
 	}})
@@ -318,6 +315,7 @@ func TestDecodeAuthStatusIgnoresUnknownAndAbsentMembers(t *testing.T) {
 }
 
 func TestAuthCommandOutputSeparatesExitStatusFromFailure(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -393,6 +391,7 @@ func TestAuthCommandOutputSurfacesContainmentAndLaunchFailures(t *testing.T) {
 }
 
 func TestStartAuthLoginDrivesTheChildEndToEnd(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -438,6 +437,7 @@ func TestStartAuthLoginDrivesTheChildEndToEnd(t *testing.T) {
 // child's own exit is the only signal the status poll has, and reporting the
 // wrapper's teardown instead leaves that poll permanently unable to run.
 func TestAuthLoginReportsTheChildsOwnExitBeforeTheFence(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -475,6 +475,7 @@ func TestAuthLoginReportsTheChildsOwnExitBeforeTheFence(t *testing.T) {
 }
 
 func TestAuthLoginWaitReportsANaturalNonzeroExit(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -518,6 +519,7 @@ func TestAuthLoginWaitDoesNotClassifyAWaitFailureAsAnExit(t *testing.T) {
 // the handler returns, so a child bound to the starting context dies before the
 // URL is ever visited.
 func TestStartAuthLoginChildOutlivesTheStartingContext(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -551,6 +553,7 @@ func TestStartAuthLoginChildOutlivesTheStartingContext(t *testing.T) {
 }
 
 func TestStartAuthLoginFailsClosedOnAnUnclassifiableLine(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -566,6 +569,7 @@ func TestStartAuthLoginFailsClosedOnAnUnclassifiableLine(t *testing.T) {
 }
 
 func TestStartAuthLoginKillIsTheFence(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -648,6 +652,7 @@ func TestStartAuthLoginChildLaunchFailures(t *testing.T) {
 }
 
 func TestAuthLoginSubmitFailsWhenTheChildIsGone(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -696,6 +701,7 @@ func TestDarwinGenerationFinishIsExportedForUnwind(t *testing.T) {
 }
 
 func TestStartAuthLoginFailsClosedWhenNoPresentationArrives(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -716,6 +722,7 @@ func TestStartAuthLoginFailsClosedWhenNoPresentationArrives(t *testing.T) {
 }
 
 func TestAuthCommandOutputContextTimeout(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}

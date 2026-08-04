@@ -54,6 +54,7 @@ func TestDarwinLaunchFailsClosedWithoutExplicitOptIn(t *testing.T) {
 }
 
 func TestDarwinLaunchBootstrapProtocol(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	originalExec := darwinLaunchExec
 	t.Cleanup(func() { darwinLaunchExec = originalExec })
 	configBytes, err := json.Marshal(darwinLaunchConfig{Path: "/native/claude", Args: []string{"claude", "version"}, Env: []string{"A=B"}})
@@ -102,6 +103,7 @@ func TestDarwinLaunchBootstrapProtocol(t *testing.T) {
 }
 
 func TestDarwinLaunchBootstrapDispatch(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	originalInput := darwinLaunchInput
 	originalExit := darwinLaunchExit
 	originalExec := darwinLaunchExec
@@ -265,10 +267,12 @@ func TestAwaitDarwinNativeExecStatus(t *testing.T) {
 }
 
 func TestDarwinMissingNativeExecutableFailsBeforeLaunchAdmission(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	generation := &DarwinGeneration{RuntimeID: strings.Repeat("a", 32), ScratchRoot: t.TempDir()}
 	launch, err := prepareProcessTreeCommand(exec.Command(filepath.Join(t.TempDir(), "missing-native")), processLaunchOptions{
 		DarwinBestEffort: true,
 		Generation:       generation,
+		Isolation:        testProcessIsolation(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -317,8 +321,8 @@ func TestPrepareDarwinLaunchResourceFailures(t *testing.T) {
 		darwinLaunchExecutable = originalExecutable
 	})
 
-	options := processLaunchOptions{DarwinBestEffort: true, Generation: &DarwinGeneration{ScratchRoot: t.TempDir()}}
-	if _, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true}); !errors.Is(err, ErrProcessContainmentIncomplete) {
+	options := processLaunchOptions{DarwinBestEffort: true, Generation: &DarwinGeneration{ScratchRoot: t.TempDir()}, Isolation: testProcessIsolation()}
+	if _, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true, Isolation: testProcessIsolation()}); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("missing generation error = %v", err)
 	}
 	if _, err := prepareProcessTreeCommand(&exec.Cmd{}, options); err == nil || !strings.Contains(err.Error(), "incomplete") {
@@ -331,6 +335,7 @@ func TestPrepareDarwinLaunchResourceFailures(t *testing.T) {
 	if _, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{
 		DarwinBestEffort: true,
 		Generation:       &DarwinGeneration{ScratchRoot: fileRoot},
+		Isolation:        testProcessIsolation(),
 	}); err == nil || !strings.Contains(err.Error(), "generation") {
 		t.Fatalf("generation preparation error = %v", err)
 	}

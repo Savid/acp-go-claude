@@ -141,6 +141,7 @@ func TestReadAuthKeychainCredentialPrefersALaterItemOverAnEarlierFailure(t *test
 }
 
 func TestAuthKeychainReadToolReportsTheRealPlatformExitStatus(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	// The real tool answers "absent" for an item nothing ever wrote, which is
 	// what lets a file-authenticated home resume without a keystore entry.
 	output, code, err := authKeychainReadTool(t.Context(), []string{
@@ -161,6 +162,7 @@ func TestAuthKeychainReadToolReportsTheRealPlatformExitStatus(t *testing.T) {
 }
 
 func TestAuthKeychainToolReportsTheRealPlatformExitStatus(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	// The real tool answers "absent" for an item nothing ever wrote, which is
 	// what keeps disconnect idempotent on a home that holds no credential.
 	code, err := authKeychainTool(t.Context(), []string{
@@ -173,6 +175,7 @@ func TestAuthKeychainToolReportsTheRealPlatformExitStatus(t *testing.T) {
 }
 
 func TestAuthKeychainToolSeparatesSuccessFromALaunchFailure(t *testing.T) {
+	skipUnprivilegedDarwinIsolation(t)
 	code, err := authKeychainTool(t.Context(), []string{"list-keychains"}, Options{})
 	require.NoError(t, err)
 	require.Zero(t, code)

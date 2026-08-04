@@ -21,7 +21,7 @@ func containmentMode(options Options) RuntimeContainmentMode {
 	}
 
 	switch runtimeGOOS {
-	case platformLinux, platformWindows:
+	case platformLinux:
 		return RuntimeContainmentAuthoritative
 	case platformDarwin:
 		if options.DarwinBestEffortContainment {

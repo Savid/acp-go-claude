@@ -505,6 +505,9 @@ func startAuthLoginChild(
 	if err != nil {
 		return nil, fmt.Errorf("contain claude auth login browser launch: %w", err)
 	}
+	if err := handoffGeneratedNativeTree(shim.dir, options.ProcessIsolation); err != nil {
+		return nil, errors.Join(fmt.Errorf("handoff claude auth login browser shim: %w", err), shim.remove())
+	}
 
 	defer func() {
 		if !started {

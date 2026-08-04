@@ -15,6 +15,7 @@ import (
 )
 
 func TestRunReturnsSignalCode(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalShutdown := shutdownOpenTelemetry
 	t.Cleanup(func() {
@@ -30,6 +31,6 @@ func TestRunReturnsSignalCode(t *testing.T) {
 	}
 	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
 
-	code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
+	code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
 	require.Equal(t, 128+int(syscall.SIGTERM), code)
 }

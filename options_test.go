@@ -109,3 +109,12 @@ func TestApplyOptionsBranches(t *testing.T) {
 	require.ErrorContains(t, validateImageLimits(ImageLimits{MaxOutputBytesPerImage: -1}), "MaxOutputBytesPerImage")
 	require.ErrorContains(t, validateImageLimits(ImageLimits{MaxOutputBytesPerToolCall: -1}), "MaxOutputBytesPerToolCall")
 }
+
+func TestWithProcessIsolationClonesBaseEnvironment(t *testing.T) {
+	base := map[string]string{"PATH": "/policy/bin", "ONLY_POLICY": "present"}
+	options := applyOptions([]Option{WithProcessIsolation(ProcessIsolation{UID: 12, GID: 34, BaseEnvironment: base})})
+	base["ONLY_POLICY"] = "mutated"
+	if options.ProcessIsolation == nil || options.ProcessIsolation.BaseEnvironment["ONLY_POLICY"] != "present" {
+		t.Fatal("WithProcessIsolation did not clone the base environment")
+	}
+}

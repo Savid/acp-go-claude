@@ -65,8 +65,10 @@ session remains addressable without reusing the aborted process.
 
 Linux uses an embedded subreaper supervisor and a dedicated proof descriptor;
 the proof covers descendants that escape Claude's process group or session.
-Windows uses a suspended-start, kill-on-close Job Object. Darwin rejects launch
-by default; its explicit best-effort mode reaps the direct child and empties the
+Windows rejects native launch because the mandatory Unix UID/GID identity
+boundary with empty supplementary groups is unavailable. Cross-compiling that
+refusal path does not establish runtime support. Darwin rejects launch by
+default; its explicit best-effort mode reaps the direct child and empties the
 captured original process group without claiming escaped descendants ended.
 Unsupported kernels reject launch.
 

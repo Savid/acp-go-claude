@@ -9,16 +9,59 @@ description: "Every flag the acp-go-claude binary accepts and what it maps to"
 acp-go-claude -path /usr/local/bin/claude -home /tmp/claude-home -model sonnet -claude-permission-mode default
 ```
 
+## Required standalone isolation policy
+
+Normal serve mode is Linux-only and requires
+`-process-isolation-config=/absolute/path/process-isolation.json`.
+`-version` and the Darwin containment diagnostic subcommands are exempt.
+The policy must be a root-owned, single-link regular file with mode `0600`.
+Every component is opened from `/` without following symlinks, and every
+ancestor must be root-owned and not writable by group or other. Unknown JSON
+fields and trailing JSON values are rejected.
+
+```json
+{
+  "uid": 20001,
+  "gid": 20001,
+  "baseEnvironment": {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/var/lib/acp-go-claude",
+    "USER": "acp-go-claude",
+    "LOGNAME": "acp-go-claude",
+    "LANG": "C.UTF-8"
+  },
+  "inheritEnvironment": []
+}
+```
+
+The supervisor must run as root. The UID/GID must name a nonroot account with
+that same-name private primary group, no supplementary groups, and a target-owned mode
+`0700` home matching `HOME`, reached without symlinks beneath protected
+root-owned ancestry; `/root` and `/nonexistent` are forbidden. `USER` and
+`LOGNAME` must match the account.
+`PATH` must contain existing canonical absolute directories. The child gets
+only `baseEnvironment` plus variables explicitly named in
+`inheritEnvironment`; identity, search-path, loader, interpreter, XDG/native
+home, and adapter-private variables cannot be inherited. Unset or duplicate
+inheritance entries fail startup. Darwin, Windows, and other platforms refuse
+standalone native mode rather than weakening this contract.
+
+Provision the target as a locked system account with a non-login shell, its
+same-name private group, and no sudo policy. Its UID and primary GID cannot be
+shared by another account. Password locking is not a substitute for disabling
+login paths, and a locked account still needs the validated private writable
+home for native tools.
+
 ## Flags
 
 | Flag | Purpose |
 | --- | --- |
 | `-path` | Claude CLI executable (default: search `PATH`). |
-| `-home` | Claude config directory (`CLAUDE_CONFIG_DIR`) for launched sessions. |
+| `-process-isolation-config` | Required absolute path to the standalone Linux isolation policy described above. |
+| `-home` | Claude config directory (`CLAUDE_CONFIG_DIR`) for launched sessions; standalone defaults to the policy `HOME`, never root ambient state. |
 | `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
 | `-provider-auth-root` | Durable host-owned directory holding the values-free provider-auth ledger. Empty, bare mode, or agent-wide static authentication leaves every `_claude/auth/*` method unadvertised. |
 | `-provider-auth-direct-home` | Exact Claude config directory the operator consents to native-login disconnect clearing. Secret-backed disconnect never clears it. |
-| `-darwin-best-effort-containment` | On Darwin only, explicitly accept process-group containment and its escaped-descendant and numeric-PGID-reuse risks. Darwin fails closed without it; other platforms reject it. |
 | `-model` | Default Claude model. |
 | `-seed-file` | Write a host file into the config dir as `<relpath>=<hostpath>`; repeatable. Requires `-home`. |
 | `-claude-settings-file` | Settings-overlay relpath under the config dir passed as `--settings`. Requires `-home`. |
@@ -38,7 +81,8 @@ and `WithSessionStore`.
 
 ## Darwin containment operations
 
-These commands inspect and clean retained Darwin best-effort generations:
+These commands inspect and clean retained Darwin best-effort generations left
+by an embedded host; the standalone command does not launch native work there:
 
 ```sh
 acp-go-claude containment diagnose -scratch-dir <parent>

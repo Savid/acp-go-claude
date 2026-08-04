@@ -244,7 +244,7 @@ func splitSubagentMetadata(entries []SessionStoreEntry) ([]SessionStoreEntry, ma
 }
 
 func writeStoreJSONL(path string, entries []SessionStoreEntry) error {
-	if err := materializeMkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := materializeMkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create transcript dir: %w", err)
 	}
 
@@ -268,7 +268,7 @@ func writeStoreJSONL(path string, entries []SessionStoreEntry) error {
 }
 
 func writeJSONFile(path string, value any) error {
-	if err := materializeMkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := materializeMkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create metadata dir: %w", err)
 	}
 

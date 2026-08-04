@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"runtime"
 	"slices"
 	"strings"
 
@@ -67,9 +66,6 @@ var serve = claudeacp.Serve
 var exit = os.Exit
 var shutdownOpenTelemetry = shutdownTelemetry
 var agentVersion = version
-var runtimeGOOS = runtime.GOOS
-
-const platformDarwin = "darwin"
 
 func main() {
 	if code := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
@@ -90,7 +86,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 	providerAuthRoot := flags.String("provider-auth-root", "", "durable host-owned root holding the provider-auth ledger; empty, static auth, or bare mode leaves the surface unadvertised")
 	providerAuthDirectHome := flags.String("provider-auth-direct-home", "", "exact Claude config directory a native-login disconnect may clear")
-	darwinBestEffort := flags.Bool("darwin-best-effort-containment", false, "accept Darwin process-group containment and its escaped-descendant and PGID-reuse risks")
+	isolationConfigPath := flags.String(processIsolationConfigFlag, "", "absolute path to the required root-owned mode-0600 Linux child-isolation policy")
 	model := flags.String("model", "", "default Claude model")
 	bare := flags.Bool("claude-bare", false, "launch Claude sessions with --bare; requires API-key or apiKeyHelper auth")
 	permissionMode := flags.String("claude-permission-mode", "", "default Claude permission mode")
@@ -108,25 +104,32 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	version := agentVersion()
 
-	if *darwinBestEffort && runtimeGOOS != platformDarwin {
-		_, _ = fmt.Fprintln(stderr, "acp-go-claude: -darwin-best-effort-containment is valid only on darwin")
-
-		return 2
-	}
-
 	if *printVersion {
 		_, _ = fmt.Fprintln(stdout, version)
 
 		return 0
 	}
 
+	if *isolationConfigPath == "" {
+		_, _ = fmt.Fprintf(stderr, "acp-go-claude: -%s is required for standalone native mode\n", processIsolationConfigFlag)
+
+		return 2
+	}
+
+	isolation, err := processIsolationConfigLoader(*isolationConfigPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "acp-go-claude: process isolation: %v\n", err)
+
+		return 1
+	}
+
+	if *claudeHome == "" {
+		*claudeHome = isolation.BaseEnvironment["HOME"]
+	}
+
 	logger := slog.New(slog.DiscardHandler)
 	if *debug {
 		logger = slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	}
-
-	if *darwinBestEffort {
-		_, _ = fmt.Fprintln(stderr, "WARNING containment=best_effort: escaped descendants may survive; numeric PGID reuse can cause collateral signalling; marker correlation is not ownership; markers can be scrubbed; native-root permits do not bound escaped provider work")
 	}
 
 	telemetry, err := configureTelemetry(ctx, logger, version)
@@ -162,6 +165,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		claudeacp.WithClaudeBareMode(*bare),
 		claudeacp.WithClaudeHideAuth(*hideClaudeAuth),
 		claudeacp.WithLogger(logger),
+		claudeacp.WithProcessIsolation(claudeacp.ProcessIsolation{
+			UID:             isolation.UID,
+			GID:             isolation.GID,
+			BaseEnvironment: isolation.BaseEnvironment,
+		}),
 	)
 	if *permissionMode != "" {
 		serveOptions = append(serveOptions, claudeacp.WithClaudeDefaultPermissionMode(*permissionMode))
@@ -177,10 +185,6 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	if *settingsFile != "" {
 		serveOptions = append(serveOptions, claudeacp.WithClaudeSettingsFile(*settingsFile))
-	}
-
-	if *darwinBestEffort {
-		serveOptions = append(serveOptions, claudeacp.WithDarwinBestEffortContainment())
 	}
 
 	serveOptions = append(serveOptions, telemetry.options...)

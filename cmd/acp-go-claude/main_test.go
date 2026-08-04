@@ -15,15 +15,13 @@ import (
 )
 
 func TestRunPassesContractFlags(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalAgentVersion := agentVersion
-	originalGOOS := runtimeGOOS
 	t.Cleanup(func() {
 		serve = originalServe
 		agentVersion = originalAgentVersion
-		runtimeGOOS = originalGOOS
 	})
-	runtimeGOOS = "darwin"
 
 	var got claudeacp.Options
 	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...claudeacp.Option) error {
@@ -37,10 +35,10 @@ func TestRunPassesContractFlags(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := run(context.Background(), []string{
+		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-path", "/bin/claude",
 		"-home", "/tmp/claude",
 		"-scratch-dir", "/tmp/claude-scratch",
-		"-darwin-best-effort-containment",
 		"-model", "sonnet",
 		"-claude-bare",
 		"-claude-permission-mode", "plan",
@@ -59,12 +57,14 @@ func TestRunPassesContractFlags(t *testing.T) {
 	require.Equal(t, "plan", got.DefaultPermissionMode)
 	require.Equal(t, "system", got.DefaultSystemPrompt)
 	require.True(t, got.HideAuth)
-	require.True(t, got.DarwinBestEffortContainment)
+	require.NotNil(t, got.ProcessIsolation)
+	require.Equal(t, uint32(20001), got.ProcessIsolation.UID)
 	require.NotNil(t, got.Logger)
-	require.Contains(t, stderr.String(), "containment=best_effort")
+	require.Empty(t, stderr.String())
 }
 
 func TestRunPassesSeedAndSettingsFlags(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	t.Cleanup(func() { serve = originalServe })
 
@@ -81,6 +81,7 @@ func TestRunPassesSeedAndSettingsFlags(t *testing.T) {
 	}
 
 	code := run(context.Background(), []string{
+		"-process-isolation-config", testProcessIsolationConfigPath,
 		"-home", "/tmp/claude",
 		"-seed-file", "settings.json=" + hostFile,
 		"-claude-settings-file", "custom.settings.json",
@@ -125,6 +126,7 @@ func TestRunVersion(t *testing.T) {
 }
 
 func TestRunErrorBranches(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalShutdown := shutdownOpenTelemetry
 	originalAgentVersion := agentVersion
@@ -143,7 +145,7 @@ func TestRunErrorBranches(t *testing.T) {
 	}
 	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
 	var stderr bytes.Buffer
-	code = run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	code = run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 	require.Equal(t, 1, code)
 	require.Contains(t, stderr.String(), "serve failed")
 
@@ -154,7 +156,7 @@ func TestRunErrorBranches(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	stderr.Reset()
-	code = run(ctx, nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	code = run(ctx, isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 	require.Equal(t, 1, code)
 	require.Contains(t, stderr.String(), "shutdown OpenTelemetry")
 }
@@ -169,6 +171,7 @@ func TestPendingSignalAndSignalCode(t *testing.T) {
 }
 
 func TestMainExitBranch(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalExit := exit
 	originalArgs := os.Args
@@ -181,7 +184,7 @@ func TestMainExitBranch(t *testing.T) {
 	serve = func(context.Context, io.Reader, io.Writer, ...claudeacp.Option) error {
 		return errors.New("serve failed")
 	}
-	os.Args = []string{"acp-go-claude"}
+	os.Args = []string{"acp-go-claude", "-process-isolation-config", testProcessIsolationConfigPath}
 	exitCode := -1
 	exit = func(code int) { exitCode = code }
 

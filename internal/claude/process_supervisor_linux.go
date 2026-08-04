@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -49,6 +48,7 @@ type linuxProcessIdentity struct {
 var (
 	turnSupervisorExecutable   = os.Executable
 	turnSupervisorMemfd        = unix.MemfdCreate
+	turnSupervisorSealConfig   = unix.FcntlInt
 	turnSupervisorPipe         = os.Pipe
 	turnSupervisorExit         = os.Exit
 	turnSupervisorSignalNotify = signal.Notify
@@ -175,7 +175,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 		return nil, errors.New("prepare Claude process supervisor: native command is incomplete")
 	}
 
-	configFD, err := turnSupervisorMemfd(turnSupervisorFDName, unix.MFD_CLOEXEC)
+	configFD, err := turnSupervisorMemfd(turnSupervisorFDName, unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
 	if err != nil {
 		return nil, fmt.Errorf("prepare Claude process supervisor config: %w", err)
 	}
@@ -185,6 +185,11 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 		_ = configFile.Close()
 
 		return nil, writeErr
+	}
+	if _, sealErr := turnSupervisorSealConfig(configFile.Fd(), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); sealErr != nil {
+		_ = configFile.Close()
+
+		return nil, fmt.Errorf("seal Claude process supervisor config: %w", sealErr)
 	}
 
 	controlRead, controlWrite, err := turnSupervisorPipe()
@@ -344,13 +349,15 @@ func runTurnSupervisor(
 		return fmt.Errorf("apply supervised Claude native identity: %w", err)
 	}
 
-	if err := startTurnSupervisorNative(native); err != nil {
+	waitDone, err := startTurnSupervisorNative(native)
+	if err != nil {
 		return err
 	}
 
 	if _, err := io.WriteString(readyOutput, turnSupervisorReady); err != nil {
+		_ = turnSupervisorSignalGroup(native.Process.Pid, syscall.SIGKILL)
+		waitErr := <-waitDone
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), native.Process.Pid)
-		waitErr := native.Wait()
 
 		var proofErr error
 		if containErr == nil {
@@ -364,9 +371,6 @@ func runTurnSupervisor(
 			proofErr,
 		)
 	}
-
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- native.Wait() }()
 
 	controlDone := make(chan struct{})
 
@@ -385,11 +389,14 @@ func runTurnSupervisor(
 
 			return errors.Join(waitErr, publishTurnSupervisorProof(proofOutput))
 		case <-controlDone:
+			_ = turnSupervisorSignalGroup(native.Process.Pid, syscall.SIGKILL)
+			waitErr := <-waitDone
+
 			if err := turnSupervisorContain(turnSupervisorProcessID(), native.Process.Pid); err != nil {
 				return err
 			}
 
-			return errors.Join(<-waitDone, publishTurnSupervisorProof(proofOutput))
+			return errors.Join(waitErr, publishTurnSupervisorProof(proofOutput))
 		case received := <-signals:
 			nativeSignal, ok := received.(syscall.Signal)
 			if !ok {
@@ -401,31 +408,20 @@ func runTurnSupervisor(
 	}
 }
 
-func startTurnSupervisorNative(native *exec.Cmd) error {
-	runtime.LockOSThread()
-	coreLimitErr := turnSupervisorCoreLimit()
-	var noNewPrivilegesErr error
-	if coreLimitErr == nil {
-		noNewPrivilegesErr = turnSupervisorNoNewPrivs()
-	}
-	var startErr error
-	if coreLimitErr == nil && noNewPrivilegesErr == nil {
-		startErr = native.Start()
-	}
-	runtime.UnlockOSThread()
+func startTurnSupervisorNative(native *exec.Cmd) (<-chan error, error) {
+	return startCommandOnCreatorThread(func() error {
+		if err := turnSupervisorCoreLimit(); err != nil {
+			return fmt.Errorf("disable core dumps for supervised Claude native root: %w", err)
+		}
+		if err := turnSupervisorNoNewPrivs(); err != nil {
+			return fmt.Errorf("disable privilege elevation for supervised Claude native root: %w", err)
+		}
+		if err := native.Start(); err != nil {
+			return fmt.Errorf("start supervised Claude native root: %w", err)
+		}
 
-	if coreLimitErr != nil {
-		return fmt.Errorf("disable core dumps for supervised Claude native root: %w", coreLimitErr)
-	}
-	if noNewPrivilegesErr != nil {
-		return fmt.Errorf("disable privilege elevation for supervised Claude native root: %w", noNewPrivilegesErr)
-	}
-
-	if startErr != nil {
-		return fmt.Errorf("start supervised Claude native root: %w", startErr)
-	}
-
-	return nil
+		return nil
+	}, native.Wait)
 }
 
 func publishTurnSupervisorProof(output io.Writer) error {

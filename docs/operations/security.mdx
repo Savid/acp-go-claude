@@ -3,6 +3,24 @@ title: "Security"
 description: "The trust boundaries an operator relies on when running the adapter"
 ---
 
+## Standalone command boundary
+
+The standalone command launches native work only on Linux and requires the
+root-owned mode-`0600` `-process-isolation-config` policy. Resolution walks
+from an open `/` descriptor with `openat` and `O_NOFOLLOW`; every ancestor
+must be root-owned and not writable by group or other, and the final single-link
+policy inode is read through the descriptor that was validated. The configured
+account home is resolved the same way, must be a target-owned mode-`0700`
+directory beneath protected root-owned ancestry, and cannot be `/root` or
+`/nonexistent`.
+
+The adapter remains root, but its ambient environment is never copied wholesale
+to the child. Only the complete literal `baseEnvironment` plus names in
+`inheritEnvironment` reach native work. The CLI refuses Darwin, Windows, and
+other platforms; Darwin best-effort containment remains an explicit
+embedded-Go option only. `-version` and Darwin containment diagnostics launch
+no native worker and are exempt.
+
 ## Credential boundary
 
 Claude account material stays in the Claude config directory the host selects
@@ -33,13 +51,23 @@ quiescence proof. Those descriptors are close-on-exec before Claude starts.
 Adapter death therefore closes the sole control writer and makes the supervisor
 contain the tree rather than leaving it detached.
 
-On Windows, Claude is created suspended, assigned to a private kill-on-close
-Job Object, and only then resumed. Job accounting must report zero active
-processes before shutdown succeeds. FreeBSD, OpenBSD, and other unsupported
-kernels reject native session launch.
+The Linux supervisor stays root and runs from `/` with a closed private
+environment. Immutable launch configuration carries the target identity and
+native environment; only Claude receives the configured UID/GID with no
+supplementary groups. Before native start the supervisor acquires the
+root-owned `/run/acp-go/agent-identities/<uid>.lock` and holds it until the
+descendant wait queue is empty. Claude inherits none of the launch, control,
+proof, or lock descriptors, so it cannot signal its supervisor, forge
+completion, or overlap another native tree using the same host identity.
 
-Darwin also rejects native launch by default. An operator can explicitly accept
-its weaker boundary with `-darwin-best-effort-containment` or
+Windows rejects native session launch before spawning Claude because its
+process API cannot apply the mandatory Unix UID/GID identity boundary with
+empty supplementary groups. A Windows cross-compile proves only that this
+refusal path builds; it does not establish runtime support. FreeBSD, OpenBSD,
+and other unsupported kernels also reject native session launch.
+
+Embedded Darwin hosts reject native launch by default. An operator can
+explicitly accept its weaker boundary with
 `WithDarwinBestEffortContainment`. Each launch then gets a fresh mode-`0700`
 generation under the selected scratch parent, a random runtime identity, and a
 new process group. Shutdown reaps the direct child, sends bounded group
@@ -72,12 +100,13 @@ deadline starts before registry and process enumeration.
 
 Turn cancellation is also contained. A native interrupt response is advisory;
 the adapter then completes the selected per-session boundary before settling a
-cancel, timeout, or caller-context cancellation. Authoritative Linux and
-Windows containment covers every descendant. Darwin best effort requires only
-direct-child reaping and absence of the original process group, so a `setsid`
-escape may remain. Readiness and supervisor exit are not authoritative proof:
-Linux requires the dedicated proof descriptor, and an unexpected supervisor
-death fails closed.
+cancel, timeout, or caller-context cancellation. Authoritative Linux
+containment covers every descendant. Windows cannot launch the native process
+because the mandatory identity boundary is unavailable. Darwin best effort
+requires only direct-child reaping and absence of the original process group,
+so a `setsid` escape may remain. Readiness and supervisor exit are not
+authoritative proof: Linux requires the dedicated proof descriptor, and an
+unexpected supervisor death fails closed.
 The next prompt starts a fresh Claude process with
 `--resume <session-id>`. Incomplete containment disables that relaunch and
 retains the runtime admission instead of making an unsafe capacity claim.

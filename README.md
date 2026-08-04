@@ -108,9 +108,12 @@ providers.
 - Optional raw Claude stream-json extension notifications.
 - OpenTelemetry spans, metrics, trace propagation, and structured logs without
   recording prompt or tool secrets by default.
-- Authoritative native-process containment on Linux and Windows. Darwin fails
-  closed by default and has an explicit best-effort opt-in for operators who
-  accept escaped-descendant and numeric-PGID-reuse risks.
+- Authoritative native-process containment on Linux. Windows native launch
+  fails closed because its process API cannot apply the mandatory Unix UID/GID
+  identity boundary with empty supplementary groups; cross-compilation proves
+  only that this refusal path builds, not runtime support. Darwin fails closed
+  by default and has an explicit best-effort opt-in for operators who accept
+  escaped-descendant and numeric-PGID-reuse risks.
 
 ## Slash Commands
 

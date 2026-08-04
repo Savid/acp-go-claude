@@ -35,10 +35,11 @@ func TestTurnSupervisorNativeInheritsSecurityLimits(t *testing.T) {
 	proofPath := os.Getenv(turnSupervisorSecurityLimitsProofEnv)
 	if proofPath != "" {
 		native := exec.Command("/bin/sh", "-c", `nnp=$(awk '$1 == "NoNewPrivs:" { print $2 }' /proc/self/status); printf '%s %s\n' "$nnp" "$(ulimit -c)" > "$1"`, "sh", proofPath)
-		if err := startTurnSupervisorNative(native); err != nil {
+		waitDone, err := startTurnSupervisorNative(native)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if err := native.Wait(); err != nil {
+		if err := <-waitDone; err != nil {
 			t.Fatal(err)
 		}
 
@@ -77,6 +78,7 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 	t.Helper()
 	executable := turnSupervisorExecutable
 	memfd := turnSupervisorMemfd
+	sealConfig := turnSupervisorSealConfig
 	pipe := turnSupervisorPipe
 	exit := turnSupervisorExit
 	notify := turnSupervisorSignalNotify
@@ -105,6 +107,7 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 	t.Cleanup(func() {
 		turnSupervisorExecutable = executable
 		turnSupervisorMemfd = memfd
+		turnSupervisorSealConfig = sealConfig
 		turnSupervisorPipe = pipe
 		turnSupervisorExit = exit
 		turnSupervisorSignalNotify = notify
@@ -281,6 +284,11 @@ func TestPrepareTurnSupervisorBranches(t *testing.T) {
 		t.Fatal("config write failure was ignored")
 	}
 	turnSupervisorWriteConfig = writeTurnSupervisorConfig
+	turnSupervisorSealConfig = func(uintptr, int, int) (int, error) { return 0, errors.New("seal") }
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
+		t.Fatal("config seal failure was ignored")
+	}
+	turnSupervisorSealConfig = unix.FcntlInt
 
 	pipeCalls := 0
 	turnSupervisorPipe = func() (*os.File, *os.File, error) {
@@ -558,23 +566,39 @@ func TestRunTurnSupervisorBranches(t *testing.T) {
 	}
 
 	controlRead, controlWrite = io.Pipe()
+	var waitedNative *exec.Cmd
+	turnSupervisorCommand = func(path string, args ...string) *exec.Cmd {
+		waitedNative = exec.Command(path, args...)
+
+		return waitedNative
+	}
+	waitObservedBeforeContainment := false
+	turnSupervisorContain = func(int, int) error {
+		if waitedNative == nil || waitedNative.ProcessState == nil {
+			return errors.New("containment ran before the direct child waiter")
+		}
+
+		waitObservedBeforeContainment = true
+
+		return nil
+	}
 	turnSupervisorSignalNotify = func(signals chan<- os.Signal, _ ...os.Signal) {
 		signals <- supervisorTestSignal("foreign")
 		signals <- syscall.SIGINT
 		_ = controlWrite.Close()
 	}
 	signalled := 0
-	turnSupervisorSignalGroup = func(_ int, signal syscall.Signal) error {
+	turnSupervisorSignalGroup = func(pid int, signal syscall.Signal) error {
 		if signal == syscall.SIGINT {
 			signalled++
 		}
 
-		return nil
+		return syscall.Kill(-pid, signal)
 	}
 	config = encodeSupervisorConfig(t, turnSupervisorConfig{Path: "/bin/sh", Args: []string{"sh", "-c", "while :; do sleep 1; done"}})
 	_ = runTurnSupervisor(config, controlRead, io.Discard, io.Discard)
-	if signalled != 1 {
-		t.Fatalf("forwarded signals = %d", signalled)
+	if signalled != 1 || !waitObservedBeforeContainment {
+		t.Fatalf("forwarded signals = %d, waited before containment = %t", signalled, waitObservedBeforeContainment)
 	}
 }
 

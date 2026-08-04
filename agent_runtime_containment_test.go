@@ -31,7 +31,7 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 	}
 
 	runtimeGOOS = "windows"
-	if got := containmentMode(Options{}); got != RuntimeContainmentAuthoritative {
+	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
 		t.Fatalf("Windows mode = %q", got)
 	}
 

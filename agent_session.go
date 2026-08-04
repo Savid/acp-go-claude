@@ -698,12 +698,16 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	if err != nil {
 		return nil, err
 	}
+	if claudeHome != "" {
+		if err := validateNativeOwnedDirectory(claudeHome, a.options.ProcessIsolation); err != nil {
+			return nil, err
+		}
+	}
 
 	imageScratchDir, err = createImageScratchDir(a.options.ScratchDir)
 	if err != nil {
 		return nil, err
 	}
-
 	imageArtifacts, err := a.loadImageArtifacts(ctx, start.ResumeID)
 	if err != nil {
 		return nil, err
@@ -749,6 +753,21 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	if err != nil {
 		return nil, err
 	}
+	if materialized == nil && a.options.ProcessIsolation != nil {
+		parent, parentErr := ensureScratchParent(a.options.ScratchDir)
+		if parentErr != nil {
+			return nil, parentErr
+		}
+
+		isolatedHome, createErr := materializeMkdirTemp(parent, "acp-go-claude-home-*")
+		if createErr != nil {
+			return nil, fmt.Errorf("create isolated Claude home: %w", createErr)
+		}
+		materialized = &materializedSession{configDir: isolatedHome}
+		if copyErr := copyClaudeConfigFiles(isolatedHome, claudeHome, env, claudeProcessIsolation(a.options.ProcessIsolation)); copyErr != nil {
+			return nil, copyErr
+		}
+	}
 
 	processClaudeHome := claudeHome
 	if materialized != nil {
@@ -759,6 +778,11 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	if err != nil {
 		return nil, err
 	}
+	if materialized != nil {
+		if err := handoffGeneratedNativeTree(processClaudeHome, a.options.ProcessIsolation); err != nil {
+			return nil, err
+		}
+	}
 
 	configurationStarted := time.Now()
 	mcpConfigPath, mcpConfigDir, err := writeSessionMCPConfig(a.options.ScratchDir, mcpConfig)
@@ -766,6 +790,11 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 
 	if err != nil {
 		return nil, err
+	}
+	if mcpConfigDir != "" {
+		if err := handoffGeneratedNativeTree(mcpConfigDir, a.options.ProcessIsolation); err != nil {
+			return nil, err
+		}
 	}
 
 	modelConfig, hasModelConfig, err := modelConfigFromEnv(env)

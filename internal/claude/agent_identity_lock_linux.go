@@ -28,13 +28,13 @@ func acquireLinuxAgentIdentityLock(uid uint32, control io.Reader) (io.Closer, er
 	}
 	defer unix.Close(rootFD)
 
-	wagieFD, err := openLinuxLockDirectory("wagie", rootFD, 0o700, true)
+	acpGoFD, err := openLinuxLockDirectory("acp-go", rootFD, 0o700, true)
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(wagieFD)
+	defer unix.Close(acpGoFD)
 
-	namespaceFD, err := openLinuxLockDirectory("agent-identities", wagieFD, 0o700, true)
+	namespaceFD, err := openLinuxLockDirectory("agent-identities", acpGoFD, 0o700, true)
 	if err != nil {
 		return nil, err
 	}
@@ -110,11 +110,8 @@ func verifyLinuxLockFile(fd int) error {
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return fmt.Errorf("stat agent identity lock: %w", err)
 	}
-	if stat.Uid != 0 || stat.Gid != 0 || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 {
+	if stat.Uid != 0 || stat.Gid != 0 || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 || stat.Mode&0o777 != 0o600 {
 		return errors.New("agent identity lock is not a root-owned single-link regular file")
-	}
-	if err := unix.Fchmod(fd, 0o600); err != nil {
-		return fmt.Errorf("chmod agent identity lock: %w", err)
 	}
 
 	return nil

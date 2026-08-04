@@ -53,6 +53,18 @@ func TestLinuxAgentIdentityLockSerializesAndCancels(t *testing.T) {
 	}
 }
 
+func TestLinuxAgentIdentityLockRejectsWrongMode(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires the trusted root supervisor identity")
+	}
+
+	file, err := os.CreateTemp(t.TempDir(), "identity-lock")
+	require.NoError(t, err)
+	require.NoError(t, file.Chmod(0o644))
+	require.Error(t, verifyLinuxLockFile(int(file.Fd())))
+	require.NoError(t, file.Close())
+}
+
 func TestLinuxTrustedSupervisorResistsNativeAuthorityAttacks(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires a privileged two-principal Linux fixture")

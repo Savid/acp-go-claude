@@ -141,6 +141,7 @@ func TestJoinedSlogHandler(t *testing.T) {
 }
 
 func TestRunHandlesTelemetryConfigError(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	t.Cleanup(func() { serve = originalServe })
 
@@ -154,13 +155,14 @@ func TestRunHandlesTelemetryConfigError(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "invalid")
 
 	var stderr bytes.Buffer
-	code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 
 	require.Equal(t, 1, code)
 	require.Contains(t, stderr.String(), "configure OpenTelemetry")
 }
 
 func TestRunHandlesTelemetryShutdownError(t *testing.T) {
+	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalShutdown := shutdownOpenTelemetry
 	t.Cleanup(func() {
@@ -176,7 +178,7 @@ func TestRunHandlesTelemetryShutdownError(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := run(context.Background(), nil, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
+	code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
 
 	require.Equal(t, 1, code)
 	require.Contains(t, stderr.String(), "shutdown OpenTelemetry")

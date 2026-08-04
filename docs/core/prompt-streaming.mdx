@@ -73,8 +73,9 @@ A turn resolves one of three ways:
 
 Cancelling the Go context passed to `Prompt` also performs the contained native
 abort before returning `cancelled`. A timeout performs that same abort before
-returning cause `timeout`. Authoritative Linux and Windows containment covers
-the full native tree. Darwin best effort proves only direct-child reaping plus
-absence of the captured original group, so a `setsid` descendant may remain.
-If the selected boundary does not complete, either path fails as `transport`
-instead of claiming settlement.
+returning cause `timeout`. Authoritative Linux containment covers the full
+native tree. Windows native launch fails closed because the mandatory Unix
+UID/GID identity boundary is unavailable. Darwin best effort proves only
+direct-child reaping plus absence of the captured original group, so a
+`setsid` descendant may remain. If the selected boundary does not complete,
+either path fails as `transport` instead of claiming settlement.

@@ -14,7 +14,7 @@ import (
 type Option func(*Options)
 
 // ProcessIsolation defines the complete operating-system identity and base
-// environment inherited by every Claude process and adapter supervisor.
+// environment inherited by every native Claude process.
 type ProcessIsolation struct {
 	UID             uint32
 	GID             uint32
@@ -114,8 +114,8 @@ type Options struct {
 	DefaultModel string
 	// Env is merged into every launched Claude process environment.
 	Env map[string]string
-	// ProcessIsolation is the mandatory process boundary for every native and
-	// helper launch. Configure it with WithProcessIsolation.
+	// ProcessIsolation is the mandatory process boundary for every native
+	// launch. Configure it with WithProcessIsolation.
 	ProcessIsolation *ProcessIsolation
 
 	// Logger receives structured diagnostic logs. If nil, the default logger is used.
@@ -302,9 +302,9 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithProcessIsolation requires every native process and self-exec supervisor
-// to run as the supplied uid/gid with no supplementary groups. BaseEnvironment
-// is the complete environment base; the adapter never overlays os.Environ.
+// WithProcessIsolation requires every native process to run as the supplied
+// uid/gid with no supplementary groups. BaseEnvironment is the complete native
+// environment base; the adapter never overlays os.Environ.
 func WithProcessIsolation(isolation ProcessIsolation) Option {
 	return func(options *Options) {
 		cloned := isolation

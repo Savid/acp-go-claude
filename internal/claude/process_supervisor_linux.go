@@ -30,10 +30,12 @@ const (
 )
 
 type turnSupervisorConfig struct {
-	Path string   `json:"path"`
-	Args []string `json:"args"`
-	Dir  string   `json:"dir"`
-	Env  []string `json:"env"`
+	Path         string   `json:"path"`
+	Args         []string `json:"args"`
+	Dir          string   `json:"dir"`
+	Env          []string `json:"env"`
+	IsolationUID uint32   `json:"isolationUid"`
+	IsolationGID uint32   `json:"isolationGid"`
 }
 
 type linuxProcessIdentity struct {
@@ -69,6 +71,8 @@ var (
 	turnSupervisorOpenFile     = os.NewFile
 	turnSupervisorCloseOnExec  = unix.CloseOnExec
 	turnSupervisorInput        = inheritedTurnSupervisorInput
+	turnSupervisorIdentityLock = acquireLinuxAgentIdentityLock
+	turnSupervisorEffectiveUID = os.Geteuid
 )
 
 func enableTurnSupervisor() error {
@@ -111,7 +115,7 @@ func turnSupervisorBootstrap() {
 		return
 	}
 
-	err := verifySupervisorIdentity()
+	var err error
 	var config, control io.ReadCloser
 	var ready, proof io.WriteCloser
 	if err == nil {
@@ -155,12 +159,17 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	if err := validateProcessIsolation(options.Isolation); err != nil {
 		return nil, err
 	}
+	if turnSupervisorEffectiveUID() != 0 || uint32(turnSupervisorEffectiveUID()) == options.Isolation.UID {
+		return nil, errors.New("Claude process supervisor requires a distinct trusted root identity")
+	}
 
 	config := turnSupervisorConfig{
-		Path: native.Path,
-		Args: append([]string(nil), native.Args...),
-		Dir:  native.Dir,
-		Env:  append([]string(nil), native.Env...),
+		Path:         native.Path,
+		Args:         append([]string(nil), native.Args...),
+		Dir:          native.Dir,
+		Env:          append([]string(nil), native.Env...),
+		IsolationUID: options.Isolation.UID,
+		IsolationGID: options.Isolation.GID,
 	}
 	if config.Path == "" || len(config.Args) == 0 {
 		return nil, errors.New("prepare Claude process supervisor: native command is incomplete")
@@ -218,7 +227,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 		return nil, fmt.Errorf("resolve embedded Claude process supervisor: %w", err)
 	}
 
-	helperEnv := supervisorIdentityEnvironment(native.Env, turnSupervisorModeEnv, turnSupervisorMode, *options.Isolation)
+	helperEnv := []string{turnSupervisorModeEnv + "=" + turnSupervisorMode}
 	executable, err = resolveProcessExecutable(executable, helperEnv)
 	if err != nil {
 		_ = configFile.Close()
@@ -232,22 +241,12 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	}
 	helper := turnSupervisorCommand(executable) // #nosec G204 -- the current executable hosts the private supervisor mode.
 	helper.Env = helperEnv
-	helper.Dir = native.Dir
+	helper.Dir = "/"
 	helper.Stdin = native.Stdin
 	helper.Stdout = native.Stdout
 	helper.Stderr = native.Stderr
 	helper.ExtraFiles = []*os.File{configFile, controlRead, readyWrite, proofWrite}
 	helper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := applyProcessCredential(helper, options.Isolation); err != nil {
-		_ = configFile.Close()
-		_ = controlRead.Close()
-		_ = controlWrite.Close()
-		_ = readyRead.Close()
-		_ = readyWrite.Close()
-		_ = proofRead.Close()
-		_ = proofWrite.Close()
-		return nil, err
-	}
 
 	return &processTreeCommand{
 		cmd:       helper,
@@ -307,16 +306,22 @@ func runTurnSupervisor(
 		return fmt.Errorf("decode Claude process supervisor config: %w", err)
 	}
 
-	if config.Path == "" || len(config.Args) == 0 {
+	if config.Path == "" || len(config.Args) == 0 || config.IsolationUID == 0 || config.IsolationGID == 0 {
 		return errors.New("claude process supervisor config is incomplete")
 	}
-	if err := verifySupervisorIdentity(); err != nil {
-		return err
+	if turnSupervisorEffectiveUID() != 0 || uint32(turnSupervisorEffectiveUID()) == config.IsolationUID {
+		return errors.New("Claude process supervisor requires a distinct trusted root identity")
 	}
 
 	if err := turnSupervisorEnable(); err != nil {
 		return fmt.Errorf("enable Claude process subreaper: %w", err)
 	}
+
+	identityLock, err := turnSupervisorIdentityLock(config.IsolationUID, controlInput)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = identityLock.Close() }()
 
 	signals := make(chan os.Signal, 2)
 
@@ -331,6 +336,13 @@ func runTurnSupervisor(
 	native.Stdout = os.Stdout
 	native.Stderr = os.Stderr
 	configureProcessCommand(native)
+	if err := applyProcessCredential(native, &ProcessIsolation{
+		UID:             config.IsolationUID,
+		GID:             config.IsolationGID,
+		BaseEnvironment: environmentMap(config.Env),
+	}); err != nil {
+		return fmt.Errorf("apply supervised Claude native identity: %w", err)
+	}
 
 	if err := startTurnSupervisorNative(native); err != nil {
 		return err

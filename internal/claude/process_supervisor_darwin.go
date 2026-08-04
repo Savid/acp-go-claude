@@ -23,6 +23,7 @@ const darwinLaunchStatusLimit = 4096
 type darwinLaunchConfig struct {
 	Path string   `json:"path"`
 	Args []string `json:"args"`
+	Dir  string   `json:"dir"`
 	Env  []string `json:"env"`
 }
 
@@ -140,6 +141,10 @@ func runDarwinLaunchBootstrap(configInput io.ReadCloser, gate io.ReadCloser) err
 		return fmt.Errorf("close Darwin native launch descriptors: %w", err)
 	}
 
+	if err := os.Chdir(config.Dir); err != nil {
+		return fmt.Errorf("enter native Claude working directory: %w", err)
+	}
+
 	if err := darwinLaunchExec(config.Path, config.Args, config.Env); err != nil {
 		return fmt.Errorf("exec native Claude command: %w", err)
 	}
@@ -167,6 +172,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	config := darwinLaunchConfig{
 		Path: native.Path,
 		Args: append([]string(nil), native.Args...),
+		Dir:  native.Dir,
 		Env:  withoutPrivateAdapterEnv(native.Env),
 	}
 	if config.Path == "" || len(config.Args) == 0 {
@@ -233,7 +239,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 		return nil, fmt.Errorf("resolve Darwin native launch bootstrap: %w", err)
 	}
 
-	helperEnv := supervisorIdentityEnvironment(native.Env, darwinLaunchBootstrapEnv, darwinLaunchBootstrapMode, *options.Isolation)
+	helperEnv := supervisorIdentityEnvironment(nil, darwinLaunchBootstrapEnv, darwinLaunchBootstrapMode, *options.Isolation)
 
 	executable, err = resolveProcessExecutable(executable, helperEnv)
 	if err != nil {
@@ -247,7 +253,7 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	}
 
 	helper := darwinLaunchCommand(executable) // #nosec G204 -- the current executable hosts the private launch bootstrap.
-	helper.Dir = native.Dir
+	helper.Dir = "/"
 	helper.Env = helperEnv
 	helper.Stdin = native.Stdin
 	helper.Stdout = native.Stdout

@@ -99,6 +99,8 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 	run := turnSupervisorRun
 	openFile := turnSupervisorOpenFile
 	closeOnExec := turnSupervisorCloseOnExec
+	identityLock := turnSupervisorIdentityLock
+	effectiveUID := turnSupervisorEffectiveUID
 	syscallKillOriginal := syscallKill
 	t.Cleanup(func() {
 		turnSupervisorExecutable = executable
@@ -125,6 +127,8 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 		turnSupervisorRun = run
 		turnSupervisorOpenFile = openFile
 		turnSupervisorCloseOnExec = closeOnExec
+		turnSupervisorIdentityLock = identityLock
+		turnSupervisorEffectiveUID = effectiveUID
 		syscallKill = syscallKillOriginal
 	})
 }
@@ -259,20 +263,21 @@ func (c *recordingWriteCloser) Close() error {
 
 func TestPrepareTurnSupervisorBranches(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
+	options := processLaunchOptions{Isolation: testProcessIsolation()}
 
-	if _, err := prepareProcessTreeCommand(&exec.Cmd{}, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(&exec.Cmd{}, options); err == nil {
 		t.Fatal("incomplete native command was accepted")
 	}
 
 	native := exec.Command("true")
 	turnSupervisorMemfd = func(string, int) (int, error) { return 0, errors.New("memfd") }
-	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
 		t.Fatal("memfd failure was ignored")
 	}
 
 	turnSupervisorMemfd = unix.MemfdCreate
 	turnSupervisorWriteConfig = func(io.WriteSeeker, turnSupervisorConfig) error { return errors.New("write") }
-	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
 		t.Fatal("config write failure was ignored")
 	}
 	turnSupervisorWriteConfig = writeTurnSupervisorConfig
@@ -286,7 +291,7 @@ func TestPrepareTurnSupervisorBranches(t *testing.T) {
 
 		return os.Pipe()
 	}
-	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
 		t.Fatal("control pipe failure was ignored")
 	}
 
@@ -299,7 +304,7 @@ func TestPrepareTurnSupervisorBranches(t *testing.T) {
 
 		return os.Pipe()
 	}
-	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
 		t.Fatal("readiness pipe failure was ignored")
 	}
 
@@ -312,23 +317,36 @@ func TestPrepareTurnSupervisorBranches(t *testing.T) {
 
 		return os.Pipe()
 	}
-	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
 		t.Fatal("proof pipe failure was ignored")
 	}
 
 	turnSupervisorPipe = os.Pipe
 	turnSupervisorExecutable = func() (string, error) { return "", errors.New("executable") }
-	if _, err := prepareProcessTreeCommand(native, processLaunchOptions{}); err == nil {
+	if _, err := prepareProcessTreeCommand(native, options); err == nil {
 		t.Fatal("executable failure was ignored")
 	}
 
 	turnSupervisorExecutable = os.Executable
-	launch, err := prepareProcessTreeCommand(native, processLaunchOptions{})
+	launch, err := prepareProcessTreeCommand(native, options)
 	if err != nil {
 		t.Fatalf("prepare supervisor: %v", err)
 	}
 	if launch.cmd == nil || len(launch.inherited) != 4 || launch.control == nil || launch.ready == nil || launch.proof == nil {
 		t.Fatalf("prepared launch = %#v", launch)
+	}
+	if launch.cmd.Dir != "/" || len(launch.cmd.Env) != 1 || launch.cmd.Env[0] != turnSupervisorModeEnv+"="+turnSupervisorMode {
+		t.Fatalf("supervisor authority environment = dir %q env %q", launch.cmd.Dir, launch.cmd.Env)
+	}
+	if launch.cmd.SysProcAttr == nil || launch.cmd.SysProcAttr.Credential != nil {
+		t.Fatalf("supervisor unexpectedly carries native credentials: %#v", launch.cmd.SysProcAttr)
+	}
+	var sealed turnSupervisorConfig
+	if err := json.NewDecoder(launch.inherited[0]).Decode(&sealed); err != nil {
+		t.Fatalf("decode sealed supervisor config: %v", err)
+	}
+	if sealed.IsolationUID != options.Isolation.UID || sealed.IsolationGID != options.Isolation.GID {
+		t.Fatalf("sealed native identity = %d:%d", sealed.IsolationUID, sealed.IsolationGID)
 	}
 	launch.close()
 	launch.close()
@@ -410,6 +428,10 @@ func TestTurnSupervisorEnvironmentReplacesInternalMode(t *testing.T) {
 
 func TestRunTurnSupervisorBranches(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
+	turnSupervisorEffectiveUID = func() int { return 0 }
+	turnSupervisorIdentityLock = func(uint32, io.Reader) (io.Closer, error) {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
 	turnSupervisorEnable = func() error { return nil }
 	turnSupervisorNoNewPrivs = func() error { return nil }
 	turnSupervisorCoreLimit = func() error { return nil }
@@ -558,6 +580,15 @@ func TestRunTurnSupervisorBranches(t *testing.T) {
 
 func encodeSupervisorConfig(t *testing.T, config turnSupervisorConfig) io.Reader {
 	t.Helper()
+	if config.IsolationUID == 0 {
+		config.IsolationUID = 1
+	}
+	if config.IsolationGID == 0 {
+		config.IsolationGID = 1
+	}
+	if config.Env == nil {
+		config.Env = []string{"PATH=/usr/bin:/bin"}
+	}
 	var buffer bytes.Buffer
 	if err := json.NewEncoder(&buffer).Encode(config); err != nil {
 		t.Fatal(err)

@@ -86,7 +86,7 @@ type Options struct {
 }
 
 // ProcessIsolation is the mandatory credential and complete environment base
-// applied to every provider process and self-exec supervisor.
+// applied to every provider process.
 type ProcessIsolation struct {
 	UID             uint32
 	GID             uint32

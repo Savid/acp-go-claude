@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -51,6 +52,7 @@ var (
 	turnSupervisorSignalNotify = signal.Notify
 	turnSupervisorSignalStop   = signal.Stop
 	turnSupervisorEnable       = enableTurnSupervisor
+	turnSupervisorNoNewPrivs   = enableTurnSupervisorNoNewPrivileges
 	turnSupervisorCommand      = exec.Command
 	turnSupervisorContain      = awaitLinuxSupervisorContainment
 	turnSupervisorProcessID    = os.Getpid
@@ -70,6 +72,10 @@ var (
 
 func enableTurnSupervisor() error {
 	return unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+}
+
+func enableTurnSupervisorNoNewPrivileges() error {
+	return unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 }
 
 func inheritedTurnSupervisorInput() (io.ReadCloser, io.ReadCloser, io.WriteCloser, io.WriteCloser, error) {
@@ -321,8 +327,8 @@ func runTurnSupervisor(
 	native.Stderr = os.Stderr
 	configureProcessCommand(native)
 
-	if err := native.Start(); err != nil {
-		return fmt.Errorf("start supervised Claude native root: %w", err)
+	if err := startTurnSupervisorNative(native); err != nil {
+		return err
 	}
 
 	if _, err := io.WriteString(readyOutput, turnSupervisorReady); err != nil {
@@ -376,6 +382,26 @@ func runTurnSupervisor(
 			_ = turnSupervisorSignalGroup(native.Process.Pid, nativeSignal)
 		}
 	}
+}
+
+func startTurnSupervisorNative(native *exec.Cmd) error {
+	runtime.LockOSThread()
+	noNewPrivilegesErr := turnSupervisorNoNewPrivs()
+	var startErr error
+	if noNewPrivilegesErr == nil {
+		startErr = native.Start()
+	}
+	runtime.UnlockOSThread()
+
+	if noNewPrivilegesErr != nil {
+		return fmt.Errorf("disable privilege elevation for supervised Claude native root: %w", noNewPrivilegesErr)
+	}
+
+	if startErr != nil {
+		return fmt.Errorf("start supervised Claude native root: %w", startErr)
+	}
+
+	return nil
 }
 
 func publishTurnSupervisorProof(output io.Writer) error {

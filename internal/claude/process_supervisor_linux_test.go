@@ -29,6 +29,38 @@ type supervisorWriteSeeker struct {
 	seekErr  error
 }
 
+const turnSupervisorNoNewPrivilegesProofEnv = "ACP_GO_CLAUDE_TEST_NO_NEW_PRIVILEGES_PROOF"
+
+func TestTurnSupervisorNativeInheritsNoNewPrivileges(t *testing.T) {
+	proofPath := os.Getenv(turnSupervisorNoNewPrivilegesProofEnv)
+	if proofPath != "" {
+		native := exec.Command("/bin/sh", "-c", `awk '$1 == "NoNewPrivs:" { print $2 }' /proc/self/status > "$1"`, "sh", proofPath)
+		if err := startTurnSupervisorNative(native); err != nil {
+			t.Fatal(err)
+		}
+		if err := native.Wait(); err != nil {
+			t.Fatal(err)
+		}
+
+		return
+	}
+
+	proofPath = filepath.Join(t.TempDir(), "no-new-privileges")
+	helper := exec.Command(os.Args[0], "-test.run=^TestTurnSupervisorNativeInheritsNoNewPrivileges$")
+	helper.Env = append(os.Environ(), turnSupervisorNoNewPrivilegesProofEnv+"="+proofPath)
+	if output, err := helper.CombinedOutput(); err != nil {
+		t.Fatalf("run no-new-privileges proof helper: %v\n%s", err, output)
+	}
+
+	proof, err := os.ReadFile(proofPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(proof)) != "1" {
+		t.Fatalf("native NoNewPrivs = %q, want 1", strings.TrimSpace(string(proof)))
+	}
+}
+
 func (w supervisorWriteSeeker) Write(value []byte) (int, error) {
 	if w.writeErr != nil {
 		return 0, w.writeErr
@@ -51,6 +83,7 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 	stop := turnSupervisorSignalStop
 	input := turnSupervisorInput
 	enable := turnSupervisorEnable
+	noNewPrivs := turnSupervisorNoNewPrivs
 	command := turnSupervisorCommand
 	contain := turnSupervisorContain
 	processID := turnSupervisorProcessID
@@ -75,6 +108,7 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 		turnSupervisorSignalStop = stop
 		turnSupervisorInput = input
 		turnSupervisorEnable = enable
+		turnSupervisorNoNewPrivs = noNewPrivs
 		turnSupervisorCommand = command
 		turnSupervisorContain = contain
 		turnSupervisorProcessID = processID
@@ -375,6 +409,7 @@ func TestTurnSupervisorEnvironmentReplacesInternalMode(t *testing.T) {
 func TestRunTurnSupervisorBranches(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
 	turnSupervisorEnable = func() error { return nil }
+	turnSupervisorNoNewPrivs = func() error { return nil }
 	turnSupervisorSignalNotify = func(chan<- os.Signal, ...os.Signal) {}
 	turnSupervisorSignalStop = func(chan<- os.Signal) {}
 	turnSupervisorProcessID = func() int { return 99 }
@@ -392,6 +427,12 @@ func TestRunTurnSupervisorBranches(t *testing.T) {
 		t.Fatal("subreaper failure succeeded")
 	}
 	turnSupervisorEnable = func() error { return nil }
+	turnSupervisorNoNewPrivs = func() error { return errors.New("no new privileges") }
+	config = encodeSupervisorConfig(t, turnSupervisorConfig{Path: "/bin/sh", Args: []string{"sh", "-c", "exit 0"}})
+	if err := runTurnSupervisor(config, strings.NewReader(""), io.Discard, io.Discard); err == nil {
+		t.Fatal("no-new-privileges failure succeeded")
+	}
+	turnSupervisorNoNewPrivs = func() error { return nil }
 
 	config = encodeSupervisorConfig(t, turnSupervisorConfig{Path: "/missing", Args: []string{"missing"}})
 	if err := runTurnSupervisor(config, strings.NewReader(""), io.Discard, io.Discard); err == nil {

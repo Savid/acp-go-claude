@@ -350,7 +350,10 @@ func TestTurnSupervisorConfigAndReadinessBranches(t *testing.T) {
 
 func TestTurnSupervisorEnvironmentReplacesInternalMode(t *testing.T) {
 	t.Setenv(turnSupervisorModeEnv, "stale")
-	env := turnSupervisorEnvironment()
+	env := supervisorIdentityEnvironment(
+		[]string{"BASE=yes"}, turnSupervisorModeEnv, turnSupervisorMode,
+		ProcessIsolation{UID: 1, GID: 2},
+	)
 	count := 0
 	for _, entry := range env {
 		if entry == turnSupervisorModeEnv+"="+turnSupervisorMode {
@@ -362,6 +365,10 @@ func TestTurnSupervisorEnvironmentReplacesInternalMode(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("supervisor mode count = %d", count)
+	}
+	values := environmentMap(env)
+	if values["BASE"] != "yes" || values[processIsolationUIDEnv] != "1" || values[processIsolationGIDEnv] != "2" {
+		t.Fatalf("supervisor policy environment = %#v", values)
 	}
 }
 

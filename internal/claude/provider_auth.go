@@ -183,7 +183,7 @@ func authCommandOutput(
 	generation *DarwinGeneration,
 	operation string,
 ) ([]byte, int, error) {
-	path, err := Discover(ctx, options.CLIPath, nil)
+	path, err := Discover(ctx, options.CLIPath, options)
 	if err != nil {
 		return nil, 0, errors.Join(err, generation.finish(true))
 	}
@@ -427,7 +427,7 @@ const (
 // with a scrubbed environment and returns once the grammar has yielded the
 // validated authorization URL.
 func StartAuthLogin(ctx context.Context, options Options, generation *DarwinGeneration) (*AuthLogin, string, error) {
-	path, err := Discover(ctx, options.CLIPath, nil)
+	path, err := Discover(ctx, options.CLIPath, options)
 	if err != nil {
 		return nil, "", errors.Join(err, generation.finish(true))
 	}
@@ -490,7 +490,11 @@ func startAuthLoginChild(
 
 	envOptions := options
 	envOptions.Cwd = cwd
+
 	command.Env = BuildEnv(envOptions)
+	if command.Env == nil {
+		return nil, errors.New("build Claude auth login environment: invalid process isolation")
+	}
 
 	// The shim is applied after BuildEnv because BuildEnv drops keys wholesale,
 	// and a PATH or BROWSER it rewrote afterwards would hand the authorization
@@ -513,6 +517,7 @@ func startAuthLoginChild(
 	launch, err := processPrepareContained(command, processLaunchOptions{
 		DarwinBestEffort: options.DarwinBestEffort,
 		Generation:       generation,
+		Isolation:        options.ProcessIsolation,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("prepare claude auth login containment: %w", err)

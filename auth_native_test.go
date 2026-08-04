@@ -240,9 +240,9 @@ func TestRemoveKeystoreItemsNamesTheConfigDirAndTheAccount(t *testing.T) {
 	requireAuthFailed(t, broker.removeKeystoreItems(t.Context()), authCauseTransport)
 }
 
-func TestAuthNativeUserReadsTheProcessEnvironment(t *testing.T) {
-	t.Setenv("USER", "operator")
-	require.Equal(t, "operator", authNativeUser())
+func TestAuthNativeUserReadsThePolicyEnvironment(t *testing.T) {
+	options := claude.Options{ProcessIsolation: &claude.ProcessIsolation{BaseEnvironment: map[string]string{"USER": "operator"}}}
+	require.Equal(t, "operator", authNativeUser(options))
 }
 
 func TestAuthLoginBeginWrapsTheNativeStart(t *testing.T) {

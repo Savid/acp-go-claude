@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
 
@@ -124,7 +125,9 @@ func TestMaterializeStoreSessionErrors(t *testing.T) {
 	agent := NewAgent(WithSessionStore(store), WithScratchDir(copyScratch))
 
 	originalCopy := copyClaudeConfigFiles
-	copyClaudeConfigFiles = func(string, string, map[string]string) error { return errors.New("copy failed") }
+	copyClaudeConfigFiles = func(string, string, map[string]string, *claude.ProcessIsolation) error {
+		return errors.New("copy failed")
+	}
 	t.Cleanup(func() { copyClaudeConfigFiles = originalCopy })
 	materialized, err := agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
 	require.ErrorContains(t, err, "copy failed")
@@ -178,9 +181,9 @@ func TestConfigDirAndNativeTranscriptDeleteHelpers(t *testing.T) {
 	require.Equal(t, filepath.Clean(overrideHome), defaultClaudeConfigDir(overrideHome))
 
 	dst := t.TempDir()
-	require.NoError(t, copyClaudeConfigFilesImpl(dst, dst, nil))
+	require.NoError(t, copyClaudeConfigFilesImpl(dst, dst, nil, nil))
 	require.NoFileExists(t, filepath.Join(dst, ".claude.json"))
-	require.NoError(t, copyClaudeConfigFilesImpl(dst, "", map[string]string{"CLAUDE_CONFIG_DIR": t.TempDir()}))
+	require.NoError(t, copyClaudeConfigFilesImpl(dst, "", map[string]string{"CLAUDE_CONFIG_DIR": t.TempDir()}, nil))
 
 	sessionID := "33333333-3333-4333-8333-333333333333"
 	projectKey := "project"
@@ -273,7 +276,7 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 
 	materializeReadFile = func(string) ([]byte, error) { return []byte(`{"ok":true}`), nil }
 	materializeWriteFile = func(string, []byte, os.FileMode) error { return errors.New("copy write failed") }
-	require.ErrorContains(t, copyClaudeConfigFilesImpl(t.TempDir(), t.TempDir(), nil), "copy write failed")
+	require.ErrorContains(t, copyClaudeConfigFilesImpl(t.TempDir(), t.TempDir(), nil, nil), "copy write failed")
 	materializeReadFile = originalReadFile
 	materializeWriteFile = originalWriteFile
 

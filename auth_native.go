@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
@@ -40,8 +39,19 @@ var authLoginBegin = func(
 	return login, authorizeURL, nil
 }
 
-// authNativeUser reports the account name the platform keystore items carry.
-var authNativeUser = func() string { return os.Getenv("USER") }
+// authNativeUser reports the target account name the platform keystore items
+// carry. It comes only from the complete process policy environment.
+var authNativeUser = func(options claude.Options) string {
+	if value := options.Env["USER"]; value != "" {
+		return value
+	}
+
+	if options.ProcessIsolation != nil {
+		return options.ProcessIsolation.BaseEnvironment["USER"]
+	}
+
+	return ""
+}
 
 // nativeOptions builds the launch options every provider-auth subcommand runs
 // under. Flows run in the normal session home: a completed login must land in
@@ -63,6 +73,7 @@ func (p *providerAuth) nativeOptions() (claude.Options, error) {
 		CLIPath:          p.agent.options.ExecutablePath,
 		ClaudeHome:       p.home.path,
 		Env:              p.agent.options.Env,
+		ProcessIsolation: claudeProcessIsolation(p.agent.options.ProcessIsolation),
 		ScratchParent:    scratch,
 		DarwinBestEffort: p.agent.containmentMode == RuntimeContainmentBestEffort,
 	}, nil
@@ -246,7 +257,7 @@ func (p *providerAuth) removeKeystoreItems(ctx context.Context) error {
 		return authFailed(authRemovalCause(err), authProviderID, "", "")
 	}
 
-	if err := authKeychainRemove(ctx, options.ClaudeHome, authNativeUser()); err != nil {
+	if err := authKeychainRemove(ctx, options.ClaudeHome, authNativeUser(options), options); err != nil {
 		return authFailed(authCauseTransport, authProviderID, "", "")
 	}
 

@@ -100,7 +100,12 @@ func turnSupervisorBootstrap() {
 		return
 	}
 
-	config, control, ready, proof, err := turnSupervisorInput()
+	err := verifySupervisorIdentity()
+	var config, control io.ReadCloser
+	var ready, proof io.WriteCloser
+	if err == nil {
+		config, control, ready, proof, err = turnSupervisorInput()
+	}
 	if err == nil {
 		err = turnSupervisorRun(config, control, ready, proof)
 	}
@@ -135,6 +140,9 @@ func turnSupervisorBootstrap() {
 func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
 	if options.DarwinBestEffort {
 		return nil, fmt.Errorf("%w: Darwin best-effort containment is invalid on linux", ErrProcessContainmentIncomplete)
+	}
+	if err := validateProcessIsolation(options.Isolation); err != nil {
+		return nil, err
 	}
 
 	config := turnSupervisorConfig{
@@ -199,14 +207,36 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 		return nil, fmt.Errorf("resolve embedded Claude process supervisor: %w", err)
 	}
 
+	helperEnv := supervisorIdentityEnvironment(native.Env, turnSupervisorModeEnv, turnSupervisorMode, *options.Isolation)
+	executable, err = resolveProcessExecutable(executable, helperEnv)
+	if err != nil {
+		_ = configFile.Close()
+		_ = controlRead.Close()
+		_ = controlWrite.Close()
+		_ = readyRead.Close()
+		_ = readyWrite.Close()
+		_ = proofRead.Close()
+		_ = proofWrite.Close()
+		return nil, fmt.Errorf("resolve embedded Claude process supervisor through process policy: %w", err)
+	}
 	helper := turnSupervisorCommand(executable) // #nosec G204 -- the current executable hosts the private supervisor mode.
-	helper.Env = turnSupervisorEnvironment()
+	helper.Env = helperEnv
 	helper.Dir = native.Dir
 	helper.Stdin = native.Stdin
 	helper.Stdout = native.Stdout
 	helper.Stderr = native.Stderr
 	helper.ExtraFiles = []*os.File{configFile, controlRead, readyWrite, proofWrite}
 	helper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := applyProcessCredential(helper, options.Isolation); err != nil {
+		_ = configFile.Close()
+		_ = controlRead.Close()
+		_ = controlWrite.Close()
+		_ = readyRead.Close()
+		_ = readyWrite.Close()
+		_ = proofRead.Close()
+		_ = proofWrite.Close()
+		return nil, err
+	}
 
 	return &processTreeCommand{
 		cmd:       helper,
@@ -255,19 +285,6 @@ func writeTurnSupervisorConfig(file io.WriteSeeker, config turnSupervisorConfig)
 	return nil
 }
 
-func turnSupervisorEnvironment() []string {
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, turnSupervisorModeEnv+"=") {
-			continue
-		}
-
-		env = append(env, entry)
-	}
-
-	return append(env, turnSupervisorModeEnv+"="+turnSupervisorMode)
-}
-
 func runTurnSupervisor(
 	configInput io.Reader,
 	controlInput io.Reader,
@@ -281,6 +298,9 @@ func runTurnSupervisor(
 
 	if config.Path == "" || len(config.Args) == 0 {
 		return errors.New("claude process supervisor config is incomplete")
+	}
+	if err := verifySupervisorIdentity(); err != nil {
+		return err
 	}
 
 	if err := turnSupervisorEnable(); err != nil {

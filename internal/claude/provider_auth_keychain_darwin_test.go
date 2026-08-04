@@ -15,7 +15,7 @@ func TestRemoveAuthKeychainItemsRemovesEveryItemUnderABoundedCall(t *testing.T) 
 
 	var calls [][]string
 
-	authKeychainTool = func(ctx context.Context, args []string) (int, error) {
+	authKeychainTool = func(ctx context.Context, args []string, _ Options) (int, error) {
 		deadline, ok := ctx.Deadline()
 		require.True(t, ok, "every keystore call carries a bound")
 		require.False(t, deadline.IsZero())
@@ -25,7 +25,7 @@ func TestRemoveAuthKeychainItemsRemovesEveryItemUnderABoundedCall(t *testing.T) 
 		return 0, nil
 	}
 
-	require.NoError(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator"))
+	require.NoError(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator", Options{}))
 	require.Len(t, calls, 4)
 	require.Equal(t, "delete-generic-password", calls[0][0])
 	require.Equal(t, "-a", calls[0][3])
@@ -37,21 +37,21 @@ func TestRemoveAuthKeychainItemsSeparatesAbsenceFromTransientFailure(t *testing.
 
 	t.Cleanup(func() { authKeychainTool = original })
 
-	authKeychainTool = func(context.Context, []string) (int, error) { return 44, nil }
-	require.NoError(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator"))
+	authKeychainTool = func(context.Context, []string, Options) (int, error) { return 44, nil }
+	require.NoError(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator", Options{}))
 
-	authKeychainTool = func(context.Context, []string) (int, error) { return 1, nil }
-	require.ErrorContains(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator"), "status 1")
+	authKeychainTool = func(context.Context, []string, Options) (int, error) { return 1, nil }
+	require.ErrorContains(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator", Options{}), "status 1")
 
 	// A keychain that refuses the delete answers 51 with the item still in it.
 	// Reported as success, the caller would tell the operator a credential was
 	// cleared that a later login still finds.
-	authKeychainTool = func(context.Context, []string) (int, error) { return 51, nil }
-	require.ErrorContains(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator"), "status 51")
+	authKeychainTool = func(context.Context, []string, Options) (int, error) { return 51, nil }
+	require.ErrorContains(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator", Options{}), "status 51")
 
 	want := errors.New("tool missing")
-	authKeychainTool = func(context.Context, []string) (int, error) { return 0, want }
-	require.ErrorIs(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator"), want)
+	authKeychainTool = func(context.Context, []string, Options) (int, error) { return 0, want }
+	require.ErrorIs(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator", Options{}), want)
 }
 
 func TestReadAuthKeychainCredentialReturnsTheFirstPresentItemUnderABoundedCall(t *testing.T) {
@@ -61,7 +61,7 @@ func TestReadAuthKeychainCredentialReturnsTheFirstPresentItemUnderABoundedCall(t
 
 	var calls [][]string
 
-	authKeychainReadTool = func(ctx context.Context, args []string) ([]byte, int, error) {
+	authKeychainReadTool = func(ctx context.Context, args []string, _ Options) ([]byte, int, error) {
 		deadline, ok := ctx.Deadline()
 		require.True(t, ok, "every keystore call carries a bound")
 		require.False(t, deadline.IsZero())
@@ -75,7 +75,7 @@ func TestReadAuthKeychainCredentialReturnsTheFirstPresentItemUnderABoundedCall(t
 		return []byte(`{"claudeAiOauth":{"accessToken":"unit-secret"}}` + "\n"), 0, nil
 	}
 
-	data, err := ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator")
+	data, err := ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator", Options{})
 	require.NoError(t, err)
 	require.Equal(t, `{"claudeAiOauth":{"accessToken":"unit-secret"}}`, string(data))
 	require.Len(t, calls, 2)
@@ -90,14 +90,14 @@ func TestReadAuthKeychainCredentialAnswersAbsenceForMissingAndEmptyItems(t *test
 
 	t.Cleanup(func() { authKeychainReadTool = original })
 
-	authKeychainReadTool = func(context.Context, []string) ([]byte, int, error) { return nil, 44, nil }
-	data, err := ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator")
+	authKeychainReadTool = func(context.Context, []string, Options) ([]byte, int, error) { return nil, 44, nil }
+	data, err := ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator", Options{})
 	require.NoError(t, err)
 	require.Nil(t, data)
 
 	// An item holding nothing is absence, not a credential.
-	authKeychainReadTool = func(context.Context, []string) ([]byte, int, error) { return []byte("\n"), 0, nil }
-	data, err = ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator")
+	authKeychainReadTool = func(context.Context, []string, Options) ([]byte, int, error) { return []byte("\n"), 0, nil }
+	data, err = ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator", Options{})
 	require.NoError(t, err)
 	require.Nil(t, data)
 }
@@ -107,13 +107,13 @@ func TestReadAuthKeychainCredentialSeparatesAbsenceFromTransientFailure(t *testi
 
 	t.Cleanup(func() { authKeychainReadTool = original })
 
-	authKeychainReadTool = func(context.Context, []string) ([]byte, int, error) { return nil, 51, nil }
-	_, err := ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator")
+	authKeychainReadTool = func(context.Context, []string, Options) ([]byte, int, error) { return nil, 51, nil }
+	_, err := ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator", Options{})
 	require.ErrorContains(t, err, "status 51")
 
 	want := errors.New("tool missing")
-	authKeychainReadTool = func(context.Context, []string) ([]byte, int, error) { return nil, 0, want }
-	_, err = ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator")
+	authKeychainReadTool = func(context.Context, []string, Options) ([]byte, int, error) { return nil, 0, want }
+	_, err = ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator", Options{})
 	require.ErrorIs(t, err, want)
 }
 
@@ -124,7 +124,7 @@ func TestReadAuthKeychainCredentialPrefersALaterItemOverAnEarlierFailure(t *test
 
 	var calls int
 
-	authKeychainReadTool = func(context.Context, []string) ([]byte, int, error) {
+	authKeychainReadTool = func(context.Context, []string, Options) ([]byte, int, error) {
 		calls++
 		if calls == 1 {
 			return nil, 51, nil
@@ -135,7 +135,7 @@ func TestReadAuthKeychainCredentialPrefersALaterItemOverAnEarlierFailure(t *test
 
 	// A credential that is actually there beats reporting the first item's
 	// refusal: the session either resumes logged in or it does not.
-	data, err := ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator")
+	data, err := ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator", Options{})
 	require.NoError(t, err)
 	require.Equal(t, `{"claudeAiOauth":{}}`, string(data))
 }
@@ -148,7 +148,7 @@ func TestAuthKeychainReadToolReportsTheRealPlatformExitStatus(t *testing.T) {
 		"-s", "acp-go-claude-canary-service-that-does-not-exist",
 		"-a", "acp-go-claude-canary-account",
 		"-w",
-	})
+	}, Options{})
 	require.NoError(t, err)
 	require.Empty(t, output)
 	require.True(t, authKeychainAbsent(code), "unexpected status %d", code)
@@ -156,7 +156,7 @@ func TestAuthKeychainReadToolReportsTheRealPlatformExitStatus(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	_, _, err = authKeychainReadTool(ctx, []string{"list-keychains"})
+	_, _, err = authKeychainReadTool(ctx, []string{"list-keychains"}, Options{})
 	require.Error(t, err)
 }
 
@@ -167,19 +167,19 @@ func TestAuthKeychainToolReportsTheRealPlatformExitStatus(t *testing.T) {
 		"delete-generic-password",
 		"-s", "acp-go-claude-canary-service-that-does-not-exist",
 		"-a", "acp-go-claude-canary-account",
-	})
+	}, Options{})
 	require.NoError(t, err)
 	require.True(t, authKeychainAbsent(code), "unexpected status %d", code)
 }
 
 func TestAuthKeychainToolSeparatesSuccessFromALaunchFailure(t *testing.T) {
-	code, err := authKeychainTool(t.Context(), []string{"list-keychains"})
+	code, err := authKeychainTool(t.Context(), []string{"list-keychains"}, Options{})
 	require.NoError(t, err)
 	require.Zero(t, code)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	_, err = authKeychainTool(ctx, []string{"list-keychains"})
+	_, err = authKeychainTool(ctx, []string{"list-keychains"}, Options{})
 	require.Error(t, err)
 }

@@ -242,7 +242,7 @@ func assertDarwinRemovalClearsPresentItems(t *testing.T, account string) {
 
 	assertDarwinReadLegCarriesSeededItems(t, account)
 
-	require.NoError(t, claude.RemoveAuthKeychainItems(t.Context(), keystoreDarwinConfigDir, account))
+	require.NoError(t, claude.RemoveAuthKeychainItems(t.Context(), keystoreDarwinConfigDir, account, claude.Options{}))
 
 	for _, item := range items {
 		find := exec.CommandContext(t.Context(), "security", "find-generic-password",
@@ -250,7 +250,7 @@ func assertDarwinRemovalClearsPresentItems(t *testing.T, account string) {
 		require.Error(t, find.Run(), "item %q survived the removal ladder", item.Service)
 	}
 
-	absent, err := claude.ReadAuthKeychainCredential(t.Context(), keystoreDarwinConfigDir, account)
+	absent, err := claude.ReadAuthKeychainCredential(t.Context(), keystoreDarwinConfigDir, account, claude.Options{})
 	require.NoError(t, err)
 	require.Nil(t, absent, "the read leg answered from an item the removal ladder cleared")
 }
@@ -262,7 +262,7 @@ func assertDarwinRemovalClearsPresentItems(t *testing.T, account string) {
 func assertDarwinReadLegCarriesSeededItems(t *testing.T, account string) {
 	t.Helper()
 
-	data, err := claude.ReadAuthKeychainCredential(t.Context(), keystoreDarwinConfigDir, account)
+	data, err := claude.ReadAuthKeychainCredential(t.Context(), keystoreDarwinConfigDir, account, claude.Options{})
 	require.NoError(t, err)
 	require.Equal(t, residenceCanary, string(data))
 

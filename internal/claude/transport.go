@@ -133,7 +133,7 @@ func NewProcessTransport(log *slog.Logger, options Options) *ProcessTransport {
 
 // Start launches the Claude CLI.
 func (t *ProcessTransport) Start(ctx context.Context) (returnErr error) {
-	path, err := Discover(ctx, t.options.CLIPath, t.options.Env)
+	path, err := Discover(ctx, t.options.CLIPath, t.options)
 	if err != nil {
 		return err
 	}
@@ -173,6 +173,9 @@ func (t *ProcessTransport) Start(ctx context.Context) (returnErr error) {
 	envOptions.Cwd = cmd.Dir
 
 	cmd.Env = BuildEnv(envOptions)
+	if cmd.Env == nil {
+		return errors.New("build Claude process environment: invalid process isolation")
+	}
 
 	if cmd.Stdin != nil {
 		return errors.New("create stdin pipe: exec: Stdin already set")
@@ -189,6 +192,7 @@ func (t *ProcessTransport) Start(ctx context.Context) (returnErr error) {
 	launch, err := processPrepareContained(cmd, processLaunchOptions{
 		DarwinBestEffort: t.options.DarwinBestEffort,
 		Generation:       generation,
+		Isolation:        t.options.ProcessIsolation,
 	})
 	if err != nil {
 		if errors.Is(err, ErrProcessContainmentIncomplete) && t.options.ObserveProcessInventory != nil {

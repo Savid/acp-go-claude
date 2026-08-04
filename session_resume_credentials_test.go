@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
 
@@ -160,7 +161,7 @@ func stubResumeCredentialKeystore(t *testing.T, stub func(string) ([]byte, error
 	original := resumeCredentialKeystore
 	t.Cleanup(func() { resumeCredentialKeystore = original })
 
-	resumeCredentialKeystore = stub
+	resumeCredentialKeystore = func(source string, _ ...claude.Options) ([]byte, error) { return stub(source) }
 }
 
 func TestCopyClaudeResumeCredentialRejectsUnsafeSources(t *testing.T) {

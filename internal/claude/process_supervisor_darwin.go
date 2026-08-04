@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -51,7 +50,16 @@ func darwinLaunchBootstrap() {
 		return
 	}
 
-	configFile, gate, status, err := darwinLaunchInput()
+	err := verifySupervisorIdentity()
+
+	var (
+		configFile, gate io.ReadCloser
+		status           io.WriteCloser
+	)
+	if err == nil {
+		configFile, gate, status, err = darwinLaunchInput()
+	}
+
 	if err == nil {
 		err = runDarwinLaunchBootstrap(configFile, gate)
 	}
@@ -110,6 +118,10 @@ func reportDarwinLaunchStatus(status io.WriteCloser, launchErr error) {
 }
 
 func runDarwinLaunchBootstrap(configInput io.ReadCloser, gate io.ReadCloser) error {
+	if err := verifySupervisorIdentity(); err != nil {
+		return err
+	}
+
 	var config darwinLaunchConfig
 	if err := json.NewDecoder(configInput).Decode(&config); err != nil {
 		return fmt.Errorf("decode native launch config: %w", err)
@@ -138,6 +150,10 @@ func runDarwinLaunchBootstrap(configInput io.ReadCloser, gate io.ReadCloser) err
 func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
 	if !options.DarwinBestEffort {
 		return nil, fmt.Errorf("%w: Darwin best-effort containment requires explicit opt-in", ErrProcessContainmentIncomplete)
+	}
+
+	if err := validateProcessIsolation(options.Isolation); err != nil {
+		return nil, err
 	}
 
 	if options.Generation == nil {
@@ -217,9 +233,22 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 		return nil, fmt.Errorf("resolve Darwin native launch bootstrap: %w", err)
 	}
 
+	helperEnv := supervisorIdentityEnvironment(native.Env, darwinLaunchBootstrapEnv, darwinLaunchBootstrapMode, *options.Isolation)
+
+	executable, err = resolveProcessExecutable(executable, helperEnv)
+	if err != nil {
+		_ = configFile.Close()
+		_ = gateRead.Close()
+		_ = gateWrite.Close()
+		_ = statusRead.Close()
+		_ = statusWrite.Close()
+
+		return nil, fmt.Errorf("resolve Darwin native launch bootstrap through process policy: %w", err)
+	}
+
 	helper := darwinLaunchCommand(executable) // #nosec G204 -- the current executable hosts the private launch bootstrap.
 	helper.Dir = native.Dir
-	helper.Env = darwinLaunchBootstrapEnvironment()
+	helper.Env = helperEnv
 	helper.Stdin = native.Stdin
 	helper.Stdout = native.Stdout
 	helper.Stderr = native.Stderr
@@ -227,22 +256,20 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	helper.ExtraFiles = []*os.File{configFile, gateRead, statusWrite}
 	configureProcessCommandPlatform(helper)
 
+	if err := applyProcessCredential(helper, options.Isolation); err != nil {
+		_ = configFile.Close()
+		_ = gateRead.Close()
+		_ = gateWrite.Close()
+		_ = statusRead.Close()
+		_ = statusWrite.Close()
+
+		return nil, err
+	}
+
 	return &processTreeCommand{
 		cmd: helper, inherited: []*os.File{configFile, gateRead, statusWrite}, startGate: gateWrite, ready: statusRead,
 		bestEffort: true, generation: options.Generation,
 	}, nil
-}
-
-func darwinLaunchBootstrapEnvironment() []string {
-	env := []string{darwinLaunchBootstrapEnv + "=" + darwinLaunchBootstrapMode}
-
-	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, "GORACE=") {
-			env = append(env, entry)
-		}
-	}
-
-	return env
 }
 
 func awaitProcessTreeReady(launch *processTreeCommand) error {

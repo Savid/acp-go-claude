@@ -9,6 +9,7 @@ import (
 type processLaunchOptions struct {
 	DarwinBestEffort bool
 	Generation       *DarwinGeneration
+	Isolation        *ProcessIsolation
 }
 
 type commandWait struct {

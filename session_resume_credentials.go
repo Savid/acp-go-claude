@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 const (
@@ -45,12 +47,16 @@ var (
 	resumeCredentialKeystore = readClaudeResumeKeychainCredential
 )
 
-func copyClaudeResumeCredential(source string, destination string) error {
+func copyClaudeResumeCredential(source string, destination string, provided ...claude.Options) error {
+	var options claude.Options
+	if len(provided) > 0 {
+		options = provided[0]
+	}
 	// The keystore is consulted before the plaintext file because the CLI
 	// itself prefers its Keychain item when both exist: a config dir can hold
 	// a stale credential file beside a live Keychain item, and carrying the
 	// file would resume the session logged out.
-	data, err := resumeCredentialKeystore(source)
+	data, err := resumeCredentialKeystore(source, options)
 	if err != nil {
 		return err
 	}

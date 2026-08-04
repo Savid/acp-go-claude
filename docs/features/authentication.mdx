@@ -31,8 +31,8 @@ err := claudeacp.Serve(ctx, input, output,
 )
 ```
 
-Environment variables set with `WithEnv` (or in the process environment used to
-launch the binary) are merged into every launched Claude process. Keep secrets in
+Environment variables set with `WithEnv` (or in `ProcessIsolation.BaseEnvironment`)
+are merged into every launched Claude process. Keep secrets in
 the environment rather than in seeded config files. See
 [Models and config](/docs/features/models-config) for pointing Claude at a
 custom Anthropic-compatible endpoint.

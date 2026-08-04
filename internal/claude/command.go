@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"regexp"
 	"slices"
 	"strconv"
@@ -22,8 +21,6 @@ const cliArgOutputFormat = "--output-format"
 // stream-json control protocol (bidirectional control requests, partial-message
 // streaming, session mirror, hook events) requires the Claude Code 2.x line.
 const minClaudeVersion = "2.0.0"
-
-var commandEnviron = os.Environ
 
 // BuildArgs returns the Claude CLI arguments for ACP-backed interactive sessions.
 func BuildArgs(options Options) []string {
@@ -116,8 +113,12 @@ func compactJSON(value any) string {
 // the residence probe describes a different one reports success about a store
 // nobody asked about.
 func BuildEnv(options Options) []string {
-	values := make(map[string]string)
-	keys := make([]string, 0, len(os.Environ())+len(options.Env)+3)
+	if err := validateProcessIsolation(options.ProcessIsolation); err != nil {
+		return nil
+	}
+
+	values := make(map[string]string, len(options.ProcessIsolation.BaseEnvironment)+len(options.Env)+3)
+	keys := make([]string, 0, len(options.ProcessIsolation.BaseEnvironment)+len(options.Env)+3)
 
 	set := func(key string, value string) {
 		if key == envClaudeCodeNested || strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) {
@@ -135,13 +136,15 @@ func BuildEnv(options Options) []string {
 		values[key] = value
 	}
 
-	for _, item := range commandEnviron() {
-		key, value, ok := strings.Cut(item, "=")
-		if !ok || key == "" {
-			continue
-		}
+	baseKeys := make([]string, 0, len(options.ProcessIsolation.BaseEnvironment))
+	for key := range options.ProcessIsolation.BaseEnvironment {
+		baseKeys = append(baseKeys, key)
+	}
 
-		set(key, value)
+	slices.Sort(baseKeys)
+
+	for _, key := range baseKeys {
+		set(key, options.ProcessIsolation.BaseEnvironment[key])
 	}
 
 	if options.ClaudeHome != "" {
@@ -169,6 +172,10 @@ func BuildEnv(options Options) []string {
 		set(envSearchPath, prependSearchPath(options.ExtraPathDirs, values[envSearchPath]))
 	}
 
+	if err := validateProcessSearchPath(values[envSearchPath]); err != nil {
+		return nil
+	}
+
 	env := make([]string, 0, len(keys))
 	for _, key := range keys {
 		env = append(env, key+"="+values[key])
@@ -192,20 +199,25 @@ func prependSearchPath(dirs []string, search string) string {
 }
 
 // Discover finds the Claude executable.
-func Discover(ctx context.Context, cliPath string, _ map[string]string) (string, error) {
-	if strings.TrimSpace(cliPath) != "" {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-
-		return cliPath, nil
+func Discover(ctx context.Context, cliPath string, policy any) (string, error) {
+	options, ok := policy.(Options)
+	if !ok {
+		return "", errors.New("process isolation is required")
 	}
 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 
-	path, err := exec.LookPath("claude")
+	if err := validateProcessIsolation(options.ProcessIsolation); err != nil {
+		return "", err
+	}
+
+	if strings.TrimSpace(cliPath) == "" {
+		cliPath = "claude" //nolint:goconst // Executable identity is distinct from Darwin registry metadata.
+	}
+
+	path, err := resolveProcessExecutable(cliPath, BuildEnv(options))
 	if err != nil {
 		return "", fmt.Errorf("find claude in PATH: %w", err)
 	}
@@ -304,7 +316,11 @@ func containedClaudeOutput(
 
 	envOptions := options
 	envOptions.Cwd = command.Dir
+
 	command.Env = BuildEnv(envOptions)
+	if command.Env == nil {
+		return nil, errors.New("build Claude process environment: invalid process isolation")
+	}
 
 	stdout, childStdout, err := os.Pipe()
 	if err != nil {
@@ -316,6 +332,7 @@ func containedClaudeOutput(
 	launch, err := processPrepareContained(command, processLaunchOptions{
 		DarwinBestEffort: options.DarwinBestEffort,
 		Generation:       generation,
+		Isolation:        options.ProcessIsolation,
 	})
 	if err != nil {
 		closeErr := errors.Join(stdout.Close(), childStdout.Close())

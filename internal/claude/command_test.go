@@ -16,6 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var commandEnviron = os.Environ
+
 func TestBuildArgs(t *testing.T) {
 	t.Parallel()
 

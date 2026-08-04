@@ -286,11 +286,17 @@ func TestDarwinBootstrapEnvironmentIsPrivate(t *testing.T) {
 	t.Setenv(DarwinScratchRootEnv, "/private/root")
 	t.Setenv("GORACE", "halt_on_error=1")
 
-	env := testEnvironmentMap(darwinLaunchBootstrapEnvironment())
-	if env[darwinLaunchBootstrapEnv] != darwinLaunchBootstrapMode || env["GORACE"] != "halt_on_error=1" {
+	env := testEnvironmentMap(supervisorIdentityEnvironment(
+		[]string{"BASE=yes"}, darwinLaunchBootstrapEnv, darwinLaunchBootstrapMode,
+		ProcessIsolation{UID: 1, GID: 2},
+	))
+	if env[darwinLaunchBootstrapEnv] != darwinLaunchBootstrapMode {
 		t.Fatalf("bootstrap environment = %#v", env)
 	}
-	for _, key := range []string{privateKey, DarwinRuntimeIDEnv, DarwinScratchRootEnv} {
+	if env["BASE"] != "yes" || env[processIsolationUIDEnv] != "1" || env[processIsolationGIDEnv] != "2" {
+		t.Fatalf("bootstrap policy environment = %#v", env)
+	}
+	for _, key := range []string{privateKey, DarwinRuntimeIDEnv, DarwinScratchRootEnv, "GORACE"} {
 		if _, ok := env[key]; ok {
 			t.Fatalf("private environment leaked %s: %#v", key, env)
 		}

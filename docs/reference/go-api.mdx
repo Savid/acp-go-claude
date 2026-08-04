@@ -15,6 +15,7 @@ streams:
 ```go
 err := claudeacp.Serve(ctx, input, output,
 	claudeacp.WithExecutablePath("/usr/local/bin/claude"),
+	claudeacp.WithProcessIsolation(claudeacp.ProcessIsolation{UID: agentUID, GID: agentGID, BaseEnvironment: agentEnv}),
 	claudeacp.WithHome("/tmp/claude-home"),
 	claudeacp.WithDefaultModel("sonnet"),
 	claudeacp.WithClaudeDefaultPermissionMode("default"),
@@ -34,7 +35,8 @@ accidentally release the quarantined admission.
 
 | Option | Purpose |
 | --- | --- |
-| `WithExecutablePath` | Set the Claude CLI path (default: search `PATH`). |
+| `WithExecutablePath` | Set the Claude CLI path (default: search the isolation policy's `PATH`). |
+| `WithProcessIsolation` | Mandatory nonzero target UID/GID and complete replacement base environment for every native/helper process; supplementary groups are cleared. |
 | `WithHome` | Set `CLAUDE_CONFIG_DIR` for launched Claude processes. |
 | `WithScratchDir` | Parent directory for ephemeral on-disk materialization, created `0700` when missing (default: system temp). |
 | `WithInputHandoffRoot` | Absolute directory prompt images may be handed over in as local files. Read-only to the adapter; unset rejects every handoff-form block. |
@@ -42,7 +44,7 @@ accidentally release the quarantined admission.
 | `WithProviderAuthDirectHome` | Consent gate for native-login disconnect. Secret-backed disconnect never clears the native home. |
 | `WithDarwinBestEffortContainment` | Explicitly accept Darwin's process-group boundary. Invalid off Darwin; without it Darwin native launch fails closed. |
 | `WithDefaultModel` | Default Claude model for new sessions. |
-| `WithEnv` | Merge environment variables into every Claude child. |
+| `WithEnv` | Overlay environment variables on `ProcessIsolation.BaseEnvironment` for every Claude child. The adapter never inherits its own process environment. |
 | `WithSeedFiles` | Write files into the resolved config dir before launch (requires `WithHome`). |
 | `WithSessionStore` | Replace the default in-memory session authority with a host store. |
 | `WithSessionStoreLoadTimeout` | Bound store reads used during restore and listing. |

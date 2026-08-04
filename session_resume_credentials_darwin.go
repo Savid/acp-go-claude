@@ -15,8 +15,17 @@ import (
 // CLI accepts in its place. The context is fresh because the copy runs on
 // the session-load path without one, and every keystore call underneath
 // carries its own bound.
-func readClaudeResumeKeychainCredential(source string) ([]byte, error) {
-	data, err := claude.ReadAuthKeychainCredential(context.Background(), source, authNativeUser())
+func readClaudeResumeKeychainCredential(source string, provided ...claude.Options) ([]byte, error) {
+	var options claude.Options
+	if len(provided) > 0 {
+		options = provided[0]
+	}
+
+	if options.ProcessIsolation == nil {
+		return nil, nil
+	}
+
+	data, err := claude.ReadAuthKeychainCredential(context.Background(), source, authNativeUser(options), options)
 	if err != nil {
 		return nil, fmt.Errorf("claude resume keystore credential: %w", err)
 	}

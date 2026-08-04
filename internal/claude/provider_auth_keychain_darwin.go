@@ -10,10 +10,27 @@ import (
 
 // authKeychainTool is the platform keystore command. It is a package variable
 // so the removal ladder is exercised without a real login Keychain.
-var authKeychainTool = func(ctx context.Context, args []string) (int, error) {
-	command := exec.CommandContext(ctx, "security", args...)
+var authKeychainTool = runAuthKeychainTool
 
-	err := command.Run()
+func runAuthKeychainTool(ctx context.Context, args []string, options Options) (int, error) {
+	env := BuildEnv(options)
+	if env == nil {
+		return 0, errors.New("build keychain environment: invalid process isolation")
+	}
+
+	path, err := resolveProcessExecutable("security", env)
+	if err != nil {
+		return 0, err
+	}
+
+	command := exec.CommandContext(ctx, path, args...)
+
+	command.Env = env
+	if credentialErr := applyProcessCredential(command, options.ProcessIsolation); credentialErr != nil {
+		return 0, credentialErr
+	}
+
+	err = command.Run()
 	if err == nil {
 		return 0, nil
 	}
@@ -37,8 +54,25 @@ const (
 // from authKeychainTool because a read's answer is the secret itself, so
 // stdout must be captured. A package variable so the read leg is exercised
 // without a real login Keychain.
-var authKeychainReadTool = func(ctx context.Context, args []string) ([]byte, int, error) {
-	command := exec.CommandContext(ctx, "security", args...)
+var authKeychainReadTool = runAuthKeychainReadTool
+
+func runAuthKeychainReadTool(ctx context.Context, args []string, options Options) ([]byte, int, error) {
+	env := BuildEnv(options)
+	if env == nil {
+		return nil, 0, errors.New("build keychain environment: invalid process isolation")
+	}
+
+	path, err := resolveProcessExecutable("security", env)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	command := exec.CommandContext(ctx, path, args...)
+
+	command.Env = env
+	if credentialErr := applyProcessCredential(command, options.ProcessIsolation); credentialErr != nil {
+		return nil, 0, credentialErr
+	}
 
 	output, err := command.Output()
 	if err == nil {
@@ -59,7 +93,7 @@ var authKeychainReadTool = func(ctx context.Context, args []string) ([]byte, int
 // config dir path, so this read is the only way credential material leaves an
 // instance home whose plaintext store was never written. The platform tool
 // appends one newline the blob never carries; only that newline is trimmed.
-func ReadAuthKeychainCredential(ctx context.Context, configDir string, user string) ([]byte, error) {
+func ReadAuthKeychainCredential(ctx context.Context, configDir string, user string, options Options) ([]byte, error) {
 	var failures error
 
 	for _, item := range AuthKeychainCredentialItems(configDir, user) {
@@ -69,7 +103,7 @@ func ReadAuthKeychainCredential(ctx context.Context, configDir string, user stri
 			authKeychainFlagService, item.Service,
 			authKeychainFlagAccount, item.Account,
 			"-w",
-		})
+		}, options)
 
 		cancel()
 
@@ -101,7 +135,7 @@ func ReadAuthKeychainCredential(ctx context.Context, configDir string, user stri
 // reachable name shapes. Native logout already removes what it knows about;
 // this closes the case where the legacy API-key item survives it, which would
 // leave a usable credential behind.
-func RemoveAuthKeychainItems(ctx context.Context, configDir string, user string) error {
+func RemoveAuthKeychainItems(ctx context.Context, configDir string, user string, options Options) error {
 	var failures error
 
 	for _, item := range AuthKeychainItems(configDir, user) {
@@ -110,7 +144,7 @@ func RemoveAuthKeychainItems(ctx context.Context, configDir string, user string)
 			"delete-generic-password",
 			authKeychainFlagService, item.Service,
 			authKeychainFlagAccount, item.Account,
-		})
+		}, options)
 
 		cancel()
 

@@ -369,7 +369,7 @@ func blockedClaudeEnvKey(key string) bool {
 	}
 
 	switch upper {
-	case "PATH", "NODE_OPTIONS", "BASH_ENV", "ENV", "CLAUDECODE":
+	case "PATH", "NODE_OPTIONS", "BASH_ENV", "ENV", "CLAUDECODE": //nolint:goconst // Protocol allowlist is clearer with literal names.
 		return true
 	default:
 		return strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_")

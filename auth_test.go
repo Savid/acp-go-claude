@@ -214,7 +214,7 @@ func newAuthSeams(t *testing.T) *authTestSeams {
 		return 0, seams.logoutErr
 	}
 
-	authKeychainRemove = func(_ context.Context, configDir string, user string) error {
+	authKeychainRemove = func(_ context.Context, configDir string, user string, _ claude.Options) error {
 		seams.removeCalls++
 		seams.removedDir = configDir
 		seams.removedUser = user
@@ -222,7 +222,7 @@ func newAuthSeams(t *testing.T) *authTestSeams {
 		return seams.removeErr
 	}
 
-	authNativeUser = func() string { return "canary-user" }
+	authNativeUser = func(claude.Options) string { return "canary-user" }
 
 	t.Cleanup(func() {
 		authLoginBegin = beginOriginal

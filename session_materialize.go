@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 const (
@@ -122,7 +124,7 @@ func (a *Agent) materializeStoreSessionWithEntries(
 		return nil, err
 	}
 
-	if err := copyClaudeConfigFiles(tmp, sourceClaudeHome, env); err != nil {
+	if err := copyClaudeConfigFiles(tmp, sourceClaudeHome, env, claudeProcessIsolation(a.options.ProcessIsolation)); err != nil {
 		return nil, err
 	}
 
@@ -278,7 +280,7 @@ func writeJSONFile(path string, value any) error {
 	return materializeWriteFile(path, append(data, '\n'), 0o600)
 }
 
-func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, env map[string]string) error {
+func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, env map[string]string, isolation *claude.ProcessIsolation) error {
 	source := sourceClaudeConfigDir(sourceClaudeHome, env)
 	if source == "" || filepath.Clean(source) == filepath.Clean(dst) {
 		return nil
@@ -291,7 +293,7 @@ func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, env map[stri
 		}
 	}
 
-	return copyClaudeResumeCredential(source, dst)
+	return copyClaudeResumeCredential(source, dst, claude.Options{ProcessIsolation: isolation})
 }
 
 func sourceClaudeConfigDir(sourceClaudeHome string, env map[string]string) string {

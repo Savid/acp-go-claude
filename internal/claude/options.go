@@ -10,8 +10,9 @@ type Options struct {
 	CLIPath string
 	Cwd     string
 
-	ClaudeHome string
-	Env        map[string]string
+	ClaudeHome       string
+	Env              map[string]string
+	ProcessIsolation *ProcessIsolation
 	// ExtraPathDirs are absolute directories prepended, in order, to the child's
 	// PATH. They shadow every inherited entry, so an executable named here wins
 	// over the one the operator's PATH would otherwise resolve.
@@ -82,6 +83,14 @@ type Options struct {
 
 	SessionMirror bool
 	Hooks         Hooks
+}
+
+// ProcessIsolation is the mandatory credential and complete environment base
+// applied to every provider process and self-exec supervisor.
+type ProcessIsolation struct {
+	UID             uint32
+	GID             uint32
+	BaseEnvironment map[string]string
 }
 
 const HookEventPostToolUse = "PostToolUse"

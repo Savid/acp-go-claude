@@ -12,6 +12,9 @@ import (
 type processContainment struct{}
 
 func prepareProcessTreeCommand(_ *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
+	if err := validateProcessIsolation(options.Isolation); err != nil {
+		return nil, err
+	}
 	if options.DarwinBestEffort {
 		return nil, fmt.Errorf(
 			"%w: Darwin best-effort containment is invalid on %s",

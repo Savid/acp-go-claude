@@ -13,6 +13,14 @@ import (
 // Option configures the Claude ACP agent.
 type Option func(*Options)
 
+// ProcessIsolation defines the complete operating-system identity and base
+// environment inherited by every Claude process and adapter supervisor.
+type ProcessIsolation struct {
+	UID             uint32
+	GID             uint32
+	BaseEnvironment map[string]string
+}
+
 // RuntimeResourceKind identifies the lifecycle scope consuming a host-managed resource.
 type RuntimeResourceKind string
 
@@ -106,6 +114,9 @@ type Options struct {
 	DefaultModel string
 	// Env is merged into every launched Claude process environment.
 	Env map[string]string
+	// ProcessIsolation is the mandatory process boundary for every native and
+	// helper launch. Configure it with WithProcessIsolation.
+	ProcessIsolation *ProcessIsolation
 
 	// Logger receives structured diagnostic logs. If nil, the default logger is used.
 	Logger *slog.Logger
@@ -288,6 +299,17 @@ func WithTracerProvider(provider trace.TracerProvider) Option {
 func WithExecutablePath(path string) Option {
 	return func(options *Options) {
 		options.ExecutablePath = path
+	}
+}
+
+// WithProcessIsolation requires every native process and self-exec supervisor
+// to run as the supplied uid/gid with no supplementary groups. BaseEnvironment
+// is the complete environment base; the adapter never overlays os.Environ.
+func WithProcessIsolation(isolation ProcessIsolation) Option {
+	return func(options *Options) {
+		cloned := isolation
+		cloned.BaseEnvironment = cloneStringMap(isolation.BaseEnvironment)
+		options.ProcessIsolation = &cloned
 	}
 }
 

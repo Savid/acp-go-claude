@@ -29,12 +29,12 @@ type supervisorWriteSeeker struct {
 	seekErr  error
 }
 
-const turnSupervisorNoNewPrivilegesProofEnv = "ACP_GO_CLAUDE_TEST_NO_NEW_PRIVILEGES_PROOF"
+const turnSupervisorSecurityLimitsProofEnv = "ACP_GO_CLAUDE_TEST_SECURITY_LIMITS_PROOF"
 
-func TestTurnSupervisorNativeInheritsNoNewPrivileges(t *testing.T) {
-	proofPath := os.Getenv(turnSupervisorNoNewPrivilegesProofEnv)
+func TestTurnSupervisorNativeInheritsSecurityLimits(t *testing.T) {
+	proofPath := os.Getenv(turnSupervisorSecurityLimitsProofEnv)
 	if proofPath != "" {
-		native := exec.Command("/bin/sh", "-c", `awk '$1 == "NoNewPrivs:" { print $2 }' /proc/self/status > "$1"`, "sh", proofPath)
+		native := exec.Command("/bin/sh", "-c", `nnp=$(awk '$1 == "NoNewPrivs:" { print $2 }' /proc/self/status); printf '%s %s\n' "$nnp" "$(ulimit -c)" > "$1"`, "sh", proofPath)
 		if err := startTurnSupervisorNative(native); err != nil {
 			t.Fatal(err)
 		}
@@ -45,19 +45,19 @@ func TestTurnSupervisorNativeInheritsNoNewPrivileges(t *testing.T) {
 		return
 	}
 
-	proofPath = filepath.Join(t.TempDir(), "no-new-privileges")
-	helper := exec.Command(os.Args[0], "-test.run=^TestTurnSupervisorNativeInheritsNoNewPrivileges$")
-	helper.Env = append(os.Environ(), turnSupervisorNoNewPrivilegesProofEnv+"="+proofPath)
+	proofPath = filepath.Join(t.TempDir(), "security-limits")
+	helper := exec.Command(os.Args[0], "-test.run=^TestTurnSupervisorNativeInheritsSecurityLimits$")
+	helper.Env = append(os.Environ(), turnSupervisorSecurityLimitsProofEnv+"="+proofPath)
 	if output, err := helper.CombinedOutput(); err != nil {
-		t.Fatalf("run no-new-privileges proof helper: %v\n%s", err, output)
+		t.Fatalf("run security-limits proof helper: %v\n%s", err, output)
 	}
 
 	proof, err := os.ReadFile(proofPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(proof)) != "1" {
-		t.Fatalf("native NoNewPrivs = %q, want 1", strings.TrimSpace(string(proof)))
+	if strings.TrimSpace(string(proof)) != "1 0" {
+		t.Fatalf("native security limits = %q, want 1 0", strings.TrimSpace(string(proof)))
 	}
 }
 
@@ -84,6 +84,7 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 	input := turnSupervisorInput
 	enable := turnSupervisorEnable
 	noNewPrivs := turnSupervisorNoNewPrivs
+	coreLimit := turnSupervisorCoreLimit
 	command := turnSupervisorCommand
 	contain := turnSupervisorContain
 	processID := turnSupervisorProcessID
@@ -109,6 +110,7 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 		turnSupervisorInput = input
 		turnSupervisorEnable = enable
 		turnSupervisorNoNewPrivs = noNewPrivs
+		turnSupervisorCoreLimit = coreLimit
 		turnSupervisorCommand = command
 		turnSupervisorContain = contain
 		turnSupervisorProcessID = processID
@@ -410,6 +412,7 @@ func TestRunTurnSupervisorBranches(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
 	turnSupervisorEnable = func() error { return nil }
 	turnSupervisorNoNewPrivs = func() error { return nil }
+	turnSupervisorCoreLimit = func() error { return nil }
 	turnSupervisorSignalNotify = func(chan<- os.Signal, ...os.Signal) {}
 	turnSupervisorSignalStop = func(chan<- os.Signal) {}
 	turnSupervisorProcessID = func() int { return 99 }
@@ -427,6 +430,12 @@ func TestRunTurnSupervisorBranches(t *testing.T) {
 		t.Fatal("subreaper failure succeeded")
 	}
 	turnSupervisorEnable = func() error { return nil }
+	turnSupervisorCoreLimit = func() error { return errors.New("core limit") }
+	config = encodeSupervisorConfig(t, turnSupervisorConfig{Path: "/bin/sh", Args: []string{"sh", "-c", "exit 0"}})
+	if err := runTurnSupervisor(config, strings.NewReader(""), io.Discard, io.Discard); err == nil {
+		t.Fatal("core-limit failure succeeded")
+	}
+	turnSupervisorCoreLimit = func() error { return nil }
 	turnSupervisorNoNewPrivs = func() error { return errors.New("no new privileges") }
 	config = encodeSupervisorConfig(t, turnSupervisorConfig{Path: "/bin/sh", Args: []string{"sh", "-c", "exit 0"}})
 	if err := runTurnSupervisor(config, strings.NewReader(""), io.Discard, io.Discard); err == nil {

@@ -53,6 +53,7 @@ var (
 	turnSupervisorSignalStop   = signal.Stop
 	turnSupervisorEnable       = enableTurnSupervisor
 	turnSupervisorNoNewPrivs   = enableTurnSupervisorNoNewPrivileges
+	turnSupervisorCoreLimit    = disableTurnSupervisorCoreDumps
 	turnSupervisorCommand      = exec.Command
 	turnSupervisorContain      = awaitLinuxSupervisorContainment
 	turnSupervisorProcessID    = os.Getpid
@@ -76,6 +77,10 @@ func enableTurnSupervisor() error {
 
 func enableTurnSupervisorNoNewPrivileges() error {
 	return unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+}
+
+func disableTurnSupervisorCoreDumps() error {
+	return unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{})
 }
 
 func inheritedTurnSupervisorInput() (io.ReadCloser, io.ReadCloser, io.WriteCloser, io.WriteCloser, error) {
@@ -386,13 +391,20 @@ func runTurnSupervisor(
 
 func startTurnSupervisorNative(native *exec.Cmd) error {
 	runtime.LockOSThread()
-	noNewPrivilegesErr := turnSupervisorNoNewPrivs()
+	coreLimitErr := turnSupervisorCoreLimit()
+	var noNewPrivilegesErr error
+	if coreLimitErr == nil {
+		noNewPrivilegesErr = turnSupervisorNoNewPrivs()
+	}
 	var startErr error
-	if noNewPrivilegesErr == nil {
+	if coreLimitErr == nil && noNewPrivilegesErr == nil {
 		startErr = native.Start()
 	}
 	runtime.UnlockOSThread()
 
+	if coreLimitErr != nil {
+		return fmt.Errorf("disable core dumps for supervised Claude native root: %w", coreLimitErr)
+	}
 	if noNewPrivilegesErr != nil {
 		return fmt.Errorf("disable privilege elevation for supervised Claude native root: %w", noNewPrivilegesErr)
 	}

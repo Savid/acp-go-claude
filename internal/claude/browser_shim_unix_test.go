@@ -24,7 +24,7 @@ const testBrowserProbeURL = "https://example.invalid/"
 // record is allowed to mean anything.
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 	skipUnprivilegedDarwinIsolation(t)
-	dir := t.TempDir()
+	dir := testTraversableTempDir(t)
 	probe := filepath.Join(dir, "probe")
 	marker := filepath.Join(dir, "launched")
 

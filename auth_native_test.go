@@ -23,6 +23,11 @@ func TestNativeOptionsRunsFlowsInTheSessionHome(t *testing.T) {
 	require.Equal(t, "/bin/claude", options.CLIPath)
 	require.Equal(t, map[string]string{"A": "B"}, options.Env)
 	require.False(t, options.DarwinBestEffort)
+	release, err := options.AcquireKeychainDiscovery(t.Context())
+	require.NoError(t, err)
+	release()
+	_, err = options.PrepareKeychainGeneration(t.Context())
+	require.ErrorContains(t, err, "best-effort containment is not selected")
 
 	resolved, err := filepath.EvalSymlinks(home)
 	require.NoError(t, err)
@@ -33,6 +38,55 @@ func TestNativeOptionsRunsFlowsInTheSessionHome(t *testing.T) {
 	bestEffort, err := broker.nativeOptions()
 	require.NoError(t, err)
 	require.True(t, bestEffort.DarwinBestEffort)
+	generation, err := bestEffort.PrepareKeychainGeneration(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, generation.Finish(true))
+
+	resume := broker.agent.resumeCredentialOptions()
+	release, err = resume.AcquireKeychainDiscovery(t.Context())
+	require.NoError(t, err)
+	release()
+	generation, err = resume.PrepareKeychainGeneration(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, generation.Finish(true))
+}
+
+func TestNativeLogoutCannotBeRedirectedFromTheConsentedHome(t *testing.T) {
+	seams := newAuthSeams(t)
+	managed := t.TempDir()
+	hostile := t.TempDir()
+	broker, _ := newAuthBroker(t,
+		WithHome(managed),
+		WithProviderAuthDirectHome(managed),
+		WithProcessIsolation(ProcessIsolation{
+			UID: 4242,
+			GID: 4242,
+			BaseEnvironment: map[string]string{
+				homeEnv: "/home/claude",
+				"PATH":  "/usr/bin:/bin",
+			},
+			StandaloneOwnerID:   "logout-test",
+			StandaloneStateRoot: managed,
+		}),
+	)
+	broker.agent.options.Env["CLAUDE_CONFIG_DIR"] = hostile
+
+	originalLogout := authLogoutCommand
+	var launchedEnv []string
+	authLogoutCommand = func(_ context.Context, options claude.Options, _ *claude.DarwinGeneration) (int, error) {
+		seams.logoutCalls++
+		launchedEnv = claude.BuildEnv(options)
+
+		return 0, nil
+	}
+	t.Cleanup(func() { authLogoutCommand = originalLogout })
+
+	require.NoError(t, broker.nativeLogout(t.Context()))
+	resolved, err := filepath.EvalSymlinks(managed)
+	require.NoError(t, err)
+	require.Contains(t, launchedEnv, "CLAUDE_CONFIG_DIR="+resolved)
+	require.NotContains(t, launchedEnv, "CLAUDE_CONFIG_DIR="+hostile)
+	require.Equal(t, 1, seams.logoutCalls)
 }
 
 func TestNativeOptionsFailsOnAnUnresolvableHome(t *testing.T) {
@@ -238,11 +292,16 @@ func TestRemoveKeystoreItemsNamesTheConfigDirAndTheAccount(t *testing.T) {
 
 	seams.removeErr = errTestRandom
 	requireAuthFailed(t, broker.removeKeystoreItems(t.Context()), authCauseTransport)
+
+	seams.removeErr = claude.ErrProcessContainmentIncomplete
+	requireAuthFailed(t, broker.removeKeystoreItems(t.Context()), authCauseProcess)
 }
 
 func TestAuthNativeUserReadsThePolicyEnvironment(t *testing.T) {
+	require.Equal(t, "overlay", authNativeUser(claude.Options{Env: map[string]string{"USER": "overlay"}}))
 	options := claude.Options{ProcessIsolation: &claude.ProcessIsolation{BaseEnvironment: map[string]string{"USER": "operator"}}}
 	require.Equal(t, "operator", authNativeUser(options))
+	require.Empty(t, authNativeUser(claude.Options{}))
 }
 
 func TestAuthLoginBeginWrapsTheNativeStart(t *testing.T) {

@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"log/slog"
+	"os"
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
@@ -15,10 +16,21 @@ type Option func(*Options)
 
 // ProcessIsolation defines the complete operating-system identity and base
 // environment inherited by every native Claude process.
+type ProcessIdentityLockCapability interface {
+	Duplicate() (*os.File, error)
+}
+
 type ProcessIsolation struct {
-	UID             uint32
-	GID             uint32
-	BaseEnvironment map[string]string
+	UID                 uint32
+	GID                 uint32
+	BaseEnvironment     map[string]string
+	StandaloneOwnerID   string
+	StandaloneStateRoot string
+	// IdentityLock is an optional trusted-supervisor descriptor for the
+	// host-global UID lock. Linux supervisors validate it and never expose it to
+	// the native Claude process. Standalone embeddings should leave it nil.
+	IdentityLock    ProcessIdentityLockCapability
+	AuthorityDomain ProcessIdentityLockCapability
 }
 
 // RuntimeResourceKind identifies the lifecycle scope consuming a host-managed resource.
@@ -112,7 +124,8 @@ type Options struct {
 	ProviderAuthDirectHome string
 	// DefaultModel is passed to newly created Claude sessions when non-empty.
 	DefaultModel string
-	// Env is merged into every launched Claude process environment.
+	// Env is merged into every launched Claude process environment. Managed
+	// config and identity root variables are rejected.
 	Env map[string]string
 	// ProcessIsolation is the mandatory process boundary for every native
 	// launch. Configure it with WithProcessIsolation.
@@ -504,7 +517,8 @@ func WithTurnTimeout(timeout time.Duration) Option {
 	}
 }
 
-// WithEnv adds environment variables to every launched Claude process.
+// WithEnv adds environment variables to every launched Claude process. Managed
+// config and identity root variables are rejected during agent initialization.
 func WithEnv(env map[string]string) Option {
 	return func(options *Options) {
 		options.Env = cloneStringMap(env)

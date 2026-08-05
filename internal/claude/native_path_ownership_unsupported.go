@@ -12,7 +12,8 @@ func handoffGeneratedNativeTree(_ string, isolation *ProcessIsolation) error {
 	if isolation == nil {
 		return nil
 	}
-	if isolation.UID == uint32(os.Geteuid()) && isolation.GID == uint32(os.Getegid()) {
+
+	if int64(isolation.UID) == int64(os.Geteuid()) && int64(isolation.GID) == int64(os.Getegid()) {
 		return nil
 	}
 

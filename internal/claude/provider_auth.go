@@ -29,6 +29,8 @@ const authLoginHost = "claude.com"
 // authLoginMaxURLBytes bounds the authorization URL before it is relayed.
 const authLoginMaxURLBytes = 2048
 
+var authLoginHandoffGeneratedNativeTree = handoffGeneratedNativeTree
+
 // authRedirectQueryKey names the query parameter carrying the hosted callback.
 const authRedirectQueryKey = "redirect_uri"
 
@@ -505,8 +507,9 @@ func startAuthLoginChild(
 	if err != nil {
 		return nil, fmt.Errorf("contain claude auth login browser launch: %w", err)
 	}
-	if err := handoffGeneratedNativeTree(shim.dir, options.ProcessIsolation); err != nil {
-		return nil, errors.Join(fmt.Errorf("handoff claude auth login browser shim: %w", err), shim.remove())
+
+	if handoffErr := authLoginHandoffGeneratedNativeTree(shim.dir, options.ProcessIsolation); handoffErr != nil {
+		return nil, errors.Join(fmt.Errorf("handoff claude auth login browser shim: %w", handoffErr), shim.remove())
 	}
 
 	defer func() {
@@ -614,7 +617,7 @@ func (l *AuthLogin) Close() error {
 	l.once.Do(func() {
 		_ = l.stdin.Close()
 
-		containErr := l.tree.quiesce(authShutdownWait)
+		containErr := processContainmentQuiesce(l.tree, authShutdownWait)
 		waitErr := l.reap()
 
 		_ = l.stdout.Close()

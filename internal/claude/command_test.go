@@ -107,25 +107,35 @@ func TestBuildEnv(t *testing.T) {
 	t.Setenv("CLAUDECODE", "nested")
 	t.Setenv("PWD", "/process/cwd")
 
-	env := BuildEnv(withTestProcessIsolation(Options{
+	options := withTestProcessIsolation(Options{
 		ClaudeHome: "/tmp/claude-home",
 		Cwd:        "/repo",
 		Env: map[string]string{
 			"CLAUDE_CONFIG_DIR": "/override/claude-home",
 			"CLAUDECODE":        "explicit-nested",
+			"HOME":              "/override/home",
 			"PWD":               "/override/cwd",
 			"X_TEST":            "1",
+			"XDG_CONFIG_HOME":   "/override/xdg-config",
 		},
-	}))
+	})
+	options.ProcessIsolation.BaseEnvironment["HOME"] = "/managed/home"
+	options.ProcessIsolation.BaseEnvironment["XDG_CONFIG_HOME"] = "/managed/xdg-config"
+	env := BuildEnv(options)
 
 	require.Equal(t, 1, countEnvKey(env, "CLAUDE_CONFIG_DIR"))
 	require.Equal(t, 1, countEnvKey(env, "CLAUDE_CODE_ENTRYPOINT"))
 	require.Equal(t, 1, countEnvKey(env, "PWD"))
 	require.Equal(t, 0, countEnvKey(env, "CLAUDECODE"))
-	require.Contains(t, env, "CLAUDE_CONFIG_DIR=/override/claude-home")
+	require.Contains(t, env, "CLAUDE_CONFIG_DIR=/tmp/claude-home")
 	require.Contains(t, env, "CLAUDE_CODE_ENTRYPOINT=acp-go-claude")
+	require.Contains(t, env, "HOME=/managed/home")
 	require.Contains(t, env, "PWD=/repo")
 	require.Contains(t, env, "X_TEST=1")
+	require.Contains(t, env, "XDG_CONFIG_HOME=/managed/xdg-config")
+	require.NotContains(t, env, "CLAUDE_CONFIG_DIR=/override/claude-home")
+	require.NotContains(t, env, "HOME=/override/home")
+	require.NotContains(t, env, "XDG_CONFIG_HOME=/override/xdg-config")
 }
 
 func TestBuildEnvPrependsExtraPathDirs(t *testing.T) {
@@ -158,7 +168,7 @@ func TestBuildEnvExtraPathDirsOutrankAnOverriddenPath(t *testing.T) {
 
 func TestBuildEnvExtraPathDirsWithoutInheritedPath(t *testing.T) {
 	env := BuildEnv(Options{
-		ProcessIsolation: &ProcessIsolation{UID: 1, GID: 2, BaseEnvironment: map[string]string{"GOOD": "1"}},
+		ProcessIsolation: &ProcessIsolation{UID: 1, GID: 2, BaseEnvironment: map[string]string{"GOOD": "1"}, StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test"},
 		ExtraPathDirs:    []string{"/session/bin"},
 	})
 
@@ -168,6 +178,7 @@ func TestBuildEnvExtraPathDirsWithoutInheritedPath(t *testing.T) {
 func TestBuildEnvUsesOnlyPolicyEntries(t *testing.T) {
 	env := BuildEnv(Options{ProcessIsolation: &ProcessIsolation{
 		UID: 1, GID: 2, BaseEnvironment: map[string]string{"GOOD": "1"},
+		StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test",
 	}})
 
 	require.Contains(t, env, "GOOD=1")
@@ -194,6 +205,11 @@ func TestDiscover(t *testing.T) {
 	path, err := Discover(context.Background(), "/bin/sh", withTestProcessIsolation(Options{}))
 	require.NoError(t, err)
 	require.Equal(t, "/bin/sh", path)
+}
+
+func TestDiscoverRejectsMissingPolicy(t *testing.T) {
+	_, err := Discover(t.Context(), "/bin/sh", struct{}{})
+	require.ErrorContains(t, err, "process isolation is required")
 }
 
 func TestDiscoverCancelledExplicitPath(t *testing.T) {
@@ -246,7 +262,6 @@ func TestCompareSemver(t *testing.T) {
 }
 
 func TestValidateClaudeVersion(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -319,7 +334,6 @@ func TestContainedClaudeOutputSurvivesWaitBeforeRead(t *testing.T) {
 }
 
 func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	want := errors.New("version seam")
 	releases := 0
 	err := validateClaudeVersion(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
@@ -415,6 +429,16 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 	}))
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	require.Equal(t, 2, observedUnavailable)
+
+	_, err = containedClaudeOutput(t.Context(), "/bin/sh", nil, Options{}, nil, "invalid environment")
+	require.ErrorContains(t, err, "invalid process isolation")
+
+	originalPipe := commandPipe
+	t.Cleanup(func() { commandPipe = originalPipe })
+	commandPipe = func() (*os.File, *os.File, error) { return nil, nil, want }
+	_, err = containedClaudeOutput(t.Context(), "/bin/sh", nil, withTestProcessIsolation(Options{Cwd: t.TempDir()}), nil, "pipe failure")
+	require.ErrorIs(t, err, want)
+	commandPipe = originalPipe
 
 	processPrepareContained = originalPrepare
 	processStartContained = originalStart

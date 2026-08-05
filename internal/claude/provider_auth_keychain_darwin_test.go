@@ -3,6 +3,9 @@ package claude
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -140,49 +143,171 @@ func TestReadAuthKeychainCredentialPrefersALaterItemOverAnEarlierFailure(t *test
 	require.Equal(t, `{"claudeAiOauth":{}}`, string(data))
 }
 
-func TestAuthKeychainReadToolReportsTheRealPlatformExitStatus(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
-	// The real tool answers "absent" for an item nothing ever wrote, which is
-	// what lets a file-authenticated home resume without a keystore entry.
-	output, code, err := authKeychainReadTool(t.Context(), []string{
-		"find-generic-password",
-		"-s", "acp-go-claude-canary-service-that-does-not-exist",
-		"-a", "acp-go-claude-canary-account",
-		"-w",
-	}, Options{})
-	require.NoError(t, err)
-	require.Empty(t, output)
-	require.True(t, authKeychainAbsent(code), "unexpected status %d", code)
+func TestAuthKeychainExitCodeSeparatesAnAnswerFromALaunchFailure(t *testing.T) {
+	t.Parallel()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	_, _, err = authKeychainReadTool(ctx, []string{"list-keychains"}, Options{})
-	require.Error(t, err)
-}
-
-func TestAuthKeychainToolReportsTheRealPlatformExitStatus(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
-	// The real tool answers "absent" for an item nothing ever wrote, which is
-	// what keeps disconnect idempotent on a home that holds no credential.
-	code, err := authKeychainTool(t.Context(), []string{
-		"delete-generic-password",
-		"-s", "acp-go-claude-canary-service-that-does-not-exist",
-		"-a", "acp-go-claude-canary-account",
-	}, Options{})
-	require.NoError(t, err)
-	require.True(t, authKeychainAbsent(code), "unexpected status %d", code)
-}
-
-func TestAuthKeychainToolSeparatesSuccessFromALaunchFailure(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
-	code, err := authKeychainTool(t.Context(), []string{"list-keychains"}, Options{})
+	code, err := authKeychainExitCode(nil)
 	require.NoError(t, err)
 	require.Zero(t, code)
 
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
+	exitErr := exec.Command("/bin/sh", "-c", "exit 44").Run()
+	require.Error(t, exitErr)
 
-	_, err = authKeychainTool(ctx, []string{"list-keychains"}, Options{})
+	code, err = authKeychainExitCode(exitErr)
+	require.NoError(t, err)
+	require.Equal(t, 44, code)
+	require.True(t, authKeychainAbsent(code))
+
+	want := errors.New("tool missing")
+
+	code, err = authKeychainExitCode(fmt.Errorf("launch: %w", want))
+	require.ErrorIs(t, err, want)
+	require.Zero(t, code)
+}
+
+func TestAuthKeychainReadResultSurfacesTheBlobOnlyForAPresentItem(t *testing.T) {
+	t.Parallel()
+
+	output, code, err := authKeychainReadResult([]byte("blob\n"), nil)
+	require.NoError(t, err)
+	require.Zero(t, code)
+	require.Equal(t, "blob\n", string(output))
+
+	output, code, err = authKeychainReadResult([]byte("partial"), exec.Command("/bin/sh", "-c", "exit 51").Run())
+	require.NoError(t, err)
+	require.Equal(t, 51, code)
+	require.Nil(t, output)
+
+	want := errors.New("tool missing")
+
+	output, code, err = authKeychainReadResult([]byte("partial"), want)
+	require.ErrorIs(t, err, want)
+	require.Zero(t, code)
+	require.Nil(t, output)
+}
+
+func TestAuthKeychainToolsRequireContainmentAndNativeAdmission(t *testing.T) {
+	_, _, err := runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, Options{})
+	require.ErrorContains(t, err, "invalid process isolation")
+
+	isolation := testProcessIsolation()
+	isolation.BaseEnvironment[envSearchPath] = t.TempDir()
+
+	_, _, err = runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, Options{ProcessIsolation: isolation})
+	require.ErrorIs(t, err, exec.ErrNotFound)
+
+	options := withTestProcessIsolation(Options{})
+	_, _, err = runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, options)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+
+	useAuthDirectContainment(t)
+	prepared := 0
+	acquired := 0
+	released := 0
+	options.DarwinBestEffort = true
+	options.PrepareKeychainGeneration = func(context.Context) (*DarwinGeneration, error) {
+		prepared++
+
+		return &DarwinGeneration{ScratchRoot: t.TempDir()}, nil
+	}
+	options.AcquireKeychainDiscovery = func(context.Context) (func(), error) {
+		acquired++
+
+		return func() { released++ }, nil
+	}
+	_, code, err := runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, options)
+	require.NoError(t, err)
+	require.Zero(t, code)
+	require.Equal(t, 1, prepared)
+	require.Equal(t, 1, acquired)
+	require.Equal(t, 1, released)
+}
+
+func TestContainedAuthKeychainToolFailureBranches(t *testing.T) {
+	useAuthDirectContainment(t)
+	directPrepare := processPrepareContained
+	options := withTestProcessIsolation(Options{DarwinBestEffort: true})
+	options.PrepareKeychainGeneration = func(context.Context) (*DarwinGeneration, error) {
+		return &DarwinGeneration{ScratchRoot: t.TempDir()}, nil
+	}
+	releases := 0
+	options.AcquireKeychainDiscovery = func(context.Context) (func(), error) {
+		return func() { releases++ }, nil
+	}
+
+	wantPrepare := errors.New("prepare generation")
+	prepare := options.PrepareKeychainGeneration
+	options.PrepareKeychainGeneration = func(context.Context) (*DarwinGeneration, error) { return nil, wantPrepare }
+	_, _, err := runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, options)
+	require.ErrorIs(t, err, wantPrepare)
+	options.PrepareKeychainGeneration = prepare
+
+	wantAcquire := errors.New("acquire native root")
+	acquire := options.AcquireKeychainDiscovery
+	finished := false
+	options.PrepareKeychainGeneration = func(context.Context) (*DarwinGeneration, error) {
+		return &DarwinGeneration{Release: func(complete bool) error {
+			finished = complete
+
+			return nil
+		}}, nil
+	}
+	options.AcquireKeychainDiscovery = func(context.Context) (func(), error) { return nil, wantAcquire }
+	_, _, err = runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, options)
+	require.ErrorIs(t, err, wantAcquire)
+	require.True(t, finished)
+	options.PrepareKeychainGeneration = prepare
+	options.AcquireKeychainDiscovery = acquire
+
+	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) {
+		return nil, ErrProcessContainmentIncomplete
+	}
+	_, _, err = runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, options)
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.Zero(t, releases)
+
+	wantRun := errors.New("prepare containment")
+	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) { return nil, wantRun }
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _, err = runContainedAuthKeychainTool(canceled, []string{"list-keychains"}, options)
+	require.ErrorIs(t, err, context.Canceled)
+
+	_, _, err = runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, options)
+	require.ErrorIs(t, err, wantRun)
+
+	processPrepareContained = func(command *exec.Cmd, launchOptions processLaunchOptions) (*processTreeCommand, error) {
+		command.Path = "/bin/sh"
+		command.Args = []string{"sh", "-c", "exit 51"}
+
+		return directPrepare(command, launchOptions)
+	}
+	_, code, err := runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, options)
+	require.NoError(t, err)
+	require.Equal(t, 51, code)
+}
+
+func TestAuthKeychainToolsReportALaunchFailureAsOne(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged session so the credential cannot be applied")
+	}
+
+	t.Parallel()
+
+	options := withTestProcessIsolation(Options{})
+
+	code, err := authKeychainTool(t.Context(), []string{"list-keychains"}, options)
 	require.Error(t, err)
+	require.Zero(t, code)
+
+	output, code, err := authKeychainReadTool(t.Context(), []string{"list-keychains"}, options)
+	require.Error(t, err)
+	require.Zero(t, code)
+	require.Nil(t, output)
+
+	_, err = authKeychainTool(t.Context(), []string{"list-keychains"}, Options{})
+	require.ErrorContains(t, err, "invalid process isolation")
+
+	_, _, err = authKeychainReadTool(t.Context(), []string{"list-keychains"}, Options{})
+	require.ErrorContains(t, err, "invalid process isolation")
 }

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type darwinTestReadCloser struct {
@@ -38,6 +40,23 @@ func (r *darwinTestReadCloser) Close() error {
 	return r.closeErr
 }
 
+func useDarwinTestSupervisorIdentity(t *testing.T) {
+	t.Helper()
+	originalUID := processEffectiveUID
+	originalGID := processEffectiveGID
+	originalGroups := processGroups
+	t.Setenv(processIsolationUIDEnv, "41")
+	t.Setenv(processIsolationGIDEnv, "42")
+	processEffectiveUID = func() int { return 41 }
+	processEffectiveGID = func() int { return 42 }
+	processGroups = func() ([]int, error) { return nil, nil }
+	t.Cleanup(func() {
+		processEffectiveUID = originalUID
+		processEffectiveGID = originalGID
+		processGroups = originalGroups
+	})
+}
+
 func TestConfigureCommandDarwin(t *testing.T) {
 	cmd := exec.Command("true")
 	configureProcessCommand(cmd)
@@ -54,13 +73,22 @@ func TestDarwinLaunchFailsClosedWithoutExplicitOptIn(t *testing.T) {
 }
 
 func TestDarwinLaunchBootstrapProtocol(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
+	useDarwinTestSupervisorIdentity(t)
 	originalExec := darwinLaunchExec
 	t.Cleanup(func() { darwinLaunchExec = originalExec })
-	configBytes, err := json.Marshal(darwinLaunchConfig{Path: "/native/claude", Args: []string{"claude", "version"}, Env: []string{"A=B"}})
+	workingDirectory, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
+	configBytes, err := json.Marshal(darwinLaunchConfig{Path: "/native/claude", Args: []string{"claude", "version"}, Dir: workingDirectory, Env: []string{"A=B"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processEffectiveUID = func() int { return 99 }
+	if err := runDarwinLaunchBootstrap(nil, nil); err == nil || !strings.Contains(err.Error(), "mismatch") {
+		t.Fatalf("bootstrap identity error = %v", err)
+	}
+	processEffectiveUID = func() int { return 41 }
 
 	config := &darwinTestReadCloser{Reader: bytes.NewReader(configBytes)}
 	gate := &darwinTestReadCloser{Reader: bytes.NewReader([]byte{1})}
@@ -89,6 +117,7 @@ func TestDarwinLaunchBootstrapProtocol(t *testing.T) {
 		{name: "gate byte", config: &darwinTestReadCloser{Reader: bytes.NewReader(configBytes)}, gate: &darwinTestReadCloser{Reader: strings.NewReader("x")}},
 		{name: "close", config: &darwinTestReadCloser{Reader: bytes.NewReader(configBytes), closeErr: errors.New("close config")}, gate: &darwinTestReadCloser{Reader: strings.NewReader("\x01")}},
 		{name: "exec", config: &darwinTestReadCloser{Reader: bytes.NewReader(configBytes)}, gate: &darwinTestReadCloser{Reader: strings.NewReader("\x01")}, exec: func(string, []string, []string) error { return errors.New("exec") }},
+		{name: "chdir", config: &darwinTestReadCloser{Reader: strings.NewReader(`{"path":"/native/claude","args":["claude"],"dir":"/definitely/missing"}`)}, gate: &darwinTestReadCloser{Reader: strings.NewReader("\x01")}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			darwinLaunchExec = test.exec
@@ -103,7 +132,7 @@ func TestDarwinLaunchBootstrapProtocol(t *testing.T) {
 }
 
 func TestDarwinLaunchBootstrapDispatch(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
+	useDarwinTestSupervisorIdentity(t)
 	originalInput := darwinLaunchInput
 	originalExit := darwinLaunchExit
 	originalExec := darwinLaunchExec
@@ -121,7 +150,11 @@ func TestDarwinLaunchBootstrapDispatch(t *testing.T) {
 		return nil, nil, failureStatus, errors.New("input")
 	}
 	darwinLaunchBootstrap()
-	config, err := json.Marshal(darwinLaunchConfig{Path: "/native/claude", Args: []string{"claude"}})
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := json.Marshal(darwinLaunchConfig{Path: "/native/claude", Args: []string{"claude"}, Dir: workingDirectory})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +198,11 @@ func TestInheritedDarwinLaunchInputAndBoundedStatus(t *testing.T) {
 		return file
 	}
 	closeExecFD := -1
-	darwinLaunchCloseExec = func(fd int) { closeExecFD = fd }
+	darwinLaunchCloseExec = func(fd int) error {
+		closeExecFD = fd
+
+		return nil
+	}
 	config, gate, status, err := inheritedDarwinLaunchInput()
 	if err != nil || config == nil || gate == nil || status == nil || closeExecFD != int(files[2].Fd()) {
 		t.Fatalf("inherited input = (%v,%v,%v), close-on-exec=%d, err=%v", config, gate, status, closeExecFD, err)
@@ -183,8 +220,33 @@ func TestInheritedDarwinLaunchInputAndBoundedStatus(t *testing.T) {
 
 		return files[index-1]
 	}
-	if _, _, _, err := inheritedDarwinLaunchInput(); err == nil {
+	if _, _, _, missingErr := inheritedDarwinLaunchInput(); missingErr == nil {
 		t.Fatal("missing status descriptor was accepted")
+	}
+
+	closeExecFiles := make([]*os.File, 3)
+	for index := range closeExecFiles {
+		file, createErr := os.CreateTemp(t.TempDir(), "descriptor")
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		closeExecFiles[index] = file
+	}
+	index = 0
+	darwinLaunchOpenFile = func(uintptr, string) *os.File {
+		file := closeExecFiles[index]
+		index++
+
+		return file
+	}
+	closeExecErr := errors.New("close-on-exec")
+	darwinLaunchCloseExec = func(int) error { return closeExecErr }
+	config, gate, status, err = inheritedDarwinLaunchInput()
+	if !errors.Is(err, closeExecErr) {
+		t.Fatalf("close-on-exec error = %v", err)
+	}
+	for _, file := range []io.Closer{config, gate, status} {
+		_ = file.Close()
 	}
 
 	writer := &darwinTestWriteCloser{}
@@ -193,6 +255,49 @@ func TestInheritedDarwinLaunchInputAndBoundedStatus(t *testing.T) {
 		t.Fatalf("bounded status length=%d closed=%v", writer.Len(), writer.closed)
 	}
 	reportDarwinLaunchStatus(nil, errors.New("ignored"))
+}
+
+func TestDarwinLaunchCloseOnExecChecked(t *testing.T) {
+	original := darwinLaunchFcntl
+	t.Cleanup(func() { darwinLaunchFcntl = original })
+
+	calls := 0
+	darwinLaunchFcntl = func(_ uintptr, command int, argument int) (int, error) {
+		calls++
+		if calls == 1 {
+			if command != unix.F_GETFD || argument != 0 {
+				t.Fatalf("get flags call = (%d,%d)", command, argument)
+			}
+
+			return 0, nil
+		}
+		if command != unix.F_SETFD || argument&unix.FD_CLOEXEC == 0 {
+			t.Fatalf("set flags call = (%d,%d)", command, argument)
+		}
+
+		return 0, nil
+	}
+	if err := setDarwinLaunchCloseOnExec(5); err != nil || calls != 2 {
+		t.Fatalf("checked close-on-exec calls=%d err=%v", calls, err)
+	}
+
+	want := errors.New("fcntl")
+	darwinLaunchFcntl = func(uintptr, int, int) (int, error) { return 0, want }
+	if err := setDarwinLaunchCloseOnExec(5); !errors.Is(err, want) {
+		t.Fatalf("get flags error = %v", err)
+	}
+	calls = 0
+	darwinLaunchFcntl = func(uintptr, int, int) (int, error) {
+		calls++
+		if calls == 1 {
+			return 0, nil
+		}
+
+		return 0, want
+	}
+	if err := setDarwinLaunchCloseOnExec(5); !errors.Is(err, want) {
+		t.Fatalf("set flags error = %v", err)
+	}
 }
 
 func TestAwaitDarwinNativeExecStatus(t *testing.T) {
@@ -313,15 +418,20 @@ func TestPrepareDarwinLaunchResourceFailures(t *testing.T) {
 	originalPipe := darwinLaunchPipe
 	originalEncode := darwinLaunchEncode
 	originalExecutable := darwinLaunchExecutable
+	originalCommand := darwinLaunchCommand
 	t.Cleanup(func() {
 		darwinLaunchCreateTemp = originalCreateTemp
 		darwinLaunchRemove = originalRemove
 		darwinLaunchPipe = originalPipe
 		darwinLaunchEncode = originalEncode
 		darwinLaunchExecutable = originalExecutable
+		darwinLaunchCommand = originalCommand
 	})
 
 	options := processLaunchOptions{DarwinBestEffort: true, Generation: &DarwinGeneration{ScratchRoot: t.TempDir()}, Isolation: testProcessIsolation()}
+	if _, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true, Generation: options.Generation}); err == nil {
+		t.Fatal("missing process isolation was accepted")
+	}
 	if _, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true, Isolation: testProcessIsolation()}); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("missing generation error = %v", err)
 	}
@@ -406,5 +516,18 @@ func TestPrepareDarwinLaunchResourceFailures(t *testing.T) {
 	darwinLaunchExecutable = func() (string, error) { return "", want }
 	if _, err := prepareProcessTreeCommand(exec.Command("true"), options); !errors.Is(err, want) || !strings.Contains(err.Error(), "bootstrap") {
 		t.Fatalf("executable error = %v", err)
+	}
+	darwinLaunchExecutable = func() (string, error) { return "relative-bootstrap", nil }
+	if _, err := prepareProcessTreeCommand(exec.Command("true"), options); err == nil || !strings.Contains(err.Error(), "through process policy") {
+		t.Fatalf("bootstrap resolution error = %v", err)
+	}
+	darwinLaunchExecutable = originalExecutable
+	darwinLaunchCommand = func(name string, args ...string) *exec.Cmd {
+		options.Isolation.BaseEnvironment = nil
+
+		return exec.Command(name, args...)
+	}
+	if _, err := prepareProcessTreeCommand(exec.Command("true"), options); err == nil || !strings.Contains(err.Error(), "base environment") {
+		t.Fatalf("bootstrap credential error = %v", err)
 	}
 }

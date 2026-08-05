@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -33,7 +35,8 @@ var (
 	darwinLaunchExit       = os.Exit
 	darwinLaunchExec       = syscall.Exec
 	darwinLaunchOpenFile   = os.NewFile
-	darwinLaunchCloseExec  = syscall.CloseOnExec
+	darwinLaunchFcntl      = unix.FcntlInt
+	darwinLaunchCloseExec  = setDarwinLaunchCloseOnExec
 	darwinLaunchInput      = inheritedDarwinLaunchInput
 	darwinLaunchTimeout    = defaultCloseWait
 	darwinLaunchCreateTemp = os.CreateTemp
@@ -95,9 +98,24 @@ func inheritedDarwinLaunchInput() (io.ReadCloser, io.ReadCloser, io.WriteCloser,
 		return configFile, gate, status, errors.New("darwin native launch descriptors are unavailable")
 	}
 
-	darwinLaunchCloseExec(int(status.Fd()))
+	if err := darwinLaunchCloseExec(int(status.Fd())); err != nil {
+		return configFile, gate, status, err
+	}
 
 	return configFile, gate, status, nil
+}
+
+func setDarwinLaunchCloseOnExec(fd int) error {
+	flags, err := darwinLaunchFcntl(uintptr(fd), unix.F_GETFD, 0)
+	if err != nil {
+		return fmt.Errorf("read inherited Claude Darwin launch descriptor flags: %w", err)
+	}
+
+	if _, err = darwinLaunchFcntl(uintptr(fd), unix.F_SETFD, flags|unix.FD_CLOEXEC); err != nil {
+		return fmt.Errorf("protect inherited Claude Darwin launch descriptor from exec: %w", err)
+	}
+
+	return nil
 }
 
 func reportDarwinLaunchStatus(status io.WriteCloser, launchErr error) {

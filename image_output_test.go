@@ -929,7 +929,6 @@ func TestImageArtifactStoreEdges(t *testing.T) {
 		mixedSessionID,
 		t.TempDir(),
 		t.TempDir(),
-		nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, materialized)

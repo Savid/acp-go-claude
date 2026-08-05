@@ -19,7 +19,12 @@ import (
 	"github.com/savid/acp-go-claude/internal/permissions"
 )
 
-var mapMCPServersToClaude = mapper.MCPServersToClaude
+var (
+	mapMCPServersToClaude               = mapper.MCPServersToClaude
+	sessionEnsureScratchParent          = ensureScratchParent
+	sessionHandoffGeneratedNativeTree   = handoffGeneratedNativeTree
+	sessionValidateNativeOwnedDirectory = validateNativeOwnedDirectory
+)
 
 // NewSession creates and starts a Claude CLI session.
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (resp acp.NewSessionResponse, err error) {
@@ -698,9 +703,10 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	if err != nil {
 		return nil, err
 	}
+
 	if claudeHome != "" {
-		if err := validateNativeOwnedDirectory(claudeHome, a.options.ProcessIsolation); err != nil {
-			return nil, err
+		if validationErr := sessionValidateNativeOwnedDirectory(claudeHome, a.options.ProcessIsolation); validationErr != nil {
+			return nil, validationErr
 		}
 	}
 
@@ -708,6 +714,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	if err != nil {
 		return nil, err
 	}
+
 	imageArtifacts, err := a.loadImageArtifacts(ctx, start.ResumeID)
 	if err != nil {
 		return nil, err
@@ -746,15 +753,16 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		}
 
 		materialized, err = a.materializeStoreSessionWithEntries(
-			ctx, start.ResumeID, start.Cwd, claudeHome, env, rehydrated,
+			ctx, start.ResumeID, start.Cwd, claudeHome, rehydrated,
 		)
 	}
 
 	if err != nil {
 		return nil, err
 	}
+
 	if materialized == nil && a.options.ProcessIsolation != nil {
-		parent, parentErr := ensureScratchParent(a.options.ScratchDir)
+		parent, parentErr := sessionEnsureScratchParent(a.options.ScratchDir)
 		if parentErr != nil {
 			return nil, parentErr
 		}
@@ -763,8 +771,9 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		if createErr != nil {
 			return nil, fmt.Errorf("create isolated Claude home: %w", createErr)
 		}
+
 		materialized = &materializedSession{configDir: isolatedHome}
-		if copyErr := copyClaudeConfigFiles(isolatedHome, claudeHome, env, claudeProcessIsolation(a.options.ProcessIsolation)); copyErr != nil {
+		if copyErr := copyClaudeConfigFiles(isolatedHome, claudeHome, a.resumeCredentialOptions()); copyErr != nil {
 			return nil, copyErr
 		}
 	}
@@ -778,9 +787,10 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	if err != nil {
 		return nil, err
 	}
+
 	if materialized != nil {
-		if err := handoffGeneratedNativeTree(processClaudeHome, a.options.ProcessIsolation); err != nil {
-			return nil, err
+		if handoffErr := sessionHandoffGeneratedNativeTree(processClaudeHome, a.options.ProcessIsolation); handoffErr != nil {
+			return nil, handoffErr
 		}
 	}
 
@@ -791,9 +801,10 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	if err != nil {
 		return nil, err
 	}
+
 	if mcpConfigDir != "" {
-		if err := handoffGeneratedNativeTree(mcpConfigDir, a.options.ProcessIsolation); err != nil {
-			return nil, err
+		if handoffErr := sessionHandoffGeneratedNativeTree(mcpConfigDir, a.options.ProcessIsolation); handoffErr != nil {
+			return nil, handoffErr
 		}
 	}
 

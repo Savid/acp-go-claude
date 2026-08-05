@@ -218,7 +218,7 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, os.WriteFile(envNativePath, []byte("{}\n"), 0o600))
 	envSkipStore := NewInMemorySessionStore()
 	require.NoError(t, envSkipStore.Append(ctx, SessionKey{SessionID: "88888888-8888-4888-8888-888888888888"}, []SessionStoreEntry{[]byte(`{"type":"system"}`)}))
-	envSkip, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(envSkipStore), WithEnv(map[string]string{"CLAUDE_CONFIG_DIR": envNativeHome}))
+	envSkip, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(envSkipStore), WithHome(envNativeHome))
 	_, err = envSkip.LoadSession(ctx, LoadSessionRequest("88888888-8888-4888-8888-888888888888", cwd))
 	require.NoError(t, err)
 	require.NotNil(t, envSkip.sessions["88888888-8888-4888-8888-888888888888"].materialized)
@@ -893,6 +893,97 @@ func TestStartSessionEdgeBranches(t *testing.T) {
 	modeApplyErrAgent, _, _ := newFakeLifecycleAgent(t, modeApplyErrTransport, WithClaudeDefaultPermissionMode("auto"))
 	_, err = modeApplyErrAgent.startSession(ctx, sessionID, sessionStart{Cwd: cwd, MetaOptions: ClaudeOptions{Model: "opus"}})
 	require.ErrorContains(t, err, "set default mode failed")
+}
+
+func TestStartSessionIsolationFailureBranches(t *testing.T) {
+	ctx := t.Context()
+	cwd := t.TempDir()
+	sessionID := acp.SessionId("34343434-3434-4434-8434-343434343434")
+	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid())
+	if uid == 0 {
+		uid = 1
+	}
+	if gid == 0 {
+		gid = 1
+	}
+	isolation := ProcessIsolation{UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin"}}
+
+	originalEnsure := sessionEnsureScratchParent
+	originalHandoff := sessionHandoffGeneratedNativeTree
+	originalValidate := sessionValidateNativeOwnedDirectory
+	originalMkdirTemp := materializeMkdirTemp
+	originalCopy := copyClaudeConfigFiles
+	t.Cleanup(func() {
+		sessionEnsureScratchParent = originalEnsure
+		sessionHandoffGeneratedNativeTree = originalHandoff
+		sessionValidateNativeOwnedDirectory = originalValidate
+		materializeMkdirTemp = originalMkdirTemp
+		copyClaudeConfigFiles = originalCopy
+	})
+	restore := func() {
+		sessionEnsureScratchParent = originalEnsure
+		sessionHandoffGeneratedNativeTree = originalHandoff
+		sessionValidateNativeOwnedDirectory = originalValidate
+		materializeMkdirTemp = originalMkdirTemp
+		copyClaudeConfigFiles = originalCopy
+	}
+	start := func(options []Option, request sessionStart) error {
+		agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), options...)
+		_, err := agent.startSession(ctx, sessionID, request)
+
+		return err
+	}
+	authAgent := newAuthAgent(t)
+	authAgent.setConnection(newRecordingAgentClient())
+	installFakeClaudeClient(authAgent, newFakeClaudeTransport())
+	authSession, err := authAgent.startSession(ctx, sessionID, sessionStart{Cwd: cwd})
+	require.NoError(t, err)
+	require.NoError(t, authSession.Close(ctx))
+
+	sessionValidateNativeOwnedDirectory = func(string, *ProcessIsolation) error { return errors.New("validate native home") }
+	err = start(nil, sessionStart{Cwd: cwd})
+	require.ErrorContains(t, err, "validate native home")
+	restore()
+
+	sessionEnsureScratchParent = func(string) (string, error) { return "", errors.New("isolated scratch") }
+	err = start([]Option{WithProcessIsolation(isolation)}, sessionStart{Cwd: cwd})
+	require.ErrorContains(t, err, "isolated scratch")
+	restore()
+
+	materializeMkdirTemp = func(string, string) (string, error) { return "", errors.New("isolated home") }
+	err = start([]Option{WithProcessIsolation(isolation)}, sessionStart{Cwd: cwd})
+	require.ErrorContains(t, err, "create isolated Claude home")
+	restore()
+
+	copyClaudeConfigFiles = func(string, string, claude.Options) error { return errors.New("copy isolated home") }
+	err = start([]Option{WithProcessIsolation(isolation)}, sessionStart{Cwd: cwd})
+	require.ErrorContains(t, err, "copy isolated home")
+	restore()
+
+	copyClaudeConfigFiles = func(string, string, claude.Options) error { return nil }
+	sessionHandoffGeneratedNativeTree = func(string, *ProcessIsolation) error { return errors.New("handoff isolated home") }
+	err = start([]Option{WithProcessIsolation(isolation)}, sessionStart{Cwd: cwd})
+	require.ErrorContains(t, err, "handoff isolated home")
+	restore()
+
+	handoffs := 0
+	copyClaudeConfigFiles = func(string, string, claude.Options) error { return nil }
+	sessionHandoffGeneratedNativeTree = func(string, *ProcessIsolation) error {
+		handoffs++
+		if handoffs == 2 {
+			return errors.New("handoff MCP config")
+		}
+
+		return nil
+	}
+	err = start([]Option{WithProcessIsolation(isolation)}, sessionStart{
+		Cwd: cwd,
+		McpServers: []acp.McpServer{{
+			Stdio: &acp.McpServerStdio{Name: "fixture", Command: "/bin/true"},
+		}},
+	})
+	require.ErrorContains(t, err, "handoff MCP config")
+	require.Equal(t, 2, handoffs)
 }
 
 func TestSessionCloseReportsMCPConfigRemovalError(t *testing.T) {

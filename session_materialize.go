@@ -51,9 +51,8 @@ func (a *Agent) materializeStoreSession(
 	sessionID string,
 	cwd string,
 	sourceClaudeHome string,
-	env map[string]string,
 ) (materialized *materializedSession, err error) {
-	return a.materializeStoreSessionWithEntries(ctx, sessionID, cwd, sourceClaudeHome, env, nil)
+	return a.materializeStoreSessionWithEntries(ctx, sessionID, cwd, sourceClaudeHome, nil)
 }
 
 func (a *Agent) materializeStoreSessionWithEntries(
@@ -61,7 +60,6 @@ func (a *Agent) materializeStoreSessionWithEntries(
 	sessionID string,
 	cwd string,
 	sourceClaudeHome string,
-	env map[string]string,
 	storeEntries []SessionStoreEntry,
 ) (materialized *materializedSession, err error) {
 	if sessionID == "" {
@@ -124,7 +122,7 @@ func (a *Agent) materializeStoreSessionWithEntries(
 		return nil, err
 	}
 
-	if err := copyClaudeConfigFiles(tmp, sourceClaudeHome, env, claudeProcessIsolation(a.options.ProcessIsolation)); err != nil {
+	if err := copyClaudeConfigFiles(tmp, sourceClaudeHome, a.resumeCredentialOptions()); err != nil {
 		return nil, err
 	}
 
@@ -280,8 +278,12 @@ func writeJSONFile(path string, value any) error {
 	return materializeWriteFile(path, append(data, '\n'), 0o600)
 }
 
-func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, env map[string]string, isolation *claude.ProcessIsolation) error {
-	source := sourceClaudeConfigDir(sourceClaudeHome, env)
+func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, options claude.Options) error {
+	source := ""
+	if strings.TrimSpace(sourceClaudeHome) != "" {
+		source = filepath.Clean(sourceClaudeHome)
+	}
+
 	if source == "" || filepath.Clean(source) == filepath.Clean(dst) {
 		return nil
 	}
@@ -293,19 +295,32 @@ func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, env map[stri
 		}
 	}
 
-	return copyClaudeResumeCredential(source, dst, claude.Options{ProcessIsolation: isolation})
+	return copyClaudeResumeCredential(source, dst, options)
+}
+
+func (a *Agent) resumeCredentialOptions() claude.Options {
+	return claude.Options{
+		ProcessIsolation: claudeProcessIsolation(a.options.ProcessIsolation),
+		DarwinBestEffort: a.containmentMode == RuntimeContainmentBestEffort,
+		AcquireKeychainDiscovery: func(discoveryCtx context.Context) (func(), error) {
+			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
+		},
+		PrepareKeychainGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
+			return a.prepareDarwinGeneration(generationCtx, RuntimeResourceDiscovery)
+		},
+	}
 }
 
 func sourceClaudeConfigDir(sourceClaudeHome string, env map[string]string) string {
-	if env != nil && strings.TrimSpace(env["CLAUDE_CONFIG_DIR"]) != "" {
-		return filepath.Clean(env["CLAUDE_CONFIG_DIR"])
+	if env != nil && strings.TrimSpace(env[claudeConfigDirEnv]) != "" {
+		return filepath.Clean(env[claudeConfigDirEnv])
 	}
 
 	if strings.TrimSpace(sourceClaudeHome) != "" {
 		return filepath.Clean(sourceClaudeHome)
 	}
 
-	if configDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); configDir != "" {
+	if configDir := strings.TrimSpace(os.Getenv(claudeConfigDirEnv)); configDir != "" {
 		return filepath.Clean(configDir)
 	}
 

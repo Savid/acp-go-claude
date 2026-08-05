@@ -192,6 +192,9 @@ func TestDarwinWaitNormalizesPipeDelayOnlyAfterContainment(t *testing.T) {
 	if err := tree.wait(nil); err != nil {
 		t.Fatalf("wait error = %v", err)
 	}
+	if err := waitContainedProcess(tree, nil); err != nil {
+		t.Fatalf("contained wait error = %v", err)
+	}
 	if !tree.ownsShutdown() || tree.close() != nil {
 		t.Fatal("Darwin tree ownership mismatch")
 	}
@@ -211,19 +214,21 @@ func prepareDarwinTestLaunch(t *testing.T, generation *DarwinGeneration) *proces
 	if generation == nil {
 		generation = &DarwinGeneration{ScratchRoot: t.TempDir()}
 	}
-	launch, err := prepareProcessTreeCommand(exec.Command("/bin/sh", "-c", "while :; do sleep 1; done"), processLaunchOptions{
-		DarwinBestEffort: true,
-		Generation:       generation,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	command := exec.Command("/bin/sh", "-c", "while :; do sleep 1; done")
+	configureProcessCommandPlatform(command)
 
-	return launch
+	return &processTreeCommand{cmd: command, bestEffort: true, generation: generation}
+}
+
+func prepareDarwinExitLaunch(t *testing.T) *processTreeCommand {
+	t.Helper()
+	command := exec.Command("/usr/bin/true")
+	configureProcessCommandPlatform(command)
+
+	return &processTreeCommand{cmd: command, bestEffort: true, generation: &DarwinGeneration{ScratchRoot: t.TempDir()}}
 }
 
 func TestDarwinStartValidationAndFastExitBranches(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	originalGetpgid := syscallGetpgid
 	originalKill := syscallKill
 	originalAbortWait := darwinAbortWait
@@ -258,7 +263,7 @@ func TestDarwinStartValidationAndFastExitBranches(t *testing.T) {
 
 	syscallGetpgid = func(int) (int, error) { return 0, syscall.ESRCH }
 	syscallKill = func(int, syscall.Signal) error { return syscall.ESRCH }
-	if tree, err := startContainedProcess(prepareDarwinTestLaunch(t, nil)); tree != nil || err == nil || errors.Is(err, ErrProcessContainmentIncomplete) {
+	if tree, err := startContainedProcess(prepareDarwinExitLaunch(t)); tree != nil || err == nil || errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("absent fast-exit tree=%v error=%v", tree, err)
 	}
 
@@ -271,12 +276,12 @@ func TestDarwinStartValidationAndFastExitBranches(t *testing.T) {
 
 		return syscall.ESRCH
 	}
-	if tree, err := startContainedProcess(prepareDarwinTestLaunch(t, nil)); tree != nil || err == nil || errors.Is(err, ErrProcessContainmentIncomplete) {
+	if tree, err := startContainedProcess(prepareDarwinExitLaunch(t)); tree != nil || err == nil || errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("observable fast-exit tree=%v error=%v", tree, err)
 	}
 
 	syscallKill = func(int, syscall.Signal) error { return syscall.EIO }
-	if tree, err := startContainedProcess(prepareDarwinTestLaunch(t, nil)); tree != nil || !errors.Is(err, ErrProcessContainmentIncomplete) {
+	if tree, err := startContainedProcess(prepareDarwinExitLaunch(t)); tree != nil || !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("probe-failure fast-exit tree=%v error=%v", tree, err)
 	}
 
@@ -290,7 +295,6 @@ func TestDarwinStartValidationAndFastExitBranches(t *testing.T) {
 }
 
 func TestDarwinGateReleaseFailureCleansGroup(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	originalKill := syscallKill
 	originalGetpgid := syscallGetpgid
 	originalWait := startPausedCommandWaitFn
@@ -300,9 +304,10 @@ func TestDarwinGateReleaseFailureCleansGroup(t *testing.T) {
 		startPausedCommandWaitFn = originalWait
 	})
 	launch := prepareDarwinTestLaunch(t, nil)
-	if err := launch.startGate.Close(); err != nil {
-		t.Fatal(err)
-	}
+	gateRead, gateWrite, err := os.Pipe()
+	require.NoError(t, err)
+	require.NoError(t, gateRead.Close())
+	launch.startGate = gateWrite
 	syscallGetpgid = func(pid int) (int, error) { return pid, nil }
 	var order []string
 	startPausedCommandWaitFn = func(wait func() error) (*commandWait, func()) {
@@ -447,7 +452,6 @@ func TestProcessTransportDarwinContainmentShutdownBranches(t *testing.T) {
 }
 
 func TestDarwinStartContainedProcessRealBoundaries(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if tree, err := startContainedProcess(nil); tree != nil || !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("nil launch tree=%v error=%v", tree, err)
 	}
@@ -470,24 +474,28 @@ func TestDarwinStartContainedProcessRealBoundaries(t *testing.T) {
 	}
 
 	generation := &DarwinGeneration{ScratchRoot: t.TempDir()}
-	launch, err := prepareProcessTreeCommand(exec.Command("/bin/sh", "-c", "while :; do sleep 1; done"), processLaunchOptions{
-		DarwinBestEffort: true,
-		Generation:       generation,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	launch := prepareDarwinTestLaunch(t, generation)
 	tree, err := startContainedProcess(launch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tree.quiesce(defaultCloseWait); err != nil {
+	if quiesceErr := tree.quiesce(defaultCloseWait); quiesceErr != nil {
+		t.Fatal(quiesceErr)
+	}
+
+	ready, err := os.CreateTemp(t.TempDir(), "ready")
+	if err != nil {
 		t.Fatal(err)
+	}
+	launch = prepareDarwinTestLaunch(t, &DarwinGeneration{ScratchRoot: t.TempDir()})
+	launch.ready = ready
+	tree, err = startContainedProcess(launch)
+	if tree != nil || !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), "exec-status deadline") {
+		t.Fatalf("ready deadline tree=%v error=%v", tree, err)
 	}
 }
 
 func TestDarwinSetsidEscapeSurvivesSelectedBoundary(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	readyFile := filepath.Join(t.TempDir(), "ready")
 	command := exec.Command(os.Args[0], "-test.run=TestDarwinContainmentSetsidHelper")
@@ -497,13 +505,8 @@ func TestDarwinSetsidEscapeSurvivesSelectedBoundary(t *testing.T) {
 		"CLAUDE_TEST_DARWIN_CONTAINMENT_READY_FILE="+readyFile,
 	)
 	generation := &DarwinGeneration{RuntimeID: strings.Repeat("0", 32), ScratchRoot: t.TempDir()}
-	launch, err := prepareProcessTreeCommand(command, processLaunchOptions{
-		DarwinBestEffort: true,
-		Generation:       generation,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	configureProcessCommandPlatform(command)
+	launch := &processTreeCommand{cmd: command, bestEffort: true, generation: generation}
 	tree, err := startContainedProcess(launch)
 	if err != nil {
 		t.Fatal(err)
@@ -573,19 +576,12 @@ func TestDarwinContainmentSetsidHelper(t *testing.T) {
 }
 
 func TestDarwinRecordActivationFailureCleansCapturedGroup(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	want := errors.New("record")
 	generation := &DarwinGeneration{
 		ScratchRoot:   t.TempDir(),
 		RecordStarted: func(int, int) error { return want },
 	}
-	launch, err := prepareProcessTreeCommand(exec.Command("/bin/sh", "-c", "while :; do sleep 1; done"), processLaunchOptions{
-		DarwinBestEffort: true,
-		Generation:       generation,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	launch := prepareDarwinTestLaunch(t, generation)
 	tree, err := startContainedProcess(launch)
 	if tree != nil || !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), want.Error()) {
 		t.Fatalf("activation tree=%v error=%v", tree, err)

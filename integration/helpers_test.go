@@ -857,16 +857,6 @@ func integrationContainmentOption() claudeacp.Option {
 	return func(*claudeacp.Options) {}
 }
 
-// integrationContainmentArgs is the same opt-in on the other side of the
-// process boundary, where the compiled binary takes it as a flag.
-func integrationContainmentArgs() []string {
-	if runtime.GOOS == "darwin" {
-		return []string{"-darwin-best-effort-containment"}
-	}
-
-	return nil
-}
-
 func connectLiveAgent(
 	t *testing.T,
 	ctx context.Context,
@@ -1012,8 +1002,7 @@ func connectLiveAgentBinary(
 
 	claudePath := integrationClaudePath(t)
 	runtime := isolatedClaudeRuntime(t)
-	args := integrationContainmentArgs()
-	args = append(args, "-path", claudePath, "-home", runtime.home)
+	args := []string{"-path", claudePath, "-home", runtime.home}
 	if model := os.Getenv("ACP_GO_CLAUDE_MODEL"); model != "" {
 		args = append(args, "-model", model)
 	}

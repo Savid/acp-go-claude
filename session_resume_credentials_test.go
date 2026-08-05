@@ -25,7 +25,7 @@ func TestMaterializeStoreSessionCarriesResumeCredentialPrivately(t *testing.T) {
 	}))
 	scratch := filepath.Join(t.TempDir(), "private", "scratch")
 	agent := NewAgent(WithHome(source), WithSessionStore(store), WithScratchDir(scratch))
-	materialized, err := agent.materializeStoreSession(ctx, sessionID, cwd, source, nil)
+	materialized, err := agent.materializeStoreSession(ctx, sessionID, cwd, source)
 	require.NoError(t, err)
 	require.NotNil(t, materialized)
 
@@ -56,6 +56,31 @@ func TestMaterializeStoreSessionCarriesResumeCredentialPrivately(t *testing.T) {
 	configDir := materialized.configDir
 	require.NoError(t, materialized.Close())
 	require.NoDirExists(t, configDir)
+}
+
+func TestConfigCopySourceCannotBeRedirectedByTheProcessEnvironment(t *testing.T) {
+	stubResumeCredentialKeystore(t, func(string) ([]byte, error) { return nil, nil })
+
+	managed := t.TempDir()
+	hostile := t.TempDir()
+	destination := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(managed, claudeResumeCredentialFile),
+		[]byte(`{"claudeAiOauth":{"accessToken":"managed-secret"}}`),
+		0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(hostile, claudeResumeCredentialFile),
+		[]byte(`{"claudeAiOauth":{"accessToken":"hostile-secret"}}`),
+		0o600,
+	))
+	t.Setenv("CLAUDE_CONFIG_DIR", hostile)
+
+	require.NoError(t, copyClaudeConfigFilesImpl(destination, managed, claude.Options{}))
+	copied, err := os.ReadFile(filepath.Join(destination, claudeResumeCredentialFile))
+	require.NoError(t, err)
+	require.Contains(t, string(copied), "managed-secret")
+	require.NotContains(t, string(copied), "hostile-secret")
 }
 
 func TestCopyClaudeResumeCredentialMissingPreservesFirstTurnAuthContract(t *testing.T) {
@@ -217,7 +242,7 @@ func TestCopyClaudeResumeCredentialRejectsUnsafeSources(t *testing.T) {
 		require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: sessionID}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
 		agent := NewAgent(WithHome(source), WithSessionStore(store), WithScratchDir(scratch))
 
-		materialized, err := agent.materializeStoreSession(t.Context(), sessionID, t.TempDir(), source, nil)
+		materialized, err := agent.materializeStoreSession(t.Context(), sessionID, t.TempDir(), source)
 		require.Nil(t, materialized)
 		require.ErrorIs(t, err, errClaudeResumeCredentialMalformed)
 		requireSecretSafeCredentialError(t, err, source, secret)

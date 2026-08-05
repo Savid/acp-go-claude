@@ -27,7 +27,7 @@ func TestMaterializeStoreSessionUsesScratchDir(t *testing.T) {
 	scratch := filepath.Join(t.TempDir(), "nested", "scratch")
 	agent := NewAgent(WithSessionStore(store), WithScratchDir(scratch))
 
-	materialized, err := agent.materializeStoreSession(ctx, sessionID, cwd, sourceHome, nil)
+	materialized, err := agent.materializeStoreSession(ctx, sessionID, cwd, sourceHome)
 	require.NoError(t, err)
 	require.NotNil(t, materialized)
 	t.Cleanup(func() { require.NoError(t, materialized.Close()) })
@@ -39,7 +39,7 @@ func TestMaterializeStoreSessionUsesScratchDir(t *testing.T) {
 	require.NoError(t, os.WriteFile(occupied, []byte("x"), 0o600))
 
 	blocked := NewAgent(WithSessionStore(store), WithScratchDir(occupied))
-	_, err = blocked.materializeStoreSession(ctx, sessionID, cwd, sourceHome, nil)
+	_, err = blocked.materializeStoreSession(ctx, sessionID, cwd, sourceHome)
 	require.ErrorContains(t, err, "create scratch parent dir")
 }
 
@@ -68,7 +68,7 @@ func TestMaterializeStoreSessionBranches(t *testing.T) {
 	require.NoError(t, store.Append(ctx, SessionKey{SessionID: sessionID, Subpath: "subagents/empty"}, nil))
 
 	agent := NewAgent(WithHome(sourceHome), WithSessionStore(store))
-	materialized, err := agent.materializeStoreSession(ctx, sessionID, cwd, sourceHome, nil)
+	materialized, err := agent.materializeStoreSession(ctx, sessionID, cwd, sourceHome)
 	require.NoError(t, err)
 	require.NotNil(t, materialized)
 	t.Cleanup(func() { require.NoError(t, materialized.Close()) })
@@ -95,17 +95,17 @@ func TestMaterializeStoreSessionBranches(t *testing.T) {
 	require.NoError(t, ((*materializedSession)(nil)).Close())
 	require.NoError(t, (&materializedSession{}).Close())
 
-	none, err := agent.materializeStoreSession(ctx, "", cwd, sourceHome, nil)
+	none, err := agent.materializeStoreSession(ctx, "", cwd, sourceHome)
 	require.NoError(t, err)
 	require.Nil(t, none)
-	none, err = agent.materializeStoreSession(ctx, "not-a-uuid", cwd, sourceHome, nil)
+	none, err = agent.materializeStoreSession(ctx, "not-a-uuid", cwd, sourceHome)
 	require.NoError(t, err)
 	require.Nil(t, none)
 
 	nativePath := filepath.Join(sourceHome, "projects", projectKey, sessionID+".jsonl")
 	require.NoError(t, os.MkdirAll(filepath.Dir(nativePath), 0o755))
 	require.NoError(t, os.WriteFile(nativePath, []byte(`{"type":"assistant","message":{"content":"native-only"}}`), 0o600))
-	materialized, err = agent.materializeStoreSession(ctx, sessionID, cwd, sourceHome, nil)
+	materialized, err = agent.materializeStoreSession(ctx, sessionID, cwd, sourceHome)
 	require.NoError(t, err)
 	require.NotNil(t, materialized)
 	mainData, err = os.ReadFile(materialized.mainPath)
@@ -125,11 +125,11 @@ func TestMaterializeStoreSessionErrors(t *testing.T) {
 	agent := NewAgent(WithSessionStore(store), WithScratchDir(copyScratch))
 
 	originalCopy := copyClaudeConfigFiles
-	copyClaudeConfigFiles = func(string, string, map[string]string, *claude.ProcessIsolation) error {
+	copyClaudeConfigFiles = func(string, string, claude.Options) error {
 		return errors.New("copy failed")
 	}
 	t.Cleanup(func() { copyClaudeConfigFiles = originalCopy })
-	materialized, err := agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
+	materialized, err := agent.materializeStoreSession(ctx, sessionID, cwd, "")
 	require.ErrorContains(t, err, "copy failed")
 	require.Nil(t, materialized)
 	requireScratchDirEmpty(t, copyScratch)
@@ -141,18 +141,18 @@ func TestMaterializeStoreSessionErrors(t *testing.T) {
 		WithSessionStore(&faultSessionStore{SessionStore: store, listSubkeysErr: listErr}),
 		WithScratchDir(listScratch),
 	)
-	materialized, err = agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
+	materialized, err = agent.materializeStoreSession(ctx, sessionID, cwd, "")
 	require.ErrorContains(t, err, "list session store subkeys")
 	require.Nil(t, materialized)
 	requireScratchDirEmpty(t, listScratch)
 
 	loadErr := errors.New("load failed")
 	agent = NewAgent(WithSessionStore(&faultSessionStore{SessionStore: store, loadErr: loadErr}))
-	materialized, err = agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
+	materialized, err = agent.materializeStoreSession(ctx, sessionID, cwd, "")
 	require.ErrorContains(t, err, "load session store key")
 	require.Nil(t, materialized)
 
-	_, err = agent.materializeStoreSession(ctx, sessionID, "relative", "", nil)
+	_, err = agent.materializeStoreSession(ctx, sessionID, "relative", "")
 	require.ErrorContains(t, err, "cwd must be an absolute path")
 
 	require.ErrorContains(t, writeJSONFile(filepath.Join(t.TempDir(), "bad.json"), map[string]any{"bad": func() {}}), "encode metadata")
@@ -181,9 +181,9 @@ func TestConfigDirAndNativeTranscriptDeleteHelpers(t *testing.T) {
 	require.Equal(t, filepath.Clean(overrideHome), defaultClaudeConfigDir(overrideHome))
 
 	dst := t.TempDir()
-	require.NoError(t, copyClaudeConfigFilesImpl(dst, dst, nil, nil))
+	require.NoError(t, copyClaudeConfigFilesImpl(dst, dst, claude.Options{}))
 	require.NoFileExists(t, filepath.Join(dst, ".claude.json"))
-	require.NoError(t, copyClaudeConfigFilesImpl(dst, "", map[string]string{"CLAUDE_CONFIG_DIR": t.TempDir()}, nil))
+	require.NoError(t, copyClaudeConfigFilesImpl(dst, "", claude.Options{}))
 
 	sessionID := "33333333-3333-4333-8333-333333333333"
 	projectKey := "project"
@@ -237,20 +237,20 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 	})
 
 	materializeMkdirTemp = func(string, string) (string, error) { return "", errors.New("temp failed") }
-	_, err := agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
+	_, err := agent.materializeStoreSession(ctx, sessionID, cwd, "")
 	require.ErrorContains(t, err, "temp failed")
 	materializeMkdirTemp = originalMkdirTemp
 
 	materializeWriteFile = func(string, []byte, os.FileMode) error { return errors.New("write failed") }
 	require.ErrorContains(t, writeStoreJSONL(filepath.Join(t.TempDir(), "out.jsonl"), []SessionStoreEntry{[]byte(`{}`)}), "write failed")
-	_, err = agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
+	_, err = agent.materializeStoreSession(ctx, sessionID, cwd, "")
 	require.ErrorContains(t, err, "write failed")
 	requireScratchDirEmpty(t, scratch)
 	materializeWriteFile = originalWriteFile
 
 	materializeWriteFile = func(string, []byte, os.FileMode) error { return errors.New("write failed") }
 	materializeRemoveAll = func(string) error { return errors.New("remove failed") }
-	_, err = agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
+	_, err = agent.materializeStoreSession(ctx, sessionID, cwd, "")
 	require.ErrorContains(t, err, "write failed")
 	require.ErrorContains(t, err, "clean up materialized session")
 	materializeWriteFile = originalWriteFile
@@ -264,19 +264,19 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 
 		return originalWriteFile(path, data, mode)
 	}
-	_, err = agent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
+	_, err = agent.materializeStoreSession(ctx, sessionID, cwd, "")
 	require.ErrorContains(t, err, "subkey materialization failed")
 	requireScratchDirEmpty(t, scratch)
 	materializeWriteFile = originalWriteFile
 
 	emptyStoreAgent := NewAgent(WithSessionStore(NewInMemorySessionStore()))
-	none, err := emptyStoreAgent.materializeStoreSession(ctx, sessionID, cwd, "", nil)
+	none, err := emptyStoreAgent.materializeStoreSession(ctx, sessionID, cwd, "")
 	require.NoError(t, err)
 	require.Nil(t, none)
 
 	materializeReadFile = func(string) ([]byte, error) { return []byte(`{"ok":true}`), nil }
 	materializeWriteFile = func(string, []byte, os.FileMode) error { return errors.New("copy write failed") }
-	require.ErrorContains(t, copyClaudeConfigFilesImpl(t.TempDir(), t.TempDir(), nil, nil), "copy write failed")
+	require.ErrorContains(t, copyClaudeConfigFilesImpl(t.TempDir(), t.TempDir(), claude.Options{}), "copy write failed")
 	materializeReadFile = originalReadFile
 	materializeWriteFile = originalWriteFile
 

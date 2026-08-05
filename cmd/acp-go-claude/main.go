@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -124,7 +125,14 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	}
 
 	if *claudeHome == "" {
-		*claudeHome = isolation.BaseEnvironment["HOME"]
+		*claudeHome = isolation.StandaloneStateRoot
+	}
+
+	if !filepath.IsAbs(*claudeHome) || filepath.Clean(*claudeHome) != *claudeHome ||
+		*claudeHome != isolation.StandaloneStateRoot {
+		_, _ = fmt.Fprintf(stderr, "acp-go-claude: -home must equal standaloneStateRoot %q\n", isolation.StandaloneStateRoot)
+
+		return 1
 	}
 
 	logger := slog.New(slog.DiscardHandler)
@@ -166,9 +174,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		claudeacp.WithClaudeHideAuth(*hideClaudeAuth),
 		claudeacp.WithLogger(logger),
 		claudeacp.WithProcessIsolation(claudeacp.ProcessIsolation{
-			UID:             isolation.UID,
-			GID:             isolation.GID,
-			BaseEnvironment: isolation.BaseEnvironment,
+			UID:                 isolation.UID,
+			GID:                 isolation.GID,
+			BaseEnvironment:     isolation.BaseEnvironment,
+			StandaloneOwnerID:   isolation.StandaloneOwnerID,
+			StandaloneStateRoot: isolation.StandaloneStateRoot,
 		}),
 	)
 	if *permissionMode != "" {

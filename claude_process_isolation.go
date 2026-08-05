@@ -9,5 +9,7 @@ func claudeProcessIsolation(value *ProcessIsolation) *claude.ProcessIsolation {
 
 	return &claude.ProcessIsolation{
 		UID: value.UID, GID: value.GID, BaseEnvironment: cloneStringMap(value.BaseEnvironment),
+		StandaloneOwnerID: value.StandaloneOwnerID, StandaloneStateRoot: value.StandaloneStateRoot,
+		IdentityLock: value.IdentityLock, AuthorityDomain: value.AuthorityDomain,
 	}
 }

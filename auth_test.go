@@ -667,6 +667,14 @@ func TestProviderAuthDispatchRoutesEveryAdvertisedLeg(t *testing.T) {
 	requireAuthFailed(t, err, authCauseHarvestFailed)
 }
 
+func TestProviderAuthDispatchRejectsUnknownLeg(t *testing.T) {
+	broker, _ := newAuthBroker(t)
+	result, handled, err := broker.agent.handleAuthExtensionMethod(t.Context(), "_claude/auth/unknown", nil)
+	require.NoError(t, err)
+	require.False(t, handled)
+	require.Nil(t, result)
+}
+
 func TestAuthFailedErrorCarriesTheClosedShape(t *testing.T) {
 	failure := &authFailedError{cause: authCauseTransport, providerID: authProviderID, method: authMethodLogin, flowID: "flow"}
 	require.Equal(t, "claude_auth_failed: transport", failure.Error())

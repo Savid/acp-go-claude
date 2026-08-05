@@ -9,7 +9,7 @@ import (
 )
 
 func handoffGeneratedNativeTreePlatform(_ string, uid uint32, gid uint32) error {
-	if uid == uint32(os.Geteuid()) && gid == uint32(os.Getegid()) {
+	if int64(uid) == int64(os.Geteuid()) && int64(gid) == int64(os.Getegid()) {
 		return nil
 	}
 
@@ -17,7 +17,7 @@ func handoffGeneratedNativeTreePlatform(_ string, uid uint32, gid uint32) error 
 }
 
 func validateNativeOwnedDirectoryPlatform(_ string, uid uint32, gid uint32) error {
-	if uid == uint32(os.Geteuid()) && gid == uint32(os.Getegid()) {
+	if int64(uid) == int64(os.Geteuid()) && int64(gid) == int64(os.Getegid()) {
 		return nil
 	}
 

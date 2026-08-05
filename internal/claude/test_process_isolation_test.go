@@ -26,7 +26,10 @@ func testProcessIsolation() *ProcessIsolation {
 		environment[envSearchPath] = "/usr/bin:/bin"
 	}
 
-	return &ProcessIsolation{UID: uint32(uid), GID: uint32(gid), BaseEnvironment: environment}
+	return &ProcessIsolation{
+		UID: uint32(uid), GID: uint32(gid), BaseEnvironment: environment,
+		StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test",
+	}
 }
 
 func skipUnprivilegedDarwinIsolation(t *testing.T) {
@@ -42,4 +45,23 @@ func withTestProcessIsolation(options Options) Options {
 	}
 
 	return options
+}
+
+func testTraversableTempDir(t *testing.T) string {
+	t.Helper()
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("resolve test working directory: %v", err)
+	}
+	directory, err := os.MkdirTemp(workingDirectory, "acp-go-claude-test-")
+	if err != nil {
+		t.Fatalf("create traversable test directory: %v", err)
+	}
+	if err = os.Chmod(directory, 0o711); err != nil {
+		_ = os.RemoveAll(directory)
+		t.Fatalf("make test directory traversable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+
+	return directory
 }

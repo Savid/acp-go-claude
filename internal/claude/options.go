@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"os"
 	"time"
 )
 
@@ -75,7 +76,9 @@ type Options struct {
 	AcquireUsageDiscovery func(context.Context) (func(), error)
 	// PrepareUsageGeneration reserves the fresh scratch generation used by
 	// claude /usage on every supported containment backend.
-	PrepareUsageGeneration func(context.Context) (*DarwinGeneration, error)
+	PrepareUsageGeneration    func(context.Context) (*DarwinGeneration, error)
+	AcquireKeychainDiscovery  func(context.Context) (func(), error)
+	PrepareKeychainGeneration func(context.Context) (*DarwinGeneration, error)
 
 	PermissionHandler  PermissionHandler
 	ElicitationHandler ElicitationHandler
@@ -87,10 +90,19 @@ type Options struct {
 
 // ProcessIsolation is the mandatory credential and complete environment base
 // applied to every provider process.
+type ProcessIdentityLockCapability interface {
+	Duplicate() (*os.File, error)
+}
+
 type ProcessIsolation struct {
-	UID             uint32
-	GID             uint32
-	BaseEnvironment map[string]string
+	UID                      uint32
+	GID                      uint32
+	BaseEnvironment          map[string]string
+	StandaloneOwnerID        string
+	StandaloneStateRoot      string
+	IdentityLock             ProcessIdentityLockCapability `json:"-"`
+	AuthorityDomain          ProcessIdentityLockCapability `json:"-"`
+	identityAuthorityAdopted bool
 }
 
 const HookEventPostToolUse = "PostToolUse"

@@ -7,6 +7,8 @@ import (
 	"github.com/savid/acp-go-claude/internal/claude"
 )
 
+var readAuthKeychainCredential = claude.ReadAuthKeychainCredential
+
 // readClaudeResumeKeychainCredential answers with the login Keychain
 // credential blob the source config dir owns. A native login on darwin
 // stores the OAuth credential only in the Keychain, keyed by a hash of the
@@ -25,7 +27,7 @@ func readClaudeResumeKeychainCredential(source string, provided ...claude.Option
 		return nil, nil
 	}
 
-	data, err := claude.ReadAuthKeychainCredential(context.Background(), source, authNativeUser(options), options)
+	data, err := readAuthKeychainCredential(context.Background(), source, authNativeUser(options), options)
 	if err != nil {
 		return nil, fmt.Errorf("claude resume keystore credential: %w", err)
 	}

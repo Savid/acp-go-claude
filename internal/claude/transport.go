@@ -35,7 +35,7 @@ var (
 	processCommand                 = newProcessCommand
 	processPrepareContained        = prepareProcessTreeCommand
 	processStartContained          = startContainedProcess
-	processWaitContained           = func(tree *processContainment, cmd *exec.Cmd) error { return tree.wait(cmd) }
+	processWaitContained           = waitContainedProcess
 	processAfterDecode             = func() {}
 	processGetwd                   = os.Getwd
 	processTerminate               = terminateProcess
@@ -47,6 +47,8 @@ var (
 	processShutdownWaitDelay       = 5 * time.Second
 	processExitGracePeriod         = 2 * time.Second
 )
+
+func waitContainedProcess(tree *processContainment, cmd *exec.Cmd) error { return tree.wait(cmd) }
 
 // claudeVersionProbe fails fast when the discovered Claude CLI is too old. It is
 // a variable so tests can substitute the probe.

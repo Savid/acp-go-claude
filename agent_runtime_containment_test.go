@@ -15,6 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type containmentTestLock struct{}
+
+func (containmentTestLock) Duplicate() (*os.File, error) { return nil, errors.New("unavailable") }
+
 func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 	originalGOOS := runtimeGOOS
 	t.Cleanup(func() { runtimeGOOS = originalGOOS })
@@ -52,6 +56,35 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 	runtimeGOOS = "freebsd"
 	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
 		t.Fatalf("unsupported mode = %q", got)
+	}
+}
+
+func TestStandaloneIsolationDefaultsAndFencesDurableHome(t *testing.T) {
+	const stateRoot = "/var/lib/acp-go-claude"
+	isolation := ProcessIsolation{StandaloneOwnerID: "deployment-1", StandaloneStateRoot: stateRoot}
+
+	defaulted := NewAgent(WithProcessIsolation(isolation))
+	require.Equal(t, stateRoot, defaulted.options.Home)
+
+	mismatched := NewAgent(WithHome("/var/lib/other"), WithProcessIsolation(isolation))
+	_, err := mismatched.Initialize(t.Context(), acp.InitializeRequest{})
+	require.ErrorContains(t, err, "WithHome must equal ProcessIsolation.StandaloneStateRoot")
+
+	borrowed := Options{Home: "/unchanged", ProcessIsolation: &ProcessIsolation{IdentityLock: containmentTestLock{}}}
+	require.NoError(t, normalizeStandaloneHome(&borrowed))
+	require.Equal(t, "/unchanged", borrowed.Home)
+}
+
+func TestAgentRejectsManagedRootEnvironmentOverrides(t *testing.T) {
+	for _, key := range []string{
+		claudeConfigDirEnv, homeEnv, "XDG_CACHE_HOME", xdgConfigHomeEnv,
+		"XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME",
+	} {
+		t.Run(key, func(t *testing.T) {
+			agent := NewAgent(WithEnv(map[string]string{key: "/attacker-selected"}))
+			_, err := agent.Initialize(t.Context(), acp.InitializeRequest{})
+			require.ErrorContains(t, err, "managed by the process isolation policy")
+		})
 	}
 }
 

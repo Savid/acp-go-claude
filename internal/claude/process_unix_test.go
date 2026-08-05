@@ -310,13 +310,24 @@ func supervisorProofFile(t *testing.T) *os.File {
 	return read
 }
 
-func TestLinuxSupervisorControlEOFContainsDetachedDescendant(t *testing.T) {
-	dir := t.TempDir()
+func TestTrustedSupervisorControlEOFContainsDetachedDescendant(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("trusted supervisor credential boundary requires root")
+	}
+	const (
+		uid = uint32(64211)
+		gid = uint32(64212)
+	)
+	root := createClaudeSupervisorFixtureRoot(t, uid, gid)
+	dir := filepath.Join(root, "native")
 	pidFile := filepath.Join(dir, "child.pid")
 	sentinel := filepath.Join(dir, "sentinel")
-	native := supervisorDetachedNativeCommand(t, pidFile, sentinel)
+	native := supervisorDetachedNativeCommand(t, root, pidFile, sentinel)
 	configureProcessCommand(native)
-	launch, err := prepareProcessTreeCommand(native, processLaunchOptions{})
+	launch, err := prepareProcessTreeCommand(native, processLaunchOptions{Isolation: &ProcessIsolation{
+		UID: uid, GID: gid, BaseEnvironment: environmentMap(native.Env),
+		StandaloneOwnerID: "claude-control-eof", StandaloneStateRoot: createClaudeSupervisorStateRoot(t, uid, gid),
+	}})
 	require.NoError(t, err)
 	tree, err := startContainedProcess(launch)
 	require.NoError(t, err)
@@ -335,16 +346,34 @@ func TestLinuxSupervisorControlEOFContainsDetachedDescendant(t *testing.T) {
 	require.NoFileExists(t, sentinel)
 }
 
-func TestLinuxSupervisorDeathCannotCertifyDetachedDescendant(t *testing.T) {
-	dir := t.TempDir()
+func TestTrustedSupervisorGuardianDeathContainsDetachedDescendant(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("trusted supervisor credential boundary requires root")
+	}
+	const (
+		uid = uint32(64221)
+		gid = uint32(64222)
+	)
+	root := createClaudeSupervisorFixtureRoot(t, uid, gid)
+	dir := filepath.Join(root, "native")
 	pidFile := filepath.Join(dir, "child.pid")
 	sentinel := filepath.Join(dir, "sentinel")
+	cliPath := supervisorDetachedNativePath(t, root)
+	testExecutable := copyClaudeSupervisorTestExecutable(t, root)
+	baseEnvironment := map[string]string{
+		"PATH": "/usr/bin:/bin", "CLAUDE_SUPERVISOR_CHILD_PID": pidFile,
+		"CLAUDE_SUPERVISOR_SENTINEL": sentinel, "CLAUDE_SUPERVISOR_TEST_EXE": testExecutable,
+	}
 	transport := NewProcessTransport(nil, Options{
-		CLIPath: supervisorDetachedNativePath(t),
+		CLIPath: cliPath,
 		Env: map[string]string{
 			"CLAUDE_SUPERVISOR_CHILD_PID": pidFile,
 			"CLAUDE_SUPERVISOR_SENTINEL":  sentinel,
-			"CLAUDE_SUPERVISOR_TEST_EXE":  mustTestExecutable(t),
+			"CLAUDE_SUPERVISOR_TEST_EXE":  testExecutable,
+		},
+		ProcessIsolation: &ProcessIsolation{
+			UID: uid, GID: gid, BaseEnvironment: baseEnvironment,
+			StandaloneOwnerID: "claude-guardian-death", StandaloneStateRoot: createClaudeSupervisorStateRoot(t, uid, gid),
 		},
 	})
 	require.NoError(t, transport.Start(t.Context()))
@@ -352,40 +381,47 @@ func TestLinuxSupervisorDeathCannotCertifyDetachedDescendant(t *testing.T) {
 	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 
 	require.NoError(t, transport.cmd.Process.Kill())
-	err := transport.Close()
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
-	require.True(t, processExists(childPID),
-		"unexpected supervisor death fixture must retain the escaped process so a false proof is observable")
+	require.NoError(t, transport.Close())
+	require.False(t, processExists(childPID), "liveness survivor returned before the escaped process was contained")
+	time.Sleep(800 * time.Millisecond)
+	require.NoFileExists(t, sentinel)
 }
 
-func supervisorDetachedNativeCommand(t *testing.T, pidFile string, sentinel string) *exec.Cmd {
+func supervisorDetachedNativeCommand(t *testing.T, root string, pidFile string, sentinel string) *exec.Cmd {
 	t.Helper()
-	cmd := exec.Command(supervisorDetachedNativePath(t))
+	cmd := exec.Command(supervisorDetachedNativePath(t, root))
 	cmd.Env = append(os.Environ(),
 		"CLAUDE_SUPERVISOR_CHILD_PID="+pidFile,
 		"CLAUDE_SUPERVISOR_SENTINEL="+sentinel,
-		"CLAUDE_SUPERVISOR_TEST_EXE="+mustTestExecutable(t),
+		"CLAUDE_SUPERVISOR_TEST_EXE="+copyClaudeSupervisorTestExecutable(t, root),
 	)
 
 	return cmd
 }
 
-func supervisorDetachedNativePath(t *testing.T) string {
+func supervisorDetachedNativePath(t *testing.T, root string) string {
 	t.Helper()
 
-	return writeShellScript(t, filepath.Join(t.TempDir(), "claude"), `#!/bin/sh
+	path := writeShellScript(t, filepath.Join(root, "claude"), `#!/bin/sh
 if [ "$1" = "--version" ]; then echo '2.1.210 (Claude Code)'; exit 0; fi
 "$CLAUDE_SUPERVISOR_TEST_EXE" -test.run '^TestSupervisorDetachedChildProcess$' -- --claude-supervisor-detached-child "$CLAUDE_SUPERVISOR_CHILD_PID" "$CLAUDE_SUPERVISOR_SENTINEL" &
 while :; do sleep 1; done
 `)
+	require.NoError(t, os.Chmod(path, 0o755))
+
+	return path
 }
 
-func mustTestExecutable(t *testing.T) string {
+func copyClaudeSupervisorTestExecutable(t *testing.T, root string) string {
 	t.Helper()
 	executable, err := os.Executable()
 	require.NoError(t, err)
+	payload, err := os.ReadFile(executable)
+	require.NoError(t, err)
+	copyPath := filepath.Join(root, "claude-supervisor.test")
+	require.NoError(t, os.WriteFile(copyPath, payload, 0o755))
 
-	return executable
+	return copyPath
 }
 
 func awaitSupervisorDetachedChild(t *testing.T, pidFile string) int {
@@ -429,7 +465,10 @@ func TestSupervisorDetachedChildProcess(t *testing.T) {
 	select {}
 }
 
-func TestProcessTransportCloseKillsUnixProcessGroup(t *testing.T) {
+func TestTrustedSupervisorProcessTransportCloseKillsUnixProcessGroup(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("trusted supervisor credential boundary requires root")
+	}
 	oldWaitDelay := processShutdownWaitDelay
 	processShutdownWaitDelay = 2 * time.Second
 	t.Cleanup(func() { processShutdownWaitDelay = oldWaitDelay })
@@ -438,7 +477,12 @@ func TestProcessTransportCloseKillsUnixProcessGroup(t *testing.T) {
 	processExitGracePeriod = 20 * time.Millisecond
 	t.Cleanup(func() { processExitGracePeriod = oldGrace })
 
-	dir := t.TempDir()
+	const (
+		uid = uint32(64231)
+		gid = uint32(64232)
+	)
+	root := createClaudeSupervisorFixtureRoot(t, uid, gid)
+	dir := filepath.Join(root, "native")
 	pidFile := filepath.Join(dir, "child.pid")
 	script := writeShellScript(t, filepath.Join(dir, "claude"), `#!/bin/sh
 trap '' TERM
@@ -446,9 +490,14 @@ sh -c 'trap "" TERM; while :; do sleep 1; done' &
 echo $! > "$CHILD_PID_FILE"
 while :; do sleep 1; done
 `)
+	require.NoError(t, os.Chmod(script, 0o755))
 	transport := NewProcessTransport(nil, Options{
 		CLIPath: script,
 		Env:     map[string]string{"CHILD_PID_FILE": pidFile},
+		ProcessIsolation: &ProcessIsolation{
+			UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin", "CHILD_PID_FILE": pidFile},
+			StandaloneOwnerID: "claude-close-process-group", StandaloneStateRoot: createClaudeSupervisorStateRoot(t, uid, gid),
+		},
 	})
 
 	require.NoError(t, transport.Start(context.Background()))
@@ -469,21 +518,34 @@ while :; do sleep 1; done
 	}, time.Second, 10*time.Millisecond)
 }
 
-func TestProcessTransportCloseProvesQuiescenceAfterRootExit(t *testing.T) {
+func TestTrustedSupervisorProcessTransportCloseProvesQuiescenceAfterRootExit(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("trusted supervisor credential boundary requires root")
+	}
 	oldWaitDelay := processShutdownWaitDelay
 	processShutdownWaitDelay = 2 * time.Second
 	t.Cleanup(func() { processShutdownWaitDelay = oldWaitDelay })
 
-	dir := t.TempDir()
+	const (
+		uid = uint32(64241)
+		gid = uint32(64242)
+	)
+	root := createClaudeSupervisorFixtureRoot(t, uid, gid)
+	dir := filepath.Join(root, "native")
 	pidFile := filepath.Join(dir, "child.pid")
 	script := writeShellScript(t, filepath.Join(dir, "claude"), `#!/bin/sh
 sh -c 'trap "" TERM; while :; do sleep 1; done' &
 echo $! > "$CHILD_PID_FILE"
 exit 0
 `)
+	require.NoError(t, os.Chmod(script, 0o755))
 	transport := NewProcessTransport(nil, Options{
 		CLIPath: script,
 		Env:     map[string]string{"CHILD_PID_FILE": pidFile},
+		ProcessIsolation: &ProcessIsolation{
+			UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin", "CHILD_PID_FILE": pidFile},
+			StandaloneOwnerID: "claude-root-exit", StandaloneStateRoot: createClaudeSupervisorStateRoot(t, uid, gid),
+		},
 	})
 
 	require.NoError(t, transport.Start(context.Background()))

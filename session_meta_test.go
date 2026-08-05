@@ -71,6 +71,29 @@ func TestStartSessionCarriesExtraPathDirsToLaunch(t *testing.T) {
 	require.NoError(t, session.Close(ctx))
 }
 
+func TestSessionMetaCannotRedirectTheManagedClaudeHome(t *testing.T) {
+	agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+
+	copyCalled := false
+	originalCopy := copyClaudeConfigFiles
+	copyClaudeConfigFiles = func(string, string, claude.Options) error {
+		copyCalled = true
+
+		return nil
+	}
+	t.Cleanup(func() { copyClaudeConfigFiles = originalCopy })
+
+	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir(), WithSessionMeta(map[string]any{
+		claudeMetaKey: map[string]any{
+			metaOptionsKey: map[string]any{
+				settingsFieldEnv: map[string]any{"CLAUDE_CONFIG_DIR": t.TempDir()},
+			},
+		},
+	})))
+	require.ErrorContains(t, err, "_meta.claude.options.env.CLAUDE_CONFIG_DIR is not allowed")
+	require.False(t, copyCalled)
+}
+
 func TestCloneStringMap(t *testing.T) {
 	t.Parallel()
 
@@ -177,6 +200,13 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 			wantErr: "is not allowed",
 		},
 		{
+			name: "managed root env key",
+			meta: map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{
+				"XDG_CONFIG_HOME": "/attacker-selected",
+			}}}},
+			wantErr: "is not allowed",
+		},
+		{
 			name:    "invalid env key",
 			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"BAD-NAME": "x"}}}},
 			wantErr: "is not a valid environment variable name",
@@ -225,6 +255,9 @@ func TestClaudeMetaSmallHelpers(t *testing.T) {
 	require.True(t, blockedClaudeEnvKey("LD_PRELOAD"))
 	require.True(t, blockedClaudeEnvKey("dyld_library_path"))
 	require.True(t, blockedClaudeEnvKey(privateAdapterEnvPrefix+"TEST"))
+	require.True(t, blockedClaudeEnvKey("CLAUDE_CONFIG_DIR"))
+	require.True(t, blockedClaudeEnvKey("HOME"))
+	require.True(t, blockedClaudeEnvKey("XDG_RUNTIME_DIR"))
 	require.False(t, blockedClaudeEnvKey("ANTHROPIC_BASE_URL"))
 	require.True(t, validClaudePermissionMode(string(modeDefault)))
 	require.True(t, validClaudePermissionMode(permissionModeAcceptEdits))

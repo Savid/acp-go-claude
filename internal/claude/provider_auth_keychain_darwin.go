@@ -13,24 +13,65 @@ import (
 var authKeychainTool = runAuthKeychainTool
 
 func runAuthKeychainTool(ctx context.Context, args []string, options Options) (int, error) {
+	_, code, err := runContainedAuthKeychainTool(ctx, args, options)
+
+	return code, err
+}
+
+func runContainedAuthKeychainTool(ctx context.Context, args []string, options Options) ([]byte, int, error) {
 	env := BuildEnv(options)
 	if env == nil {
-		return 0, errors.New("build keychain environment: invalid process isolation")
+		return nil, 0, errors.New("build keychain environment: invalid process isolation")
 	}
 
 	path, err := resolveProcessExecutable("security", env)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 
-	command := exec.CommandContext(ctx, path, args...)
-
-	command.Env = env
-	if credentialErr := applyProcessCredential(command, options.ProcessIsolation); credentialErr != nil {
-		return 0, credentialErr
+	if options.PrepareKeychainGeneration == nil || options.AcquireKeychainDiscovery == nil {
+		return nil, 0, fmt.Errorf("%w: keychain native admission is unavailable", ErrProcessContainmentIncomplete)
 	}
 
-	err = command.Run()
+	generation, err := options.PrepareKeychainGeneration(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	release, err := options.AcquireKeychainDiscovery(ctx)
+	if err != nil {
+		return nil, 0, errors.Join(err, generation.finish(true))
+	}
+
+	containedOptions := options
+	containedOptions.Cwd = "/"
+
+	output, runErr := containedClaudeOutput(ctx, path, args, containedOptions, generation, "security keychain")
+	if !errors.Is(runErr, ErrProcessContainmentIncomplete) {
+		release()
+	}
+
+	if runErr == nil {
+		return output, 0, nil
+	}
+
+	if errors.Is(runErr, ErrProcessContainmentIncomplete) {
+		return nil, 0, runErr
+	}
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, 0, errors.Join(ctxErr, runErr)
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		return nil, exitErr.ExitCode(), nil
+	}
+
+	return nil, 0, runErr
+}
+
+func authKeychainExitCode(err error) (int, error) {
 	if err == nil {
 		return 0, nil
 	}
@@ -57,34 +98,16 @@ const (
 var authKeychainReadTool = runAuthKeychainReadTool
 
 func runAuthKeychainReadTool(ctx context.Context, args []string, options Options) ([]byte, int, error) {
-	env := BuildEnv(options)
-	if env == nil {
-		return nil, 0, errors.New("build keychain environment: invalid process isolation")
+	return runContainedAuthKeychainTool(ctx, args, options)
+}
+
+func authKeychainReadResult(output []byte, err error) ([]byte, int, error) {
+	code, launchErr := authKeychainExitCode(err)
+	if code != 0 || launchErr != nil {
+		return nil, code, launchErr
 	}
 
-	path, err := resolveProcessExecutable("security", env)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	command := exec.CommandContext(ctx, path, args...)
-
-	command.Env = env
-	if credentialErr := applyProcessCredential(command, options.ProcessIsolation); credentialErr != nil {
-		return nil, 0, credentialErr
-	}
-
-	output, err := command.Output()
-	if err == nil {
-		return output, 0, nil
-	}
-
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return nil, exitErr.ExitCode(), nil
-	}
-
-	return nil, 0, err
+	return output, 0, nil
 }
 
 // ReadAuthKeychainCredential answers with the composite OAuth credential blob

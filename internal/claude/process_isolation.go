@@ -6,15 +6,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
 	processIsolationUIDEnv = privateAdapterEnvPrefix + "UID"
 	processIsolationGIDEnv = privateAdapterEnvPrefix + "GID"
 )
+
+var processIsolationGOOS = runtime.GOOS
 
 func validateProcessIsolation(isolation *ProcessIsolation) error {
 	if isolation == nil {
@@ -33,7 +38,88 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		return fmt.Errorf("validate process isolation base environment: %w", err)
 	}
 
+	if processIsolationGOOS == "linux" {
+		if err := validateStandaloneIdentityDisposition(isolation); err != nil {
+			return err
+		}
+	}
+
 	return validateProcessIsolationPlatform()
+}
+
+func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
+	identityLock := isolation.IdentityLock != nil
+	authorityDomain := isolation.AuthorityDomain != nil
+
+	if isolation.identityAuthorityAdopted {
+		if identityLock || authorityDomain {
+			return errors.New("adopted process identity authority cannot carry duplicable capabilities")
+		}
+
+		identityLock = true
+		authorityDomain = true
+	}
+
+	if identityLock != authorityDomain {
+		return errors.New("process identity lock and authority domain must be provided together")
+	}
+
+	if identityLock {
+		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
+			return errors.New("borrowed process identity forbids standalone owner fields")
+		}
+
+		return nil
+	}
+
+	if !validStandaloneOwnerID(isolation.StandaloneOwnerID) {
+		return errors.New("standalone owner id must be 1..256 canonical ASCII bytes")
+	}
+
+	if !validStandaloneStateRootPath(isolation.StandaloneStateRoot) {
+		return errors.New("standalone state root must be a clean absolute path outside the authority root")
+	}
+
+	return nil
+}
+
+func validStandaloneOwnerID(value string) bool {
+	if value == "" || len(value) > 256 || !standaloneOwnerIDAlphanumeric(value[0]) {
+		return false
+	}
+
+	for index := 1; index < len(value); index++ {
+		if !standaloneOwnerIDAlphanumeric(value[index]) && !strings.ContainsRune("._:@/-", rune(value[index])) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func standaloneOwnerIDAlphanumeric(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
+}
+
+func validStandaloneStateRootPath(value string) bool {
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || !filepath.IsAbs(value) ||
+		filepath.Clean(value) != value || value == "/" || strings.IndexByte(value, 0) >= 0 {
+		return false
+	}
+
+	const authorityRoot = "/var/lib/acp-go/agent-identities"
+
+	if value == authorityRoot || strings.HasPrefix(value, authorityRoot+string(filepath.Separator)) {
+		return false
+	}
+
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func validateEnvironmentMap(environment map[string]string) error {

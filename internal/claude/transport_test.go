@@ -53,6 +53,7 @@ type deadlineWriteCloser struct {
 
 func platformTestTransportOptions(t *testing.T, options Options) Options {
 	t.Helper()
+	useDirectTestContainment(t)
 	options = withTestProcessIsolation(options)
 	options.AcquireUsageDiscovery = func(context.Context) (func(), error) {
 		return func() {}, nil
@@ -678,7 +679,6 @@ func TestProcessTransportShutdownGraceReturnsUnexpectedWaitError(t *testing.T) {
 }
 
 func TestProcessTransportCloseSendsTermBeforeKill(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
@@ -714,7 +714,6 @@ while :; do :; done
 }
 
 func TestProcessTransportCloseKillsAfterTermTimeout(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
@@ -794,7 +793,6 @@ func TestProcessTransportCloseReportsKillError(t *testing.T) {
 }
 
 func TestProcessTransportCloseWithoutWaitDelay(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
@@ -846,7 +844,6 @@ func TestProcessTransportWaitForShutdownRecordsSuccessfulKill(t *testing.T) {
 }
 
 func TestProcessTransportCloseWaitsForVoluntaryExitBeforeTerm(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
@@ -977,7 +974,6 @@ func writeShellScript(t *testing.T, path string, script string) string {
 }
 
 func TestProcessTransportStartProbesVersion(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -1044,17 +1040,19 @@ func TestProcessTransportStartBadWorkingDirectory(t *testing.T) {
 }
 
 func TestProcessTransportStartSetupErrors(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
+	useDirectTestContainment(t)
 
 	nativeCommand := processCommand
+	versionProbe := claudeVersionProbe
 	prepareContained := processPrepareContained
 	startContained := processStartContained
 	getwd := processGetwd
 	t.Cleanup(func() {
 		processCommand = nativeCommand
+		claudeVersionProbe = versionProbe
 		processPrepareContained = prepareContained
 		processStartContained = startContained
 		processGetwd = getwd
@@ -1063,9 +1061,18 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 	processGetwd = func() (string, error) {
 		return "", errors.New("getwd failed")
 	}
-	transport := NewProcessTransport(nil, Options{CLIPath: "/bin/sh"})
+	transport := NewProcessTransport(nil, withTestProcessIsolation(Options{CLIPath: "/bin/sh"}))
 	require.Error(t, transport.Start(context.Background()))
 	processGetwd = getwd
+
+	transport = NewProcessTransport(nil, withTestProcessIsolation(Options{CLIPath: "/bin/sh", Cwd: t.TempDir()}))
+	claudeVersionProbe = func(context.Context, string, Options) error {
+		transport.options.ProcessIsolation = nil
+
+		return nil
+	}
+	require.ErrorContains(t, transport.Start(t.Context()), "invalid process isolation")
+	claudeVersionProbe = versionProbe
 
 	processCommand = func(name string, arg ...string) *exec.Cmd {
 		cmd := nativeCommand(name, arg...)
@@ -1073,7 +1080,7 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 
 		return cmd
 	}
-	transport = NewProcessTransport(nil, Options{CLIPath: "/bin/sh", Cwd: t.TempDir()})
+	transport = NewProcessTransport(nil, withTestProcessIsolation(Options{CLIPath: "/bin/sh", Cwd: t.TempDir()}))
 	require.Error(t, transport.Start(context.Background()))
 
 	processCommand = func(name string, arg ...string) *exec.Cmd {
@@ -1082,7 +1089,7 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 
 		return cmd
 	}
-	transport = NewProcessTransport(nil, Options{CLIPath: "/bin/sh", Cwd: t.TempDir()})
+	transport = NewProcessTransport(nil, withTestProcessIsolation(Options{CLIPath: "/bin/sh", Cwd: t.TempDir()}))
 	require.Error(t, transport.Start(context.Background()))
 
 	processCommand = func(name string, arg ...string) *exec.Cmd {
@@ -1091,7 +1098,7 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 
 		return cmd
 	}
-	transport = NewProcessTransport(nil, Options{CLIPath: "/bin/sh", Cwd: t.TempDir()})
+	transport = NewProcessTransport(nil, withTestProcessIsolation(Options{CLIPath: "/bin/sh", Cwd: t.TempDir()}))
 	require.Error(t, transport.Start(context.Background()))
 
 	processCommand = nativeCommand
@@ -1099,13 +1106,13 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) {
 		return nil, errors.Join(ErrProcessContainmentIncomplete, errors.New("prepare failed"))
 	}
-	transport = NewProcessTransport(nil, Options{
+	transport = NewProcessTransport(nil, withTestProcessIsolation(Options{
 		CLIPath: "/bin/sh",
 		Cwd:     t.TempDir(),
 		ObserveProcessInventory: func(_ context.Context, inventory func() (int, bool)) {
 			inventories = append(inventories, inventory)
 		},
-	})
+	}))
 	require.ErrorIs(t, transport.Start(context.Background()), ErrProcessContainmentIncomplete)
 	require.Len(t, inventories, 1)
 	inventories = nil
@@ -1125,7 +1132,7 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 
 				return &processTreeCommand{cmd: prepared}, nil
 			}
-			preparedTransport := NewProcessTransport(nil, Options{CLIPath: "/bin/sh", Cwd: t.TempDir()})
+			preparedTransport := NewProcessTransport(nil, withTestProcessIsolation(Options{CLIPath: "/bin/sh", Cwd: t.TempDir()}))
 			require.Error(t, preparedTransport.Start(context.Background()))
 		})
 	}
@@ -1134,13 +1141,13 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 	processStartContained = func(*processTreeCommand) (*processContainment, error) {
 		return nil, errors.Join(ErrProcessContainmentIncomplete, errors.New("containment cleanup failed"))
 	}
-	transport = NewProcessTransport(nil, Options{
+	transport = NewProcessTransport(nil, withTestProcessIsolation(Options{
 		CLIPath: "/bin/sh",
 		Cwd:     t.TempDir(),
 		ObserveProcessInventory: func(_ context.Context, inventory func() (int, bool)) {
 			inventories = append(inventories, inventory)
 		},
-	})
+	}))
 	require.ErrorIs(t, transport.Start(context.Background()), ErrProcessContainmentIncomplete)
 	require.Len(t, inventories, 1)
 	_, exact := inventories[0]()
@@ -1148,25 +1155,24 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 }
 
 func TestProcessTransportStartDarwinGenerationFailureBranches(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	want := errors.New("generation")
-	transport := NewProcessTransport(nil, Options{
+	transport := NewProcessTransport(nil, withTestProcessIsolation(Options{
 		CLIPath:          "/bin/sh",
 		DarwinBestEffort: true,
 		PrepareDarwinGeneration: func(context.Context) (*DarwinGeneration, error) {
 			return nil, want
 		},
-	})
+	}))
 	require.ErrorIs(t, transport.Start(t.Context()), want)
 
-	transport = NewProcessTransport(nil, Options{
+	transport = NewProcessTransport(nil, withTestProcessIsolation(Options{
 		CLIPath:          "/bin/sh",
 		Cwd:              filepath.Join(t.TempDir(), "missing"),
 		DarwinBestEffort: true,
 		PrepareDarwinGeneration: func(context.Context) (*DarwinGeneration, error) {
 			return &DarwinGeneration{Release: func(bool) error { return want }}, nil
 		},
-	})
+	}))
 	require.ErrorIs(t, transport.Start(t.Context()), want)
 
 	originalPrepare := processPrepareContained
@@ -1182,12 +1188,12 @@ func TestProcessTransportStartDarwinGenerationFailureBranches(t *testing.T) {
 		return nil, errors.Join(ErrProcessContainmentIncomplete, want)
 	}
 	var inventories []func() (int, bool)
-	transport = NewProcessTransport(nil, Options{
+	transport = NewProcessTransport(nil, withTestProcessIsolation(Options{
 		CLIPath: "/bin/sh",
 		ObserveProcessInventory: func(_ context.Context, inventory func() (int, bool)) {
 			inventories = append(inventories, inventory)
 		},
-	})
+	}))
 	require.ErrorIs(t, transport.Start(t.Context()), ErrProcessContainmentIncomplete)
 	require.Len(t, inventories, 1)
 	_, exact := inventories[0]()
@@ -1195,9 +1201,6 @@ func TestProcessTransportStartDarwinGenerationFailureBranches(t *testing.T) {
 }
 
 func TestProcessTransportStart(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
-	t.Parallel()
-
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-claude")
 	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o755))

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -281,11 +283,13 @@ func (c *nthDoneContext) Value(any) any {
 
 const processContainmentHelperArg = "--acp-go-claude-containment-helper"
 
+var actualProcessFixtureUID atomic.Uint32
+
 // TestCancelContainsActualNativeDescendants exercises the complete adapter
 // cancellation path against a real OS process tree. The protocol stand-in
 // deliberately acknowledges interrupt without stopping a setsid tool process
 // that ignores INT and TERM; only transport containment can make this test pass.
-func TestCancelContainsActualNativeDescendants(t *testing.T) {
+func TestProcessIsolationActualCancelContainsNativeDescendants(t *testing.T) {
 	fixture := newActualProcessFixture(t)
 	agent, sessionID := fixture.agent, fixture.session.id
 
@@ -321,7 +325,7 @@ func TestCancelContainsActualNativeDescendants(t *testing.T) {
 	fixture.assertLazyResume(t, "turn-resume")
 }
 
-func TestTimeoutContainsActualNativeDescendants(t *testing.T) {
+func TestProcessIsolationActualTimeoutContainsNativeDescendants(t *testing.T) {
 	fixture := newActualProcessFixture(t, WithTurnTimeout(500*time.Millisecond))
 
 	result := make(chan error, 1)
@@ -346,7 +350,7 @@ func TestTimeoutContainsActualNativeDescendants(t *testing.T) {
 	fixture.assertLazyResume(t, "turn-after-timeout")
 }
 
-func TestParentCancelContainsActualNativeDescendants(t *testing.T) {
+func TestProcessIsolationActualParentCancelContainsNativeDescendants(t *testing.T) {
 	fixture := newActualProcessFixture(t)
 	promptCtx, cancelPrompt := context.WithCancel(context.Background())
 
@@ -395,8 +399,19 @@ func newActualProcessFixture(t *testing.T, agentOptions ...Option) actualProcess
 	if runtime.GOOS != "linux" {
 		t.Skip("authoritative detached-descendant containment requires Linux")
 	}
+	if os.Geteuid() != 0 {
+		t.Skip("authoritative detached-descendant containment requires root")
+	}
+	selfNamespace, selfErr := os.Readlink("/proc/self/ns/pid")
+	initNamespace, initErr := os.Readlink("/proc/1/ns/pid")
+	if selfErr != nil || initErr != nil || selfNamespace != initNamespace ||
+		selfNamespace != "pid:[4026531836]" && os.Getpid() != 1 {
+		t.Skip("authoritative detached-descendant containment requires the initial PID namespace")
+	}
 
-	dir := t.TempDir()
+	uid := 64300 + actualProcessFixtureUID.Add(1)
+	gid := uid
+	dir := createActualProcessStateRoot(t, uid, gid)
 	pidFile := filepath.Join(dir, "child.pid")
 	launchFile := filepath.Join(dir, "launch-count")
 	argsFile := filepath.Join(dir, "launch-args")
@@ -411,14 +426,18 @@ func newActualProcessFixture(t *testing.T, agentOptions ...Option) actualProcess
 		strconv.Quote(executable), processContainmentHelperArg,
 	)
 	require.NoError(t, os.WriteFile(wrapper, []byte(wrapperBody), 0o700))
+	require.NoError(t, os.Chown(wrapper, int(uid), int(gid)))
 
 	agent := NewAgent(agentOptions...)
 	agent.setConnection(newRecordingAgentClient())
 	sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
 	options := claude.Options{
-		CLIPath:   wrapper,
-		Cwd:       dir,
-		SessionID: string(sessionID),
+		CLIPath: wrapper, Cwd: dir, SessionID: string(sessionID),
+		ProcessIsolation: &claude.ProcessIsolation{
+			UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin"},
+			StandaloneOwnerID:   "claude-session-containment-" + strconv.FormatUint(uint64(uid), 10),
+			StandaloneStateRoot: dir,
+		},
 		Env: map[string]string{
 			"ACP_TEST_CHILD_PID":    pidFile,
 			"ACP_TEST_LAUNCH_COUNT": launchFile,
@@ -451,6 +470,32 @@ func newActualProcessFixture(t *testing.T, agentOptions ...Option) actualProcess
 		agent: agent, session: session, pidFile: pidFile,
 		argsFile: argsFile, triggerFile: triggerFile, sentinelFile: sentinelFile,
 	}
+}
+
+func createActualProcessStateRoot(t *testing.T, uid, gid uint32) string {
+	t.Helper()
+	base := "/var/lib/acp-go-claude-session-test"
+	require.NoError(t, os.MkdirAll(base, 0o711))
+	require.NoError(t, os.Chmod(base, 0o711))
+	info, err := os.Stat(base)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	require.True(t, info.IsDir())
+	require.Equal(t, os.FileMode(0o711), info.Mode().Perm())
+	require.Equal(t, uint32(0), stat.Uid)
+	require.Equal(t, uint32(0), stat.Gid)
+
+	dir := filepath.Join(base, strconv.FormatUint(uint64(uid), 10))
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.Chown(dir, int(uid), int(gid)))
+	require.NoError(t, os.Chmod(dir, 0o700))
+	for _, name := range []string{"child.pid", "launch-count", "launch-args", "delayed-trigger", "delayed-sentinel", "claude"} {
+		err = os.Remove(filepath.Join(dir, name))
+		require.True(t, err == nil || errors.Is(err, os.ErrNotExist), "remove stale fixture file %q: %v", name, err)
+	}
+
+	return dir
 }
 
 func (f actualProcessFixture) waitForChild(t *testing.T) int {

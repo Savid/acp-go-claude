@@ -105,6 +105,7 @@ var (
 // NewAgent creates an ACP agent for Claude Code.
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
+	homeErr := normalizeStandaloneHome(&options)
 
 	log := options.Logger
 	if log == nil {
@@ -136,6 +137,7 @@ func NewAgent(opts ...Option) *Agent {
 		permissionCache:  make(map[acp.SessionId]map[string]string),
 		activeLimitErr:   validateConcurrencyLimits(options.ConcurrencyLimits),
 		configurationErr: errors.Join(
+			homeErr,
 			validateContainmentOptions(options),
 			validateImageLimits(options.ImageLimits),
 			validateInputHandoffRoot(options.InputHandoffRoot),

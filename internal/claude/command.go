@@ -17,6 +17,8 @@ const envClaudeCodeNested = "CLAUDECODE"
 const envSearchPath = "PATH"
 const cliArgOutputFormat = "--output-format"
 
+var commandPipe = os.Pipe
+
 // minClaudeVersion is the oldest Claude CLI the adapter supports. The adapter's
 // stream-json control protocol (bidirectional control requests, partial-message
 // streaming, session mirror, hook events) requires the Claude Code 2.x line.
@@ -144,11 +146,11 @@ func BuildEnv(options Options) []string {
 	slices.Sort(baseKeys)
 
 	for _, key := range baseKeys {
-		set(key, options.ProcessIsolation.BaseEnvironment[key])
-	}
+		if strings.EqualFold(key, "CLAUDE_CONFIG_DIR") {
+			continue
+		}
 
-	if options.ClaudeHome != "" {
-		set("CLAUDE_CONFIG_DIR", options.ClaudeHome)
+		set(key, options.ProcessIsolation.BaseEnvironment[key])
 	}
 
 	set("CLAUDE_CODE_ENTRYPOINT", "acp-go-claude")
@@ -161,7 +163,15 @@ func BuildEnv(options Options) []string {
 	slices.Sort(optionKeys)
 
 	for _, key := range optionKeys {
+		if managedRootEnvKey(key) {
+			continue
+		}
+
 		set(key, options.Env[key])
+	}
+
+	if options.ClaudeHome != "" {
+		set("CLAUDE_CONFIG_DIR", options.ClaudeHome)
 	}
 
 	if options.Cwd != "" {
@@ -182,6 +192,16 @@ func BuildEnv(options Options) []string {
 	}
 
 	return env
+}
+
+func managedRootEnvKey(key string) bool {
+	switch strings.ToUpper(key) {
+	case "CLAUDE_CONFIG_DIR", "HOME",
+		"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
+		return true
+	default:
+		return false
+	}
 }
 
 // prependSearchPath returns a PATH value carrying dirs ahead of every entry
@@ -322,7 +342,7 @@ func containedClaudeOutput(
 		return nil, errors.New("build Claude process environment: invalid process isolation")
 	}
 
-	stdout, childStdout, err := os.Pipe()
+	stdout, childStdout, err := commandPipe()
 	if err != nil {
 		return nil, fmt.Errorf("capture %s output: %w", operation, err)
 	}

@@ -171,7 +171,7 @@ func defaultClaudeConfigDir(claudeHome string) string {
 		return filepath.Clean(claudeHome)
 	}
 
-	if configDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); configDir != "" {
+	if configDir := strings.TrimSpace(os.Getenv(claudeConfigDirEnv)); configDir != "" {
 		return filepath.Clean(configDir)
 	}
 

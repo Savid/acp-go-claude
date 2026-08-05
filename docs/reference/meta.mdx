@@ -127,6 +127,9 @@ of that session's Claude process. They precede every inherited entry, so an
 executable placed in one shadows the one PATH would otherwise resolve. A
 relative or empty entry fails the session-lifecycle request. Raw `PATH` stays
 rejected in `env`; this is the supported way to extend the child's search path.
+`CLAUDE_CONFIG_DIR`, `HOME`, and the XDG cache, config, data, runtime, and state
+root variables are also rejected in session `env`. The host-selected
+`WithHome` and trusted process-isolation base environment remain authoritative.
 
 ## Model metadata
 

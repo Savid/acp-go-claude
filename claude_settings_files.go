@@ -234,7 +234,7 @@ func userSettingsPath(claudeHome string) string {
 		return filepath.Join(claudeHome, settingsFileName)
 	}
 
-	if configDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); configDir != "" {
+	if configDir := strings.TrimSpace(os.Getenv(claudeConfigDirEnv)); configDir != "" {
 		return filepath.Join(configDir, settingsFileName)
 	}
 

@@ -154,7 +154,6 @@ func TestParseUsageOutput(t *testing.T) {
 }
 
 func TestQueryRateLimits(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}

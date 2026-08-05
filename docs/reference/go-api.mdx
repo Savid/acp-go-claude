@@ -15,8 +15,8 @@ streams:
 ```go
 err := claudeacp.Serve(ctx, input, output,
 	claudeacp.WithExecutablePath("/usr/local/bin/claude"),
-	claudeacp.WithProcessIsolation(claudeacp.ProcessIsolation{UID: agentUID, GID: agentGID, BaseEnvironment: agentEnv}),
-	claudeacp.WithHome("/tmp/claude-home"),
+	claudeacp.WithProcessIsolation(claudeacp.ProcessIsolation{UID: agentUID, GID: agentGID, BaseEnvironment: agentEnv, StandaloneOwnerID: ownerID, StandaloneStateRoot: "/var/lib/acp-go-claude"}),
+	claudeacp.WithHome("/var/lib/acp-go-claude"),
 	claudeacp.WithDefaultModel("sonnet"),
 	claudeacp.WithClaudeDefaultPermissionMode("default"),
 	claudeacp.WithSessionStore(store),
@@ -37,14 +37,14 @@ accidentally release the quarantined admission.
 | --- | --- |
 | `WithExecutablePath` | Set the Claude CLI path (default: search the isolation policy's `PATH`). |
 | `WithProcessIsolation` | Mandatory nonzero target UID/GID and complete replacement environment for native Claude processes. On Linux the embedded supervisor stays trusted root; only the native child receives the configured identity, with supplementary groups cleared. |
-| `WithHome` | Set `CLAUDE_CONFIG_DIR` for launched Claude processes. |
+| `WithHome` | Set `CLAUDE_CONFIG_DIR` for launched Claude processes. Standalone isolation defaults it to `StandaloneStateRoot` and rejects any different explicit path. |
 | `WithScratchDir` | Parent directory for ephemeral on-disk materialization, created `0700` when missing (default: system temp). |
 | `WithInputHandoffRoot` | Absolute directory prompt images may be handed over in as local files. Read-only to the adapter; unset rejects every handoff-form block. |
 | `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Unset, relative, unusable, bare mode, or agent-wide static authentication leaves every `_claude/auth/*` method unadvertised. |
 | `WithProviderAuthDirectHome` | Consent gate for native-login disconnect. Secret-backed disconnect never clears the native home. |
 | `WithDarwinBestEffortContainment` | Explicitly accept Darwin's process-group boundary. Invalid off Darwin; without it Darwin native launch fails closed. |
 | `WithDefaultModel` | Default Claude model for new sessions. |
-| `WithEnv` | Overlay environment variables on `ProcessIsolation.BaseEnvironment` for every Claude child. The adapter never inherits its own process environment. |
+| `WithEnv` | Overlay ordinary environment variables on `ProcessIsolation.BaseEnvironment` for every Claude child. `CLAUDE_CONFIG_DIR`, `HOME`, and XDG root variables are reserved and rejected; the adapter never inherits its own process environment. |
 | `WithSeedFiles` | Write files into the resolved config dir before launch (requires `WithHome`). |
 | `WithSessionStore` | Replace the default in-memory session authority with a host store. |
 | `WithSessionStoreLoadTimeout` | Bound store reads used during restore and listing. |
@@ -52,6 +52,34 @@ accidentally release the quarantined admission.
 | `WithImageLimits` | Set decoded-byte policy limits for image input and output. |
 | `WithTurnTimeout` | Bound one prompt turn; expiry fails the turn with cause `timeout` (default: no deadline). |
 | `WithRuntimeResourceHooks` | Let an embedding host admit native roots and reserve adapter scratch roots before they are created. |
+
+`ProcessIsolation.IdentityLock` and `ProcessIsolation.AuthorityDomain`
+optionally accept opaque host capabilities with `Duplicate() (*os.File, error)`
+for the already-held canonical UID lock and shared `domain.lock` lease. Each
+capability keeps ownership of its original descriptor; caller-owned duplicates
+reach only the trusted supervisor, which validates the named inodes, held locks,
+and strict matching domain record and protects them with checked `FD_CLOEXEC`.
+Set both fields together for
+host-borrowed authority or leave both nil for standalone domain, permanent
+provider-owner binding, retained `ACTIVE`, and UID-lock acquisition. A
+mixed nil/non-nil pair fails closed. Borrowed authority rejects owned UIDs. Native
+processes receive neither capability nor descriptor.
+
+`ProcessIsolation.StandaloneOwnerID` and
+`ProcessIsolation.StandaloneStateRoot` are required when both capabilities
+are nil and forbidden when both are set. The owner ID is the nonsecret
+case-sensitive deployment identity: 1--256 canonical ASCII bytes beginning
+alphanumeric, followed only by alphanumerics or `._:@/-`. The state root is
+the existing dedicated durable provider home, neither `/` nor equal to or
+beneath `/var/lib/acp-go/agent-identities`, expressed as a clean absolute UTF-8 path of
+at most 4096 bytes with no control character. Linux resolves it from `/`
+without symlinks or magic links, requires protected root-owned ancestry and an
+exact configured UID:GID mode-`0700` final directory, and binds the exact
+path, device, and inode. The protected path and metadata are revalidated
+immediately before `ACTIVE` publication and native launch. Standalone claims
+are permanent; changing either value does not migrate authority and fails
+closed. Standalone `WithHome` defaults to this exact state root and any
+different explicit home fails construction validation.
 
 ## Claude-specific options
 

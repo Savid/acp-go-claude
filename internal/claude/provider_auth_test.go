@@ -42,9 +42,13 @@ func osc8(url string) string {
 
 func authTestOptions(t *testing.T, options Options) (Options, *DarwinGeneration) {
 	t.Helper()
+	useAuthDirectContainment(t)
+	handoff := authLoginHandoffGeneratedNativeTree
+	authLoginHandoffGeneratedNativeTree = func(string, *ProcessIsolation) error { return nil }
+	t.Cleanup(func() { authLoginHandoffGeneratedNativeTree = handoff })
 	options = withTestProcessIsolation(options)
 
-	root, err := os.MkdirTemp(t.TempDir(), "acp-go-claude-runtime-")
+	root, err := os.MkdirTemp(testTraversableTempDir(t), "acp-go-claude-runtime-")
 	require.NoError(t, err)
 
 	generation := &DarwinGeneration{
@@ -60,7 +64,7 @@ func authTestOptions(t *testing.T, options Options) (Options, *DarwinGeneration)
 	}
 
 	if options.ScratchParent == "" {
-		options.ScratchParent = t.TempDir()
+		options.ScratchParent = testTraversableTempDir(t)
 	}
 
 	if runtime.GOOS == "darwin" {
@@ -269,6 +273,7 @@ func TestBuildEnvScrubsEveryChildNotJustTheLoginOne(t *testing.T) {
 			"PATH": "/usr/bin", "TERM_PROGRAM": "iTerm.app", testForceHyperlinkEnv: "1",
 			envCustomOAuthURL: "https://claude.example", testGoTracebackEnv: "crash",
 		},
+		StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test",
 	}, Env: map[string]string{
 		"KEEP":            "1",
 		envCustomOAuthURL: "https://claude.example",
@@ -315,7 +320,6 @@ func TestDecodeAuthStatusIgnoresUnknownAndAbsentMembers(t *testing.T) {
 }
 
 func TestAuthCommandOutputSeparatesExitStatusFromFailure(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -367,6 +371,7 @@ func TestAuthCommandOutputFailsWhenTheBinaryCannotBeFound(t *testing.T) {
 }
 
 func TestAuthCommandOutputSurfacesContainmentAndLaunchFailures(t *testing.T) {
+	useAuthDirectContainment(t)
 	originalPrepare := processPrepareContained
 
 	t.Cleanup(func() { processPrepareContained = originalPrepare })
@@ -391,7 +396,6 @@ func TestAuthCommandOutputSurfacesContainmentAndLaunchFailures(t *testing.T) {
 }
 
 func TestStartAuthLoginDrivesTheChildEndToEnd(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -437,7 +441,6 @@ func TestStartAuthLoginDrivesTheChildEndToEnd(t *testing.T) {
 // child's own exit is the only signal the status poll has, and reporting the
 // wrapper's teardown instead leaves that poll permanently unable to run.
 func TestAuthLoginReportsTheChildsOwnExitBeforeTheFence(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -475,7 +478,6 @@ func TestAuthLoginReportsTheChildsOwnExitBeforeTheFence(t *testing.T) {
 }
 
 func TestAuthLoginWaitReportsANaturalNonzeroExit(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -519,7 +521,6 @@ func TestAuthLoginWaitDoesNotClassifyAWaitFailureAsAnExit(t *testing.T) {
 // the handler returns, so a child bound to the starting context dies before the
 // URL is ever visited.
 func TestStartAuthLoginChildOutlivesTheStartingContext(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -553,7 +554,6 @@ func TestStartAuthLoginChildOutlivesTheStartingContext(t *testing.T) {
 }
 
 func TestStartAuthLoginFailsClosedOnAnUnclassifiableLine(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -569,7 +569,6 @@ func TestStartAuthLoginFailsClosedOnAnUnclassifiableLine(t *testing.T) {
 }
 
 func TestStartAuthLoginKillIsTheFence(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -592,6 +591,7 @@ func TestStartAuthLoginKillIsTheFence(t *testing.T) {
 }
 
 func TestStartAuthLoginChildLaunchFailures(t *testing.T) {
+	useAuthDirectContainment(t)
 	originalGetwd := processGetwd
 	originalPrepare := processPrepareContained
 	originalStart := processStartContained
@@ -651,8 +651,22 @@ func TestStartAuthLoginChildLaunchFailures(t *testing.T) {
 	require.ErrorIs(t, err, errAuthTest)
 }
 
+func TestStartAuthLoginChildRefusesBeforeItSpawns(t *testing.T) {
+	options, generation := authTestOptions(t, Options{Cwd: t.TempDir()})
+	options.ProcessIsolation = &ProcessIsolation{}
+
+	_, err := startAuthLoginChild("/bin/sh", options, generation)
+	require.ErrorContains(t, err, "invalid process isolation")
+
+	options, generation = authTestOptions(t, Options{Cwd: t.TempDir()})
+	authLoginHandoffGeneratedNativeTree = func(string, *ProcessIsolation) error { return errAuthTest }
+
+	_, err = startAuthLoginChild("/bin/sh", options, generation)
+	require.ErrorIs(t, err, errAuthTest)
+	require.ErrorContains(t, err, "handoff claude auth login browser shim")
+}
+
 func TestAuthLoginSubmitFailsWhenTheChildIsGone(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -701,7 +715,6 @@ func TestDarwinGenerationFinishIsExportedForUnwind(t *testing.T) {
 }
 
 func TestStartAuthLoginFailsClosedWhenNoPresentationArrives(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}
@@ -722,7 +735,6 @@ func TestStartAuthLoginFailsClosedWhenNoPresentationArrives(t *testing.T) {
 }
 
 func TestAuthCommandOutputContextTimeout(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}

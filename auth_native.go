@@ -76,6 +76,12 @@ func (p *providerAuth) nativeOptions() (claude.Options, error) {
 		ProcessIsolation: claudeProcessIsolation(p.agent.options.ProcessIsolation),
 		ScratchParent:    scratch,
 		DarwinBestEffort: p.agent.containmentMode == RuntimeContainmentBestEffort,
+		AcquireKeychainDiscovery: func(discoveryCtx context.Context) (func(), error) {
+			return acquireNativeRoot(discoveryCtx, p.agent.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
+		},
+		PrepareKeychainGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
+			return p.agent.prepareDarwinGeneration(generationCtx, RuntimeResourceDiscovery)
+		},
 	}, nil
 }
 
@@ -258,6 +264,10 @@ func (p *providerAuth) removeKeystoreItems(ctx context.Context) error {
 	}
 
 	if err := authKeychainRemove(ctx, options.ClaudeHome, authNativeUser(options), options); err != nil {
+		if errors.Is(err, claude.ErrProcessContainmentIncomplete) {
+			return authFailed(p.authNativeCause(err), authProviderID, "", "")
+		}
+
 		return authFailed(authCauseTransport, authProviderID, "", "")
 	}
 

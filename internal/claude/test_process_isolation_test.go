@@ -47,13 +47,14 @@ func withTestProcessIsolation(options Options) Options {
 	return options
 }
 
+// testTraversableTempDir returns a directory an unprivileged native identity
+// can reach. The directory must live under the system temp root rather than the
+// package working directory: a checkout sits under the invoking user's home,
+// and Ubuntu creates home directories mode 0750, so no other identity can
+// search into the checkout at all.
 func testTraversableTempDir(t *testing.T) string {
 	t.Helper()
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("resolve test working directory: %v", err)
-	}
-	directory, err := os.MkdirTemp(workingDirectory, "acp-go-claude-test-")
+	directory, err := os.MkdirTemp("", "acp-go-claude-test-")
 	if err != nil {
 		t.Fatalf("create traversable test directory: %v", err)
 	}

@@ -1270,13 +1270,13 @@ func exerciseClaudeSupervisorPeerDeath(t *testing.T, fixture *claudeSupervisorPe
 	assertClaudeSupervisorAuthorityLocks(t, "/var/lib/acp-go/agent-identities", fixture.uid, true)
 }
 
+// createClaudeSupervisorFixtureRoot builds the native fixture tree under /tmp
+// because the supervised native identity must be able to search every ancestor
+// of the fixture. A checkout cannot serve: it sits under the invoking user's
+// home, and Ubuntu creates home directories mode 0750.
 func createClaudeSupervisorFixtureRoot(t *testing.T, uid, gid uint32) string {
 	t.Helper()
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	root, err := os.MkdirTemp(workingDirectory, ".acp-go-claude-supervisor-")
+	root, err := os.MkdirTemp("/tmp", "acp-go-claude-supervisor-")
 	if err != nil {
 		t.Fatal(err)
 	}

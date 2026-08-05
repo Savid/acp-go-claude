@@ -604,10 +604,19 @@ func TestAgentStandaloneRebindRejectsOverlayFilesystemBeforeDomainMutation(t *te
 	before, err := os.ReadFile(recordPath)
 	require.NoError(t, err)
 	previousProbe := agentStandaloneFilesystemProbe
+	previousFstatfs := agentStandaloneProbeFstatfs
+	agentStandaloneProbeFstatfs = func(_ int, filesystem *unix.Statfs_t) error {
+		filesystem.Type = 0x794c7630
+
+		return nil
+	}
 	agentStandaloneFilesystemProbe = func(dir *os.File, _ bool) error {
 		return probeAgentStandaloneFilesystem(dir, false)
 	}
-	t.Cleanup(func() { agentStandaloneFilesystemProbe = previousProbe })
+	t.Cleanup(func() {
+		agentStandaloneFilesystemProbe = previousProbe
+		agentStandaloneProbeFstatfs = previousFstatfs
+	})
 	want := agentStandaloneOwner{
 		Version: 1, UID: 62097, GID: 62098, Kind: agentStandaloneOwnerKind,
 		Provider: agentStandaloneOwnerID, OwnerID: "overlay-rebind",
@@ -1044,7 +1053,7 @@ func TestAgentStandaloneFinalStateRootRevalidationAfterLastScanPreventsActive(t 
 	) error {
 		scans++
 		if scans == 2 {
-			require.NoError(t, os.Remove(stateRoot))
+			require.NoError(t, os.Rename(stateRoot, stateRoot+".old"))
 			require.NoError(t, os.Mkdir(stateRoot, 0o700))
 			require.NoError(t, os.Chown(stateRoot, int(uid), int(gid)))
 		}

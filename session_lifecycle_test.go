@@ -419,11 +419,16 @@ func newActualProcessFixture(t *testing.T, agentOptions ...Option) actualProcess
 	sentinelFile := filepath.Join(dir, "delayed-sentinel")
 	executable, err := os.Executable()
 	require.NoError(t, err)
+	executablePayload, err := os.ReadFile(executable)
+	require.NoError(t, err)
+	helperExecutable := filepath.Join(dir, "claude-containment-helper.test")
+	require.NoError(t, os.WriteFile(helperExecutable, executablePayload, 0o700))
+	require.NoError(t, os.Chown(helperExecutable, int(uid), int(gid)))
 
 	wrapper := filepath.Join(dir, "claude")
 	wrapperBody := fmt.Sprintf(
 		"#!/bin/sh\nexec %s -test.run '^TestClaudeProcessContainmentHelper$' -- %s \"$@\"\n",
-		strconv.Quote(executable), processContainmentHelperArg,
+		strconv.Quote(helperExecutable), processContainmentHelperArg,
 	)
 	require.NoError(t, os.WriteFile(wrapper, []byte(wrapperBody), 0o700))
 	require.NoError(t, os.Chown(wrapper, int(uid), int(gid)))
@@ -490,7 +495,7 @@ func createActualProcessStateRoot(t *testing.T, uid, gid uint32) string {
 	require.NoError(t, os.MkdirAll(dir, 0o700))
 	require.NoError(t, os.Chown(dir, int(uid), int(gid)))
 	require.NoError(t, os.Chmod(dir, 0o700))
-	for _, name := range []string{"child.pid", "launch-count", "launch-args", "delayed-trigger", "delayed-sentinel", "claude"} {
+	for _, name := range []string{"child.pid", "launch-count", "launch-args", "delayed-trigger", "delayed-sentinel", "claude", "claude-containment-helper.test"} {
 		err = os.Remove(filepath.Join(dir, name))
 		require.True(t, err == nil || errors.Is(err, os.ErrNotExist), "remove stale fixture file %q: %v", name, err)
 	}

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
@@ -56,7 +57,9 @@ func TestTurnSupervisorNativeInheritsSecurityLimits(t *testing.T) {
 		return
 	}
 
-	proofPath = filepath.Join(t.TempDir(), "security-limits")
+	proofRoot := testTraversableTempDir(t)
+	require.NoError(t, os.Chown(proofRoot, 1, 1))
+	proofPath = filepath.Join(proofRoot, "security-limits")
 	helper := exec.Command(os.Args[0], "-test.run=^TestTurnSupervisorNativeInheritsSecurityLimits$")
 	helper.Env = append(os.Environ(), turnSupervisorSecurityLimitsProofEnv+"="+proofPath)
 	if output, err := helper.CombinedOutput(); err != nil {
@@ -169,7 +172,7 @@ func TestTrustedSupervisorPreservesCapturedNativeOutput(t *testing.T) {
 		"/bin/sh",
 		[]string{"-c", `printf '2.1.80 (Claude Code)\n'`},
 		Options{
-			Cwd: testTraversableTempDir(t),
+			Cwd: "/",
 			ProcessIsolation: &ProcessIsolation{
 				UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin"},
 				StandaloneOwnerID: "claude-captured-output", StandaloneStateRoot: createClaudeSupervisorStateRoot(t, uid, gid),
@@ -1269,7 +1272,11 @@ func exerciseClaudeSupervisorPeerDeath(t *testing.T, fixture *claudeSupervisorPe
 
 func createClaudeSupervisorFixtureRoot(t *testing.T, uid, gid uint32) string {
 	t.Helper()
-	root, err := os.MkdirTemp("/tmp", "acp-go-claude-supervisor-")
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(workingDirectory, ".acp-go-claude-supervisor-")
 	if err != nil {
 		t.Fatal(err)
 	}

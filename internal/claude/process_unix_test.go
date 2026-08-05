@@ -315,8 +315,8 @@ func TestTrustedSupervisorControlEOFContainsDetachedDescendant(t *testing.T) {
 		t.Skip("trusted supervisor credential boundary requires root")
 	}
 	const (
-		uid = uint32(64211)
-		gid = uint32(64212)
+		uid = uint32(64411)
+		gid = uint32(64412)
 	)
 	root := createClaudeSupervisorFixtureRoot(t, uid, gid)
 	dir := filepath.Join(root, "native")
@@ -366,6 +366,7 @@ func TestTrustedSupervisorGuardianDeathContainsDetachedDescendant(t *testing.T) 
 	}
 	transport := NewProcessTransport(nil, Options{
 		CLIPath: cliPath,
+		Cwd:     dir,
 		Env: map[string]string{
 			"CLAUDE_SUPERVISOR_CHILD_PID": pidFile,
 			"CLAUDE_SUPERVISOR_SENTINEL":  sentinel,
@@ -373,7 +374,7 @@ func TestTrustedSupervisorGuardianDeathContainsDetachedDescendant(t *testing.T) 
 		},
 		ProcessIsolation: &ProcessIsolation{
 			UID: uid, GID: gid, BaseEnvironment: baseEnvironment,
-			StandaloneOwnerID: "claude-guardian-death", StandaloneStateRoot: createClaudeSupervisorStateRoot(t, uid, gid),
+			StandaloneOwnerID: "claude-transport-guardian-death", StandaloneStateRoot: createClaudeSupervisorStateRoot(t, uid, gid),
 		},
 	})
 	require.NoError(t, transport.Start(t.Context()))
@@ -493,6 +494,7 @@ while :; do sleep 1; done
 	require.NoError(t, os.Chmod(script, 0o755))
 	transport := NewProcessTransport(nil, Options{
 		CLIPath: script,
+		Cwd:     dir,
 		Env:     map[string]string{"CHILD_PID_FILE": pidFile},
 		ProcessIsolation: &ProcessIsolation{
 			UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin", "CHILD_PID_FILE": pidFile},
@@ -541,6 +543,7 @@ exit 0
 	require.NoError(t, os.Chmod(script, 0o755))
 	transport := NewProcessTransport(nil, Options{
 		CLIPath: script,
+		Cwd:     dir,
 		Env:     map[string]string{"CHILD_PID_FILE": pidFile},
 		ProcessIsolation: &ProcessIsolation{
 			UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin", "CHILD_PID_FILE": pidFile},

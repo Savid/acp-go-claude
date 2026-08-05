@@ -43,13 +43,12 @@ func TestRealNativeBrowserContainment(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(browserCanaryScratch, 0o711))
 	require.NoError(t, os.Chmod(browserCanaryScratch, 0o711))
-	home := browserCanaryOwnedDir(t, "/home/canary/.claude-browser-canary", 0o700)
 	authRoot := browserCanaryOwnedDir(t, "/home/canary/provider-auth-browser-canary", 0o700)
 	stateRoot := browserCanaryOwnedDir(t, browserCanaryState, 0o700)
 
 	agent := NewAgent(
 		WithExecutablePath(browserCanaryNative),
-		WithHome(home),
+		WithHome(stateRoot),
 		WithScratchDir(browserCanaryScratch),
 		WithProviderAuthRoot(authRoot),
 		WithLogger(slog.New(slog.DiscardHandler)),

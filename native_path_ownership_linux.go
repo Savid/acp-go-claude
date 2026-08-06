@@ -13,6 +13,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// The native ownership surface re-reads every descriptor it is about to trust,
+// so each syscall it depends on is reached through a seam. Faulting a seam is
+// the only way to prove these paths fail closed when the kernel stops answering
+// for a descriptor they already accepted, and the only way to stage a second
+// read disagreeing with the first.
+var (
+	nativeOwnershipOpenFilesystemRoot = func() (int, error) {
+		return unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	}
+	nativeOwnershipFstat   = unix.Fstat
+	nativeOwnershipClose   = unix.Close
+	nativeOwnershipReadDir = func(directory *os.File) ([]os.DirEntry, error) {
+		return directory.ReadDir(-1)
+	}
+)
+
 func handoffGeneratedNativeTreePlatform(root string, uid uint32, gid uint32) error {
 	trustedUID := uint32(os.Geteuid())
 	trustedGID := uint32(os.Getegid())
@@ -43,7 +59,7 @@ func validateNativeOwnedDirectoryPlatform(root string, uid uint32, gid uint32) e
 	defer directory.Close()
 
 	var stat unix.Stat_t
-	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil {
+	if err := nativeOwnershipFstat(int(directory.Fd()), &stat); err != nil {
 		return fmt.Errorf("inspect native-owned directory: %w", err)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
@@ -65,14 +81,14 @@ func openNativeOwnershipDirectory(name string, validate func(unix.Stat_t, bool) 
 	}
 
 	clean := filepath.Clean(name)
-	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := nativeOwnershipOpenFilesystemRoot()
 	if err != nil {
 		return nil, err
 	}
 
 	components := strings.Split(strings.TrimPrefix(clean, "/"), "/")
 	var rootStat unix.Stat_t
-	if statErr := unix.Fstat(fd, &rootStat); statErr != nil {
+	if statErr := nativeOwnershipFstat(fd, &rootStat); statErr != nil {
 		_ = unix.Close(fd)
 
 		return nil, statErr
@@ -95,7 +111,7 @@ func openNativeOwnershipDirectory(name string, validate func(unix.Stat_t, bool) 
 			return nil, openErr
 		}
 		var stat unix.Stat_t
-		if statErr := unix.Fstat(next, &stat); statErr != nil {
+		if statErr := nativeOwnershipFstat(next, &stat); statErr != nil {
 			_ = unix.Close(next)
 			_ = unix.Close(fd)
 
@@ -107,7 +123,7 @@ func openNativeOwnershipDirectory(name string, validate func(unix.Stat_t, bool) 
 
 			return nil, validateErr
 		}
-		closeErr := unix.Close(fd)
+		closeErr := nativeOwnershipClose(fd)
 		if closeErr != nil {
 			_ = unix.Close(next)
 
@@ -197,7 +213,7 @@ func handoffNativeOwnershipDirectory(
 		return err
 	}
 
-	entries, err := directory.ReadDir(-1)
+	entries, err := nativeOwnershipReadDir(directory)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
@@ -237,7 +253,7 @@ func handoffNativeOwnershipEntry(
 	targetGID uint32,
 ) error {
 	var stat unix.Stat_t
-	if err := unix.Fstat(int(entry.Fd()), &stat); err != nil {
+	if err := nativeOwnershipFstat(int(entry.Fd()), &stat); err != nil {
 		return err
 	}
 
@@ -265,7 +281,7 @@ func validateHandoffNativeInode(
 	singleLink bool,
 ) error {
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
+	if err := nativeOwnershipFstat(fd, &stat); err != nil {
 		return err
 	}
 	if stat.Mode&unix.S_IFMT != kind {
@@ -294,7 +310,7 @@ func chownAndVerifyNativeInode(fd int, kind uint32, uid uint32, gid uint32, sing
 	}
 
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
+	if err := nativeOwnershipFstat(fd, &stat); err != nil {
 		return err
 	}
 	if stat.Mode&unix.S_IFMT != kind || stat.Uid != uid || stat.Gid != gid {

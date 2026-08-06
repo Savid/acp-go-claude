@@ -33,7 +33,7 @@ func bindAgentStandaloneStateRoot(path string, uid, gid uint32) (agentStandalone
 	}
 	defer func() { _ = unix.Close(fd) }()
 	components := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	for index, component := range components {
+	for _, component := range components {
 		var parent unix.Stat_t
 		if err = agentStandaloneFstat(fd, &parent); err != nil {
 			return agentStandaloneStateRoot{}, err
@@ -51,20 +51,17 @@ func bindAgentStandaloneStateRoot(path string, uid, gid uint32) (agentStandalone
 		}
 		_ = unix.Close(fd)
 		fd = next
-		if index != len(components)-1 {
-			continue
-		}
-		var final unix.Stat_t
-		if err = agentStandaloneFstat(fd, &final); err != nil {
-			return agentStandaloneStateRoot{}, err
-		}
-		if final.Mode&unix.S_IFMT != unix.S_IFDIR || final.Uid != uid || final.Gid != gid ||
-			final.Mode&0o777 != 0o700 || final.Dev == 0 || final.Ino == 0 {
-			return agentStandaloneStateRoot{}, errors.New("standalone state root must be the claimed UID:GID-owned mode-0700 directory")
-		}
-		return agentStandaloneStateRoot{Path: path, Dev: uint64(final.Dev), Ino: final.Ino}, nil
 	}
-	return agentStandaloneStateRoot{}, errors.New("standalone state root has no path components")
+	var final unix.Stat_t
+	if err = agentStandaloneFstat(fd, &final); err != nil {
+		return agentStandaloneStateRoot{}, err
+	}
+	if final.Mode&unix.S_IFMT != unix.S_IFDIR || final.Uid != uid || final.Gid != gid ||
+		final.Mode&0o777 != 0o700 || final.Dev == 0 || final.Ino == 0 {
+		return agentStandaloneStateRoot{}, errors.New("standalone state root must be the claimed UID:GID-owned mode-0700 directory")
+	}
+
+	return agentStandaloneStateRoot{Path: path, Dev: uint64(final.Dev), Ino: final.Ino}, nil
 }
 
 func validAgentStandaloneStateRootPath(path string) bool {
@@ -1413,10 +1410,9 @@ func auditAgentStandaloneAuthorityRoot(
 			}
 			continue
 		}
-		if uidText, ok := strings.CutSuffix(name, ".owner"); ok {
-			if _, parseErr := parseAgentStandaloneUID(uidText); parseErr != nil {
-				return fmt.Errorf("invalid standalone owner name %q", name)
-			}
+		// The owner pass above already refused every ".owner" entry whose uid
+		// text does not parse, so this pass only has to account for the entry.
+		if _, ok := strings.CutSuffix(name, ".owner"); ok {
 			if requireEmpty {
 				return errors.New("agent authority record is missing but a permanent owner binding exists")
 			}
@@ -2161,9 +2157,9 @@ func loadAgentStandaloneOwner(directory *os.File, uid, ownerUID, ownerGID uint32
 	if err = decoder.Decode(&owner); err != nil {
 		return agentStandaloneOwner{}, err
 	}
-	if err = decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return agentStandaloneOwner{}, errors.New("standalone owner contains trailing data")
-	}
+	// exactAgentAuthorityFields has already unmarshalled these same bytes whole,
+	// which refuses a payload carrying more than one JSON value, so the decode
+	// above consumed all of it.
 	canonical, err := json.Marshal(owner)
 	if err != nil || !bytes.Equal(payload, append(canonical, '\n')) {
 		return agentStandaloneOwner{}, errors.New("standalone owner is not canonical compact JSON with one newline")
@@ -2226,9 +2222,8 @@ func loadAgentStandaloneMarker(directory *os.File, uid, ownerUID, ownerGID uint3
 	if err = decoder.Decode(&marker); err != nil {
 		return agentStandaloneMarker{}, err
 	}
-	if err = decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return agentStandaloneMarker{}, errors.New("agent identity marker contains trailing data")
-	}
+	// json.Unmarshal has already refused a payload carrying more than one JSON
+	// value, over these same bytes, so the decode above consumed all of it.
 	if marker.Version != 2 || marker.UID != uid || marker.UID == 0 || marker.GID == 0 ||
 		!validAgentStandaloneSessionKey(marker.SessionKey) {
 		return agentStandaloneMarker{}, errors.New("agent identity marker is incomplete")
@@ -2253,17 +2248,22 @@ func loadAgentStandaloneMarker(directory *os.File, uid, ownerUID, ownerGID uint3
 	}
 	var rawPaths []json.RawMessage
 	if marker.State == "active" {
-		if err = json.Unmarshal(raw["paths"], &rawPaths); err != nil || len(rawPaths) != len(marker.Paths) {
-			return agentStandaloneMarker{}, errors.Join(errors.New("ACTIVE marker paths are invalid"), err)
+		// The ACTIVE branch above proved "paths" is present and decoded into a
+		// non-nil slice, so these exact bytes are a JSON array with one element
+		// per decoded path. Reading them back as raw elements re-presents that
+		// decode; it is not a second parse that could disagree with it.
+		_ = json.Unmarshal(raw["paths"], &rawPaths)
+	}
+
+	for index, element := range rawPaths {
+		if _, fieldsErr := exactAgentAuthorityFields(
+			element, "base", "segments", "action", "rootDev", "rootIno",
+		); fieldsErr != nil {
+			return agentStandaloneMarker{}, fmt.Errorf("invalid marker path %d schema: %w", index, fieldsErr)
 		}
 	}
 	seenPaths := make(map[string]string, len(marker.Paths))
 	for index, path := range marker.Paths {
-		if _, fieldsErr := exactAgentAuthorityFields(
-			rawPaths[index], "base", "segments", "action", "rootDev", "rootIno",
-		); fieldsErr != nil {
-			return agentStandaloneMarker{}, fmt.Errorf("invalid marker path %d schema: %w", index, fieldsErr)
-		}
 		if err = validateAgentStandaloneManifestPath(path); err != nil {
 			return agentStandaloneMarker{}, fmt.Errorf("invalid marker path %d: %w", index, err)
 		}

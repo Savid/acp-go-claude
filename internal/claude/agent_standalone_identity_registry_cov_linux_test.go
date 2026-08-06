@@ -593,7 +593,7 @@ func TestAgentStandaloneCovDomainRevalidationRequiresTheExactPublishedRecord(t *
 // propagates the same refusal instead of accepting a vanished state root.
 func TestAgentStandaloneCovStateRootBindingRefusesUnusablePaths(t *testing.T) {
 	uid, gid := agentStandaloneTestAuthorityIDs()
-	for _, path := range []string{"srv/claude/state", "/srv/claude/../claude/state", "/srv/claude/state/"} {
+	for _, path := range []string{"srv/claude/state", "/srv/claude/../pi/state", "/srv/claude/state/"} {
 		bound, err := bindAgentStandaloneStateRoot(path, uid, gid)
 		require.ErrorContains(t, err, "must be a clean absolute path")
 		require.Equal(t, agentStandaloneStateRoot{}, bound)

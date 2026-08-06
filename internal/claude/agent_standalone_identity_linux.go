@@ -130,6 +130,7 @@ var agentStandaloneCloseTemporary = func(file *os.File) error { return file.Clos
 var agentStandaloneVacancyScan = proveAgentStandaloneIdentityVacant
 var agentStandaloneReadDir = os.ReadDir
 var agentStandaloneReadFile = os.ReadFile
+var agentStandaloneReadlink = os.Readlink
 var agentStandaloneReplaceDomain = replaceAgentStandaloneDomainRecord
 var agentStandaloneLockOpenat = unix.Openat
 var agentStandaloneLockFchown = unix.Fchown
@@ -1089,7 +1090,7 @@ func validateAgentStandaloneBinder() error {
 	if err != nil {
 		return err
 	}
-	selfPID, err := os.Readlink("/proc/self")
+	selfPID, err := agentStandaloneReadlink("/proc/self")
 	if err != nil {
 		return err
 	}
@@ -1103,7 +1104,7 @@ func validateAgentStandaloneBinder() error {
 	if self != procNamespace {
 		return errors.New("standalone agent authority binder requires self and procfs PID namespaces to match")
 	}
-	if _, err = os.ReadFile("/proc/1/status"); err != nil {
+	if _, err = agentStandaloneReadFile("/proc/1/status"); err != nil {
 		return fmt.Errorf("prove unrestricted root procfs visibility: %w", err)
 	}
 	const initialPIDNamespaceInode = 0xeffffffc
@@ -1552,7 +1553,7 @@ func parseAgentStandaloneTemporarySuffix(name, prefix string, allowRenamed bool)
 }
 
 func agentStandaloneAuthorityPath(directory *os.File) (string, error) {
-	path, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", directory.Fd()))
+	path, err := agentStandaloneReadlink(fmt.Sprintf("/proc/self/fd/%d", directory.Fd()))
 	if err != nil {
 		return "", fmt.Errorf("resolve agent authority root path: %w", err)
 	}

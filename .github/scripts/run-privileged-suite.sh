@@ -11,7 +11,9 @@
 #   * A temp root on a filesystem with local lock semantics whose ancestry is
 #     root-owned and not group- or other-writable. A container's /tmp is
 #     overlayfs and mode 01777.
-#   * An authority root at /var/lib/acp-go the suite can own outright.
+#   * An authority root at /var/lib/acp-go the suite can own outright, and a
+#     /tmp on a real filesystem. Several fixtures name /tmp directly, and the
+#     home lock refuses overlayfs because it has no local lock semantics.
 #
 # The runner's docker socket is the host daemon, which is how the native-browser
 # canary already reaches the host PID namespace. Use the same door: run the
@@ -109,6 +111,7 @@ docker run --rm \
 	--security-opt seccomp=unconfined \
 	--security-opt apparmor=unconfined \
 	--tmpfs /acp-go-tmp:rw,exec,mode=0755,size=4g \
+	--tmpfs /tmp:rw,exec,size=2g \
 	--mount "type=volume,source=$authority_volume,target=/var/lib/acp-go/agent-identities" \
 	--mount "type=volume,source=$GO_CACHE_VOLUME,target=/gocache" \
 	--volume "$workspace_host:/src" \

@@ -572,13 +572,42 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 	beginWait()
 
 	reader := bufio.NewReader(data)
+
+	nativePID, armErr := armTurnSupervisorGuardian(
+		completion, readyOutput, startInput, data, reader, liveness, livenessLaunch, waiter, &authority,
+	)
+	if armErr != nil {
+		return armErr
+	}
+
+	return superviseTurnSupervisorGuardian(completion, reader, liveness, waiter, controlDone, signals, nativePID, &authority)
+}
+
+// armTurnSupervisorGuardian drives the readiness handshake: it waits for the
+// liveness supervisor to arm, reports armed upstream, waits for the caller's own
+// start gate, releases the liveness gate, and reads back the native pid it must
+// contain. Every refusal kills the liveness process group, waits for it,
+// contains what is left and reports completion, exactly as before.
+func armTurnSupervisorGuardian(
+	completion *os.File,
+	readyOutput io.Writer,
+	startInput *os.File,
+	data *os.File,
+	reader *bufio.Reader,
+	liveness *exec.Cmd,
+	livenessLaunch *processTreeCommand,
+	waiter *commandWait,
+	authority **turnSupervisorAuthority,
+) (int, error) {
+	var err error
+
 	if err = turnSupervisorReadDeadline(data, time.Now().Add(5*time.Second)); err != nil {
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
-		completionErr := completeTurnSupervisorAuthority(completion, &authority, containErr == nil)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, containErr == nil)
 
-		return errors.Join(err, waitErr, containErr, completionErr)
+		return 0, errors.Join(err, waitErr, containErr, completionErr)
 	}
 
 	line, readyErr := reader.ReadString('\n')
@@ -586,45 +615,45 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
-		completionErr := completeTurnSupervisorAuthority(completion, &authority, containErr == nil)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, containErr == nil)
 
-		return errors.Join(fmt.Errorf("await Claude liveness readiness: %w", readyErr), waitErr, containErr, completionErr)
+		return 0, errors.Join(fmt.Errorf("await Claude liveness readiness: %w", readyErr), waitErr, containErr, completionErr)
 	}
 
 	if line != turnSupervisorArmed {
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
-		completionErr := completeTurnSupervisorAuthority(completion, &authority, containErr == nil)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, containErr == nil)
 
-		return errors.Join(fmt.Errorf("invalid Claude liveness armed state %q", strings.TrimSpace(line)), waitErr, containErr, completionErr)
+		return 0, errors.Join(fmt.Errorf("invalid Claude liveness armed state %q", strings.TrimSpace(line)), waitErr, containErr, completionErr)
 	}
 
 	if _, err = io.WriteString(readyOutput, turnSupervisorArmed); err != nil {
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
-		completionErr := completeTurnSupervisorAuthority(completion, &authority, containErr == nil)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, containErr == nil)
 
-		return errors.Join(err, waitErr, containErr, completionErr)
+		return 0, errors.Join(err, waitErr, containErr, completionErr)
 	}
 
 	if err = readTurnSupervisorStartGate(startInput); err != nil {
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
-		completionErr := completeTurnSupervisorAuthority(completion, &authority, containErr == nil)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, containErr == nil)
 
-		return errors.Join(fmt.Errorf("await Claude guardian start gate: %w", err), waitErr, containErr, completionErr)
+		return 0, errors.Join(fmt.Errorf("await Claude guardian start gate: %w", err), waitErr, containErr, completionErr)
 	}
 
 	if err = livenessLaunch.releaseStartGate(); err != nil {
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
-		completionErr := completeTurnSupervisorAuthority(completion, &authority, containErr == nil)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, containErr == nil)
 
-		return errors.Join(fmt.Errorf("release Claude liveness start gate: %w", err), waitErr, containErr, completionErr)
+		return 0, errors.Join(fmt.Errorf("release Claude liveness start gate: %w", err), waitErr, containErr, completionErr)
 	}
 
 	line, readyErr = reader.ReadString('\n')
@@ -632,18 +661,18 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
-		completionErr := completeTurnSupervisorAuthority(completion, &authority, containErr == nil)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, containErr == nil)
 
-		return errors.Join(fmt.Errorf("await Claude liveness readiness: %w", readyErr), waitErr, containErr, completionErr)
+		return 0, errors.Join(fmt.Errorf("await Claude liveness readiness: %w", readyErr), waitErr, containErr, completionErr)
 	}
 
 	if err = turnSupervisorReadDeadline(data, time.Time{}); err != nil {
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
-		completionErr := completeTurnSupervisorAuthority(completion, &authority, containErr == nil)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, containErr == nil)
 
-		return errors.Join(err, waitErr, containErr, completionErr)
+		return 0, errors.Join(err, waitErr, containErr, completionErr)
 	}
 
 	nativePID, err := parseTurnSupervisorLivenessReady(line)
@@ -651,20 +680,36 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
-		completionErr := completeTurnSupervisorAuthority(completion, &authority, containErr == nil)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, containErr == nil)
 
-		return errors.Join(err, waitErr, containErr, completionErr)
+		return 0, errors.Join(err, waitErr, containErr, completionErr)
 	}
 
 	if _, err = io.WriteString(readyOutput, turnSupervisorReady); err != nil {
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), nativePID)
-		completionErr := completeTurnSupervisorAuthority(completion, &authority, containErr == nil)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, containErr == nil)
 
-		return errors.Join(err, waitErr, containErr, completionErr)
+		return 0, errors.Join(err, waitErr, containErr, completionErr)
 	}
 
+	return nativePID, nil
+}
+
+// superviseTurnSupervisorGuardian holds the armed launch until the liveness
+// supervisor exits, the control channel closes, or a signal has to be forwarded,
+// then adjudicates what the liveness side reported on its way out.
+func superviseTurnSupervisorGuardian(
+	completion *os.File,
+	reader *bufio.Reader,
+	liveness *exec.Cmd,
+	waiter *commandWait,
+	controlDone <-chan struct{},
+	signals <-chan os.Signal,
+	nativePID int,
+	authority **turnSupervisorAuthority,
+) error {
 	var waitErr error
 
 	for {
@@ -689,7 +734,7 @@ livenessExited:
 	doneLine, doneErr := reader.ReadString('\n')
 
 	if doneErr == nil && doneLine == "done\n" {
-		completionErr := completeTurnSupervisorAuthority(completion, &authority, true)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, true)
 
 		return errors.Join(waitErr, completionErr)
 	}
@@ -697,14 +742,14 @@ livenessExited:
 	containErr := turnSupervisorContain(turnSupervisorProcessID(), nativePID)
 
 	if failure, failed := strings.CutPrefix(strings.TrimSpace(doneLine), turnSupervisorFailure); failed {
-		closeErr := completeTurnSupervisorAuthority(completion, &authority, false)
+		closeErr := completeTurnSupervisorAuthority(completion, authority, false)
 
 		return errors.Join(waitErr, fmt.Errorf("claude liveness completion failed: %s", failure), doneErr, containErr, closeErr)
 	}
 
 	completionErr := completeTurnSupervisorAuthority(
 		completion,
-		&authority,
+		authority,
 		containErr == nil && turnSupervisorSignaledExit(waitErr),
 	)
 

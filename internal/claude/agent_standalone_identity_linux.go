@@ -124,12 +124,14 @@ func knownAgentStandaloneProvider(value string) bool {
 }
 
 const (
-	agentStandaloneOwnerKind = "standalone-provider"
-	agentStandaloneOwnerID   = "github.com/savid/acp-go-claude"
-	agentStandaloneOwnerMax  = 8 << 10
-	agentStandaloneMarkerMax = 1 << 20
-	agentStandaloneClaimMax  = 30 * time.Second
-	agentStandaloneRetry     = 10 * time.Millisecond
+	agentStandaloneOwnerKind  = "standalone-provider"
+	agentStandaloneActive     = "active"
+	agentStandaloneRemovePath = "remove-path"
+	agentStandaloneOwnerID    = "github.com/savid/acp-go-claude"
+	agentStandaloneOwnerMax   = 8 << 10
+	agentStandaloneMarkerMax  = 1 << 20
+	agentStandaloneClaimMax   = 30 * time.Second
+	agentStandaloneRetry      = 10 * time.Millisecond
 )
 
 var (
@@ -572,7 +574,7 @@ func acquireAgentStandaloneDomain(
 ) (*os.File, error) {
 	for {
 		shared, err := acquireAgentStandaloneNamedLock(
-			directory, "domain.lock", unix.LOCK_SH, false,
+			directory, agentAuthorityDomainLockName, unix.LOCK_SH, false,
 			ownerUID, ownerGID, deadline, canceled, signals,
 		)
 		if errors.Is(err, unix.ENOENT) {
@@ -623,7 +625,7 @@ func acquireAgentStandaloneDomain(
 				}
 
 				exclusive, exclusiveErr := acquireAgentStandaloneNamedLock(
-					directory, "domain.lock", unix.LOCK_EX, false,
+					directory, agentAuthorityDomainLockName, unix.LOCK_EX, false,
 					ownerUID, ownerGID, deadline, canceled, signals,
 				)
 				if exclusiveErr != nil {
@@ -680,7 +682,7 @@ func acquireAgentStandaloneDomain(
 		}
 
 		exclusive, err := acquireAgentStandaloneNamedLock(
-			directory, "domain.lock", unix.LOCK_EX, false,
+			directory, agentAuthorityDomainLockName, unix.LOCK_EX, false,
 			ownerUID, ownerGID, deadline, canceled, signals,
 		)
 		if err != nil {
@@ -1183,9 +1185,9 @@ func acquireAgentStandaloneMissingDomainLock(
 	}
 
 	if len(entries) != 0 {
-		if len(entries) == 1 && entries[0].Name() == "domain.lock" {
+		if len(entries) == 1 && entries[0].Name() == agentAuthorityDomainLockName {
 			return acquireAgentStandaloneNamedLock(
-				directory, "domain.lock", unix.LOCK_EX, false,
+				directory, agentAuthorityDomainLockName, unix.LOCK_EX, false,
 				ownerUID, ownerGID, deadline, canceled, signals,
 			)
 		}
@@ -1194,7 +1196,7 @@ func acquireAgentStandaloneMissingDomainLock(
 	}
 
 	return acquireAgentStandaloneNamedLock(
-		directory, "domain.lock", unix.LOCK_EX, true, ownerUID, ownerGID, deadline, canceled, signals,
+		directory, agentAuthorityDomainLockName, unix.LOCK_EX, true, ownerUID, ownerGID, deadline, canceled, signals,
 	)
 }
 
@@ -1226,7 +1228,7 @@ func acquireAgentStandaloneOwnersExclusive(
 			)
 		}
 
-		if entry.Name() != "domain.lock" && entry.Name() != "domain.json" {
+		if entry.Name() != agentAuthorityDomainLockName && entry.Name() != "domain.json" {
 			return nil, fmt.Errorf("permanent owners.lock is missing from non-pristine registry containing %q", entry.Name())
 		}
 	}
@@ -1299,7 +1301,7 @@ func validateAgentStandaloneBinder() error {
 		return errors.New("standalone agent authority binder requires canonical procfs self identity")
 	}
 
-	procNamespace, err := agentAuthorityNamespaceIdentity(filepath.Join("/proc", selfPID, "ns", "pid"))
+	procNamespace, err := agentAuthorityNamespaceIdentity(filepath.Join(agentAuthorityProcRoot, selfPID, "ns", "pid"))
 	if err != nil {
 		return err
 	}
@@ -1533,7 +1535,7 @@ func validateAgentStandaloneSameBootRebind(
 		return failIdentity(err)
 	}
 
-	if marker.State != "active" || marker.GID != owner.GID || marker.SessionKey != sessionKey || len(marker.Paths) != 0 {
+	if marker.State != agentStandaloneActive || marker.GID != owner.GID || marker.SessionKey != sessionKey || len(marker.Paths) != 0 {
 		return failIdentity(errors.New("same-boot authority rebind requires the exact retained standalone ACTIVE marker"))
 	}
 
@@ -1605,7 +1607,7 @@ func auditAgentStandaloneAuthorityRoot(
 		}
 
 		name := entry.Name()
-		if name == "domain.lock" || name == "domain.json" {
+		if name == agentAuthorityDomainLockName || name == "domain.json" {
 			continue
 		}
 
@@ -1813,7 +1815,7 @@ func auditAgentStandaloneAuthorityRoot(
 				return keyErr
 			}
 
-			if marker.State != "active" || marker.GID != owner.GID || marker.SessionKey != sessionKey || len(marker.Paths) != 0 {
+			if marker.State != agentStandaloneActive || marker.GID != owner.GID || marker.SessionKey != sessionKey || len(marker.Paths) != 0 {
 				return fmt.Errorf("standalone owner uid %d has an incompatible retained marker", uid)
 			}
 
@@ -1825,7 +1827,7 @@ func auditAgentStandaloneAuthorityRoot(
 			return fmt.Errorf("ownerless durable marker uid %d exists without permanent affinity lock %q", uid, affinityName)
 		}
 
-		if marker.State == "active" && !allowOwnerlessActive {
+		if marker.State == agentStandaloneActive && !allowOwnerlessActive {
 			return fmt.Errorf("provider cannot recover ownerless ACTIVE uid %d; authoritative host recovery is required", uid)
 		}
 	}
@@ -2479,7 +2481,7 @@ func validateAgentStandalonePriorDisposition(directory *os.File, owner agentStan
 		return keyErr
 	}
 
-	if marker.State != "active" || marker.GID != owner.GID || marker.SessionKey != sessionKey || len(marker.Paths) != 0 {
+	if marker.State != agentStandaloneActive || marker.GID != owner.GID || marker.SessionKey != sessionKey || len(marker.Paths) != 0 {
 		return errors.New("standalone owner has an incompatible retained ACTIVE marker")
 	}
 
@@ -2628,7 +2630,7 @@ func publishAgentStandaloneActive(
 	}
 
 	marker := agentStandaloneMarker{
-		Version: 2, UID: uid, GID: gid, SessionKey: key, State: "active",
+		Version: 2, UID: uid, GID: gid, SessionKey: key, State: agentStandaloneActive,
 		LeaseID: hex.EncodeToString(lease[:]), Paths: make([]agentStandaloneManifestPath, 0),
 	}
 
@@ -2680,7 +2682,7 @@ func loadAgentStandaloneMarker(directory *os.File, uid, ownerUID, ownerGID uint3
 	}
 
 	switch marker.State {
-	case "active":
+	case agentStandaloneActive:
 		if len(raw) != 7 || raw["leaseId"] == nil || raw["paths"] == nil || len(marker.LeaseID) != 32 || marker.Paths == nil {
 			return agentStandaloneMarker{}, errors.New("ACTIVE marker lacks exact v2 fields")
 		}
@@ -2701,7 +2703,7 @@ func loadAgentStandaloneMarker(directory *os.File, uid, ownerUID, ownerGID uint3
 	}
 
 	var rawPaths []json.RawMessage
-	if marker.State == "active" {
+	if marker.State == agentStandaloneActive {
 		// The ACTIVE branch above proved "paths" is present and decoded into a
 		// non-nil slice, so these exact bytes are a JSON array with one element
 		// per decoded path. Reading them back as raw elements re-presents that
@@ -2731,7 +2733,7 @@ func loadAgentStandaloneMarker(directory *os.File, uid, ownerUID, ownerGID uint3
 		for priorPath, priorAction := range seenPaths {
 			overlaps := strings.HasPrefix(identity, priorPath+string(filepath.Separator)) ||
 				strings.HasPrefix(priorPath, identity+string(filepath.Separator))
-			if overlaps && (path.Action == "remove-path" || priorAction == "remove-path") {
+			if overlaps && (path.Action == agentStandaloneRemovePath || priorAction == agentStandaloneRemovePath) {
 				return agentStandaloneMarker{}, fmt.Errorf("marker removal path %q conflicts with %q", identity, priorPath)
 			}
 		}
@@ -2779,7 +2781,7 @@ func validateAgentStandaloneManifestPath(path agentStandaloneManifestPath) error
 	}
 
 	switch path.Action {
-	case "revoke-path", "revoke-tree", "remove-path":
+	case "revoke-path", "revoke-tree", agentStandaloneRemovePath:
 		return nil
 	default:
 		return errors.New("manifest path action is invalid")
@@ -2928,7 +2930,7 @@ func proveAgentStandaloneIdentityVacant(
 		return err
 	}
 
-	entries, err := agentStandaloneReadDir("/proc")
+	entries, err := agentStandaloneReadDir(agentAuthorityProcRoot)
 	if err != nil {
 		return err
 	}

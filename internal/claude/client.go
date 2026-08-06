@@ -9,7 +9,14 @@ import (
 	"time"
 )
 
-const defaultInitializeTimeout = time.Minute
+const (
+	defaultInitializeTimeout = time.Minute
+	// permissionModeField and elicitationModeField are separate wire members
+	// that happen to share a name: one is the mode a set_permission_mode
+	// request carries, the other is the mode an elicitation request carries.
+	permissionModeField  = "mode"
+	elicitationModeField = "mode"
+)
 
 // Client is a stateful Claude CLI stream-json session.
 type Client struct {
@@ -443,7 +450,7 @@ func (c *Client) SetPermissionMode(ctx context.Context, mode string) error {
 		return ErrClientNotStarted
 	}
 
-	_, err := controller.SendRequest(ctx, "set_permission_mode", map[string]any{"mode": mode}, 5*time.Second)
+	_, err := controller.SendRequest(ctx, "set_permission_mode", map[string]any{permissionModeField: mode}, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("set permission mode: %w", err)
 	}
@@ -591,7 +598,7 @@ func (c *Client) handleElicitation(ctx context.Context, req *ControlRequest) (ma
 	}
 	request.MCPServerName, _ = req.Request["mcp_server_name"].(string)
 	request.Message, _ = req.Request["message"].(string)
-	request.Mode, _ = req.Request["mode"].(string)
+	request.Mode, _ = req.Request[elicitationModeField].(string)
 	request.URL, _ = req.Request["url"].(string)
 	request.ElicitationID, _ = req.Request["elicitation_id"].(string)
 	request.ToolUseID, _ = req.Request["tool_use_id"].(string)

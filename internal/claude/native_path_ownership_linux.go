@@ -13,6 +13,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// The generated-tree handoff re-reads every descriptor it is about to trust, so
+// each syscall it depends on is reached through a seam. Faulting a seam is the
+// only way to prove these paths fail closed when the kernel stops answering for
+// a descriptor they already accepted, and the only way to stage a second read
+// that disagrees with the first.
+var (
+	nativeOwnershipOpenFilesystemRoot = func() (int, error) {
+		return unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	}
+	nativeOwnershipFstat = unix.Fstat
+	nativeOwnershipClose = unix.Close
+)
+
 func handoffGeneratedNativeTree(root string, isolation *ProcessIsolation) error {
 	if isolation == nil {
 		return nil
@@ -40,14 +53,14 @@ func handoffGeneratedNativeTree(root string, isolation *ProcessIsolation) error 
 
 func openGeneratedNativeDirectory(name string, trustedUID uint32, trustedGID uint32, targetUID uint32, targetGID uint32) (*os.File, error) {
 	clean := filepath.Clean(name)
-	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := nativeOwnershipOpenFilesystemRoot()
 	if err != nil {
 		return nil, err
 	}
 
 	components := strings.Split(strings.TrimPrefix(clean, "/"), "/")
 	var rootStat unix.Stat_t
-	if statErr := unix.Fstat(fd, &rootStat); statErr != nil {
+	if statErr := nativeOwnershipFstat(fd, &rootStat); statErr != nil {
 		_ = unix.Close(fd)
 
 		return nil, statErr
@@ -70,7 +83,7 @@ func openGeneratedNativeDirectory(name string, trustedUID uint32, trustedGID uin
 			return nil, openErr
 		}
 		var stat unix.Stat_t
-		if statErr := unix.Fstat(next, &stat); statErr != nil {
+		if statErr := nativeOwnershipFstat(next, &stat); statErr != nil {
 			_ = unix.Close(next)
 			_ = unix.Close(fd)
 
@@ -82,7 +95,7 @@ func openGeneratedNativeDirectory(name string, trustedUID uint32, trustedGID uin
 
 			return nil, validateErr
 		}
-		closeErr := unix.Close(fd)
+		closeErr := nativeOwnershipClose(fd)
 		if closeErr != nil {
 			_ = unix.Close(next)
 
@@ -164,7 +177,7 @@ func handoffGeneratedNativeDirectory(directory *os.File, trustedUID uint32, trus
 
 func handoffGeneratedNativeEntry(file *os.File, trustedUID uint32, trustedGID uint32, targetUID uint32, targetGID uint32) error {
 	var stat unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+	if err := nativeOwnershipFstat(int(file.Fd()), &stat); err != nil {
 		return err
 	}
 
@@ -184,7 +197,7 @@ func handoffGeneratedNativeEntry(file *os.File, trustedUID uint32, trustedGID ui
 
 func validateGeneratedNativeInode(fd int, kind uint32, trustedUID uint32, trustedGID uint32, targetUID uint32, targetGID uint32, singleLink bool) error {
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
+	if err := nativeOwnershipFstat(fd, &stat); err != nil {
 		return err
 	}
 	if stat.Mode&unix.S_IFMT != kind {
@@ -213,7 +226,7 @@ func chownGeneratedNativeInode(fd int, kind uint32, uid uint32, gid uint32, sing
 	}
 
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
+	if err := nativeOwnershipFstat(fd, &stat); err != nil {
 		return err
 	}
 	if stat.Mode&unix.S_IFMT != kind || stat.Uid != uid || stat.Gid != gid || singleLink && stat.Nlink != 1 {

@@ -136,7 +136,7 @@ func TestAgentStandaloneCovRetainedMarkerChecksRefuseAnUnderivableSessionKey(t *
 
 	t.Run("registry audit", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "63311.lock")
 		agentStandaloneCovWriteOwner(t, directory, owner)
 		agentStandaloneCovWriteActiveMarker(t, directory, owner)
@@ -385,7 +385,7 @@ func TestAgentStandaloneCovDomainClaimAbortsWhenItsOwnDomainIsUnreadable(t *test
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			directory, ownerUID, ownerGID, want := testCase.setup(t)
-			before, readErr := os.ReadFile(filepath.Join(directory.Name(), "domain.json"))
+			before, readErr := os.ReadFile(filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 			wantErr := errors.New("injected current domain failure")
 			agentStandaloneCovFaultCurrentDomain(t, testCase.call, wantErr)
 
@@ -394,7 +394,7 @@ func TestAgentStandaloneCovDomainClaimAbortsWhenItsOwnDomainIsUnreadable(t *test
 			)
 			require.Nil(t, lease)
 			require.ErrorIs(t, err, wantErr)
-			after, afterErr := os.ReadFile(filepath.Join(directory.Name(), "domain.json"))
+			after, afterErr := os.ReadFile(filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 			require.Equal(t, readErr == nil, afterErr == nil, "the published record must not appear or vanish")
 			require.Equal(t, before, after, "a refused claim must not change the published record")
 		})
@@ -444,7 +444,7 @@ func TestAgentStandaloneCovFirstClaimWaitsOutAMarkerTemporaryAPeerTook(t *testin
 			"the retry must re-list the registry and see the peer's lock",
 		)
 		require.FileExists(t, path, "a temporary with a live holder must never be removed")
-		require.NoFileExists(t, filepath.Join(directory.Name(), "domain.json"))
+		require.NoFileExists(t, filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 	})
 
 	t.Run("gives up when the budget is spent", func(t *testing.T) {
@@ -456,6 +456,6 @@ func TestAgentStandaloneCovFirstClaimWaitsOutAMarkerTemporaryAPeerTook(t *testin
 		require.Nil(t, lease)
 		require.ErrorContains(t, err, "exceeded 30 seconds")
 		require.FileExists(t, path)
-		require.NoFileExists(t, filepath.Join(directory.Name(), "domain.json"))
+		require.NoFileExists(t, filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 	})
 }

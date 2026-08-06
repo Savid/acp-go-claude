@@ -162,7 +162,7 @@ func TestAgentStandaloneCovMarkerAcceptsDisjointManifestPaths(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "active", marker.State)
 	require.Len(t, marker.Paths, 2)
-	require.Equal(t, "remove-path", marker.Paths[0].Action)
+	require.Equal(t, agentStandaloneCovRemovePath, marker.Paths[0].Action)
 	require.Equal(t, "revoke-tree", marker.Paths[1].Action)
 }
 
@@ -173,13 +173,13 @@ func TestAgentStandaloneCovMarkerAcceptsDisjointManifestPaths(t *testing.T) {
 // root it claims.
 func TestAgentStandaloneCovManifestPathValidation(t *testing.T) {
 	valid := agentStandaloneManifestPath{
-		Base: "/srv/claude", Segments: []string{"a"}, Action: "revoke-path", RootDev: 1, RootIno: 2,
+		Base: "/srv/claude", Segments: []string{"a"}, Action: agentStandaloneCovRevokePath, RootDev: 1, RootIno: 2,
 	}
 	require.NoError(t, validateAgentStandaloneManifestPath(valid))
 	filesystemRoot := valid
 	filesystemRoot.Base = "/"
 	require.NoError(t, validateAgentStandaloneManifestPath(filesystemRoot))
-	for _, action := range []string{"revoke-tree", "remove-path"} {
+	for _, action := range []string{"revoke-tree", agentStandaloneCovRemovePath} {
 		accepted := valid
 		accepted.Action = action
 		require.NoError(t, validateAgentStandaloneManifestPath(accepted))
@@ -193,42 +193,42 @@ func TestAgentStandaloneCovManifestPathValidation(t *testing.T) {
 		{
 			name: "relative base",
 			path: agentStandaloneManifestPath{
-				Base: "srv/claude", Segments: []string{"a"}, Action: "revoke-path", RootDev: 1, RootIno: 2,
+				Base: "srv/claude", Segments: []string{"a"}, Action: agentStandaloneCovRevokePath, RootDev: 1, RootIno: 2,
 			},
 			want: "manifest base is not a clean absolute path",
 		},
 		{
 			name: "no segments",
 			path: agentStandaloneManifestPath{
-				Base: "/srv/claude", Segments: nil, Action: "revoke-path", RootDev: 1, RootIno: 2,
+				Base: "/srv/claude", Segments: nil, Action: agentStandaloneCovRevokePath, RootDev: 1, RootIno: 2,
 			},
 			want: "manifest path is incomplete",
 		},
 		{
 			name: "no root device",
 			path: agentStandaloneManifestPath{
-				Base: "/srv/claude", Segments: []string{"a"}, Action: "revoke-path", RootDev: 0, RootIno: 2,
+				Base: "/srv/claude", Segments: []string{"a"}, Action: agentStandaloneCovRevokePath, RootDev: 0, RootIno: 2,
 			},
 			want: "manifest path is incomplete",
 		},
 		{
 			name: "parent traversal segment",
 			path: agentStandaloneManifestPath{
-				Base: "/srv/claude", Segments: []string{".."}, Action: "revoke-path", RootDev: 1, RootIno: 2,
+				Base: "/srv/claude", Segments: []string{agentStandaloneCovParentEntry}, Action: agentStandaloneCovRevokePath, RootDev: 1, RootIno: 2,
 			},
 			want: "manifest path segment is invalid",
 		},
 		{
 			name: "separator inside a segment",
 			path: agentStandaloneManifestPath{
-				Base: "/srv/claude", Segments: []string{"a/b"}, Action: "revoke-path", RootDev: 1, RootIno: 2,
+				Base: "/srv/claude", Segments: []string{"a/b"}, Action: agentStandaloneCovRevokePath, RootDev: 1, RootIno: 2,
 			},
 			want: "manifest path segment is invalid",
 		},
 		{
 			name: "control character segment",
 			path: agentStandaloneManifestPath{
-				Base: "/srv/claude", Segments: []string{"a\x01b"}, Action: "revoke-path", RootDev: 1, RootIno: 2,
+				Base: "/srv/claude", Segments: []string{"a\x01b"}, Action: agentStandaloneCovRevokePath, RootDev: 1, RootIno: 2,
 			},
 			want: "manifest path segment contains a control character",
 		},

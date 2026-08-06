@@ -46,7 +46,7 @@ func agentStandaloneCovRebindableFixture(
 	t.Helper()
 	directory, ownerUID, ownerGID := agentStandaloneCovDivergentDomainFixture(t)
 	owner := agentStandaloneCovOwner(uid, gid, ownerID, "/srv/claude/"+ownerID, 41, 42)
-	agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+	agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 	agentStandaloneCovPermanentLock(t, directory, strconv.FormatUint(uint64(uid), 10)+".lock")
 	agentStandaloneCovWriteOwner(t, directory, owner)
 	agentStandaloneCovWriteActiveMarker(t, directory, owner)
@@ -142,12 +142,12 @@ func TestAgentStandaloneCovDomainClaimRevalidatesWhatItPublished(t *testing.T) {
 		)
 		require.Nil(t, lease)
 		require.ErrorIs(t, err, unix.ENOENT)
-		require.NoFileExists(t, filepath.Join(directory.Name(), "domain.json"))
+		require.NoFileExists(t, filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 	})
 
 	t.Run("rebind", func(t *testing.T) {
 		directory, ownerUID, ownerGID, owner := agentStandaloneCovRebindableFixture(t, 63105, 63106, "silent-rebind")
-		before, err := os.ReadFile(filepath.Join(directory.Name(), "domain.json"))
+		before, err := os.ReadFile(filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 		require.NoError(t, err)
 		silentPublication(t)
 
@@ -156,7 +156,7 @@ func TestAgentStandaloneCovDomainClaimRevalidatesWhatItPublished(t *testing.T) {
 		)
 		require.Nil(t, lease)
 		require.ErrorContains(t, err, "changed during shared-lease transition")
-		after, err := os.ReadFile(filepath.Join(directory.Name(), "domain.json"))
+		after, err := os.ReadFile(filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 		require.NoError(t, err)
 		require.Equal(t, before, after)
 	})
@@ -169,7 +169,7 @@ func TestAgentStandaloneCovDomainClaimRevalidatesWhatItPublished(t *testing.T) {
 func TestAgentStandaloneCovRebindRefusesWhenItCannotReleaseTheIdentityLock(t *testing.T) {
 	directory, ownerUID, ownerGID := agentStandaloneCovDivergentDomainFixture(t)
 	owner := agentStandaloneCovOwner(63111, 63112, "rebind-close", "/srv/claude/rebind-close", 41, 42)
-	agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+	agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 	agentStandaloneCovPermanentLock(t, directory, "63111.lock")
 	agentStandaloneCovWriteOwner(t, directory, owner)
 	agentStandaloneCovWriteActiveMarker(t, directory, owner)
@@ -195,16 +195,16 @@ func TestAgentStandaloneCovOwnerIdentityRefusesWhenItCannotReleaseOwnersLock(t *
 
 	t.Run("after draining a peer temporary", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "63121.lock")
 		temporary := filepath.Join(directory.Name(), "63121.owner.next-"+suffix)
-		agentStandaloneCovPlantOnLockOpen(t, "owners.lock", func() {
+		agentStandaloneCovPlantOnLockOpen(t, agentStandaloneCovOwnersLock, func() {
 			require.NoError(t, os.WriteFile(temporary, []byte("partial"), 0o600))
 		})
 		wantErr := errors.New("injected drain owners.lock close failure")
 		previousClose := agentStandaloneFileClose
 		agentStandaloneFileClose = func(file *os.File) error {
-			if file.Name() == "owners.lock" {
+			if file.Name() == agentStandaloneCovOwnersLock {
 				require.NoError(t, previousClose(file))
 
 				return wantErr
@@ -234,10 +234,10 @@ func TestAgentStandaloneCovOwnerIdentityRefusesWhenItCannotReleaseOwnersLock(t *
 			Version: 1, UID: uid, GID: gid, Kind: agentStandaloneOwnerKind,
 			Provider: agentStandaloneOwnerID, OwnerID: "fresh-close", StateRoot: bound,
 		}
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovNoVacancy(t, nil)
 		wantErr := errors.New("injected completed owners.lock close failure")
-		agentStandaloneCovFaultClose(t, "owners.lock", 2, wantErr)
+		agentStandaloneCovFaultClose(t, agentStandaloneCovOwnersLock, 2, wantErr)
 
 		identity, err := acquireAgentStandaloneOwnerIdentity(
 			directory, want, ownerUID, ownerGID, time.Now().Add(5*time.Second), nil, nil,
@@ -252,16 +252,16 @@ func TestAgentStandaloneCovOwnerIdentityRefusesWhenItCannotReleaseOwnersLock(t *
 
 	t.Run("after adopting a peer binding", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "63125.lock")
 		want := agentStandaloneCovOwner(63125, 63126, "adopted", "/acp-go-standalone-cov-absent/state", 1, 2)
-		agentStandaloneCovPlantOnLockOpen(t, "owners.lock", func() {
+		agentStandaloneCovPlantOnLockOpen(t, agentStandaloneCovOwnersLock, func() {
 			agentStandaloneCovWriteOwner(t, directory, want)
 		})
 		previousClose := agentStandaloneFileClose
 		wantErr := errors.New("injected adoption owners.lock close failure")
 		agentStandaloneFileClose = func(file *os.File) error {
-			if file.Name() == "owners.lock" {
+			if file.Name() == agentStandaloneCovOwnersLock {
 				require.NoError(t, previousClose(file))
 
 				return wantErr
@@ -280,11 +280,11 @@ func TestAgentStandaloneCovOwnerIdentityRefusesWhenItCannotReleaseOwnersLock(t *
 
 	t.Run("after losing the uid lock race", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		held := createAgentStandaloneTestLock(t, directory, "63127.lock", ownerUID, ownerGID)
 		require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 		wantErr := errors.New("injected contended owners.lock close failure")
-		agentStandaloneCovFaultClose(t, "owners.lock", 1, wantErr)
+		agentStandaloneCovFaultClose(t, agentStandaloneCovOwnersLock, 1, wantErr)
 
 		identity, err := acquireAgentStandaloneOwnerIdentity(
 			directory, agentStandaloneCovStaticOwner(63127, 63128, "contended"),
@@ -297,11 +297,11 @@ func TestAgentStandaloneCovOwnerIdentityRefusesWhenItCannotReleaseOwnersLock(t *
 	t.Run("after a returning owner is admitted", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
 		want := agentStandaloneCovOwner(63129, 63130, "returning-close", "/acp-go-standalone-cov-absent/state", 1, 2)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "63129.lock")
 		agentStandaloneCovWriteOwner(t, directory, want)
 		wantErr := errors.New("injected returning owners.lock close failure")
-		agentStandaloneCovFaultClose(t, "owners.lock", 1, wantErr)
+		agentStandaloneCovFaultClose(t, agentStandaloneCovOwnersLock, 1, wantErr)
 
 		identity, err := acquireAgentStandaloneOwnerIdentity(
 			directory, want, ownerUID, ownerGID, time.Now().Add(time.Second), nil, nil,
@@ -318,11 +318,11 @@ func TestAgentStandaloneCovOwnerIdentityRefusesWhenItCannotReleaseOwnersLock(t *
 func TestAgentStandaloneCovBusyPeerTemporaryExhaustsTheClaimBudget(t *testing.T) {
 	directory := openAgentStandaloneTestDirectory(t)
 	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
-	agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+	agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 	held := createAgentStandaloneTestLock(t, directory, "63131.lock", ownerUID, ownerGID)
 	require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 	temporary := filepath.Join(directory.Name(), "63131.owner.next-"+agentStandaloneCovSuffix)
-	agentStandaloneCovPlantOnLockOpen(t, "owners.lock", func() {
+	agentStandaloneCovPlantOnLockOpen(t, agentStandaloneCovOwnersLock, func() {
 		require.NoError(t, os.WriteFile(temporary, []byte("partial"), 0o600))
 	})
 
@@ -344,7 +344,7 @@ func TestAgentStandaloneCovRegistryListingFailuresAbortTheirCallers(t *testing.T
 
 	t.Run("same-boot census listing", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		wantErr := errors.New("injected census listing failure")
 		agentStandaloneCovFaultSyscall(t, "openat", 1, wantErr)
 
@@ -358,7 +358,7 @@ func TestAgentStandaloneCovRegistryListingFailuresAbortTheirCallers(t *testing.T
 
 	t.Run("same-boot census budget", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovRestoreSyscallSeams(t)
 		previous := agentStandaloneOpenat
 		slept := false
@@ -515,11 +515,11 @@ func TestAgentStandaloneCovStateRootWalkAbortsWhenAncestorMetadataIsUnavailable(
 func TestAgentStandaloneCovContendedPeerTemporaryWaitHonoursTheRemainingBudget(t *testing.T) {
 	directory := openAgentStandaloneTestDirectory(t)
 	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
-	agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+	agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 	held := createAgentStandaloneTestLock(t, directory, "63181.lock", ownerUID, ownerGID)
 	require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 	temporary := filepath.Join(directory.Name(), "63181.owner.next-"+agentStandaloneCovSuffix)
-	agentStandaloneCovPlantOnLockOpen(t, "owners.lock", func() {
+	agentStandaloneCovPlantOnLockOpen(t, agentStandaloneCovOwnersLock, func() {
 		require.NoError(t, os.WriteFile(temporary, []byte("partial"), 0o600))
 	})
 
@@ -530,7 +530,7 @@ func TestAgentStandaloneCovContendedPeerTemporaryWaitHonoursTheRemainingBudget(t
 	require.Nil(t, identity)
 	require.ErrorContains(t, err, "exceeded 30 seconds")
 	require.FileExists(t, temporary)
-	contender, taken, lockErr := tryAgentStandaloneNamedLock(directory, "owners.lock", false, ownerUID, ownerGID)
+	contender, taken, lockErr := tryAgentStandaloneNamedLock(directory, agentStandaloneCovOwnersLock, false, ownerUID, ownerGID)
 	require.NoError(t, lockErr)
 	require.True(t, taken, "the waiting claim must not hold owners.lock")
 	require.NoError(t, contender.Close())

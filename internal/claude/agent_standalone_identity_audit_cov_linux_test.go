@@ -90,7 +90,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			expired: true,
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovWriteRegistryFile(t, directory, "domain.json", "{}\n")
+				agentStandaloneCovWriteRegistryFile(t, directory, agentStandaloneCovDomainRecord, "{}\n")
 			},
 			want: "exceeded 30 seconds",
 		},
@@ -115,7 +115,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			requireEmpty: true,
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 			},
 			want: "record is missing but permanent owners.lock exists",
 		},
@@ -123,8 +123,8 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			name: "owners lock with wrong mode",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
-				require.NoError(t, os.Chmod(filepath.Join(directory.Name(), "owners.lock"), 0o644))
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
+				require.NoError(t, os.Chmod(filepath.Join(directory.Name(), agentStandaloneCovOwnersLock), 0o644))
 			},
 			want: "mode",
 		},
@@ -258,7 +258,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			name: "uid lock with wrong mode",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 				agentStandaloneCovPermanentLock(t, directory, "62615.lock")
 				require.NoError(t, os.Chmod(filepath.Join(directory.Name(), "62615.lock"), 0o644))
 			},
@@ -284,7 +284,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			name: "owner whose state root is the registry",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 				agentStandaloneCovPermanentLock(t, directory, "62619.lock")
 				agentStandaloneCovWriteOwner(t, directory,
 					agentStandaloneCovOwner(62619, 62620, "self-rooted", directory.Name(), 1, 2),
@@ -296,7 +296,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			name: "owner without its permanent uid lock",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 				agentStandaloneCovWriteOwner(t, directory,
 					agentStandaloneCovOwner(62621, 62622, "lockless", "/srv/claude/lockless", 1, 2),
 				)
@@ -307,7 +307,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			name: "two owners sharing a gid",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 				agentStandaloneCovPermanentLock(t, directory, "62623.lock")
 				agentStandaloneCovPermanentLock(t, directory, "62625.lock")
 				agentStandaloneCovWriteOwner(t, directory,
@@ -323,7 +323,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			name: "two owners sharing a provider owner id",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 				agentStandaloneCovPermanentLock(t, directory, "62627.lock")
 				agentStandaloneCovPermanentLock(t, directory, "62629.lock")
 				agentStandaloneCovWriteOwner(t, directory,
@@ -339,7 +339,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			name: "two owners sharing a state root path",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 				agentStandaloneCovPermanentLock(t, directory, "62631.lock")
 				agentStandaloneCovPermanentLock(t, directory, "62633.lock")
 				agentStandaloneCovWriteOwner(t, directory,
@@ -355,7 +355,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			name: "two owners sharing a state root inode",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 				agentStandaloneCovPermanentLock(t, directory, "62635.lock")
 				agentStandaloneCovPermanentLock(t, directory, "62637.lock")
 				agentStandaloneCovWriteOwner(t, directory,
@@ -371,7 +371,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			name: "durable marker without its permanent uid lock",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 				agentStandaloneCovPermanentLock(t, directory, "62639.lock")
 				agentStandaloneCovWriteOwner(t, directory,
 					agentStandaloneCovOwner(62639, 62640, "anchor", "/srv/claude/anchor", 1, 2),
@@ -384,7 +384,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			name: "durable marker reusing a bound gid",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 				agentStandaloneCovPermanentLock(t, directory, "62643.lock")
 				agentStandaloneCovPermanentLock(t, directory, "62645.lock")
 				agentStandaloneCovWriteOwner(t, directory,
@@ -398,7 +398,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			name: "owner with an incompatible retained marker",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 				agentStandaloneCovPermanentLock(t, directory, "62647.lock")
 				agentStandaloneCovWriteOwner(t, directory,
 					agentStandaloneCovOwner(62647, 62648, "stale-marker", "/srv/claude/stale-marker", 1, 2),
@@ -455,7 +455,7 @@ func TestAgentStandaloneCovAuthorityRootAuditCleansTrustedTemporaries(t *testing
 func TestAgentStandaloneCovAuthorityRootAuditAcceptsACoherentRegistry(t *testing.T) {
 	directory := openAgentStandaloneTestDirectory(t)
 	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
-	agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+	agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 	agentStandaloneCovPermanentLock(t, directory, "62651.lock")
 	agentStandaloneCovPermanentLock(t, directory, "62653.lock")
 	first := agentStandaloneCovOwner(62651, 62652, "coherent-a", "/srv/claude/coherent-a", 11, 12)
@@ -488,7 +488,7 @@ func TestAgentStandaloneCovOwnerUniquenessRefusesEveryCollision(t *testing.T) {
 			expired: true,
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
-				agentStandaloneCovWriteRegistryFile(t, directory, "domain.json", "{}\n")
+				agentStandaloneCovWriteRegistryFile(t, directory, agentStandaloneCovDomainRecord, "{}\n")
 			},
 			want: "exceeded 30 seconds",
 		},

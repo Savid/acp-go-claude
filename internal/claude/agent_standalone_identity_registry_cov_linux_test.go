@@ -13,7 +13,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const agentStandaloneCovSuffix = "0123456789abcdef01234567"
+const (
+	agentStandaloneCovSuffix       = "0123456789abcdef01234567"
+	agentStandaloneCovOwnersLock   = "owners.lock"
+	agentStandaloneCovDomainRecord = "domain.json"
+	agentStandaloneCovRevokePath   = "revoke-path"
+	agentStandaloneCovRemovePath   = "remove-path"
+	agentStandaloneCovParentEntry  = ".."
+)
 
 // agentStandaloneCovRemovedDirectory models the authority registry being
 // removed from the filesystem while a claim still holds its descriptor. The
@@ -130,15 +137,15 @@ func TestAgentStandaloneCovUIDLockCreationIsAllowedOnlyWhenTheLockExists(t *test
 func TestAgentStandaloneCovOwnersLockCreatedByAPeerIsJoinedNotRecreated(t *testing.T) {
 	directory := openAgentStandaloneTestDirectory(t)
 	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
-	peer := createAgentStandaloneTestLock(t, directory, "owners.lock", ownerUID, ownerGID)
+	peer := createAgentStandaloneTestLock(t, directory, agentStandaloneCovOwnersLock, ownerUID, ownerGID)
 	require.NoError(t, peer.Close())
 	var before, after unix.Stat_t
-	require.NoError(t, unix.Fstatat(int(directory.Fd()), "owners.lock", &before, unix.AT_SYMLINK_NOFOLLOW))
+	require.NoError(t, unix.Fstatat(int(directory.Fd()), agentStandaloneCovOwnersLock, &before, unix.AT_SYMLINK_NOFOLLOW))
 	restoreAgentStandalonePermanentLockSeams(t)
 	original := agentStandaloneLockOpenat
 	faulted := false
 	agentStandaloneLockOpenat = func(dirfd int, path string, flags int, mode uint32) (int, error) {
-		if !faulted && path == "owners.lock" {
+		if !faulted && path == agentStandaloneCovOwnersLock {
 			faulted = true
 
 			return -1, unix.ENOENT
@@ -153,7 +160,7 @@ func TestAgentStandaloneCovOwnersLockCreatedByAPeerIsJoinedNotRecreated(t *testi
 	require.NoError(t, err)
 	require.True(t, faulted)
 	require.NoError(t, lock.Close())
-	require.NoError(t, unix.Fstatat(int(directory.Fd()), "owners.lock", &after, unix.AT_SYMLINK_NOFOLLOW))
+	require.NoError(t, unix.Fstatat(int(directory.Fd()), agentStandaloneCovOwnersLock, &after, unix.AT_SYMLINK_NOFOLLOW))
 	require.Equal(t, before.Ino, after.Ino, "the peer owners.lock inode must be reused")
 	require.Equal(t, before.Dev, after.Dev)
 }
@@ -167,16 +174,16 @@ func TestAgentStandaloneCovNamedLockAcquisitionHonoursTheClaimBudget(t *testing.
 	t.Run("budget already gone", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
 		ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
-		lock := createAgentStandaloneTestLock(t, directory, "owners.lock", ownerUID, ownerGID)
+		lock := createAgentStandaloneTestLock(t, directory, agentStandaloneCovOwnersLock, ownerUID, ownerGID)
 		require.NoError(t, lock.Close())
 
 		acquired, err := acquireAgentStandaloneNamedLock(
-			directory, "owners.lock", unix.LOCK_EX, false,
+			directory, agentStandaloneCovOwnersLock, unix.LOCK_EX, false,
 			ownerUID, ownerGID, time.Now().Add(-time.Millisecond), nil, nil,
 		)
 		require.Nil(t, acquired)
 		require.ErrorContains(t, err, "exceeded 30 seconds")
-		contender, taken, lockErr := tryAgentStandaloneNamedLock(directory, "owners.lock", false, ownerUID, ownerGID)
+		contender, taken, lockErr := tryAgentStandaloneNamedLock(directory, agentStandaloneCovOwnersLock, false, ownerUID, ownerGID)
 		require.NoError(t, lockErr)
 		require.True(t, taken, "the refused acquisition must not retain the lock")
 		require.NoError(t, contender.Close())
@@ -185,11 +192,11 @@ func TestAgentStandaloneCovNamedLockAcquisitionHonoursTheClaimBudget(t *testing.
 	t.Run("budget expires behind a live holder", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
 		ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
-		held := createAgentStandaloneTestLock(t, directory, "owners.lock", ownerUID, ownerGID)
+		held := createAgentStandaloneTestLock(t, directory, agentStandaloneCovOwnersLock, ownerUID, ownerGID)
 		require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 
 		acquired, err := acquireAgentStandaloneNamedLock(
-			directory, "owners.lock", unix.LOCK_EX, false,
+			directory, agentStandaloneCovOwnersLock, unix.LOCK_EX, false,
 			ownerUID, ownerGID, time.Now().Add(40*time.Millisecond), nil, nil,
 		)
 		require.Nil(t, acquired)
@@ -491,7 +498,7 @@ func TestAgentStandaloneCovTargetMarkerTemporaryCleanupRequiresTheHeldUIDLock(t 
 
 	t.Run("held lock is another inode", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		wrong := createAgentStandaloneTestLock(t, directory, "owners.lock", ownerUID, ownerGID)
+		wrong := createAgentStandaloneTestLock(t, directory, agentStandaloneCovOwnersLock, ownerUID, ownerGID)
 		uidLock := createAgentStandaloneTestLock(t, directory, "62463.lock", ownerUID, ownerGID)
 		require.NoError(t, uidLock.Close())
 

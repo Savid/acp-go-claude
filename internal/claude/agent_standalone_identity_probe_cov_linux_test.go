@@ -257,7 +257,7 @@ func TestAgentStandaloneCovDomainClaimActsOnWhatTheExclusiveLeaseReveals(t *test
 		corrupted := make(chan struct{})
 		go func() {
 			time.Sleep(60 * time.Millisecond)
-			writeErr := os.WriteFile(filepath.Join(directory.Name(), "domain.json"), []byte("not json\n"), 0o600)
+			writeErr := os.WriteFile(filepath.Join(directory.Name(), agentStandaloneCovDomainRecord), []byte("not json\n"), 0o600)
 			closeErr := held.Close()
 			if writeErr != nil || closeErr != nil {
 				panic(errors.Join(writeErr, closeErr))
@@ -313,7 +313,7 @@ func TestAgentStandaloneCovOwnerIdentityRestartsOnRegistryStateItDidNotSee(t *te
 	t.Run("peer temporary seen only by the registry audit", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
 		want := agentStandaloneCovOwner(62961, 62962, "existing-temp", "/acp-go-standalone-cov-absent/state", 1, 2)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62961.lock")
 		agentStandaloneCovPermanentLock(t, directory, "62963.lock")
 		agentStandaloneCovWriteOwner(t, directory, want)
@@ -332,11 +332,11 @@ func TestAgentStandaloneCovOwnerIdentityRestartsOnRegistryStateItDidNotSee(t *te
 
 	t.Run("peer temporary with a live uid holder keeps the claim waiting", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		held := createAgentStandaloneTestLock(t, directory, "62965.lock", ownerUID, ownerGID)
 		require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 		temporary := filepath.Join(directory.Name(), "62965.owner.next-"+suffix)
-		agentStandaloneCovPlantOnLockOpen(t, "owners.lock", func() {
+		agentStandaloneCovPlantOnLockOpen(t, agentStandaloneCovOwnersLock, func() {
 			require.NoError(t, os.WriteFile(temporary, []byte("partial"), 0o600))
 		})
 

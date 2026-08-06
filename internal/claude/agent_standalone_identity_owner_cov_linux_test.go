@@ -103,7 +103,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesEveryUnsafeRegistry(t *testing.T)
 
 	t.Run("owner temporary without its uid lock", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		temporary := agentStandaloneCovWriteRegistryFile(t, directory, "62807.owner.next-"+suffix, "partial")
 
 		identity, err := acquireAgentStandaloneOwnerIdentity(
@@ -153,7 +153,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesEveryUnsafeRegistry(t *testing.T)
 
 	t.Run("durable marker without its uid lock", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovWriteCleanMarker(t, directory, 62817, 62818, "orphan-marker")
 
 		identity, err := acquireAgentStandaloneOwnerIdentity(
@@ -167,7 +167,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesEveryUnsafeRegistry(t *testing.T)
 
 	t.Run("uid lock with wrong mode", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62819.lock")
 		require.NoError(t, os.Chmod(filepath.Join(directory.Name(), "62819.lock"), 0o644))
 
@@ -181,7 +181,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesEveryUnsafeRegistry(t *testing.T)
 
 	t.Run("uid lock held by a live peer", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		held := createAgentStandaloneTestLock(t, directory, "62821.lock", ownerUID, ownerGID)
 		require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 
@@ -191,7 +191,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesEveryUnsafeRegistry(t *testing.T)
 		)
 		require.Nil(t, identity)
 		require.ErrorContains(t, err, "exceeded 30 seconds")
-		contender, taken, lockErr := tryAgentStandaloneNamedLock(directory, "owners.lock", false, ownerUID, ownerGID)
+		contender, taken, lockErr := tryAgentStandaloneNamedLock(directory, agentStandaloneCovOwnersLock, false, ownerUID, ownerGID)
 		require.NoError(t, lockErr)
 		require.True(t, taken, "each retry must release owners.lock")
 		require.NoError(t, contender.Close())
@@ -199,7 +199,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesEveryUnsafeRegistry(t *testing.T)
 
 	t.Run("malformed target marker temporary", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62823.lock")
 		temporary := agentStandaloneCovWriteRegistryFile(
 			t, directory, "62823.quarantine.next-0123456789ABCDEF01234567", "partial",
@@ -216,7 +216,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesEveryUnsafeRegistry(t *testing.T)
 
 	t.Run("registry entry that belongs to nothing", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62825.lock")
 		agentStandaloneCovWriteRegistryFile(t, directory, "leftover", "x")
 
@@ -231,7 +231,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesEveryUnsafeRegistry(t *testing.T)
 
 	t.Run("state root that no longer resolves", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62827.lock")
 		want := agentStandaloneCovOwner(62827, 62828, "gone", "/acp-go-standalone-cov-absent/state", 1, 2)
 
@@ -256,7 +256,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesAnUnsafeExistingBinding(t *testin
 	t.Run("no permanent uid lock", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
 		want := agentStandaloneCovStaticOwner(62831, 62832, "no-uid-lock")
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovWriteOwner(t, directory, want)
 
 		identity, err := acquireAgentStandaloneOwnerIdentity(
@@ -282,7 +282,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesAnUnsafeExistingBinding(t *testin
 	t.Run("malformed target marker temporary", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
 		want := agentStandaloneCovStaticOwner(62835, 62836, "bad-temp")
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62835.lock")
 		agentStandaloneCovWriteOwner(t, directory, want)
 		temporary := agentStandaloneCovWriteRegistryFile(
@@ -300,7 +300,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesAnUnsafeExistingBinding(t *testin
 	t.Run("registry entry that belongs to nothing", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
 		want := agentStandaloneCovStaticOwner(62837, 62838, "leftover")
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62837.lock")
 		agentStandaloneCovWriteOwner(t, directory, want)
 		agentStandaloneCovWriteRegistryFile(t, directory, "leftover", "x")
@@ -315,7 +315,7 @@ func TestAgentStandaloneCovOwnerIdentityRefusesAnUnsafeExistingBinding(t *testin
 	t.Run("state root that no longer resolves", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
 		want := agentStandaloneCovOwner(62839, 62840, "gone", "/acp-go-standalone-cov-absent/state", 1, 2)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62839.lock")
 		agentStandaloneCovWriteOwner(t, directory, want)
 
@@ -344,7 +344,7 @@ func TestAgentStandaloneCovOwnerIdentityAdmitsAndRepublishesAnExistingBinding(t 
 		Version: 1, UID: uid, GID: gid, Kind: agentStandaloneOwnerKind,
 		Provider: agentStandaloneOwnerID, OwnerID: "returning", StateRoot: bound,
 	}
-	agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+	agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 	agentStandaloneCovPermanentLock(t, directory, "62841.lock")
 	agentStandaloneCovWriteOwner(t, directory, want)
 	agentStandaloneCovWriteActiveMarker(t, directory, want)
@@ -381,7 +381,7 @@ func TestAgentStandaloneCovOwnerIdentityHandlesRegistryChangeUnderOwnersLock(t *
 		original := agentStandaloneLockOpenat
 		planted := false
 		agentStandaloneLockOpenat = func(dirfd int, path string, flags int, mode uint32) (int, error) {
-			if !planted && path == "owners.lock" {
+			if !planted && path == agentStandaloneCovOwnersLock {
 				planted = true
 				plant()
 			}
@@ -392,7 +392,7 @@ func TestAgentStandaloneCovOwnerIdentityHandlesRegistryChangeUnderOwnersLock(t *
 
 	t.Run("peer owner temporary without its uid lock", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		temporary := filepath.Join(directory.Name(), "62851.owner.next-"+suffix)
 		plantUnderOwnersLock(t, func() {
 			require.NoError(t, os.WriteFile(temporary, []byte("partial"), 0o600))
@@ -409,7 +409,7 @@ func TestAgentStandaloneCovOwnerIdentityHandlesRegistryChangeUnderOwnersLock(t *
 
 	t.Run("peer owner temporary is drained and the claim restarts", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62855.lock")
 		temporary := filepath.Join(directory.Name(), "62855.owner.next-"+suffix)
 		plantUnderOwnersLock(t, func() {
@@ -427,7 +427,7 @@ func TestAgentStandaloneCovOwnerIdentityHandlesRegistryChangeUnderOwnersLock(t *
 
 	t.Run("peer binds the same uid to another tuple", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		plantUnderOwnersLock(t, func() {
 			agentStandaloneCovWriteOwner(t, directory, agentStandaloneCovStaticOwner(62859, 62860, "peer"))
 		})
@@ -442,7 +442,7 @@ func TestAgentStandaloneCovOwnerIdentityHandlesRegistryChangeUnderOwnersLock(t *
 
 	t.Run("peer writes an unreadable binding", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		plantUnderOwnersLock(t, func() {
 			agentStandaloneCovWriteRegistryFile(t, directory, "62861.owner", "not json\n")
 		})
@@ -457,7 +457,7 @@ func TestAgentStandaloneCovOwnerIdentityHandlesRegistryChangeUnderOwnersLock(t *
 
 	t.Run("peer publishes the identical binding", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62863.lock")
 		want := agentStandaloneCovOwner(62863, 62864, "same", "/acp-go-standalone-cov-absent/state", 1, 2)
 		plantUnderOwnersLock(t, func() { agentStandaloneCovWriteOwner(t, directory, want) })

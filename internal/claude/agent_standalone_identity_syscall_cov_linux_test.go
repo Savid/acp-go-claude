@@ -258,7 +258,7 @@ func TestAgentStandaloneCovPublicationAbortsOnAnyFaultedStep(t *testing.T) {
 				return createAgentStandaloneOwner(directory, owner, ownerUID, ownerGID)
 			}
 		case len(testCase.name) > 6 && testCase.name[:6] == "record":
-			final = "domain.json"
+			final = agentStandaloneCovDomainRecord
 			publish = func(t *testing.T, directory *os.File) error {
 				t.Helper()
 				record, err := currentAgentAuthorityDomain(directory)
@@ -459,12 +459,12 @@ func TestAgentStandaloneCovLockAcquisitionAbortsOnAFaultedFlock(t *testing.T) {
 
 	t.Run("blocking acquisition", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		wantErr := errors.New("injected blocking flock failure")
 		agentStandaloneCovFaultSyscall(t, "flock", 1, wantErr)
 
 		lock, err := acquireAgentStandaloneNamedLock(
-			directory, "owners.lock", unix.LOCK_EX, false,
+			directory, agentStandaloneCovOwnersLock, unix.LOCK_EX, false,
 			ownerUID, ownerGID, time.Now().Add(time.Second), nil, nil,
 		)
 		require.Nil(t, lock)
@@ -473,11 +473,11 @@ func TestAgentStandaloneCovLockAcquisitionAbortsOnAFaultedFlock(t *testing.T) {
 
 	t.Run("non-blocking acquisition", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		wantErr := errors.New("injected try-flock failure")
 		agentStandaloneCovFaultSyscall(t, "flock", 1, wantErr)
 
-		lock, acquired, err := tryAgentStandaloneNamedLock(directory, "owners.lock", false, ownerUID, ownerGID)
+		lock, acquired, err := tryAgentStandaloneNamedLock(directory, agentStandaloneCovOwnersLock, false, ownerUID, ownerGID)
 		require.Nil(t, lock)
 		require.False(t, acquired)
 		require.ErrorIs(t, err, wantErr)
@@ -586,11 +586,11 @@ func TestAgentStandaloneCovDescriptorIdentityChecksFailClosed(t *testing.T) {
 
 	t.Run("permanent lock identity", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		wantErr := errors.New("injected lock fstat failure")
 		agentStandaloneCovFaultSyscall(t, "fstat", 1, wantErr)
 
-		lock, err := openAgentStandaloneNamedLock(directory, "owners.lock", false, ownerUID, ownerGID)
+		lock, err := openAgentStandaloneNamedLock(directory, agentStandaloneCovOwnersLock, false, ownerUID, ownerGID)
 		require.Nil(t, lock)
 		require.ErrorIs(t, err, wantErr)
 	})
@@ -642,7 +642,7 @@ func TestAgentStandaloneCovAuthorityRandomnessFailuresAbortTheClaim(t *testing.T
 		require.Nil(t, lease)
 		require.ErrorIs(t, err, wantErr)
 		agentStandaloneCovRestoreSyscallSeams(t)
-		require.NoFileExists(t, filepath.Join(directory.Name(), "domain.json"))
+		require.NoFileExists(t, filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 	})
 
 	t.Run("marker lease id", func(t *testing.T) {
@@ -668,11 +668,11 @@ func TestAgentStandaloneCovClaimRefusesWhenALeaseCannotBeReleased(t *testing.T) 
 
 	t.Run("owners lock after a fresh claim", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "63041.lock")
 		want := agentStandaloneCovOwner(63041, 63042, "close", "/acp-go-standalone-cov-absent/state", 1, 2)
 		wantErr := errors.New("injected owners.lock close failure")
-		agentStandaloneCovFaultClose(t, "owners.lock", 1, wantErr)
+		agentStandaloneCovFaultClose(t, agentStandaloneCovOwnersLock, 1, wantErr)
 
 		identity, err := acquireAgentStandaloneOwnerIdentity(
 			directory, want, ownerUID, ownerGID, time.Now().Add(time.Second), nil, nil,
@@ -684,13 +684,13 @@ func TestAgentStandaloneCovClaimRefusesWhenALeaseCannotBeReleased(t *testing.T) 
 	t.Run("owners lock inside the same-boot rebind", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
 		want := agentStandaloneCovOwner(63043, 63044, "rebind-close", "/srv/claude/rebind-close", 97, 98)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "63043.lock")
 		agentStandaloneCovWriteOwner(t, directory, want)
 		agentStandaloneCovWriteActiveMarker(t, directory, want)
 		agentStandaloneCovNoVacancy(t, nil)
 		wantErr := errors.New("injected rebind owners.lock close failure")
-		agentStandaloneCovFaultClose(t, "owners.lock", 1, wantErr)
+		agentStandaloneCovFaultClose(t, agentStandaloneCovOwnersLock, 1, wantErr)
 
 		identity, err := validateAgentStandaloneSameBootRebind(
 			directory, want, ownerUID, ownerGID, time.Now().Add(time.Second), nil, nil,
@@ -701,9 +701,9 @@ func TestAgentStandaloneCovClaimRefusesWhenALeaseCannotBeReleased(t *testing.T) 
 
 	t.Run("audited lock", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		wantErr := errors.New("injected audited lock close failure")
-		agentStandaloneCovFaultClose(t, "owners.lock", 1, wantErr)
+		agentStandaloneCovFaultClose(t, agentStandaloneCovOwnersLock, 1, wantErr)
 
 		require.ErrorIs(t, auditAgentStandaloneAuthorityRoot(
 			directory, ownerUID, ownerGID, false, false, false, time.Now().Add(time.Second), nil, nil,
@@ -712,7 +712,7 @@ func TestAgentStandaloneCovClaimRefusesWhenALeaseCannotBeReleased(t *testing.T) 
 
 	t.Run("audited uid lock", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "63045.lock")
 		wantErr := errors.New("injected audited uid lock close failure")
 		agentStandaloneCovFaultClose(t, "63045.lock", 1, wantErr)

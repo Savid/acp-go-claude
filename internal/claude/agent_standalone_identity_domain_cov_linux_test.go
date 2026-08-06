@@ -90,7 +90,7 @@ func TestAgentStandaloneCovDomainAcquisitionRefusesAnUnusableRegistry(t *testing
 		directory := openAgentStandaloneTestDirectory(t)
 		ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
 		agentStandaloneCovPermanentLock(t, directory, "domain.lock")
-		agentStandaloneCovWriteRegistryFile(t, directory, "domain.json", "not json\n")
+		agentStandaloneCovWriteRegistryFile(t, directory, agentStandaloneCovDomainRecord, "not json\n")
 
 		lease, err := acquireAgentStandaloneDomain(
 			directory, want, ownerUID, ownerGID, true, time.Now().Add(time.Second), nil, nil,
@@ -109,7 +109,7 @@ func TestAgentStandaloneCovDomainAcquisitionRefusesAnUnusableRegistry(t *testing
 		)
 		require.Nil(t, lease)
 		require.ErrorContains(t, err, "exceeded 30 seconds")
-		require.NoFileExists(t, filepath.Join(directory.Name(), "domain.json"))
+		require.NoFileExists(t, filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 	})
 
 	t.Run("exclusive lease unavailable for a matching-domain cleanup", func(t *testing.T) {
@@ -184,7 +184,7 @@ func TestAgentStandaloneCovDomainAcquisitionRereadsUnderTheExclusiveLease(t *tes
 		corrupted := make(chan struct{})
 		go func() {
 			time.Sleep(60 * time.Millisecond)
-			writeErr := os.WriteFile(filepath.Join(directory.Name(), "domain.json"), []byte("not json\n"), 0o600)
+			writeErr := os.WriteFile(filepath.Join(directory.Name(), agentStandaloneCovDomainRecord), []byte("not json\n"), 0o600)
 			closeErr := held.Close()
 			if writeErr != nil || closeErr != nil {
 				panic(errors.Join(writeErr, closeErr))
@@ -242,7 +242,7 @@ func TestAgentStandaloneCovDomainRebindRefusesAnUnaccountableRegistry(t *testing
 
 	t.Run("owner temporary without its uid lock", func(t *testing.T) {
 		directory, ownerUID, ownerGID := agentStandaloneCovDivergentDomainFixture(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		temporary := agentStandaloneCovWriteRegistryFile(t, directory, "62907.owner.next-"+suffix, "partial")
 
 		lease, err := acquireAgentStandaloneDomain(
@@ -266,7 +266,7 @@ func TestAgentStandaloneCovDomainRebindRefusesAnUnaccountableRegistry(t *testing
 
 	t.Run("marker temporary with a live uid holder", func(t *testing.T) {
 		directory, ownerUID, ownerGID := agentStandaloneCovDivergentDomainFixture(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		held := createAgentStandaloneTestLock(t, directory, "62909.lock", ownerUID, ownerGID)
 		require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 		temporary := agentStandaloneCovWriteRegistryFile(t, directory, "62909.quarantine.next-"+suffix, "partial")
@@ -281,7 +281,7 @@ func TestAgentStandaloneCovDomainRebindRefusesAnUnaccountableRegistry(t *testing
 
 	t.Run("marker temporary released mid-claim is cleaned and the rebind continues", func(t *testing.T) {
 		directory, ownerUID, ownerGID := agentStandaloneCovDivergentDomainFixture(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		held := createAgentStandaloneTestLock(t, directory, "62911.lock", ownerUID, ownerGID)
 		require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 		temporary := agentStandaloneCovWriteRegistryFile(t, directory, "62911.quarantine.next-"+suffix, "partial")
@@ -328,7 +328,7 @@ func TestAgentStandaloneCovSameBootRebindRefusesAnythingButItsOwnExactState(t *t
 
 	t.Run("expired budget", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 
 		identity, err := validateAgentStandaloneSameBootRebind(
 			directory, want, ownerUID, ownerGID, time.Now().Add(-time.Millisecond), nil, nil,
@@ -339,7 +339,7 @@ func TestAgentStandaloneCovSameBootRebindRefusesAnythingButItsOwnExactState(t *t
 
 	t.Run("owner name is not a uid", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovWriteRegistryFile(t, directory, "bad.owner", "{}\n")
 
 		identity, err := validateAgentStandaloneSameBootRebind(
@@ -351,7 +351,7 @@ func TestAgentStandaloneCovSameBootRebindRefusesAnythingButItsOwnExactState(t *t
 
 	t.Run("no standalone owner at all", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 
 		identity, err := validateAgentStandaloneSameBootRebind(
 			directory, want, ownerUID, ownerGID, time.Now().Add(time.Second), nil, nil,
@@ -362,7 +362,7 @@ func TestAgentStandaloneCovSameBootRebindRefusesAnythingButItsOwnExactState(t *t
 
 	t.Run("uid lock still has a holder", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovWriteOwner(t, directory, want)
 		held := createAgentStandaloneTestLock(t, directory, "62921.lock", ownerUID, ownerGID)
 		require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
@@ -376,7 +376,7 @@ func TestAgentStandaloneCovSameBootRebindRefusesAnythingButItsOwnExactState(t *t
 
 	t.Run("owner record is another tuple", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62921.lock")
 		agentStandaloneCovWriteOwner(t, directory,
 			agentStandaloneCovStaticOwner(62921, 62922, "somebody-else"),
@@ -391,7 +391,7 @@ func TestAgentStandaloneCovSameBootRebindRefusesAnythingButItsOwnExactState(t *t
 
 	t.Run("no retained marker", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62921.lock")
 		agentStandaloneCovWriteOwner(t, directory, want)
 
@@ -404,7 +404,7 @@ func TestAgentStandaloneCovSameBootRebindRefusesAnythingButItsOwnExactState(t *t
 
 	t.Run("retained marker is not this session", func(t *testing.T) {
 		directory := openAgentStandaloneTestDirectory(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		agentStandaloneCovPermanentLock(t, directory, "62921.lock")
 		agentStandaloneCovWriteOwner(t, directory, want)
 		agentStandaloneCovWriteCleanMarker(t, directory, want.UID, want.GID, "another-session")
@@ -434,10 +434,10 @@ func TestAgentStandaloneCovSameBootRebindReleasesItsIdentityOnLaterFailure(t *te
 			record.AuthorityID = "0123456789abcdef0123456789abcdef"
 			record.PIDNamespace.Ino++
 			require.NoError(t, replaceAgentStandaloneDomainRecord(directory, ownerUID, ownerGID, record))
-			before, err := os.ReadFile(filepath.Join(directory.Name(), "domain.json"))
+			before, err := os.ReadFile(filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 			require.NoError(t, err)
 			owner := agentStandaloneCovOwner(uid, gid, "rebind-fault", "/srv/claude/rebind-fault", 31, 32)
-			agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+			agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 			agentStandaloneCovPermanentLock(t, directory, "62931.lock")
 			agentStandaloneCovWriteOwner(t, directory, owner)
 			agentStandaloneCovWriteActiveMarker(t, directory, owner)
@@ -460,7 +460,7 @@ func TestAgentStandaloneCovSameBootRebindReleasesItsIdentityOnLaterFailure(t *te
 			)
 			require.Nil(t, lease)
 			require.ErrorIs(t, err, wantErr)
-			after, err := os.ReadFile(filepath.Join(directory.Name(), "domain.json"))
+			after, err := os.ReadFile(filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 			require.NoError(t, err)
 			require.Equal(t, before, after, "the old authority record must survive a refused rebind")
 			contender, taken, lockErr := tryAgentStandaloneNamedLock(directory, "62931.lock", false, ownerUID, ownerGID)
@@ -482,7 +482,7 @@ func TestAgentStandaloneCovPristineDomainClaimRefusesUnaccountableState(t *testi
 
 	t.Run("owner temporary without its uid lock", func(t *testing.T) {
 		directory, ownerUID, ownerGID := agentStandaloneCovPristineDomainFixture(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		temporary := agentStandaloneCovWriteRegistryFile(t, directory, "62943.owner.next-"+suffix, "partial")
 
 		lease, err := acquireAgentStandaloneDomain(
@@ -491,12 +491,12 @@ func TestAgentStandaloneCovPristineDomainClaimRefusesUnaccountableState(t *testi
 		require.Nil(t, lease)
 		require.ErrorIs(t, err, unix.ENOENT)
 		require.FileExists(t, temporary)
-		require.NoFileExists(t, filepath.Join(directory.Name(), "domain.json"))
+		require.NoFileExists(t, filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 	})
 
 	t.Run("owner temporary with a live uid holder", func(t *testing.T) {
 		directory, ownerUID, ownerGID := agentStandaloneCovPristineDomainFixture(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		held := createAgentStandaloneTestLock(t, directory, "62945.lock", ownerUID, ownerGID)
 		require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 		temporary := agentStandaloneCovWriteRegistryFile(t, directory, "62945.owner.next-"+suffix, "partial")
@@ -507,12 +507,12 @@ func TestAgentStandaloneCovPristineDomainClaimRefusesUnaccountableState(t *testi
 		require.Nil(t, lease)
 		require.ErrorContains(t, err, "exceeded 30 seconds")
 		require.FileExists(t, temporary)
-		require.NoFileExists(t, filepath.Join(directory.Name(), "domain.json"))
+		require.NoFileExists(t, filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 	})
 
 	t.Run("owner temporary released mid-claim exposes the non-pristine registry", func(t *testing.T) {
 		directory, ownerUID, ownerGID := agentStandaloneCovPristineDomainFixture(t)
-		agentStandaloneCovPermanentLock(t, directory, "owners.lock")
+		agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
 		held := createAgentStandaloneTestLock(t, directory, "62947.lock", ownerUID, ownerGID)
 		require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 		temporary := agentStandaloneCovWriteRegistryFile(t, directory, "62947.owner.next-"+suffix, "partial")
@@ -532,7 +532,7 @@ func TestAgentStandaloneCovPristineDomainClaimRefusesUnaccountableState(t *testi
 		require.Nil(t, lease)
 		require.ErrorContains(t, err, "record is missing but root contains prior lock")
 		require.NoFileExists(t, temporary, "the released owner temporary is drained")
-		require.NoFileExists(t, filepath.Join(directory.Name(), "domain.json"))
+		require.NoFileExists(t, filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 	})
 
 	t.Run("durability probe refuses", func(t *testing.T) {
@@ -545,7 +545,7 @@ func TestAgentStandaloneCovPristineDomainClaimRefusesUnaccountableState(t *testi
 		)
 		require.Nil(t, lease)
 		require.ErrorIs(t, err, wantErr)
-		require.NoFileExists(t, filepath.Join(directory.Name(), "domain.json"))
+		require.NoFileExists(t, filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 	})
 
 	t.Run("record publication refuses", func(t *testing.T) {
@@ -562,7 +562,7 @@ func TestAgentStandaloneCovPristineDomainClaimRefusesUnaccountableState(t *testi
 		)
 		require.Nil(t, lease)
 		require.ErrorIs(t, err, wantErr)
-		require.NoFileExists(t, filepath.Join(directory.Name(), "domain.json"))
+		require.NoFileExists(t, filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 	})
 }
 
@@ -604,7 +604,7 @@ func TestAgentStandaloneCovDomainClaimConsultsTheBinderBeforeMutating(t *testing
 
 	t.Run("rebind", func(t *testing.T) {
 		directory, ownerUID, ownerGID := agentStandaloneCovDivergentDomainFixture(t)
-		before, err := os.ReadFile(filepath.Join(directory.Name(), "domain.json"))
+		before, err := os.ReadFile(filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 		require.NoError(t, err)
 		agentStandaloneCovFailingProbe(t, probeErr)
 
@@ -617,7 +617,7 @@ func TestAgentStandaloneCovDomainClaimConsultsTheBinderBeforeMutating(t *testing
 		} else {
 			require.ErrorIs(t, err, probeErr)
 		}
-		after, err := os.ReadFile(filepath.Join(directory.Name(), "domain.json"))
+		after, err := os.ReadFile(filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 		require.NoError(t, err)
 		require.Equal(t, before, after)
 	})
@@ -635,6 +635,6 @@ func TestAgentStandaloneCovDomainClaimConsultsTheBinderBeforeMutating(t *testing
 		} else {
 			require.ErrorIs(t, err, probeErr)
 		}
-		require.NoFileExists(t, filepath.Join(directory.Name(), "domain.json"))
+		require.NoFileExists(t, filepath.Join(directory.Name(), agentStandaloneCovDomainRecord))
 	})
 }

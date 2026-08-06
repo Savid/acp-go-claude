@@ -26,8 +26,7 @@ func TestNativeOptionsRunsFlowsInTheSessionHome(t *testing.T) {
 	release, err := options.AcquireKeychainDiscovery(t.Context())
 	require.NoError(t, err)
 	release()
-	_, err = options.PrepareKeychainGeneration(t.Context())
-	require.ErrorContains(t, err, "best-effort containment is not selected")
+	requireKeychainGenerationWithoutBestEffort(t, options)
 
 	resolved, err := filepath.EvalSymlinks(home)
 	require.NoError(t, err)
@@ -38,17 +37,13 @@ func TestNativeOptionsRunsFlowsInTheSessionHome(t *testing.T) {
 	bestEffort, err := broker.nativeOptions()
 	require.NoError(t, err)
 	require.True(t, bestEffort.DarwinBestEffort)
-	generation, err := bestEffort.PrepareKeychainGeneration(t.Context())
-	require.NoError(t, err)
-	require.NoError(t, generation.Finish(true))
+	requireKeychainGenerationUnderBestEffort(t, bestEffort)
 
 	resume := broker.agent.resumeCredentialOptions()
 	release, err = resume.AcquireKeychainDiscovery(t.Context())
 	require.NoError(t, err)
 	release()
-	generation, err = resume.PrepareKeychainGeneration(t.Context())
-	require.NoError(t, err)
-	require.NoError(t, generation.Finish(true))
+	requireKeychainGenerationUnderBestEffort(t, resume)
 }
 
 func TestNativeLogoutCannotBeRedirectedFromTheConsentedHome(t *testing.T) {

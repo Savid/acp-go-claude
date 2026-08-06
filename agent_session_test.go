@@ -899,14 +899,12 @@ func TestStartSessionIsolationFailureBranches(t *testing.T) {
 	ctx := t.Context()
 	cwd := t.TempDir()
 	sessionID := acp.SessionId("34343434-3434-4434-8434-343434343434")
-	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid())
-	if uid == 0 {
-		uid = 1
-	}
-	if gid == 0 {
-		gid = 1
-	}
+	uid, gid := testIsolationIdentity()
 	isolation := ProcessIsolation{UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin"}}
+	// Every isolated branch below reaches its own seam only if the native-owned
+	// home check ahead of it passes. That check is real on Linux, so the home has
+	// to be one the isolated identity genuinely owns rather than a t.TempDir leaf.
+	isolatedOptions := []Option{WithHome(testNativeOwnedHome(t)), WithProcessIsolation(isolation)}
 
 	originalEnsure := sessionEnsureScratchParent
 	originalHandoff := sessionHandoffGeneratedNativeTree
@@ -946,23 +944,23 @@ func TestStartSessionIsolationFailureBranches(t *testing.T) {
 	restore()
 
 	sessionEnsureScratchParent = func(string) (string, error) { return "", errors.New("isolated scratch") }
-	err = start([]Option{WithProcessIsolation(isolation)}, sessionStart{Cwd: cwd})
+	err = start(isolatedOptions, sessionStart{Cwd: cwd})
 	require.ErrorContains(t, err, "isolated scratch")
 	restore()
 
 	materializeMkdirTemp = func(string, string) (string, error) { return "", errors.New("isolated home") }
-	err = start([]Option{WithProcessIsolation(isolation)}, sessionStart{Cwd: cwd})
+	err = start(isolatedOptions, sessionStart{Cwd: cwd})
 	require.ErrorContains(t, err, "create isolated Claude home")
 	restore()
 
 	copyClaudeConfigFiles = func(string, string, claude.Options) error { return errors.New("copy isolated home") }
-	err = start([]Option{WithProcessIsolation(isolation)}, sessionStart{Cwd: cwd})
+	err = start(isolatedOptions, sessionStart{Cwd: cwd})
 	require.ErrorContains(t, err, "copy isolated home")
 	restore()
 
 	copyClaudeConfigFiles = func(string, string, claude.Options) error { return nil }
 	sessionHandoffGeneratedNativeTree = func(string, *ProcessIsolation) error { return errors.New("handoff isolated home") }
-	err = start([]Option{WithProcessIsolation(isolation)}, sessionStart{Cwd: cwd})
+	err = start(isolatedOptions, sessionStart{Cwd: cwd})
 	require.ErrorContains(t, err, "handoff isolated home")
 	restore()
 
@@ -976,7 +974,7 @@ func TestStartSessionIsolationFailureBranches(t *testing.T) {
 
 		return nil
 	}
-	err = start([]Option{WithProcessIsolation(isolation)}, sessionStart{
+	err = start(isolatedOptions, sessionStart{
 		Cwd: cwd,
 		McpServers: []acp.McpServer{{
 			Stdio: &acp.McpServerStdio{Name: "fixture", Command: "/bin/true"},

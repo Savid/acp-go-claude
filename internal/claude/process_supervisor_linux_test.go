@@ -267,7 +267,11 @@ func TestInheritedTurnSupervisorInputAndEnable(t *testing.T) {
 		return file
 	}
 	closeOnExec := 0
-	turnSupervisorFcntl = func(uintptr, int, int) (int, error) { closeOnExec++; return 0, nil }
+	turnSupervisorFcntl = func(uintptr, int, int) (int, error) {
+		closeOnExec++
+
+		return 0, nil
+	}
 	config, control, ready, err := inheritedTurnSupervisorInput()
 	if err != nil {
 		t.Fatalf("inherited input: %v", err)
@@ -420,6 +424,7 @@ func TestTurnSupervisorLivenessCarriesGuardianStdio(t *testing.T) {
 	var launched *exec.Cmd
 	turnSupervisorCommand = func(name string, args ...string) *exec.Cmd {
 		launched = exec.Command(name, args...)
+
 		return launched
 	}
 	controlRead, controlWrite, err := os.Pipe()
@@ -574,6 +579,7 @@ func TestContainLinuxSupervisorDescendantsBranches(t *testing.T) {
 	retryCalls := 0
 	turnSupervisorDescendants = func(int) ([]linuxProcessIdentity, error) {
 		retryCalls++
+
 		return nil, errors.New("retry")
 	}
 	turnSupervisorSleep = func(time.Duration) {}
@@ -909,6 +915,7 @@ func TestTurnSupervisorNativeGuardianPeerDeathBeforeStartUnitBranches(t *testing
 	echild := false
 	turnSupervisorWait4 = func(int, *unix.WaitStatus, int, *unix.Rusage) (int, error) {
 		echild = true
+
 		return -1, unix.ECHILD
 	}
 	turnSupervisorDescendants = func(int) ([]linuxProcessIdentity, error) { return nil, nil }
@@ -917,6 +924,7 @@ func TestTurnSupervisorNativeGuardianPeerDeathBeforeStartUnitBranches(t *testing
 	var native *exec.Cmd
 	turnSupervisorCommand = func(name string, args ...string) *exec.Cmd {
 		native = exec.Command(name, args...)
+
 		return native
 	}
 	config := encodeSupervisorConfig(t, turnSupervisorConfig{
@@ -1420,6 +1428,7 @@ func assertClaudeSupervisorAuthorityLocks(t *testing.T, authorityRoot string, ui
 				if !errors.Is(lockErr, unix.EWOULDBLOCK) && !errors.Is(lockErr, unix.EAGAIN) {
 					t.Fatalf("Claude authority lock %q was not retained by frozen survivor: %v", name, lockErr)
 				}
+
 				break
 			}
 			if lockErr == nil {

@@ -88,6 +88,7 @@ var (
 	turnSupervisorSealConfig        = unix.FcntlInt
 	turnSupervisorEffectiveUID      = os.Geteuid
 	turnSupervisorPoll              = unix.Poll
+	turnSupervisorReadDeadline      = (*os.File).SetReadDeadline
 	turnSupervisorBeforeRelease     func(*os.Process) error
 )
 
@@ -534,7 +535,7 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 	waiter, beginWait := startPausedCommandWait(liveness.Wait)
 	beginWait()
 	reader := bufio.NewReader(data)
-	if err = data.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err = turnSupervisorReadDeadline(data, time.Now().Add(5*time.Second)); err != nil {
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
@@ -592,7 +593,7 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 
 		return errors.Join(fmt.Errorf("await Claude liveness readiness: %w", readyErr), waitErr, containErr, completionErr)
 	}
-	if err = data.SetReadDeadline(time.Time{}); err != nil {
+	if err = turnSupervisorReadDeadline(data, time.Time{}); err != nil {
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)

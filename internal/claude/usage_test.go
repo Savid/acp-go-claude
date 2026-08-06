@@ -103,7 +103,7 @@ func TestParseUsageReset(t *testing.T) {
 			want: "2026-07-09T13:40:00+10:00",
 		},
 		{name: "unknown location", text: "Jul 9, 1:40pm (Mars/Olympus)", want: ""},
-		{name: "unparseable", text: "soon", want: ""},
+		{name: "unparsable", text: "soon", want: ""},
 		{name: "empty", text: "", want: ""},
 	}
 

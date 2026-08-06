@@ -115,7 +115,7 @@ func resolveAPIAccess(env map[string]string) (string, string, bool) {
 
 	// A base URL carrying userinfo would embed its credentials in every
 	// transport error, and those errors reach the debug log. Refuse it; an
-	// unparseable URL is left for the request builder to report.
+	// unparsable URL is left for the request builder to report.
 	if parsed, err := url.Parse(baseURL); err == nil && parsed.User != nil {
 		return "", "", false
 	}

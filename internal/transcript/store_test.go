@@ -769,11 +769,11 @@ type fakeTranscriptFile struct {
 	offset           int64
 	seekErr          error
 	readErrAfterSeek error
-	seeked           bool
+	didSeek          bool
 }
 
 func (f *fakeTranscriptFile) Read(p []byte) (int, error) {
-	if f.seeked && f.readErrAfterSeek != nil {
+	if f.didSeek && f.readErrAfterSeek != nil {
 		return 0, f.readErrAfterSeek
 	}
 
@@ -801,7 +801,7 @@ func (f *fakeTranscriptFile) Seek(offset int64, whence int) (int64, error) {
 		f.offset = int64(len(f.data)) + offset
 	}
 
-	f.seeked = true
+	f.didSeek = true
 
 	return f.offset, nil
 }

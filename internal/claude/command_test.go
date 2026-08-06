@@ -275,8 +275,8 @@ func TestValidateClaudeVersion(t *testing.T) {
 	old := writeShellScript(t, filepath.Join(dir, "old"), "#!/bin/sh\necho '1.9.9 (Claude Code)'\n")
 	require.ErrorContains(t, validateClaudeVersion(context.Background(), old, options), "too old")
 
-	unparseable := writeShellScript(t, filepath.Join(dir, "bad"), "#!/bin/sh\necho 'no version'\n")
-	require.ErrorContains(t, validateClaudeVersion(context.Background(), unparseable, options), "could not parse")
+	unparsable := writeShellScript(t, filepath.Join(dir, "bad"), "#!/bin/sh\necho 'no version'\n")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), unparsable, options), "could not parse")
 
 	failing := writeShellScript(t, filepath.Join(dir, "fail"), "#!/bin/sh\nexit 1\n")
 	require.Error(t, validateClaudeVersion(context.Background(), failing, options))

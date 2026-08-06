@@ -379,7 +379,7 @@ func TestHandoffImageURIDefects(t *testing.T) {
 	blank := "   "
 	opaque := "file:relative.png"
 	remote := "file://example.test/a.png"
-	unparseable := "file://%zz"
+	unparsable := "file://%zz"
 	localhost := "file://localhost" + filepath.Join(handoffRoot, "a.png")
 
 	cases := []struct {
@@ -389,7 +389,7 @@ func TestHandoffImageURIDefects(t *testing.T) {
 	}{
 		{name: "absent", uri: nil, message: "handoff block carries no uri"},
 		{name: "blank", uri: &blank, message: "handoff block carries no uri"},
-		{name: "unparseable", uri: &unparseable, message: "handoff uri cannot be parsed"},
+		{name: "unparsable", uri: &unparsable, message: "handoff uri cannot be parsed"},
 		{name: "not a file uri", uri: ptr("https://example.test/a.png"), message: "handoff uri scheme must be file"},
 		{name: "foreign host", uri: &remote, message: "handoff uri host is not local"},
 		{name: "relative path", uri: &opaque, message: "handoff uri path must be absolute"},

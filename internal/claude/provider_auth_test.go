@@ -440,7 +440,7 @@ func TestStartAuthLoginDrivesTheChildEndToEnd(t *testing.T) {
 // ever being handed a pasted value, so nothing on this surface calls Close. The
 // child's own exit is the only signal the status poll has, and reporting the
 // wrapper's teardown instead leaves that poll permanently unable to run.
-func TestAuthLoginReportsTheChildsOwnExitBeforeTheFence(t *testing.T) {
+func TestAuthLoginReportsTheChildExitBeforeTheFence(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
 	}

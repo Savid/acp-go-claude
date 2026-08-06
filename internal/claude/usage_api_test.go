@@ -83,8 +83,8 @@ func TestResolveAPIAccess(t *testing.T) {
 			wantOK: false,
 		},
 		{
-			// An unparseable base URL is left for the request builder to report.
-			name:    "unparseable base url is passed through",
+			// An unparsable base URL is left for the request builder to report.
+			name:    "unparsable base url is passed through",
 			env:     map[string]string{envAnthropicAuthToken: "sk-ant-oat01-x", envAnthropicBaseURL: "://nope"},
 			wantURL: "://nope",
 			wantTok: "sk-ant-oat01-x",
@@ -152,7 +152,7 @@ func TestParseUnifiedHeaders(t *testing.T) {
 	require.True(t, windows[1].ResetsAt.IsZero())
 }
 
-func TestParseUnifiedHeadersSkipsUnparseableUtilization(t *testing.T) {
+func TestParseUnifiedHeadersSkipsUnparsableUtilization(t *testing.T) {
 	header := http.Header{}
 	header.Set("anthropic-ratelimit-unified-5h-utilization", "not-a-number")
 

@@ -846,7 +846,7 @@ func TestBorrowedAgentIdentityDispositionRefusesUnprovenModes(t *testing.T) {
 		err := validateBorrowedAgentIdentityDisposition(uid, gid, true, fixture.root)
 		if err == nil || !strings.Contains(err.Error(), "audit borrowed agent identity authority") ||
 			!strings.Contains(err.Error(), "looking for beginning of value") {
-			t.Fatalf("unparseable owner binding error = %v", err)
+			t.Fatalf("unparsable owner binding error = %v", err)
 		}
 	})
 

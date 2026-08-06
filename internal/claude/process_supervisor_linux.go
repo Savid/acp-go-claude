@@ -203,9 +203,6 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 		return nil, fmt.Errorf("prepare Claude native supervisor identity: %w", err)
 	}
 
-	if (options.Isolation.IdentityLock == nil) != (options.Isolation.AuthorityDomain == nil) {
-		return nil, errors.New("prepare Claude native supervisor: UID lock and authority domain must be supplied together")
-	}
 	config := turnSupervisorConfig{
 		Path:            native.Path,
 		Args:            append([]string(nil), native.Args...),
@@ -508,11 +505,6 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 
 		return err
 	}
-	defer func() {
-		if authority != nil {
-			runErr = errors.Join(runErr, authority.Close())
-		}
-	}()
 	if err = turnSupervisorEnable(); err != nil {
 		completionErr := completeTurnSupervisorAuthority(completion, &authority, true)
 

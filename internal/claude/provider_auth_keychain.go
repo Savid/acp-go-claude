@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
-	"time"
 )
 
 // AuthKeychainItem names one generic-password item the login Keychain may hold
@@ -27,10 +26,6 @@ var authKeychainAccountPattern = regexp.MustCompile(`\A[a-zA-Z0-9._-]+\z`)
 // custom-OAuth suffix is a shipped deployment mode, so a leg pinned only to the
 // default shape is blind to a worker that logged in under one.
 var authKeychainServicePrefixes = []string{"Claude Code", "Claude Code-custom-oauth"}
-
-// authKeychainCallTimeout bounds one platform keystore call. Every call carries
-// it: an unbounded call blocks the leg behind an interactive modal.
-const authKeychainCallTimeout = 2 * time.Second
 
 // authKeychainAbsentExitCodes are the platform tool's answers meaning the item
 // is not there. Any other non-zero status is transient and is never read as

@@ -6,7 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"time"
 )
+
+// authKeychainCallTimeout bounds one platform keystore call. Every call carries
+// it: an unbounded call blocks the leg behind an interactive modal.
+const authKeychainCallTimeout = 2 * time.Second
 
 // authKeychainTool is the platform keystore command. It is a package variable
 // so the removal ladder is exercised without a real login Keychain.

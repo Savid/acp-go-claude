@@ -17,6 +17,11 @@ const envClaudeCodeNested = "CLAUDECODE"
 const envSearchPath = "PATH"
 const cliArgOutputFormat = "--output-format"
 
+// defaultCLIExecutable is the executable the adapter resolves when no CLI path
+// was configured. It is the executable's own identity, which is not the Darwin
+// registry vendor that happens to spell the same word.
+const defaultCLIExecutable = "claude"
+
 var commandPipe = os.Pipe
 
 // minClaudeVersion is the oldest Claude CLI the adapter supports. The adapter's
@@ -234,7 +239,7 @@ func Discover(ctx context.Context, cliPath string, policy any) (string, error) {
 	}
 
 	if strings.TrimSpace(cliPath) == "" {
-		cliPath = "claude"
+		cliPath = defaultCLIExecutable
 	}
 
 	path, err := resolveProcessExecutable(cliPath, BuildEnv(options))

@@ -555,14 +555,14 @@ func TestCompleteTurnSupervisorAuthorityRefusesToProveWhatItCannotRelease(t *tes
 	require.ErrorContains(
 		t,
 		completeTurnSupervisorAuthority(&completion, nil, true),
-		"Claude guardian authority is unavailable at completion",
+		"claude guardian authority is unavailable at completion",
 	)
 
 	var absent *turnSupervisorAuthority
 	require.ErrorContains(
 		t,
 		completeTurnSupervisorAuthority(&completion, &absent, true),
-		"Claude guardian authority is unavailable at completion",
+		"claude guardian authority is unavailable at completion",
 	)
 	require.Zero(t, completion.Len())
 

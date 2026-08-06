@@ -478,7 +478,7 @@ func validateTurnSupervisorAdoptedAuthorityDisposition(
 			testRoot,
 		)
 	default:
-		return errors.New("Claude adopted authority origin is invalid")
+		return errors.New("claude adopted authority origin is invalid")
 	}
 }
 
@@ -549,7 +549,7 @@ func validateAdoptedStandaloneAgentIdentityDisposition(
 	}
 
 	if owner != want {
-		return errors.New("Claude adopted standalone authority does not match its immutable owner binding")
+		return errors.New("claude adopted standalone authority does not match its immutable owner binding")
 	}
 
 	return validateAgentStandalonePriorDisposition(directory, owner, trustedUID, trustedGID)

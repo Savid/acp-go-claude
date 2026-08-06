@@ -63,7 +63,7 @@ type linuxProcessIdentity struct {
 }
 
 var (
-	errTurnSupervisorGuardianExited = errors.New("Claude guardian exited before native launch")
+	errTurnSupervisorGuardianExited = errors.New("claude guardian exited before native launch")
 
 	turnSupervisorExecutable        = os.Executable
 	turnSupervisorMemfd             = unix.MemfdCreate
@@ -413,7 +413,7 @@ func awaitProcessTreeReady(launch *processTreeCommand) error {
 	}
 
 	if failure, ok := strings.CutPrefix(strings.TrimSpace(line), turnSupervisorFailure); ok {
-		return fmt.Errorf("Claude native supervisor failed before readiness: %s", failure)
+		return fmt.Errorf("claude native supervisor failed before readiness: %s", failure)
 	}
 
 	if line != turnSupervisorReady {
@@ -492,7 +492,7 @@ func startTurnSupervisorNative(native *exec.Cmd, isolation *ProcessIsolation, be
 func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, readyOutput io.Writer) (runErr error) {
 	completion := turnSupervisorOpenFile(6, "claude-turn-supervisor-completion")
 	if completion == nil {
-		return errors.New("Claude guardian completion descriptor is unavailable")
+		return errors.New("claude guardian completion descriptor is unavailable")
 	}
 	defer completion.Close()
 
@@ -504,7 +504,7 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 	if !ok {
 		_, _ = completion.WriteString(turnSupervisorProof)
 
-		return errors.New("Claude guardian control input is not an inheritable file")
+		return errors.New("claude guardian control input is not an inheritable file")
 	}
 
 	var config turnSupervisorConfig
@@ -529,7 +529,7 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 	if startInput == nil {
 		_, _ = completion.WriteString(turnSupervisorProof)
 
-		return errors.New("Claude guardian start gate is unavailable")
+		return errors.New("claude guardian start gate is unavailable")
 	}
 	defer startInput.Close()
 
@@ -711,7 +711,7 @@ livenessExited:
 	if failure, failed := strings.CutPrefix(strings.TrimSpace(doneLine), turnSupervisorFailure); failed {
 		closeErr := completeTurnSupervisorAuthority(completion, &authority, false)
 
-		return errors.Join(waitErr, fmt.Errorf("Claude liveness completion failed: %s", failure), doneErr, containErr, closeErr)
+		return errors.Join(waitErr, fmt.Errorf("claude liveness completion failed: %s", failure), doneErr, containErr, closeErr)
 	}
 
 	completionErr := completeTurnSupervisorAuthority(
@@ -720,7 +720,7 @@ livenessExited:
 		containErr == nil && turnSupervisorSignaledExit(waitErr),
 	)
 
-	return errors.Join(waitErr, fmt.Errorf("Claude liveness exited without completion report: %v", doneErr), containErr, completionErr)
+	return errors.Join(waitErr, fmt.Errorf("claude liveness exited without completion report: %v", doneErr), containErr, completionErr)
 }
 
 type turnSupervisorAuthority struct {
@@ -747,7 +747,7 @@ func completeTurnSupervisorAuthority(
 	contained bool,
 ) error {
 	if authority == nil || *authority == nil {
-		return errors.New("Claude guardian authority is unavailable at completion")
+		return errors.New("claude guardian authority is unavailable at completion")
 	}
 
 	closeErr := (*authority).Close()
@@ -1009,7 +1009,7 @@ func readTurnSupervisorStartGate(input io.Reader) error {
 func parseTurnSupervisorLivenessReady(line string) (int, error) {
 	text, ok := strings.CutSuffix(line, "\n")
 	if !ok {
-		return 0, errors.New("Claude liveness readiness is not newline terminated")
+		return 0, errors.New("claude liveness readiness is not newline terminated")
 	}
 
 	pidText, ok := strings.CutPrefix(text, "ready:")
@@ -1031,21 +1031,21 @@ func validateTurnSupervisorConfig(config turnSupervisorConfig) error {
 	}
 
 	if config.IdentityLock != config.AuthorityDomain {
-		return errors.New("Claude native supervisor identity lock and authority domain must be provided together")
+		return errors.New("claude native supervisor identity lock and authority domain must be provided together")
 	}
 
 	switch config.AuthorityOrigin {
 	case turnSupervisorBorrowed:
 		if !config.IdentityLock || config.Isolation.StandaloneOwnerID != "" || config.Isolation.StandaloneStateRoot != "" {
-			return errors.New("Claude borrowed supervisor authority disposition is invalid")
+			return errors.New("claude borrowed supervisor authority disposition is invalid")
 		}
 	case turnSupervisorStandalone:
 		if !validStandaloneOwnerID(config.Isolation.StandaloneOwnerID) ||
 			!validStandaloneStateRootPath(config.Isolation.StandaloneStateRoot) {
-			return errors.New("Claude standalone supervisor authority disposition is invalid")
+			return errors.New("claude standalone supervisor authority disposition is invalid")
 		}
 	default:
-		return errors.New("Claude native supervisor authority origin is invalid")
+		return errors.New("claude native supervisor authority origin is invalid")
 	}
 
 	validation := config.Isolation
@@ -1084,7 +1084,7 @@ func runTurnSupervisorLiveness(configInput io.Reader, controlInput io.Reader, re
 			_ = startInput.Close()
 		}
 
-		return errors.New("Claude liveness inherited descriptors are unavailable")
+		return errors.New("claude liveness inherited descriptors are unavailable")
 	}
 
 	defer completion.Close()
@@ -1186,7 +1186,7 @@ func runTurnSupervisorNative(
 	}
 
 	if identityLock == nil || authorityDomain == nil {
-		return errors.New("Claude agent identity authority is incomplete")
+		return errors.New("claude agent identity authority is incomplete")
 	}
 
 	contained := false
@@ -1242,7 +1242,7 @@ func runTurnSupervisorNative(
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
 		contained = containErr == nil
 
-		return errors.Join(fmt.Errorf("Claude guardian start gate closed before native launch: %w", err), peerErr, containErr)
+		return errors.Join(fmt.Errorf("claude guardian start gate closed before native launch: %w", err), peerErr, containErr)
 	}
 
 	var finalPeerErr error

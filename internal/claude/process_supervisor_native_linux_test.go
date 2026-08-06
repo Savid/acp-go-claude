@@ -202,7 +202,7 @@ func TestRunTurnSupervisorNativeRefusesEveryUnusableAuthority(t *testing.T) {
 			supervisorCovEncode(t, supervisorCovConfig()), nil, nil, strings.NewReader("\x01"),
 			io.Discard, io.Discard, 6, 7,
 		)
-		require.ErrorContains(t, err, "Claude agent identity authority is incomplete")
+		require.ErrorContains(t, err, "claude agent identity authority is incomplete")
 	})
 }
 
@@ -266,7 +266,7 @@ func TestRunTurnSupervisorNativeRefusesToLaunchWithoutItsGuardianAndGate(t *test
 			[]io.Reader{control}, nil, strings.NewReader(""),
 			ready, io.Discard, 6, 7,
 		)
-		require.ErrorContains(t, err, "Claude guardian start gate closed before native launch")
+		require.ErrorContains(t, err, "claude guardian start gate closed before native launch")
 		require.NotContains(
 			t, strings.Join(ready.lines(), ""), "ready:",
 			"a native root was announced without the parent releasing the start gate",

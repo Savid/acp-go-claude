@@ -234,7 +234,7 @@ func Discover(ctx context.Context, cliPath string, policy any) (string, error) {
 	}
 
 	if strings.TrimSpace(cliPath) == "" {
-		cliPath = "claude" //nolint:goconst // Executable identity is distinct from Darwin registry metadata.
+		cliPath = "claude"
 	}
 
 	path, err := resolveProcessExecutable(cliPath, BuildEnv(options))

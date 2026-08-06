@@ -426,8 +426,16 @@ func TestTurnSupervisorBootstrapSelectsTheLivenessRole(t *testing.T) {
 
 	guardian := 0
 	liveness := 0
-	turnSupervisorRun = func(io.Reader, io.Reader, io.Writer) error { guardian++; return nil }
-	turnSupervisorRunLiveness = func(io.Reader, io.Reader, io.Writer) error { liveness++; return nil }
+	turnSupervisorRun = func(io.Reader, io.Reader, io.Writer) error {
+		guardian++
+
+		return nil
+	}
+	turnSupervisorRunLiveness = func(io.Reader, io.Reader, io.Writer) error {
+		liveness++
+
+		return nil
+	}
 
 	turnSupervisorBootstrap()
 

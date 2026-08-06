@@ -135,19 +135,92 @@ func TestAgentStandaloneCovDomainAcquisitionRefusesAnUnusableRegistry(t *testing
 // replaced the record while we queued for the lease must decide the outcome,
 // not the record we read before queueing.
 func TestAgentStandaloneCovDomainAcquisitionRereadsUnderTheExclusiveLease(t *testing.T) {
-	// A peer that publishes the authority record while we queue for the
-	// exclusive lease is refused, and its record survives intact. Note that
-	// acquireAgentStandaloneDomain does not carry the re-read record's
-	// AuthorityID into the domain it revalidates on this one branch, the way it
-	// does on every other, so this refusal is currently unconditional; the
-	// assertion below pins today's behaviour and the finding is reported
-	// separately.
+	// A peer that publishes an authority record for this very domain while we
+	// queue for the exclusive lease decides the outcome: the claim adopts that
+	// record rather than minting its own. It carries the re-read record's
+	// AuthorityID into the domain it revalidates, exactly as every other branch
+	// does, so the recheck agrees and the claim returns the exclusive lease
+	// downgraded to a shared one, leaving the peer's record untouched.
 	t.Run("peer publishes a matching record while we queue", func(t *testing.T) {
 		directory, ownerUID, ownerGID := agentStandaloneCovPristineDomainFixture(t)
 		want := agentStandaloneCovStaticOwner(62903, 62904, "queued")
 		record, err := currentAgentAuthorityDomain(directory)
 		require.NoError(t, err)
 		record.AuthorityID = "0123456789abcdef0123456789abcdef"
+		recordPath := filepath.Join(directory.Name(), agentStandaloneCovDomainRecord)
+		held := agentStandaloneCovHoldDomainShared(t, directory)
+		published := make(chan struct{})
+		var peerBytes []byte
+		var peerStat unix.Stat_t
+		go func() {
+			time.Sleep(60 * time.Millisecond)
+			publishErr := replaceAgentStandaloneDomainRecord(directory, ownerUID, ownerGID, record)
+			var readErr, statErr error
+			if publishErr == nil {
+				peerBytes, readErr = os.ReadFile(recordPath)
+				statErr = unix.Stat(recordPath, &peerStat)
+			}
+			closeErr := held.Close()
+			if publishErr != nil || readErr != nil || statErr != nil || closeErr != nil {
+				panic(errors.Join(publishErr, readErr, statErr, closeErr))
+			}
+			close(published)
+		}()
+
+		lease, err := acquireAgentStandaloneDomain(
+			directory, want, ownerUID, ownerGID, true, time.Now().Add(5*time.Second), nil, nil,
+		)
+		<-published
+		require.NoError(t, err)
+		require.NotNil(t, lease)
+		defer lease.Close()
+		reread, err := loadAgentAuthorityDomainRecord(directory, ownerUID, ownerGID)
+		require.NoError(t, err)
+		require.Equal(t, record.AuthorityID, reread.AuthorityID,
+			"the claim must adopt the peer's authority id rather than mint one of its own",
+		)
+		after, readErr := os.ReadFile(recordPath)
+		require.NoError(t, readErr)
+		require.Equal(t, peerBytes, after)
+		var afterStat unix.Stat_t
+		require.NoError(t, unix.Stat(recordPath, &afterStat))
+		require.Equal(t, peerStat.Ino, afterStat.Ino, "an adopting claim must not republish the record")
+		contender, err := openAgentStandaloneNamedLock(directory, "domain.lock", false, ownerUID, ownerGID)
+		require.NoError(t, err)
+		require.NoError(t, unix.Flock(int(contender.Fd()), unix.LOCK_SH|unix.LOCK_NB),
+			"the adopted domain must be held as a shared lease",
+		)
+		require.ErrorIs(t, unix.Flock(int(contender.Fd()), unix.LOCK_EX|unix.LOCK_NB), unix.EWOULDBLOCK)
+		require.NoError(t, contender.Close())
+	})
+
+	// Adopting that record is not final until the shared lease is in force. A
+	// second peer that republishes while the claim downgrades its exclusive
+	// lease must be refused: the lease the claim is about to return would
+	// otherwise name an authority id that is no longer the published one.
+	t.Run("peer replaces the adopted record while we downgrade", func(t *testing.T) {
+		directory, ownerUID, ownerGID := agentStandaloneCovPristineDomainFixture(t)
+		want := agentStandaloneCovStaticOwner(62951, 62952, "downgrade")
+		record, err := currentAgentAuthorityDomain(directory)
+		require.NoError(t, err)
+		record.AuthorityID = "0123456789abcdef0123456789abcdef"
+		moved := record
+		moved.AuthorityID = "89abcdef0123456789abcdef01234567"
+		// The downgrade to the shared lease is the only bare LOCK_SH this claim
+		// asks for; every acquisition adds LOCK_NB. It is therefore the only
+		// place a test can move the record inside the window between the record
+		// the claim adopted and the record it rechecks.
+		moves := 0
+		previous := agentStandaloneFlock
+		t.Cleanup(func() { agentStandaloneFlock = previous })
+		agentStandaloneFlock = func(fd, how int) error {
+			if how == unix.LOCK_SH && moves == 0 {
+				moves++
+				require.NoError(t, replaceAgentStandaloneDomainRecord(directory, ownerUID, ownerGID, moved))
+			}
+
+			return previous(fd, how)
+		}
 		held := agentStandaloneCovHoldDomainShared(t, directory)
 		published := make(chan struct{})
 		go func() {
@@ -166,9 +239,12 @@ func TestAgentStandaloneCovDomainAcquisitionRereadsUnderTheExclusiveLease(t *tes
 		<-published
 		require.Nil(t, lease)
 		require.ErrorContains(t, err, "changed during shared-lease transition")
+		require.Equal(t, 1, moves, "the second peer write must land inside the downgrade")
 		reread, err := loadAgentAuthorityDomainRecord(directory, ownerUID, ownerGID)
 		require.NoError(t, err)
-		require.Equal(t, record.AuthorityID, reread.AuthorityID, "the peer record must survive the refusal")
+		require.Equal(t, moved.AuthorityID, reread.AuthorityID,
+			"the refusal must leave the newest peer record in place",
+		)
 		contender, err := openAgentStandaloneNamedLock(directory, "domain.lock", false, ownerUID, ownerGID)
 		require.NoError(t, err)
 		require.NoError(t, unix.Flock(int(contender.Fd()), unix.LOCK_EX|unix.LOCK_NB),

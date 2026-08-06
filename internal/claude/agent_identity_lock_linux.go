@@ -414,8 +414,8 @@ func validateBorrowedAgentIdentityDisposition(uid, gid uint32, testOnly bool, te
 	}
 	defer directory.Close()
 
-	if err = rejectBorrowedAgentIdentityTemporaries(directory); err != nil {
-		return err
+	if rejectErr := rejectBorrowedAgentIdentityTemporaries(directory); rejectErr != nil {
+		return rejectErr
 	}
 
 	deadline := time.Now().Add(agentStandaloneClaimMax)
@@ -515,11 +515,11 @@ func validateAdoptedStandaloneAgentIdentityDisposition(
 	}
 	defer directory.Close()
 
-	if err = rejectBorrowedAgentIdentityTemporaries(directory); err != nil {
-		return err
+	if rejectErr := rejectBorrowedAgentIdentityTemporaries(directory); rejectErr != nil {
+		return rejectErr
 	}
 
-	if err = auditAgentStandaloneAuthorityRoot(
+	if auditErr := auditAgentStandaloneAuthorityRoot(
 		directory,
 		trustedUID,
 		trustedGID,
@@ -529,8 +529,8 @@ func validateAdoptedStandaloneAgentIdentityDisposition(
 		time.Now().Add(agentStandaloneClaimMax),
 		nil,
 		nil,
-	); err != nil {
-		return err
+	); auditErr != nil {
+		return auditErr
 	}
 
 	want := agentStandaloneOwner{
@@ -607,13 +607,13 @@ func proveInheritedAgentIdentityLock(
 		}
 	}()
 
-	if err = validateAgentIdentityLockFile(contender, trustedUID, trustedGID); err != nil {
-		return err
+	if validateErr := validateAgentIdentityLockFile(contender, trustedUID, trustedGID); validateErr != nil {
+		return validateErr
 	}
 
 	var contenderStat unix.Stat_t
-	if err = agentIdentityLockFstat(contenderFD, &contenderStat); err != nil {
-		return err
+	if agentErr := agentIdentityLockFstat(contenderFD, &contenderStat); agentErr != nil {
+		return agentErr
 	}
 
 	if contenderStat.Dev != descriptor.Dev || contenderStat.Ino != descriptor.Ino {
@@ -650,8 +650,8 @@ func validateInheritedAgentIdentityFlock(file *os.File, descriptor unix.Stat_t, 
 
 		lockLines++
 
-		if err = validateInheritedAgentIdentityFlockLine(fields, descriptor, wantMode); err != nil {
-			return err
+		if validateErr := validateInheritedAgentIdentityFlockLine(fields, descriptor, wantMode); validateErr != nil {
+			return validateErr
 		}
 	}
 

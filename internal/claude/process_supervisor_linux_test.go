@@ -506,6 +506,50 @@ func TestTurnSupervisorConfigAndReadinessBranches(t *testing.T) {
 	}
 }
 
+// TestProcessTreeReadinessSpansTheStandaloneClaimBudget proves that the managed
+// root's wait for the guardian's armed report is at least as long as the
+// standalone identity claim the report waits behind, and that the guardian's
+// own post-claim wait is deliberately held apart from it.
+//
+// The guardian writes turnSupervisorArmed only after
+// acquireTurnSupervisorAuthority has returned, and that claim is allowed
+// agentStandaloneClaimMax to finish. A readiness wait shorter than the claim
+// budget therefore cancels a claim that was still making progress and reports a
+// native supervisor readiness failure that never happened. The first case
+// reports the armed state one second past the retired five-second budget and
+// requires the wait to accept it. The second case pins the distinction: the
+// guardian arms turnSupervisorLivenessReadyWait only after its own claim has
+// already completed, so that budget does not span a claim and must not be
+// raised to the claim maximum along with the readiness wait.
+func TestProcessTreeReadinessSpansTheStandaloneClaimBudget(t *testing.T) {
+	require.Less(t, turnSupervisorLivenessReadyWait, agentStandaloneClaimMax,
+		"post-claim liveness wait is no longer held apart from the claim budget")
+
+	report := turnSupervisorLivenessReadyWait + time.Second
+	require.Less(t, report, agentStandaloneClaimMax,
+		"readiness report does not fit inside the claim budget")
+
+	read, write, err := os.Pipe()
+	require.NoError(t, err)
+
+	reported := make(chan struct{})
+	t.Cleanup(func() {
+		<-reported
+		_ = write.Close()
+	})
+	go func() {
+		defer close(reported)
+		time.Sleep(report)
+		_, _ = io.WriteString(write, turnSupervisorArmed+turnSupervisorReady)
+	}()
+
+	started := time.Now()
+	require.NoError(t, awaitProcessTreeReady(&processTreeCommand{ready: read}),
+		"armed state reported %v into the claim", report)
+	require.GreaterOrEqual(t, time.Since(started), report,
+		"the readiness wait did not outlast the retired budget")
+}
+
 func TestTurnSupervisorEnvironmentReplacesInternalMode(t *testing.T) {
 	t.Setenv(turnSupervisorModeEnv, "stale")
 	env := supervisorIdentityEnvironment(

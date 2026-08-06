@@ -214,7 +214,7 @@ func TestRunTurnSupervisorGuardianRefusesAnIncompleteInheritance(t *testing.T) {
 		turnSupervisorOpenFile = func(uintptr, string) *os.File { return nil }
 
 		err := fixture.await(t, fixture.start(t))
-		require.ErrorContains(t, err, "Claude guardian completion descriptor is unavailable")
+		require.ErrorContains(t, err, "claude guardian completion descriptor is unavailable")
 	})
 
 	t.Run("completion descriptor cannot be sealed", func(t *testing.T) {
@@ -235,7 +235,7 @@ func TestRunTurnSupervisorGuardianRefusesAnIncompleteInheritance(t *testing.T) {
 		}()
 
 		err := fixture.await(t, done)
-		require.ErrorContains(t, err, "Claude guardian control input is not an inheritable file")
+		require.ErrorContains(t, err, "claude guardian control input is not an inheritable file")
 		require.Equal(t, turnSupervisorProof, fixture.proof(t))
 	})
 
@@ -272,7 +272,7 @@ func TestRunTurnSupervisorGuardianRefusesAnIncompleteInheritance(t *testing.T) {
 		fixture := supervisorCovGuardianFixtureAt(t, config, "", 7)
 
 		err := fixture.await(t, fixture.start(t))
-		require.ErrorContains(t, err, "Claude guardian start gate is unavailable")
+		require.ErrorContains(t, err, "claude guardian start gate is unavailable")
 		require.Equal(t, []uintptr{6, 9}, *fixture.opened)
 		require.Equal(t, turnSupervisorProof, fixture.proof(t))
 	})
@@ -575,7 +575,7 @@ func TestRunTurnSupervisorGuardianRetiresTheTurnOnItsTerminalReport(t *testing.T
 		fixture.releaseOnArmed(t)
 
 		err := fixture.await(t, fixture.start(t))
-		require.ErrorContains(t, err, "Claude liveness completion failed: liveness gave up")
+		require.ErrorContains(t, err, "claude liveness completion failed: liveness gave up")
 
 		// A helper that reported a failure was never contained by itself, so
 		// the guardian must not publish the proof that retires the identity.
@@ -603,7 +603,7 @@ func TestRunTurnSupervisorGuardianRetiresTheTurnOnItsTerminalReport(t *testing.T
 		target <- syscall.SIGKILL
 
 		err := fixture.await(t, done)
-		require.ErrorContains(t, err, "Claude liveness exited without completion report")
+		require.ErrorContains(t, err, "claude liveness exited without completion report")
 
 		// The helper died from the guardian's own forwarded signal and the tree
 		// was contained, so the turn is provably over even without a report.

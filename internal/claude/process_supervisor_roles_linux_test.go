@@ -522,7 +522,7 @@ func TestRunTurnSupervisorLivenessRequiresItsWholeDescriptorSet(t *testing.T) {
 			}
 
 			err := runTurnSupervisorLiveness(strings.NewReader("{}"), strings.NewReader(""), io.Discard)
-			require.ErrorContains(t, err, "Claude liveness inherited descriptors are unavailable")
+			require.ErrorContains(t, err, "claude liveness inherited descriptors are unavailable")
 
 			for index, file := range inherited {
 				if index == missing {

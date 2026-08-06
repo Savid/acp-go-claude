@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1355,7 +1356,7 @@ func validateTurnSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) err
 	}
 
 	poll := []unix.PollFd{{
-		Fd:     int32(peer.Fd()),
+		Fd:     pollFD(peer),
 		Events: unix.POLLIN | unix.POLLHUP | unix.POLLERR,
 	}}
 
@@ -1532,4 +1533,21 @@ func signalLinuxIdentity(identity linuxProcessIdentity, processSignal syscall.Si
 	}
 
 	return nil
+}
+
+// Seam for the fail-closed guard in pollFD. Linux hands out small descriptors,
+// so the guard is unreachable through a real *os.File; tests swap this to reach it.
+var pollFDSource = (*os.File).Fd
+
+// pollFD narrows a descriptor to the int32 unix.PollFd carries. Linux hands out
+// small non-negative descriptors, so the guard never fires; when the value
+// cannot be represented it yields -1, which poll reports as EBADF rather than
+// aliasing onto a live descriptor.
+func pollFD(file *os.File) int32 {
+	fd := pollFDSource(file)
+	if fd > math.MaxInt32 {
+		return -1
+	}
+
+	return int32(fd)
 }

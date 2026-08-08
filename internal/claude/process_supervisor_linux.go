@@ -391,6 +391,10 @@ func awaitProcessTreeReady(launch *processTreeCommand) error {
 		return fmt.Errorf("await Claude native supervisor readiness: %w", err)
 	}
 
+	if failure, ok := strings.CutPrefix(strings.TrimSpace(line), turnSupervisorFailure); ok {
+		return fmt.Errorf("claude native supervisor failed before readiness: %s", failure)
+	}
+
 	if line != turnSupervisorArmed {
 		return fmt.Errorf("invalid Claude native supervisor armed state %q", strings.TrimSpace(line))
 	}
@@ -1055,6 +1059,10 @@ func parseTurnSupervisorLivenessReady(line string) (int, error) {
 	text, ok := strings.CutSuffix(line, "\n")
 	if !ok {
 		return 0, errors.New("claude liveness readiness is not newline terminated")
+	}
+
+	if failure, failed := strings.CutPrefix(text, turnSupervisorFailure); failed {
+		return 0, fmt.Errorf("claude liveness failed before readiness: %s", failure)
 	}
 
 	pidText, ok := strings.CutPrefix(text, "ready:")

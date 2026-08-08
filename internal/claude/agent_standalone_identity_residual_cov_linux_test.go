@@ -4,6 +4,7 @@ package claude
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -124,7 +125,7 @@ func TestAgentStandaloneResBinderRefusesEveryProcfsDisagreement(t *testing.T) {
 		}
 
 		require.ErrorContains(t, validateAgentStandaloneBinder(),
-			"standalone agent authority binder requires canonical procfs self identity",
+			fmt.Sprintf("procfs self PID anchor is %q, want %q", strconv.Itoa(os.Getpid()+1), strconv.Itoa(os.Getpid())),
 		)
 	})
 

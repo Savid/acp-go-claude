@@ -65,11 +65,11 @@ func TestAgentStandaloneCovRegistryWritesRefuseAnUnencodableRecord(t *testing.T)
 	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
 	owner := agentStandaloneCovStaticOwner(63301, 63302, "unencodable")
 
-	t.Run("session key", func(t *testing.T) {
-		agentStandaloneCovFaultEncoding(t, errors.New("injected session key encoding failure"))
+	t.Run("owner digest", func(t *testing.T) {
+		agentStandaloneCovFaultEncoding(t, errors.New("injected owner digest encoding failure"))
 
-		key, err := agentStandaloneSessionKey(owner)
-		require.ErrorContains(t, err, "injected session key encoding failure")
+		key, err := agentStandaloneOwnerDigest(owner)
+		require.ErrorContains(t, err, "injected owner digest encoding failure")
 		require.Empty(t, key)
 	})
 
@@ -113,12 +113,12 @@ func TestAgentStandaloneCovRegistryWritesRefuseAnUnencodableRecord(t *testing.T)
 	})
 }
 
-// TestAgentStandaloneCovRetainedMarkerChecksRefuseAnUnderivableSessionKey
+// TestAgentStandaloneCovRetainedMarkerChecksRefuseAnUnderivableOwnerDigest
 // proves every comparison of a retained marker against its owner refuses when
-// the owner's session key cannot be derived. Comparing against an empty key
+// the owner's owner digest cannot be derived. Comparing against an empty key
 // would let a marker minted for a different owner tuple be accepted as this
 // owner's own retained disposition.
-func TestAgentStandaloneCovRetainedMarkerChecksRefuseAnUnderivableSessionKey(t *testing.T) {
+func TestAgentStandaloneCovRetainedMarkerChecksRefuseAnUnderivableOwnerDigest(t *testing.T) {
 	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
 	owner := agentStandaloneCovOwner(63311, 63312, "session-derive", "/srv/claude/session-derive", 121, 122)
 

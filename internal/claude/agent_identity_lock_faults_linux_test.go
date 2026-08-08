@@ -206,9 +206,9 @@ func identityLockCovBorrowedFixture(t *testing.T, uid, gid uint32) identityLockC
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = identityFile.Close() })
-	const sessionKey = "borrowed-cov-session"
+	const ownerDigest = "borrowed-cov-session"
 	affinity, err := openAgentStandaloneNamedLock(
-		directory, agentStandaloneAffinityLockName(sessionKey), true, ownerUID, ownerGID,
+		directory, agentStandaloneAffinityLockName(ownerDigest), true, ownerUID, ownerGID,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func identityLockCovBorrowedFixture(t *testing.T, uid, gid uint32) identityLockC
 		t.Fatal(err)
 	}
 	if err = publishAgentStandaloneActive(
-		directory, uid, gid, ownerUID, ownerGID, sessionKey, deadline, nil, nil,
+		directory, uid, gid, ownerUID, ownerGID, ownerDigest, deadline, nil, nil,
 	); err != nil {
 		t.Fatal(err)
 	}

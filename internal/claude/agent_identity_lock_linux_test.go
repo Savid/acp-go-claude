@@ -68,10 +68,10 @@ func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T)
 	if err = unix.Flock(int(identityFile.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	const sessionKey = "host-owned-session"
+	const ownerDigest = "host-owned-session"
 	affinity, err := openAgentStandaloneNamedLock(
 		directory,
-		agentStandaloneAffinityLockName(sessionKey),
+		agentStandaloneAffinityLockName(ownerDigest),
 		true,
 		uint32(os.Geteuid()),
 		uint32(os.Getegid()),
@@ -88,7 +88,7 @@ func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T)
 		gid,
 		uint32(os.Geteuid()),
 		uint32(os.Getegid()),
-		sessionKey,
+		ownerDigest,
 		deadline,
 		nil,
 		nil,
@@ -128,7 +128,7 @@ func TestBorrowedDispositionRequiresOwnerlessActiveWithoutMutation(t *testing.T)
 	}
 
 	clean, err := json.Marshal(agentStandaloneMarker{
-		Version: 2, UID: uid, GID: gid, OwnerDigest: sessionKey, State: "clean-ready",
+		Version: 2, UID: uid, GID: gid, OwnerDigest: ownerDigest, State: "clean-ready",
 	})
 	if err != nil {
 		t.Fatal(err)

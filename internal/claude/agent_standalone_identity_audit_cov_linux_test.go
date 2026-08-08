@@ -42,7 +42,7 @@ func agentStandaloneCovWriteOwner(t *testing.T, directory *os.File, owner agentS
 // matches an owner exactly.
 func agentStandaloneCovWriteActiveMarker(t *testing.T, directory *os.File, owner agentStandaloneOwner) {
 	t.Helper()
-	key, err := agentStandaloneSessionKey(owner)
+	key, err := agentStandaloneOwnerDigest(owner)
 	require.NoError(t, err)
 	agentStandaloneCovWriteRegistryFile(
 		t, directory, strconv.FormatUint(uint64(owner.UID), 10)+".quarantine",
@@ -403,7 +403,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 				agentStandaloneCovWriteOwner(t, directory,
 					agentStandaloneCovOwner(62647, 62648, "stale-marker", "/srv/claude/stale-marker", 1, 2),
 				)
-				agentStandaloneCovWriteCleanMarker(t, directory, 62647, 62648, "not-the-session-key")
+				agentStandaloneCovWriteCleanMarker(t, directory, 62647, 62648, "not-the-owner-digest")
 			},
 			want: "incompatible retained marker",
 		},
@@ -645,7 +645,7 @@ func TestAgentStandaloneCovOwnerUniquenessAcceptsDisjointRegistryState(t *testin
 
 // TestAgentStandaloneCovPriorDispositionRequiresTheExactRetainedMarker proves
 // a returning owner is only admitted when its retained marker is the exact
-// ACTIVE marker for its own session key, that a missing marker is fine, and
+// ACTIVE marker for its own owner digest, that a missing marker is fine, and
 // that an unreadable marker is a refusal rather than "no marker".
 func TestAgentStandaloneCovPriorDispositionRequiresTheExactRetainedMarker(t *testing.T) {
 	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()

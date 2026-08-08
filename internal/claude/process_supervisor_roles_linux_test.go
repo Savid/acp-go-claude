@@ -17,7 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const supervisorCovSessionKey = "claude-supervisor-cov-session"
+const supervisorCovOwnerDigest = "claude-supervisor-cov-session"
 
 // supervisorCovDescriptorCount reports how many descriptors this process holds.
 // The supervisor legs under test each create up to nine descriptors before they
@@ -81,13 +81,13 @@ func supervisorCovBorrowedAuthority(t *testing.T, uid, gid uint32) (*os.File, *o
 	require.NoError(t, unix.Flock(int(identity.Fd()), unix.LOCK_EX|unix.LOCK_NB))
 
 	affinity, err := openAgentStandaloneNamedLock(
-		directory, agentStandaloneAffinityLockName(supervisorCovSessionKey), true, trustedUID, trustedGID,
+		directory, agentStandaloneAffinityLockName(supervisorCovOwnerDigest), true, trustedUID, trustedGID,
 	)
 	require.NoError(t, err)
 	require.NoError(t, affinity.Close())
 
 	require.NoError(t, publishAgentStandaloneActive(
-		directory, uid, gid, trustedUID, trustedGID, supervisorCovSessionKey, deadline, nil, nil,
+		directory, uid, gid, trustedUID, trustedGID, supervisorCovOwnerDigest, deadline, nil, nil,
 	))
 
 	return identity, domain

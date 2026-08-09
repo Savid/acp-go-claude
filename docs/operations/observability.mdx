@@ -17,8 +17,8 @@ timing, request outcomes, and counters, and by default avoids recording prompt
 text, tool inputs, tool outputs, and raw Claude event bodies.
 
 The `acp_go_claude.runtime.containment` gauge records the selected containment
-mode in its `containment` attribute: `authoritative`, `best_effort`, or
-`unavailable`. Embedded hosts receive the same selection through
+mode in its `containment` attribute: `authoritative`, `shared_identity`,
+`best_effort`, or `unavailable`. Embedded hosts receive the same selection through
 `RuntimeResourceHooks.ObserveContainment` and can query it with
 `Agent.ContainmentMode()`. Darwin best effort never publishes
 provider-descendant snapshots, including a zero value, because its process

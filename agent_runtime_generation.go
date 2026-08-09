@@ -24,7 +24,7 @@ func (a *Agent) prepareDiscoveryGeneration(ctx context.Context) (*claude.DarwinG
 		return a.prepareDarwinGeneration(ctx, RuntimeResourceDiscovery)
 	}
 
-	if a.containmentMode != RuntimeContainmentAuthoritative {
+	if !a.containmentMode.provesWholeTreeLifecycle() {
 		return nil, ErrProcessContainmentIncomplete
 	}
 

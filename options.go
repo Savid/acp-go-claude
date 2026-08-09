@@ -58,7 +58,14 @@ const privateAdapterEnvPrefix = "ACP_" + "GO_CLAUDE_INTERNAL_"
 const (
 	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
 	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
-	RuntimeContainmentUnavailable   RuntimeContainmentMode = "unavailable"
+	// RuntimeContainmentSharedIdentity is the boundary a supervisor proves when
+	// the native identity is the identity it already runs as. The subreaper
+	// tree, the descendant reaping and the process-group teardown are the
+	// authoritative ones, so whole-tree lifecycle is still proven; what is
+	// absent is the credential separation between the supervisor and the agent,
+	// and the host-global record of who holds the identity.
+	RuntimeContainmentSharedIdentity RuntimeContainmentMode = "shared_identity"
+	RuntimeContainmentUnavailable    RuntimeContainmentMode = "unavailable"
 )
 
 type RuntimeStartupStage string

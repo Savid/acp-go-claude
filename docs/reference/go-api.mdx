@@ -137,9 +137,9 @@ or `discovery` and return an idempotently wrapped release function. Native-root
 release happens only after the native controller has stopped; scratch release
 happens after deletion. Claude is lockless and emits no home-lock-supervisor
 count. `Agent.ContainmentMode()` and `ObserveContainment` report
-`authoritative`, `best_effort`, or `unavailable`. Absolute descendant snapshots
-are emitted only under authoritative containment; Darwin best effort suppresses
-all such snapshots, including zero. Startup stages are `spawn`, `readiness`,
+`authoritative`, `shared_identity`, `best_effort`, or `unavailable`. Absolute
+descendant snapshots are emitted only under authoritative or shared-identity
+containment; Darwin best effort suppresses all such snapshots, including zero. Startup stages are `spawn`, `readiness`,
 `configuration`, and `session`
 where applicable. A nil callback keeps standalone use unbounded.
 

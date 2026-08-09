@@ -7,13 +7,16 @@ import (
 	"testing"
 )
 
+// testProcessIsolation returns the isolated shape: a native identity that is
+// never the identity running the test, so the fixture keeps describing a launch
+// that has a privilege boundary to cross whoever runs it.
 func testProcessIsolation() *ProcessIsolation {
 	uid, gid := os.Getuid(), os.Getgid()
-	if uid == 0 {
-		uid = 1
+	if uid == os.Geteuid() {
+		uid++
 	}
-	if gid == 0 {
-		gid = 1
+	if gid == os.Getegid() {
+		gid++
 	}
 	environment := make(map[string]string)
 	for _, entry := range os.Environ() {

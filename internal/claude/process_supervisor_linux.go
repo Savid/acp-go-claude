@@ -34,6 +34,7 @@ const (
 	turnSupervisorFailure      = "error:"
 	turnSupervisorBorrowed     = "borrowed"
 	turnSupervisorStandalone   = "standalone"
+	turnSupervisorShared       = "shared"
 
 	// turnSupervisorLivenessReadyWait bounds the guardian's wait for its
 	// liveness child's readiness report. The guardian arms it only after
@@ -230,8 +231,16 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 		AuthorityDomain: options.Isolation.AuthorityDomain != nil,
 		AuthorityOrigin: turnSupervisorStandalone,
 	}
-	if config.IdentityLock {
+
+	// The origin travels in the sealed config so the guardian and the liveness
+	// child inherit the one decision the parent made. Each of them re-derives it
+	// from its own identity and refuses a config that disagrees, so the stamp
+	// can direct the launch without being trusted on its own.
+	switch {
+	case config.IdentityLock:
 		config.AuthorityOrigin = turnSupervisorBorrowed
+	case sharedProcessIdentity(options.Isolation):
+		config.AuthorityOrigin = turnSupervisorShared
 	}
 
 	if config.Path == "" || len(config.Args) == 0 {
@@ -831,6 +840,13 @@ func acquireTurnSupervisorAuthority(
 	canceled <-chan struct{},
 	signals <-chan os.Signal,
 ) (*turnSupervisorAuthority, error) {
+	// A shared identity carries no authority. The durable registry records who
+	// may enter an identity nobody is in, and the supervisor is already in this
+	// one, so there is nothing to claim, adopt, publish or release.
+	if config.AuthorityOrigin == turnSupervisorShared {
+		return &turnSupervisorAuthority{}, nil
+	}
+
 	if config.IdentityLock {
 		identity, domain, err := adoptTurnSupervisorBorrowedAuthority(config, identityFD, domainFD)
 		if err != nil {
@@ -1087,10 +1103,22 @@ func validateTurnSupervisorConfig(config turnSupervisorConfig) error {
 		return errors.New("claude native supervisor identity lock and authority domain must be provided together")
 	}
 
+	// Every process in the tree derives the origin from its own identity, and a
+	// child that disagrees with the config it was handed refuses rather than
+	// following it: the stamp decides which steps run, so a stamp that does not
+	// describe the process running them can only be wrong.
+	if sharedProcessIdentity(&config.Isolation) != (config.AuthorityOrigin == turnSupervisorShared) {
+		return errors.New("claude native supervisor authority origin does not match the identity it runs as")
+	}
+
 	switch config.AuthorityOrigin {
 	case turnSupervisorBorrowed:
 		if !config.IdentityLock || config.Isolation.StandaloneOwnerID != "" || config.Isolation.StandaloneStateRoot != "" {
 			return errors.New("claude borrowed supervisor authority disposition is invalid")
+		}
+	case turnSupervisorShared:
+		if config.IdentityLock || config.Isolation.StandaloneOwnerID != "" || config.Isolation.StandaloneStateRoot != "" {
+			return errors.New("claude shared supervisor authority disposition is invalid")
 		}
 	case turnSupervisorStandalone:
 		if !validStandaloneOwnerID(config.Isolation.StandaloneOwnerID) ||
@@ -1214,12 +1242,17 @@ func runTurnSupervisorNative(
 		standalone      *agentStandaloneIdentity
 		err             error
 	)
-	if config.IdentityLock {
+
+	shared := config.AuthorityOrigin == turnSupervisorShared
+
+	switch {
+	case shared:
+	case config.IdentityLock:
 		identityLock, authorityDomain, err = adoptTurnSupervisorBorrowedAuthority(config, identityFD, authorityFD)
 		if err != nil {
 			return err
 		}
-	} else {
+	default:
 		standalone, err = turnSupervisorAcquireStandalone(
 			config.Isolation.UID,
 			config.Isolation.GID,
@@ -1238,7 +1271,7 @@ func runTurnSupervisorNative(
 		authorityDomain = standalone.authority
 	}
 
-	if identityLock == nil || authorityDomain == nil {
+	if !shared && (identityLock == nil || authorityDomain == nil) {
 		return errors.New("claude agent identity authority is incomplete")
 	}
 
@@ -1440,6 +1473,14 @@ func validateTurnSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) err
 func validateTurnSupervisorIdentity(isolation *ProcessIsolation) error {
 	if isolation == nil {
 		return errors.New("process isolation is required")
+	}
+
+	// The supervisor drops privilege to reach the native identity, so it has to
+	// hold a higher one first. When the native identity is the one it already
+	// runs as there is no descent to make, and demanding root would refuse the
+	// only launch such a deployment can perform.
+	if sharedProcessIdentity(isolation) {
+		return nil
 	}
 
 	effectiveUID := turnSupervisorEffectiveUID()

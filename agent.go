@@ -145,7 +145,7 @@ func NewAgent(opts ...Option) *Agent {
 			validateProviderAuthDirectHome(options.ProviderAuthDirectHome),
 		),
 		containmentMode:     mode,
-		descendantProcesses: newRuntimeProcessSnapshotTracker(options.RuntimeResourceHooks, mode == RuntimeContainmentAuthoritative),
+		descendantProcesses: newRuntimeProcessSnapshotTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle()),
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
 			return claude.NewClient(log, options, nil)
 		},

@@ -66,6 +66,21 @@ it adopts, kills, and reaps daemonized and `setsid` descendants to kernel
 inherits none of the launch, control, proof, or lock descriptors, so it cannot
 signal its supervisor, forge completion, or overlap another native tree using
 the same host identity.
+When the configured native identity is the identity the adapter already runs as,
+there is no privilege boundary to establish and the supervisor takes a
+shared-identity arm. It skips only the steps that need one: the trusted-root
+assertion, the standalone owner fields, the whole `/var/lib/acp-go` authority,
+and the credential drop. The guardian and liveness pair, both subreaper claims,
+`PR_SET_NO_NEW_PRIVS`, core-dump suppression, descendant adoption to kernel
+`ECHILD`, the readiness handshake, and every inherited-descriptor fence are
+unchanged. The parent records that decision in the sealed launch configuration,
+and each child re-derives it from its own identity and refuses a configuration
+that disagrees. Containment is then reported as `shared_identity`: whole-tree
+lifecycle is still proven, but the agent runs with the adapter's credentials,
+concurrent sessions can read each other's state, and no host-global record of
+the identity exists. Non-empty standalone owner fields are refused in that
+shape, because the task vacancy they promise cannot be proven while the
+supervisor itself holds the identity.
 A dedicated guardian peer-liveness descriptor is fenced immediately before
 native start. Guardian death before readiness refuses native launch and lets
 liveness publish completion or quarantine only after kernel `ECHILD`.

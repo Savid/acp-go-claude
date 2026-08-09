@@ -59,6 +59,66 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 	}
 }
 
+// TestContainmentModeReportsASharedAgentIdentity proves the reported boundary
+// names what the launch actually proves. A supervisor that runs the agent under
+// its own identity still proves whole-tree lifecycle, so it is not best-effort
+// and not unavailable; what it does not prove is a credential boundary between
+// itself and the agent, so it must not keep calling itself authoritative.
+func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
+	originalGOOS, originalUID := runtimeGOOS, containmentEffectiveUID
+	t.Cleanup(func() { runtimeGOOS, containmentEffectiveUID = originalGOOS, originalUID })
+
+	runtimeGOOS = "linux"
+	containmentEffectiveUID = func() int { return 1000 }
+
+	shared := Options{ProcessIsolation: &ProcessIsolation{UID: 1000, GID: 1000}}
+	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(shared))
+	require.True(t, RuntimeContainmentSharedIdentity.provesWholeTreeLifecycle())
+
+	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(Options{}))
+	require.Equal(
+		t,
+		RuntimeContainmentAuthoritative,
+		containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 64251, GID: 64252}}),
+	)
+
+	containmentEffectiveUID = func() int { return 0 }
+	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(shared))
+
+	containmentEffectiveUID = func() int { return 1000 }
+	runtimeGOOS = "darwin"
+	require.Equal(t, RuntimeContainmentUnavailable, containmentMode(shared))
+}
+
+// TestSharedIdentityAgentKeepsItsLifecycleSurfaces proves the new mode is
+// reported to the embedding and still admits every surface a proven tree is
+// allowed: the descendant inventory and the runtime generation both belong to
+// the lifecycle boundary, which a shared identity does not weaken.
+func TestSharedIdentityAgentKeepsItsLifecycleSurfaces(t *testing.T) {
+	originalGOOS, originalUID := runtimeGOOS, containmentEffectiveUID
+	t.Cleanup(func() { runtimeGOOS, containmentEffectiveUID = originalGOOS, originalUID })
+
+	runtimeGOOS = "linux"
+	containmentEffectiveUID = func() int { return 1000 }
+
+	var observed RuntimeContainmentMode
+
+	agent := NewAgent(
+		WithProcessIsolation(ProcessIsolation{UID: 1000, GID: 1000}),
+		WithScratchDir(t.TempDir()),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ObserveContainment: func(_ context.Context, mode RuntimeContainmentMode) { observed = mode },
+		}),
+	)
+	require.Equal(t, RuntimeContainmentSharedIdentity, observed)
+	require.Equal(t, RuntimeContainmentSharedIdentity, agent.ContainmentMode())
+	require.True(t, agent.descendantProcesses.authoritative)
+
+	generation, err := agent.prepareDiscoveryGeneration(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, generation.Release(true))
+}
+
 func TestStandaloneIsolationDefaultsAndFencesDurableHome(t *testing.T) {
 	const stateRoot = "/var/lib/acp-go-claude"
 	isolation := ProcessIsolation{StandaloneOwnerID: "deployment-1", StandaloneStateRoot: stateRoot}

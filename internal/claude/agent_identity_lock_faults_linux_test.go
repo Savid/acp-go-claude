@@ -1303,6 +1303,29 @@ func TestAdoptedStandaloneAgentIdentityDispositionScopesMarkerTemporariesByUID(t
 			t.Fatalf("untrusted publication %q refusal = %v", staged, adoptErr)
 		}
 	})
+
+	// A marker temporary is stated from the same listing as an owner temporary,
+	// so a tolerated publisher's rename lands in the same window and is read the
+	// same way: gone is that publication completing, and nothing else is.
+	t.Run("a foreign marker publication that lands mid-adopt never fails the adopt", func(t *testing.T) {
+		staged := stage(t, "64304.quarantine.next-"+suffix, 0o600)
+		agentStandaloneCovFaultEntryStat(t, staged, unix.ENOENT)
+		if adoptErr := adopt(); adoptErr != nil {
+			t.Fatalf("adopt refused a completed foreign publication %q: %v", staged, adoptErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(authority, staged)); statErr != nil {
+			t.Fatalf("a tolerated foreign publication was not left alone: %v", statErr)
+		}
+	})
+
+	t.Run("a foreign marker temporary that faults any other way still refuses", func(t *testing.T) {
+		staged := stage(t, "64305.quarantine.next-"+suffix, 0o600)
+		denied := errors.New("injected adopt-time marker temporary stat failure")
+		agentStandaloneCovFaultEntryStat(t, staged, denied)
+		if adoptErr := adopt(); !errors.Is(adoptErr, denied) {
+			t.Fatalf("unstatable publication %q refusal = %v, want %v", staged, adoptErr, denied)
+		}
+	})
 }
 
 // TestAdoptedStandaloneAgentIdentityDispositionScopesOwnerTemporariesByUID is
@@ -1426,6 +1449,209 @@ func TestAdoptedStandaloneAgentIdentityDispositionScopesOwnerTemporariesByUID(t 
 		adoptErr := adopt()
 		if adoptErr == nil || !strings.Contains(adoptErr.Error(), "not a trusted bounded regular file") {
 			t.Fatalf("untrusted publication %q refusal = %v", staged, adoptErr)
+		}
+	})
+
+	// The tolerance stats an entry the adopt-time listing has already returned,
+	// so the publisher's rename can land in between. The entry is then gone,
+	// which is that publication completing and the one thing the adopt reads as
+	// such; a foreign temporary that is still there and fails to state any
+	// other way refuses exactly as before.
+	t.Run("a foreign owner publication that lands mid-adopt never fails the adopt", func(t *testing.T) {
+		staged := stage(t, "64324.owner.next-"+suffix, 0o600)
+		agentStandaloneCovFaultEntryStat(t, staged, unix.ENOENT)
+		if adoptErr := adopt(); adoptErr != nil {
+			t.Fatalf("adopt refused a completed foreign publication %q: %v", staged, adoptErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(authority, staged)); statErr != nil {
+			t.Fatalf("a tolerated foreign publication was not left alone: %v", statErr)
+		}
+	})
+
+	t.Run("a foreign owner temporary that faults any other way still refuses", func(t *testing.T) {
+		staged := stage(t, "64325.owner.next-"+suffix, 0o600)
+		denied := errors.New("injected adopt-time owner temporary stat failure")
+		agentStandaloneCovFaultEntryStat(t, staged, denied)
+
+		adoptErr := adopt()
+		if !errors.Is(adoptErr, denied) {
+			t.Fatalf("unstatable publication %q refusal = %v, want %v", staged, adoptErr, denied)
+		}
+
+		// The adopt-time audit returns its refusal unwrapped. A red carrying
+		// the borrow path's wrapper came from the other disposition proof, and
+		// belongs to that lane rather than to this one.
+		if strings.Contains(adoptErr.Error(), borrowedDispositionAuditPrefix) {
+			t.Fatalf("adopt refusal %v carries the borrowed audit prefix", adoptErr)
+		}
+	})
+}
+
+// borrowedDispositionAuditPrefix is the wrapper the borrow-time disposition
+// proof puts on every refusal its authority audit returns. The adopt-time proof
+// returns the same audit's refusals unwrapped, so the prefix is what tells the
+// two paths apart in a failure that only carries a message.
+const borrowedDispositionAuditPrefix = "audit borrowed agent identity authority: "
+
+// TestBorrowedDispositionScopesOwnerTemporariesByUID is the adopt-time rule
+// carried onto the borrow path, which audits the same host-wide authority root
+// one call earlier in the same shape. The borrowed-temporary scan immediately
+// above the audit already tolerates another uid's in-flight owner publication;
+// the audit refusing the entry the scan just cleared failed one of two
+// supported concurrent launches for the width of a rename.
+//
+// Every arm holds the staged entry in place for the whole of the call under
+// test, so the overlap is decided by the fixture rather than by scheduling. The
+// refusals stay exactly as strict: the borrower's own unresolved temporary, a
+// temporary whose name does not parse, one that is not a trusted bounded
+// regular file, and one that cannot be stated for any reason other than being
+// gone each still fail the borrow closed, as does every entry the audit could
+// not account for before.
+func TestBorrowedDispositionScopesOwnerTemporariesByUID(t *testing.T) {
+	const (
+		uid              = uint32(62495)
+		gid              = uint32(62496)
+		suffix           = "361afd7c59d01d96e4b2a2ab"
+		foreignTemporary = "64342.owner.next-" + suffix
+	)
+
+	fixture := identityLockCovBorrowedFixture(t, uid, gid)
+	stage := func(t *testing.T, name string, mode os.FileMode) string {
+		t.Helper()
+		path := filepath.Join(fixture.authorityPath, name)
+		if writeErr := os.WriteFile(path, []byte("partial"), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		if chmodErr := os.Chmod(path, mode); chmodErr != nil {
+			t.Fatal(chmodErr)
+		}
+		t.Cleanup(func() {
+			if removeErr := os.Remove(path); removeErr != nil {
+				t.Errorf("remove staged temporary %q: %v", name, removeErr)
+			}
+		})
+
+		return name
+	}
+	borrow := func() error {
+		return validateBorrowedAgentIdentityDisposition(uid, gid, true, fixture.root)
+	}
+
+	if err := borrow(); err != nil {
+		t.Fatalf("control borrow of an untouched host disposition: %v", err)
+	}
+
+	t.Run("a foreign uid's owner publication in flight never fails a concurrent borrow", func(t *testing.T) {
+		staged := stage(t, foreignTemporary, 0o600)
+
+		const borrowers = 8
+
+		release := make(chan struct{})
+		refusals := make(chan error, borrowers)
+
+		var arrived sync.WaitGroup
+
+		arrived.Add(borrowers)
+
+		for range borrowers {
+			go func() {
+				arrived.Done()
+				<-release
+				refusals <- borrow()
+			}()
+		}
+
+		arrived.Wait()
+		close(release)
+
+		// Every borrower is drained before anything is reported: leaving one
+		// running past the failure would race this subtest's cleanup against
+		// its own authority reads.
+		var refused error
+
+		for range borrowers {
+			if borrowErr := <-refusals; borrowErr != nil {
+				refused = borrowErr
+			}
+		}
+
+		if refused != nil {
+			t.Fatalf("concurrent borrow refused foreign publication %q: %v", staged, refused)
+		}
+		if _, statErr := os.Stat(filepath.Join(fixture.authorityPath, staged)); statErr != nil {
+			t.Fatalf("a tolerated foreign publication was not left alone: %v", statErr)
+		}
+	})
+
+	t.Run("the borrower's own owner publication in flight still refuses", func(t *testing.T) {
+		staged := stage(t, strconv.FormatUint(uint64(uid), 10)+".owner.next-"+suffix, 0o600)
+		borrowErr := borrow()
+		if borrowErr == nil || !strings.Contains(borrowErr.Error(), "unresolved temporary") ||
+			!strings.Contains(borrowErr.Error(), staged) {
+			t.Fatalf("own publication %q refusal = %v", staged, borrowErr)
+		}
+		// The scan refuses this one before the audit ever runs, which is why
+		// its refusal carries no audit wrapper.
+		if strings.Contains(borrowErr.Error(), borrowedDispositionAuditPrefix) {
+			t.Fatalf("scan refusal %v carries the borrowed audit prefix", borrowErr)
+		}
+	})
+
+	t.Run("a malformed owner temporary still refuses", func(t *testing.T) {
+		staged := stage(t, "bad.owner.next-"+suffix, 0o600)
+		borrowErr := borrow()
+		if borrowErr == nil || !strings.Contains(borrowErr.Error(), "invalid name") {
+			t.Fatalf("malformed publication %q refusal = %v", staged, borrowErr)
+		}
+	})
+
+	t.Run("an untrusted foreign owner temporary still refuses", func(t *testing.T) {
+		staged := stage(t, "64343.owner.next-"+suffix, 0o644)
+		borrowErr := borrow()
+		if borrowErr == nil || !strings.Contains(borrowErr.Error(), "not a trusted bounded regular file") ||
+			!strings.Contains(borrowErr.Error(), borrowedDispositionAuditPrefix) {
+			t.Fatalf("untrusted publication %q refusal = %v", staged, borrowErr)
+		}
+	})
+
+	t.Run("a foreign owner publication that lands mid-borrow never fails the borrow", func(t *testing.T) {
+		staged := stage(t, "64344.owner.next-"+suffix, 0o600)
+		agentStandaloneCovFaultEntryStat(t, staged, unix.ENOENT)
+		if borrowErr := borrow(); borrowErr != nil {
+			t.Fatalf("borrow refused a completed foreign publication %q: %v", staged, borrowErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(fixture.authorityPath, staged)); statErr != nil {
+			t.Fatalf("a tolerated foreign publication was not left alone: %v", statErr)
+		}
+	})
+
+	t.Run("a foreign owner temporary that faults any other way still refuses", func(t *testing.T) {
+		staged := stage(t, "64345.owner.next-"+suffix, 0o600)
+		denied := errors.New("injected borrow-time owner temporary stat failure")
+		agentStandaloneCovFaultEntryStat(t, staged, denied)
+
+		borrowErr := borrow()
+		if !errors.Is(borrowErr, denied) ||
+			!strings.Contains(borrowErr.Error(), borrowedDispositionAuditPrefix) {
+			t.Fatalf("unstatable publication %q refusal = %v, want a wrapped %v", staged, borrowErr, denied)
+		}
+	})
+
+	// Naming the borrower widens exactly one case. The audit still accounts for
+	// every other entry in the host-wide root, and the disposition this borrow
+	// is proving still has to be the one the host published for this gid. Both
+	// hold with or without the uid-scoped tolerance, which is the point.
+	t.Run("naming the borrower widens nothing else", func(t *testing.T) {
+		if borrowErr := validateBorrowedAgentIdentityDisposition(uid, gid+1, true, fixture.root); borrowErr == nil ||
+			!strings.Contains(borrowErr.Error(), "does not have its matching ownerless ACTIVE disposition") {
+			t.Fatalf("wrong gid = %v", borrowErr)
+		}
+
+		stray := stage(t, "stray-entry", 0o600)
+		borrowErr := borrow()
+		if borrowErr == nil || !strings.Contains(borrowErr.Error(), "contains unknown entry") ||
+			!strings.Contains(borrowErr.Error(), borrowedDispositionAuditPrefix) {
+			t.Fatalf("unaccountable entry %q refusal = %v", stray, borrowErr)
 		}
 	})
 }

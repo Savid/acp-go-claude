@@ -418,6 +418,15 @@ func validateBorrowedAgentIdentityDisposition(uid, gid uint32, testOnly bool, te
 		return rejectErr
 	}
 
+	// The scan above has already ruled on this borrower's own temporaries and
+	// deliberately tolerated another uid's in-flight publication. Naming the
+	// borrower here makes the audit apply that same uid-scoped rule instead of
+	// refusing the entry the scan just cleared: two isolated launches with
+	// distinct uids share one host authority root, and neither may fail closed
+	// inside the other's rename window. It widens nothing else. Recovering a
+	// host-owned ownerless ACTIVE disposition is what this path exists to
+	// prove, and that entitlement is carried by the flag above rather than by
+	// the borrower's name.
 	deadline := time.Now().Add(agentStandaloneClaimMax)
 	if err = auditAgentStandaloneAuthorityRoot(
 		directory,
@@ -426,7 +435,7 @@ func validateBorrowedAgentIdentityDisposition(uid, gid uint32, testOnly bool, te
 		false,
 		false,
 		true,
-		agentStandaloneNoBorrower,
+		uid,
 		deadline,
 		nil,
 		nil,

@@ -1913,24 +1913,30 @@ func adjudicateAgentStandaloneAuthorityTemporary(
 		// looking at another participant's in-flight atomic write, which the
 		// borrowed-temporary scan has already ruled is not this borrower's
 		// fault; the borrower's own unresolved temporary still is. The name
-		// must parse and the entry must prove trusted and bounded before any
-		// of that applies, so a malformed or untrusted temporary stays fatal
-		// to either party. An audit that names no borrower still refuses every
-		// owner temporary, which is what makes the acquiring path drain them
-		// under the domain-exclusive owners lock.
+		// must parse, and the entry must prove trusted and bounded or else be
+		// gone — that same rename, landed — before any of that applies, so a
+		// malformed or untrusted temporary stays fatal to either party. An
+		// audit that names no borrower still refuses every owner temporary,
+		// which is what makes the acquiring path drain them under the
+		// domain-exclusive owners lock.
 		if borrowerUID != agentStandaloneNoBorrower {
 			uid, parseErr := parseAgentStandaloneOwnerTemporary(name)
 			if parseErr != nil {
 				return false, parseErr
 			}
 
+			tolerated := uid != borrowerUID
 			if validateErr := validateAgentStandaloneTemporary(
 				directory, name, ownerUID, ownerGID, agentStandaloneOwnerMax,
 			); validateErr != nil {
+				if agentStandaloneTemporaryPublished(tolerated, validateErr) {
+					return true, nil
+				}
+
 				return false, validateErr
 			}
 
-			if uid != borrowerUID {
+			if tolerated {
 				return true, nil
 			}
 		}
@@ -1962,27 +1968,34 @@ func adjudicateAgentStandaloneAuthorityTemporary(
 			return false, parseErr
 		}
 
+		// A marker temporary embeds the uid it publishes and only ever exists
+		// between that uid's write and its rename. An audit that is not
+		// cleaning up skips such an entry when it is entitled to recover a
+		// host-owned disposition, and when it runs for a borrower the entry
+		// does not belong to: either way it is looking at another
+		// participant's in-flight atomic write, which the borrowed-temporary
+		// scan has already ruled is not this borrower's fault. The borrower's
+		// own unresolved temporary still is. Deciding that before the entry is
+		// stated is what lets the stat below tell a publication that has since
+		// landed apart from a temporary that is still there and is not
+		// trusted; the name must parse either way, so a malformed temporary
+		// stays fatal to every caller.
+		tolerated := !allowCleanup &&
+			(allowOwnerlessActive || (borrowerUID != agentStandaloneNoBorrower && uid != borrowerUID))
+
 		if validateErr := validateAgentStandaloneTemporary(directory, name, ownerUID, ownerGID, agentStandaloneMarkerMax); validateErr != nil {
+			if agentStandaloneTemporaryPublished(tolerated, validateErr) {
+				return true, nil
+			}
+
 			return false, validateErr
 		}
 
+		if tolerated {
+			return true, nil
+		}
+
 		if !allowCleanup {
-			if allowOwnerlessActive {
-				return true, nil
-			}
-
-			// A marker temporary embeds the uid it publishes and only ever
-			// exists between that uid's write and its rename. An audit running
-			// for one borrower is therefore looking at another participant's
-			// in-flight atomic write, which the borrowed-temporary scan has
-			// already ruled is not this borrower's fault; the borrower's own
-			// unresolved temporary still is. The name has been parsed and the
-			// entry proved trusted and bounded above, so a malformed or
-			// untrusted temporary is still fatal to either party.
-			if borrowerUID != agentStandaloneNoBorrower && uid != borrowerUID {
-				return true, nil
-			}
-
 			return false, fmt.Errorf("marker temporary %q requires domain-exclusive cleanup", name)
 		}
 
@@ -1994,6 +2007,18 @@ func adjudicateAgentStandaloneAuthorityTemporary(
 	}
 
 	return false, nil
+}
+
+// agentStandaloneTemporaryPublished reports whether a temporary the audit had
+// already ruled it would tolerate has since been published. The audit
+// adjudicates a listing of the authority root, so a tolerated participant's
+// rename can land between that listing and the stat that proves the entry
+// trusted and bounded; the entry is then gone, which is the publication
+// completing rather than a fault of anyone's. Exactly one errno reads that way.
+// Every other stat failure is an entry that is still there and has not proved
+// itself, and it stays fatal whether the audit meant to tolerate it or not.
+func agentStandaloneTemporaryPublished(tolerated bool, err error) bool {
+	return tolerated && errors.Is(err, unix.ENOENT)
 }
 
 // validateAgentStandaloneRegistryUniqueness proves no two owner bindings claim

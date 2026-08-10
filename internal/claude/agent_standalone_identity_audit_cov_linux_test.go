@@ -626,6 +626,156 @@ func TestAgentStandaloneCovAuthorityRootAuditScopesOwnerTemporariesToItsBorrower
 	), "provider cannot recover ownerless ACTIVE uid 62669")
 }
 
+// TestAgentStandaloneCovAuthorityRootAuditReadsOnlyAVanishedEntryAsAPublication
+// pins the one errno the borrower-scoped tolerance is allowed to absorb. The
+// audit adjudicates a listing of the authority root, so a temporary it decided
+// to tolerate can be renamed into place before it is stated: the entry is then
+// gone, and refusing it would fail the very launch the tolerance exists to let
+// through. That is the whole of the widening. An entry that is still there and
+// faults for any other reason stays fatal; an entry this audit was never going
+// to tolerate — the borrower's own, one with no borrower named, one the audit
+// holds the domain-exclusive lock to clean up — stays fatal even when it is
+// gone; and an ownerless ACTIVE disposition this provider cannot recover is
+// still refused beside a tolerated publication.
+func TestAgentStandaloneCovAuthorityRootAuditReadsOnlyAVanishedEntryAsAPublication(t *testing.T) {
+	const (
+		borrower      = uint32(62671)
+		foreignOwner  = "64314.owner.next-" + agentStandaloneCovSuffix
+		ownOwner      = "62671.owner.next-" + agentStandaloneCovSuffix
+		foreignMarker = "64316.quarantine.next-" + agentStandaloneCovSuffix
+		ownMarker     = "62671.quarantine.next-" + agentStandaloneCovSuffix
+	)
+
+	denied := errors.New("injected authority entry stat failure")
+	for _, testCase := range []struct {
+		name                 string
+		entry                string
+		verdict              error
+		allowCleanup         bool
+		allowOwnerlessActive bool
+		borrowerUID          uint32
+		setup                func(t *testing.T, directory *os.File)
+		want                 string
+		wantIs               error
+	}{
+		{
+			name:        "a foreign owner publication that lands mid-audit",
+			entry:       foreignOwner,
+			verdict:     unix.ENOENT,
+			borrowerUID: borrower,
+		},
+		{
+			name:        "a foreign owner temporary that faults any other way",
+			entry:       foreignOwner,
+			verdict:     denied,
+			borrowerUID: borrower,
+			wantIs:      denied,
+		},
+		{
+			name:        "the borrower's own owner temporary that vanishes",
+			entry:       ownOwner,
+			verdict:     unix.ENOENT,
+			borrowerUID: borrower,
+			wantIs:      unix.ENOENT,
+		},
+		{
+			// The acquiring path drains owner temporaries under the
+			// domain-exclusive owners lock on this exact refusal, so an audit
+			// that names no borrower must not state the entry at all.
+			name:        "an owner temporary no borrower is named for",
+			entry:       foreignOwner,
+			verdict:     denied,
+			borrowerUID: agentStandaloneNoBorrower,
+			want:        `standalone owner temporary requires registry cleanup: "` + foreignOwner + `"`,
+		},
+		{
+			name:        "a foreign marker publication that lands mid-audit",
+			entry:       foreignMarker,
+			verdict:     unix.ENOENT,
+			borrowerUID: borrower,
+		},
+		{
+			name:                 "a marker publication that lands while a host disposition is recovered",
+			entry:                foreignMarker,
+			verdict:              unix.ENOENT,
+			allowOwnerlessActive: true,
+			borrowerUID:          agentStandaloneNoBorrower,
+		},
+		{
+			name:        "a foreign marker temporary that faults any other way",
+			entry:       foreignMarker,
+			verdict:     denied,
+			borrowerUID: borrower,
+			wantIs:      denied,
+		},
+		{
+			name:        "the borrower's own marker temporary that vanishes",
+			entry:       ownMarker,
+			verdict:     unix.ENOENT,
+			borrowerUID: borrower,
+			wantIs:      unix.ENOENT,
+		},
+		{
+			name:        "a marker temporary that vanishes with no borrower named",
+			entry:       foreignMarker,
+			verdict:     unix.ENOENT,
+			borrowerUID: agentStandaloneNoBorrower,
+			wantIs:      unix.ENOENT,
+		},
+		{
+			name:         "a marker temporary that vanishes under domain-exclusive cleanup",
+			entry:        foreignMarker,
+			verdict:      unix.ENOENT,
+			allowCleanup: true,
+			borrowerUID:  agentStandaloneNoBorrower,
+			wantIs:       unix.ENOENT,
+		},
+		{
+			name:        "an ownerless ACTIVE disposition beside a tolerated publication",
+			entry:       foreignOwner,
+			verdict:     unix.ENOENT,
+			borrowerUID: borrower,
+			setup: func(t *testing.T, directory *os.File) {
+				t.Helper()
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
+				agentStandaloneCovPermanentLock(t, directory, "62673.lock")
+				agentStandaloneCovPermanentLock(t, directory, agentStandaloneAffinityLockName("vanished-ownerless"))
+				agentStandaloneCovWriteRegistryFile(t, directory, "62673.quarantine",
+					agentStandaloneCovActiveMarker(
+						62673, 62674, "vanished-ownerless", "0123456789abcdef0123456789abcdef", "[]",
+					)+"\n",
+				)
+			},
+			want: "provider cannot recover ownerless ACTIVE uid 62673",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			directory := openAgentStandaloneTestDirectory(t)
+			ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
+			staged := agentStandaloneCovWriteRegistryFile(t, directory, testCase.entry, "partial")
+			if testCase.setup != nil {
+				testCase.setup(t, directory)
+			}
+			agentStandaloneCovFaultEntryStat(t, testCase.entry, testCase.verdict)
+
+			err := auditAgentStandaloneAuthorityRoot(
+				directory, ownerUID, ownerGID,
+				false, testCase.allowCleanup, testCase.allowOwnerlessActive,
+				testCase.borrowerUID, time.Now().Add(time.Second), nil, nil,
+			)
+			switch {
+			case testCase.wantIs != nil:
+				require.ErrorIs(t, err, testCase.wantIs)
+			case testCase.want != "":
+				require.ErrorContains(t, err, testCase.want)
+			default:
+				require.NoError(t, err)
+			}
+			require.FileExists(t, staged, "no verdict may remove an entry the audit could not state")
+		})
+	}
+}
+
 // TestAgentStandaloneCovOwnerUniquenessRefusesEveryCollision proves the
 // uniqueness sweep refuses a claim whose gid, provider owner id or state root
 // is already bound to another uid, refuses a durable marker that reserves the

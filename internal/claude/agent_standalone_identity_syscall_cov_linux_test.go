@@ -183,6 +183,26 @@ func agentStandaloneCovFaultSyscall(t *testing.T, target string, call int, verdi
 	}
 }
 
+// agentStandaloneCovFaultEntryStat makes every stat of one named authority
+// entry fail while the entry itself stays in the directory listing. The audit
+// adjudicates a listing, so this is the only way to stage what a participant
+// whose rename lands mid-audit actually leaves behind: an entry the audit has
+// already seen and can no longer state. The verdict is the caller's, because
+// the whole rule under test is which single errno the audit is allowed to read
+// as that publication rather than as a fault.
+func agentStandaloneCovFaultEntryStat(t *testing.T, name string, verdict error) {
+	t.Helper()
+	agentStandaloneCovRestoreSyscallSeams(t)
+	previous := agentStandaloneFstatat
+	agentStandaloneFstatat = func(dirfd int, path string, stat *unix.Stat_t, flags int) error {
+		if path == name {
+			return verdict
+		}
+
+		return previous(dirfd, path, stat, flags)
+	}
+}
+
 // agentStandaloneCovFaultClose makes the nth close of the named descriptor
 // fail, so a case can prove a claim that could not release a lease refuses
 // rather than carrying on believing it did.

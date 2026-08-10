@@ -713,7 +713,7 @@ func TestAgentStandaloneOwnerlessMarkerRequiresPermanentAffinityLock(t *testing.
 	deadline := time.Now().Add(time.Second)
 
 	err := auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, false, true, deadline, nil, nil,
+		directory, ownerUID, ownerGID, false, false, true, agentStandaloneNoBorrower, deadline, nil, nil,
 	)
 	require.ErrorContains(t, err, "without permanent affinity lock")
 	affinity := createAgentStandaloneTestLock(
@@ -721,7 +721,7 @@ func TestAgentStandaloneOwnerlessMarkerRequiresPermanentAffinityLock(t *testing.
 	)
 	require.NoError(t, affinity.Close())
 	require.NoError(t, auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, false, true, deadline, nil, nil,
+		directory, ownerUID, ownerGID, false, false, true, agentStandaloneNoBorrower, deadline, nil, nil,
 	))
 }
 
@@ -745,17 +745,17 @@ func TestAgentStandaloneSameDomainAllowsUnrelatedActiveAndLiveMarkerTemporary(t 
 	deadline := time.Now().Add(time.Second)
 
 	require.NoError(t, auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, false, true, deadline, nil, nil,
+		directory, ownerUID, ownerGID, false, false, true, agentStandaloneNoBorrower, deadline, nil, nil,
 	))
 	require.FileExists(t, temporary)
 	err := auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, false, false, deadline, nil, nil,
+		directory, ownerUID, ownerGID, false, false, false, agentStandaloneNoBorrower, deadline, nil, nil,
 	)
 	require.ErrorContains(t, err, "domain-exclusive cleanup")
 	require.NoError(t, held.Close())
 	require.NoError(t, os.Remove(temporary))
 	err = auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, false, false, deadline, nil, nil,
+		directory, ownerUID, ownerGID, false, false, false, agentStandaloneNoBorrower, deadline, nil, nil,
 	)
 	require.ErrorContains(t, err, "authoritative host recovery is required")
 }
@@ -811,7 +811,8 @@ func TestAgentStandaloneDomainAuditCleansBoundMarkerTemporaryWithoutDispositionM
 	require.NoError(t, os.WriteFile(temporary, []byte("partial"), 0o600))
 
 	require.NoError(t, auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, true, false, time.Now().Add(time.Second), nil, nil,
+		directory, ownerUID, ownerGID, false, true, false, agentStandaloneNoBorrower,
+		time.Now().Add(time.Second), nil, nil,
 	))
 	ownerAfter, err := os.ReadFile(ownerPath)
 	require.NoError(t, err)

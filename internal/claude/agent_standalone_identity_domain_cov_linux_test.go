@@ -705,7 +705,7 @@ func TestAgentStandaloneCovDomainRebindRefusesABusyMarkerItCannotWaitOut(t *test
 	require.NoError(t, drainErr)
 	require.False(t, ownerTempsBusy, "the busy arm under test must be the audit's, not the drain's")
 	require.ErrorIs(t, auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, true, false, time.Time{}, nil, nil,
+		directory, ownerUID, ownerGID, false, true, false, agentStandaloneNoBorrower, time.Time{}, nil, nil,
 	), errAgentStandaloneMarkerTempBusy)
 
 	// The record names another PID namespace, so the rebind cannot downgrade to

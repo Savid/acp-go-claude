@@ -426,6 +426,7 @@ func validateBorrowedAgentIdentityDisposition(uid, gid uint32, testOnly bool, te
 		false,
 		false,
 		true,
+		agentStandaloneNoBorrower,
 		deadline,
 		nil,
 		nil,
@@ -519,6 +520,12 @@ func validateAdoptedStandaloneAgentIdentityDisposition(
 		return rejectErr
 	}
 
+	// The scan above has already ruled on this borrower's own temporaries, and
+	// deliberately tolerated another uid's in-flight marker publication. Naming
+	// the borrower here makes the audit apply that same uid-scoped rule instead
+	// of refusing the entry the scan just cleared: two isolated launches with
+	// distinct uids share one host authority root, and neither may fail closed
+	// inside the other's rename window. Ownerless ACTIVE recovery stays refused.
 	if auditErr := auditAgentStandaloneAuthorityRoot(
 		directory,
 		trustedUID,
@@ -526,6 +533,7 @@ func validateAdoptedStandaloneAgentIdentityDisposition(
 		false,
 		false,
 		false,
+		uid,
 		time.Now().Add(agentStandaloneClaimMax),
 		nil,
 		nil,

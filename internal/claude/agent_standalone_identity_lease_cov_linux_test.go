@@ -431,7 +431,8 @@ func TestAgentStandaloneCovAuditHonoursTheBudgetBetweenItsTwoPasses(t *testing.T
 	}
 
 	require.ErrorIs(t, auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, false, false, time.Now().Add(time.Second), canceled, nil,
+		directory, ownerUID, ownerGID, false, false, false, agentStandaloneNoBorrower,
+		time.Now().Add(time.Second), canceled, nil,
 	), errAgentStandaloneCanceled)
 	require.Equal(t, 1, reads, "the second pass must not start after cancellation")
 }

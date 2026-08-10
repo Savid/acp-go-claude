@@ -144,7 +144,8 @@ func TestAgentStandaloneCovRetainedMarkerChecksRefuseAnUnderivableOwnerDigest(t 
 		agentStandaloneCovFaultEncoding(t, wantErr)
 
 		require.ErrorIs(t, auditAgentStandaloneAuthorityRoot(
-			directory, ownerUID, ownerGID, false, false, false, time.Now().Add(time.Second), nil, nil,
+			directory, ownerUID, ownerGID, false, false, false, agentStandaloneNoBorrower,
+			time.Now().Add(time.Second), nil, nil,
 		), wantErr)
 	})
 
@@ -253,7 +254,8 @@ func TestAgentStandaloneCovAuditRefusesARegistryItCannotName(t *testing.T) {
 	t.Cleanup(func() { agentStandaloneOpenat = previous })
 
 	require.ErrorContains(t, auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, false, false, time.Now().Add(time.Second), nil, nil,
+		directory, ownerUID, ownerGID, false, false, false, agentStandaloneNoBorrower,
+		time.Now().Add(time.Second), nil, nil,
 	), "deleted directory")
 }
 

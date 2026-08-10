@@ -111,7 +111,8 @@ func TestAgentStandaloneCovRemovedRegistryRootRefusesEveryTraversal(t *testing.T
 
 	t.Run("authority root audit", func(t *testing.T) {
 		require.ErrorIs(t, auditAgentStandaloneAuthorityRoot(
-			agentStandaloneCovRemovedDirectory(t), ownerUID, ownerGID, false, false, false, deadline, nil, nil,
+			agentStandaloneCovRemovedDirectory(t), ownerUID, ownerGID, false, false, false,
+			agentStandaloneNoBorrower, deadline, nil, nil,
 		), unix.ENOENT)
 	})
 }

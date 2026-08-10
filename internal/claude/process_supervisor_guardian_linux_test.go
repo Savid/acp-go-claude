@@ -369,6 +369,28 @@ func TestRunTurnSupervisorGuardianRefusesEveryArmingDeviation(t *testing.T) {
 		require.Equal(t, turnSupervisorProof, fixture.proof(t))
 	})
 
+	// A liveness supervisor that refuses reports its reason on the frame it
+	// would otherwise have armed on. The guardian has to attribute that to the
+	// refusal it names rather than to an invalid armed state, or a legitimate
+	// downstream refusal reaches the caller labelled a protocol violation.
+	t.Run("armed frame carries a named refusal", func(t *testing.T) {
+		fixture := supervisorCovGuardianFixture(
+			t, supervisorCovConfig(),
+			supervisorCovLivenessScript(
+				"printf 'error:adopt Claude agent identity lock: operation not permitted\\n' >&"+
+					supervisorCovLivenessData,
+				supervisorCovLinger,
+			),
+		)
+
+		err := fixture.await(t, fixture.start(t))
+		require.ErrorContains(t, err, "claude liveness failed before readiness: "+
+			"adopt Claude agent identity lock: operation not permitted")
+		require.NotContains(t, err.Error(), "invalid Claude liveness armed state")
+		require.Empty(t, fixture.ready.lines())
+		require.Equal(t, turnSupervisorProof, fixture.proof(t))
+	})
+
 	t.Run("armed state is unrecognised", func(t *testing.T) {
 		fixture := supervisorCovGuardianFixture(
 			t, supervisorCovConfig(),

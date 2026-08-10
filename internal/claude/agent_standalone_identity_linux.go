@@ -134,6 +134,12 @@ const (
 	agentStandaloneRetry      = 10 * time.Millisecond
 )
 
+// agentStandaloneNoBorrower is the borrower uid an authority audit passes when
+// it is not auditing on behalf of one participant claiming the host-wide
+// authority root. Zero is never a valid standalone uid — parseAgentStandaloneUID
+// refuses it — so no temporary the audit parses can ever name this borrower.
+const agentStandaloneNoBorrower = uint32(0)
+
 var (
 	errAgentStandaloneCanceled       = errors.New("standalone agent identity acquisition canceled")
 	errAgentStandaloneOwnerTemporary = errors.New("standalone owner temporary requires registry cleanup")
@@ -451,7 +457,7 @@ func claimAgentStandaloneOwnerUnderLock(
 	}
 
 	if auditErr := auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, false, true, deadline, canceled, signals,
+		directory, ownerUID, ownerGID, false, false, true, agentStandaloneNoBorrower, deadline, canceled, signals,
 	); auditErr != nil {
 		return fail(auditErr)
 	}
@@ -502,7 +508,7 @@ func acquireAgentStandaloneExistingOwner(
 	}
 
 	if err = auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, false, true, deadline, canceled, signals,
+		directory, ownerUID, ownerGID, false, false, true, agentStandaloneNoBorrower, deadline, canceled, signals,
 	); err != nil {
 		return nil, errors.Join(err, identityFile.Close())
 	}
@@ -821,7 +827,7 @@ func rebindAgentStandaloneDomain(
 	}
 
 	if auditErr := auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, true, false, deadline, canceled, signals,
+		directory, ownerUID, ownerGID, false, true, false, agentStandaloneNoBorrower, deadline, canceled, signals,
 	); auditErr != nil {
 		_ = exclusive.Close()
 
@@ -932,7 +938,7 @@ func establishAgentStandaloneDomain(
 	}
 
 	if auditErr := auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, true, true, false, deadline, canceled, signals,
+		directory, ownerUID, ownerGID, true, true, false, agentStandaloneNoBorrower, deadline, canceled, signals,
 	); auditErr != nil {
 		_ = exclusive.Close()
 
@@ -1643,6 +1649,11 @@ func validateAgentStandaloneSameBootRebind(
 	return uidLock, nil
 }
 
+// auditAgentStandaloneAuthorityRoot accounts for every entry in the host-wide
+// authority root. borrowerUID names the participant this audit runs on behalf
+// of, or agentStandaloneNoBorrower when it runs on behalf of the domain rather
+// than one uid; it only ever widens which in-flight temporaries belonging to
+// *other* uids are tolerated, never which durable state is accepted.
 func auditAgentStandaloneAuthorityRoot(
 	directory *os.File,
 	ownerUID uint32,
@@ -1650,6 +1661,7 @@ func auditAgentStandaloneAuthorityRoot(
 	requireEmpty bool,
 	allowCleanup bool,
 	allowOwnerlessActive bool,
+	borrowerUID uint32,
 	deadline time.Time,
 	canceled <-chan struct{},
 	signals <-chan os.Signal,
@@ -1673,7 +1685,7 @@ func auditAgentStandaloneAuthorityRoot(
 
 	inventory, inventoryErr := classifyAgentStandaloneAuthorityEntries(
 		directory, entries, ownerUID, ownerGID,
-		requireEmpty, allowCleanup, allowOwnerlessActive, deadline, canceled, signals,
+		requireEmpty, allowCleanup, allowOwnerlessActive, borrowerUID, deadline, canceled, signals,
 	)
 	if inventoryErr != nil {
 		return inventoryErr
@@ -1752,6 +1764,7 @@ func classifyAgentStandaloneAuthorityEntries(
 	requireEmpty bool,
 	allowCleanup bool,
 	allowOwnerlessActive bool,
+	borrowerUID uint32,
 	deadline time.Time,
 	canceled <-chan struct{},
 	signals <-chan os.Signal,
@@ -1792,7 +1805,7 @@ func classifyAgentStandaloneAuthorityEntries(
 		}
 
 		temporary, temporaryErr := adjudicateAgentStandaloneAuthorityTemporary(
-			directory, name, ownerUID, ownerGID, allowCleanup, allowOwnerlessActive,
+			directory, name, ownerUID, ownerGID, allowCleanup, allowOwnerlessActive, borrowerUID,
 		)
 		if temporaryErr != nil {
 			return agentStandaloneAuthorityInventory{}, temporaryErr
@@ -1890,6 +1903,7 @@ func adjudicateAgentStandaloneAuthorityTemporary(
 	ownerGID uint32,
 	allowCleanup bool,
 	allowOwnerlessActive bool,
+	borrowerUID uint32,
 ) (bool, error) {
 	switch {
 	case strings.Contains(name, ".owner.next-"):
@@ -1926,6 +1940,18 @@ func adjudicateAgentStandaloneAuthorityTemporary(
 
 		if !allowCleanup {
 			if allowOwnerlessActive {
+				return true, nil
+			}
+
+			// A marker temporary embeds the uid it publishes and only ever
+			// exists between that uid's write and its rename. An audit running
+			// for one borrower is therefore looking at another participant's
+			// in-flight atomic write, which the borrowed-temporary scan has
+			// already ruled is not this borrower's fault; the borrower's own
+			// unresolved temporary still is. The name has been parsed and the
+			// entry proved trusted and bounded above, so a malformed or
+			// untrusted temporary is still fatal to either party.
+			if borrowerUID != agentStandaloneNoBorrower && uid != borrowerUID {
 				return true, nil
 			}
 

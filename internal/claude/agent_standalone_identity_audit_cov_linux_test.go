@@ -81,6 +81,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 		requireEmpty         bool
 		allowCleanup         bool
 		allowOwnerlessActive bool
+		borrowerUID          uint32
 		expired              bool
 		setup                func(t *testing.T, directory *os.File)
 		want                 string
@@ -185,6 +186,36 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 				t.Helper()
 				agentStandaloneCovWriteRegistryFile(t, directory, "62605.quarantine.next-"+suffix, "partial")
 				require.NoError(t, os.Chmod(filepath.Join(directory.Name(), "62605.quarantine.next-"+suffix), 0o644))
+			},
+			want: "not a trusted bounded regular file",
+		},
+		{
+			// The borrower-scoped tolerance below is uid-scoped, not blanket:
+			// the borrower's own unresolved publication is still its own fault.
+			name:        "borrower's own marker temporary",
+			borrowerUID: 62611,
+			setup: func(t *testing.T, directory *os.File) {
+				t.Helper()
+				agentStandaloneCovWriteRegistryFile(t, directory, "62611.quarantine.next-"+suffix, "partial")
+			},
+			want: `marker temporary "62611.quarantine.next-` + suffix + `" requires domain-exclusive cleanup`,
+		},
+		{
+			name:        "malformed marker temporary with a borrower",
+			borrowerUID: 62613,
+			setup: func(t *testing.T, directory *os.File) {
+				t.Helper()
+				agentStandaloneCovWriteRegistryFile(t, directory, "bad.quarantine.next-"+suffix, "partial")
+			},
+			want: "invalid name",
+		},
+		{
+			name:        "untrusted foreign marker temporary with a borrower",
+			borrowerUID: 62613,
+			setup: func(t *testing.T, directory *os.File) {
+				t.Helper()
+				agentStandaloneCovWriteRegistryFile(t, directory, "62615.quarantine.next-"+suffix, "partial")
+				require.NoError(t, os.Chmod(filepath.Join(directory.Name(), "62615.quarantine.next-"+suffix), 0o644))
 			},
 			want: "not a trusted bounded regular file",
 		},
@@ -420,7 +451,7 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			err := auditAgentStandaloneAuthorityRoot(
 				directory, ownerUID, ownerGID,
 				testCase.requireEmpty, testCase.allowCleanup, testCase.allowOwnerlessActive,
-				deadline, nil, nil,
+				testCase.borrowerUID, deadline, nil, nil,
 			)
 			require.ErrorContains(t, err, testCase.want)
 		})
@@ -443,7 +474,8 @@ func TestAgentStandaloneCovAuthorityRootAuditCleansTrustedTemporaries(t *testing
 	)
 
 	require.NoError(t, auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, true, false, time.Now().Add(time.Second), nil, nil,
+		directory, ownerUID, ownerGID, false, true, false, agentStandaloneNoBorrower,
+		time.Now().Add(time.Second), nil, nil,
 	))
 	require.NoFileExists(t, domainTemporary)
 	require.NoFileExists(t, probeTemporary)
@@ -465,8 +497,56 @@ func TestAgentStandaloneCovAuthorityRootAuditAcceptsACoherentRegistry(t *testing
 	agentStandaloneCovWriteActiveMarker(t, directory, first)
 
 	require.NoError(t, auditAgentStandaloneAuthorityRoot(
-		directory, ownerUID, ownerGID, false, false, false, time.Now().Add(time.Second), nil, nil,
+		directory, ownerUID, ownerGID, false, false, false, agentStandaloneNoBorrower,
+		time.Now().Add(time.Second), nil, nil,
 	))
+}
+
+// TestAgentStandaloneCovAuthorityRootAuditScopesMarkerTemporariesToItsBorrower
+// pins the rule the adopt-time audit was missing: an audit run on one
+// borrower's behalf tolerates another uid's in-flight marker publication —
+// exactly the entry rejectBorrowedAgentIdentityTemporaries has already ruled is
+// not this borrower's fault — and leaves it untouched, while the same entry
+// still refuses an audit that names no borrower. Naming a borrower widens
+// nothing else: an ownerless ACTIVE disposition this provider has no authority
+// to recover stays fail-closed either way.
+func TestAgentStandaloneCovAuthorityRootAuditScopesMarkerTemporariesToItsBorrower(t *testing.T) {
+	// The entry name is byte-identical to the one CI run 31355869496 refused.
+	const (
+		borrower         = uint32(62617)
+		foreignTemporary = "64302.quarantine.next-361afd7c59d01d96e4b2a2ab"
+		wantRefusal      = `marker temporary "` + foreignTemporary + `" requires domain-exclusive cleanup`
+	)
+	directory := openAgentStandaloneTestDirectory(t)
+	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
+	agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
+	agentStandaloneCovPermanentLock(t, directory, "62617.lock")
+	owner := agentStandaloneCovOwner(borrower, 62618, "borrower-scope", "/srv/claude/borrower-scope", 21, 22)
+	agentStandaloneCovWriteOwner(t, directory, owner)
+	agentStandaloneCovWriteActiveMarker(t, directory, owner)
+	inFlight := agentStandaloneCovWriteRegistryFile(t, directory, foreignTemporary, "partial")
+	deadline := time.Now().Add(time.Second)
+
+	require.NoError(t, auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, false, false, false, borrower, deadline, nil, nil,
+	))
+	require.FileExists(t, inFlight, "a tolerated foreign publication must never be cleaned up")
+	require.ErrorContains(t, auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, false, false, false, agentStandaloneNoBorrower, deadline, nil, nil,
+	), wantRefusal)
+	require.FileExists(t, inFlight)
+
+	agentStandaloneCovPermanentLock(t, directory, "62619.lock")
+	agentStandaloneCovPermanentLock(t, directory, agentStandaloneAffinityLockName("borrower-scope-ownerless"))
+	agentStandaloneCovWriteRegistryFile(t, directory, "62619.quarantine",
+		agentStandaloneCovActiveMarker(
+			62619, 62620, "borrower-scope-ownerless", "0123456789abcdef0123456789abcdef", "[]",
+		)+"\n",
+	)
+
+	require.ErrorContains(t, auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, false, false, false, borrower, deadline, nil, nil,
+	), "provider cannot recover ownerless ACTIVE uid 62619")
 }
 
 // TestAgentStandaloneCovOwnerUniquenessRefusesEveryCollision proves the

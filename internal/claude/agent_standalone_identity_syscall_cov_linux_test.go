@@ -706,7 +706,8 @@ func TestAgentStandaloneCovClaimRefusesWhenALeaseCannotBeReleased(t *testing.T) 
 		agentStandaloneCovFaultClose(t, agentStandaloneCovOwnersLock, 1, wantErr)
 
 		require.ErrorIs(t, auditAgentStandaloneAuthorityRoot(
-			directory, ownerUID, ownerGID, false, false, false, time.Now().Add(time.Second), nil, nil,
+			directory, ownerUID, ownerGID, false, false, false, agentStandaloneNoBorrower,
+			time.Now().Add(time.Second), nil, nil,
 		), wantErr)
 	})
 
@@ -718,7 +719,8 @@ func TestAgentStandaloneCovClaimRefusesWhenALeaseCannotBeReleased(t *testing.T) 
 		agentStandaloneCovFaultClose(t, "63045.lock", 1, wantErr)
 
 		require.ErrorIs(t, auditAgentStandaloneAuthorityRoot(
-			directory, ownerUID, ownerGID, false, false, false, time.Now().Add(time.Second), nil, nil,
+			directory, ownerUID, ownerGID, false, false, false, agentStandaloneNoBorrower,
+			time.Now().Add(time.Second), nil, nil,
 		), wantErr)
 	})
 

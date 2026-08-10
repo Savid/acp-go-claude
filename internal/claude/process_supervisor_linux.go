@@ -647,6 +647,21 @@ func armTurnSupervisorGuardian(
 		return 0, errors.Join(fmt.Errorf("await Claude liveness readiness: %w", readyErr), waitErr, containErr, completionErr)
 	}
 
+	// The liveness supervisor reports a refusal on the same frame it would have
+	// armed on, so a named refusal arrives here rather than at the readiness
+	// frame below. Recognising it keeps the reason attributed to the refusal
+	// that produced it instead of reporting it as a protocol violation.
+	if failure, failed := strings.CutPrefix(strings.TrimSpace(line), turnSupervisorFailure); failed {
+		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
+		waitErr, _ := waiter.await(context.Background())
+		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
+		completionErr := completeTurnSupervisorAuthority(completion, authority, containErr == nil)
+
+		return 0, errors.Join(
+			fmt.Errorf("claude liveness failed before readiness: %s", failure), waitErr, containErr, completionErr,
+		)
+	}
+
 	if line != turnSupervisorArmed {
 		_ = signalProcessGroupID(liveness.Process.Pid, syscall.SIGKILL)
 		waitErr, _ := waiter.await(context.Background())

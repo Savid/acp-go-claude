@@ -75,7 +75,7 @@ home for native tools.
 | Flag | Purpose |
 | --- | --- |
 | `-path` | Claude CLI executable (default: search `PATH`). |
-| `-process-isolation-config` | Optional absolute path to the standalone Linux isolation policy described above. Omitted launches native work as the current identity. |
+| `-process-isolation-config` | optional absolute path to the standalone Linux isolation policy described above. Omitted launches native work as the current identity. |
 | `-home` | Claude config directory (`CLAUDE_CONFIG_DIR`) for launched sessions. In hardened mode it defaults to and, when set, must equal `standaloneStateRoot`; ordinary mode accepts an independent clean path. |
 | `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
 | `-provider-auth-root` | Durable host-owned directory holding the values-free provider-auth ledger. Empty, bare mode, or agent-wide static authentication leaves every `_claude/auth/*` method unadvertised. |

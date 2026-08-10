@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	authEscapedStdoutRoleEnv   = "ACP_GO_CLAUDE_TEST_AUTH_ESCAPED_STDOUT_ROLE"
-	authEscapedStdoutPIDEnv    = "ACP_GO_CLAUDE_TEST_AUTH_ESCAPED_STDOUT_PID_FILE"
-	authEscapedStdoutBinaryEnv = "ACP_GO_CLAUDE_TEST_AUTH_ESCAPED_STDOUT_BINARY"
+	authEscapedStdoutRoleEnv   = "ACP_GO_CLAUDE_FAKE_MODE"
+	authEscapedStdoutPIDEnv    = "ACP_GO_CLAUDE_FAKE_DESCENDANT_PID_FILE"
+	authEscapedStdoutBinaryEnv = "ACP_GO_CLAUDE_FAKE_HELPER"
 )
 
 func TestAuthLoginFailedPresentationClosesEscapedStdout(t *testing.T) {

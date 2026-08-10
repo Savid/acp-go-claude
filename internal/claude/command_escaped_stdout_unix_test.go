@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	escapedStdoutRoleEnv = "ACP_GO_CLAUDE_TEST_ESCAPED_STDOUT_ROLE"
-	escapedStdoutPIDEnv  = "ACP_GO_CLAUDE_TEST_ESCAPED_STDOUT_PID_FILE"
+	escapedStdoutRoleEnv = "ACP_GO_CLAUDE_FAKE_MODE"
+	escapedStdoutPIDEnv  = "ACP_GO_CLAUDE_FAKE_DESCENDANT_PID_FILE"
 )
 
 func TestContainedClaudeOutputCancellationClosesEscapedStdout(t *testing.T) {

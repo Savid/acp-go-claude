@@ -471,7 +471,7 @@ func TestPrepareUsageGenerationResources(t *testing.T) {
 // launch carries the sanitized ambient environment, and the agent reports
 // shared identity with no descendant inventory and no whole-tree claim.
 func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
-	t.Setenv("ACP_GO_CLAUDE_TEST_CANARY", "ambient-canary")
+	t.Setenv("ACP_GO_CLAUDE_TEST_ACTUAL_AMBIENT", "ambient-canary")
 
 	var (
 		launched  []claude.Options
@@ -501,12 +501,12 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 	require.Len(t, launched, 1)
 	require.Nil(t, launched[0].ProcessIsolation,
 		"omission must not manufacture a ProcessIsolation value")
-	require.Equal(t, "ambient-canary", launched[0].OrdinaryEnvironment["ACP_GO_CLAUDE_TEST_CANARY"])
+	require.Equal(t, "ambient-canary", launched[0].OrdinaryEnvironment["ACP_GO_CLAUDE_TEST_ACTUAL_AMBIENT"])
 
 	// The one capture is cloned per launch, so a mutated launch environment
 	// cannot reach the next one.
-	launched[0].OrdinaryEnvironment["ACP_GO_CLAUDE_TEST_CANARY"] = "mutated"
-	require.Equal(t, "ambient-canary", agent.ordinaryEnvironment()["ACP_GO_CLAUDE_TEST_CANARY"])
+	launched[0].OrdinaryEnvironment["ACP_GO_CLAUDE_TEST_ACTUAL_AMBIENT"] = "mutated"
+	require.Equal(t, "ambient-canary", agent.ordinaryEnvironment()["ACP_GO_CLAUDE_TEST_ACTUAL_AMBIENT"])
 
 	require.Nil(t, agent.claudeIsolation())
 	require.Equal(t, RuntimeContainmentSharedIdentity, agent.ContainmentMode())
@@ -529,7 +529,7 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 // internal/claude.TestDarwinLaunchFailsClosedForExplicitProcessIsolation and
 // the platform selector tests beside it.
 func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
-	t.Setenv("ACP_GO_CLAUDE_TEST_CANARY", "ambient-canary")
+	t.Setenv("ACP_GO_CLAUDE_TEST_ACTUAL_AMBIENT", "ambient-canary")
 
 	agent := NewAgent(WithProcessIsolation(ProcessIsolation{
 		UID: 64251, GID: 64252,
@@ -543,7 +543,7 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	require.NotNil(t, isolation)
 	require.Equal(t, uint32(64251), isolation.UID)
 	require.Equal(t, uint32(64252), isolation.GID)
-	require.NotContains(t, isolation.BaseEnvironment, "ACP_GO_CLAUDE_TEST_CANARY")
+	require.NotContains(t, isolation.BaseEnvironment, "ACP_GO_CLAUDE_TEST_ACTUAL_AMBIENT")
 	require.Equal(t, "/policy/bin", isolation.BaseEnvironment["PATH"])
 	require.Nil(t, agent.ordinaryEnvironment(),
 		"an explicit policy must not capture an ordinary ambient fallback")
@@ -571,7 +571,7 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 		CLIPath:             "/bin/true",
 		Cwd:                 t.TempDir(),
 		ProcessIsolation:    invalid.claudeIsolation(),
-		OrdinaryEnvironment: map[string]string{"ACP_GO_CLAUDE_TEST_CANARY": "fallback"},
+		OrdinaryEnvironment: map[string]string{"ACP_GO_CLAUDE_TEST_ACTUAL_AMBIENT": "fallback"},
 	})
 	require.ErrorContains(t, transport.Start(t.Context()), "process isolation uid and gid must be nonzero")
 }

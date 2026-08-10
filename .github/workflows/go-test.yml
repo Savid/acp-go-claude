@@ -62,14 +62,7 @@ jobs:
 
       - name: Static-environment executable lookup
         shell: bash
-        run: |
-          set -euo pipefail
-          selector='^TestWindowsOrdinaryExecutableLookup'
-          expected=$(go test -list "$selector" ./internal/claude | grep -Ec '^Test' || true)
-          [ "$expected" -eq 4 ] || { echo "windows lookup test count $expected, want 4"; exit 1; }
-          go test -v -count=1 -run "$selector" ./internal/claude | tee windows-ordinary.log
-          passed=$(grep -Ec '^--- PASS: TestWindowsOrdinaryExecutableLookup' windows-ordinary.log || true)
-          [ "$passed" -eq "$expected" ] || { echo "windows lookup pass count $passed, want $expected"; exit 1; }
+        run: .github/scripts/run-windows-behavior-proof.sh
 
   trusted-supervisor:
     runs-on: [self-hosted]

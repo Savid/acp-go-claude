@@ -36,6 +36,25 @@ func supervisorCovNewPublisher() *supervisorCovPublisher {
 	return &supervisorCovPublisher{armed: make(chan struct{}), ready: make(chan struct{})}
 }
 
+func supervisorCovAcknowledgingGuardian(
+	t *testing.T, ready io.Writer,
+) (*os.File, io.Writer) {
+	t.Helper()
+
+	peer, guardian := supervisorCovPipe(t)
+	output := supervisorCovWriteFunc(func(value []byte) (int, error) {
+		written, writeErr := ready.Write(value)
+		if writeErr == nil && strings.HasPrefix(string(value), turnSupervisorDonePrefix) {
+			_, writeErr = guardian.Write(value)
+			writeErr = errors.Join(writeErr, guardian.Close())
+		}
+
+		return written, writeErr
+	})
+
+	return peer, output
+}
+
 func (publisher *supervisorCovPublisher) Write(value []byte) (int, error) {
 	text := string(value)
 
@@ -364,17 +383,19 @@ func TestRunTurnSupervisorNativeEndsTheTurnOnEveryTerminalEvent(t *testing.T) {
 		control, _ := supervisorCovPipe(t)
 		ready := supervisorCovNewPublisher()
 		completion := supervisorCovNewPublisher()
+		peer, readyOutput := supervisorCovAcknowledgingGuardian(t, ready)
 		require.NoError(t, runTurnSupervisorNative(
 			supervisorCovEncode(t, supervisorCovNativeConfig("/bin/true")),
-			[]io.Reader{control}, nil, strings.NewReader("\x01"),
-			ready, completion, 6, 7,
+			[]io.Reader{control}, peer, strings.NewReader("\x01"),
+			readyOutput, completion, 6, 7,
 		))
 
 		lines := ready.lines()
 		require.Equal(t, turnSupervisorArmed, lines[0])
 		require.True(t, strings.HasPrefix(lines[1], "ready:"))
-		require.Equal(t, "done\n", lines[2], "the turn was reported without a terminal result")
-		require.Empty(t, completion.lines(), "a paired liveness published the guardian's own proof")
+		_, terminalErr := parseTurnSupervisorTerminalFrame(lines[2])
+		require.NoError(t, terminalErr, "the turn was reported without a valid terminal challenge")
+		require.Equal(t, []string{turnSupervisorProof}, completion.lines())
 		require.NotZero(t, (<-contained)[1])
 	})
 
@@ -390,13 +411,14 @@ func TestRunTurnSupervisorNativeEndsTheTurnOnEveryTerminalEvent(t *testing.T) {
 
 		control, controlWrite := supervisorCovPipe(t)
 		ready := supervisorCovNewPublisher()
+		peer, readyOutput := supervisorCovAcknowledgingGuardian(t, ready)
 
 		done := make(chan error, 1)
 		go func() {
 			done <- runTurnSupervisorNative(
 				supervisorCovEncode(t, supervisorCovNativeConfig("/bin/sleep", "60")),
-				[]io.Reader{control}, nil, strings.NewReader("\x01"),
-				ready, io.Discard, 6, 7,
+				[]io.Reader{control}, peer, strings.NewReader("\x01"),
+				readyOutput, io.Discard, 6, 7,
 			)
 		}()
 
@@ -406,7 +428,8 @@ func TestRunTurnSupervisorNativeEndsTheTurnOnEveryTerminalEvent(t *testing.T) {
 
 		killed := <-signaled
 		require.Equal(t, int(syscall.SIGKILL), killed[1])
-		require.Equal(t, "done\n", ready.lines()[2])
+		_, terminalErr := parseTurnSupervisorTerminalFrame(ready.lines()[2])
+		require.NoError(t, terminalErr)
 	})
 
 	t.Run("signals are forwarded to the native group", func(t *testing.T) {
@@ -421,13 +444,14 @@ func TestRunTurnSupervisorNativeEndsTheTurnOnEveryTerminalEvent(t *testing.T) {
 
 		control, controlWrite := supervisorCovPipe(t)
 		ready := supervisorCovNewPublisher()
+		peer, readyOutput := supervisorCovAcknowledgingGuardian(t, ready)
 
 		done := make(chan error, 1)
 		go func() {
 			done <- runTurnSupervisorNative(
 				supervisorCovEncode(t, supervisorCovNativeConfig("/bin/sleep", "60")),
-				[]io.Reader{control}, nil, strings.NewReader("\x01"),
-				ready, io.Discard, 6, 7,
+				[]io.Reader{control}, peer, strings.NewReader("\x01"),
+				readyOutput, io.Discard, 6, 7,
 			)
 		}()
 
@@ -489,7 +513,7 @@ func TestRunTurnSupervisorNativeNeverReportsAnUncontainedTree(t *testing.T) {
 
 			require.ErrorIs(t, <-done, want)
 			require.NotContains(
-				t, strings.Join(ready.lines(), ""), "done\n",
+				t, strings.Join(ready.lines(), ""), turnSupervisorDonePrefix,
 				"an uncontained turn was reported as finished",
 			)
 			require.Empty(t, completion.lines())

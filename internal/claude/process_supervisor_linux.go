@@ -5,6 +5,8 @@ package claude
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,9 +33,12 @@ const (
 	turnSupervisorReady        = "ready\n"
 	turnSupervisorArmed        = "armed\n"
 	turnSupervisorProof        = "contained\n"
+	turnSupervisorDonePrefix   = "done:"
 	turnSupervisorFailure      = "error:"
 	turnSupervisorBorrowed     = "borrowed"
 	turnSupervisorStandalone   = "standalone"
+	turnSupervisorChallengeLen = 32
+	turnSupervisorTerminalLen  = len(turnSupervisorDonePrefix) + 2*turnSupervisorChallengeLen + 1
 
 	// turnSupervisorLivenessReadyWait bounds the guardian's wait for its
 	// liveness child's readiness report. The guardian arms it only after
@@ -65,39 +70,44 @@ type linuxProcessIdentity struct {
 var (
 	errTurnSupervisorGuardianExited = errors.New("claude guardian exited before native launch")
 
-	turnSupervisorExecutable        = os.Executable
-	turnSupervisorMemfd             = unix.MemfdCreate
-	turnSupervisorPipe              = os.Pipe
-	turnSupervisorExit              = os.Exit
-	turnSupervisorSignalNotify      = signal.Notify
-	turnSupervisorSignalStop        = signal.Stop
-	turnSupervisorEnable            = enableTurnSupervisor
-	turnSupervisorNoNewPrivs        = enableTurnSupervisorNoNewPrivileges
-	turnSupervisorCoreLimit         = disableTurnSupervisorCoreDumps
-	turnSupervisorCommand           = exec.Command
-	turnSupervisorContain           = awaitLinuxSupervisorContainment
-	turnSupervisorProcessID         = os.Getpid
-	turnSupervisorSignalGroup       = signalProcessGroupID
-	turnSupervisorWriteConfig       = writeTurnSupervisorConfig
-	turnSupervisorDescendants       = linuxDescendants
-	turnSupervisorIdentity          = readLinuxProcessIdentity
-	turnSupervisorSignalPID         = signalLinuxIdentity
-	turnSupervisorWait4             = unix.Wait4
-	turnSupervisorSleep             = time.Sleep
-	turnSupervisorProcRoot          = "/proc"
-	turnSupervisorRun               = runTurnSupervisorGuardian
-	turnSupervisorRunLiveness       = runTurnSupervisorLiveness
-	turnSupervisorOpenFile          = os.NewFile
-	turnSupervisorFcntl             = unix.FcntlInt
-	turnSupervisorInput             = inheritedTurnSupervisorInput
-	turnSupervisorPrctl             = unix.Prctl
-	turnSupervisorSetrlimit         = unix.Setrlimit
-	turnSupervisorAcquireStandalone = acquireAgentStandaloneIdentity
-	turnSupervisorSealConfig        = unix.FcntlInt
-	turnSupervisorEffectiveUID      = os.Geteuid
-	turnSupervisorPoll              = unix.Poll
-	turnSupervisorReadDeadline      = (*os.File).SetReadDeadline
+	turnSupervisorExecutable                  = os.Executable
+	turnSupervisorMemfd                       = unix.MemfdCreate
+	turnSupervisorPipe                        = os.Pipe
+	turnSupervisorExit                        = os.Exit
+	turnSupervisorSignalNotify                = signal.Notify
+	turnSupervisorSignalStop                  = signal.Stop
+	turnSupervisorEnable                      = enableTurnSupervisor
+	turnSupervisorNoNewPrivs                  = enableTurnSupervisorNoNewPrivileges
+	turnSupervisorCoreLimit                   = disableTurnSupervisorCoreDumps
+	turnSupervisorCommand                     = exec.Command
+	turnSupervisorContain                     = awaitLinuxSupervisorContainment
+	turnSupervisorProcessID                   = os.Getpid
+	turnSupervisorSignalGroup                 = signalProcessGroupID
+	turnSupervisorWriteConfig                 = writeTurnSupervisorConfig
+	turnSupervisorDescendants                 = linuxDescendants
+	turnSupervisorIdentity                    = readLinuxProcessIdentity
+	turnSupervisorSignalPID                   = signalLinuxIdentity
+	turnSupervisorWait4                       = unix.Wait4
+	turnSupervisorSleep                       = time.Sleep
+	turnSupervisorProcRoot                    = "/proc"
+	turnSupervisorRun                         = runTurnSupervisorGuardian
+	turnSupervisorRunLiveness                 = runTurnSupervisorLiveness
+	turnSupervisorOpenFile                    = os.NewFile
+	turnSupervisorFcntl                       = unix.FcntlInt
+	turnSupervisorInput                       = inheritedTurnSupervisorInput
+	turnSupervisorPrctl                       = unix.Prctl
+	turnSupervisorSetrlimit                   = unix.Setrlimit
+	turnSupervisorAcquireStandalone           = acquireAgentStandaloneIdentity
+	turnSupervisorSealConfig                  = unix.FcntlInt
+	turnSupervisorEffectiveUID                = os.Geteuid
+	turnSupervisorPoll                        = unix.Poll
+	turnSupervisorReadDeadline                = (*os.File).SetReadDeadline
+	turnSupervisorWritePeer                   = (*os.File).Write
+	turnSupervisorChallengeSource   io.Reader = rand.Reader
 	turnSupervisorBeforeRelease     func(*os.Process) error
+	turnSupervisorAfterTerminalRead func()
+	turnSupervisorBeforeTerminalACK func()
+	turnSupervisorAfterTerminalACK  func()
 )
 
 func enableTurnSupervisor() error {
@@ -607,7 +617,9 @@ func runTurnSupervisorGuardian(configInput io.Reader, controlInput io.Reader, re
 		return armErr
 	}
 
-	return superviseTurnSupervisorGuardian(completion, reader, liveness, waiter, controlDone, signals, nativePID, &authority)
+	return superviseTurnSupervisorGuardian(
+		completion, peer, reader, liveness, waiter, controlDone, signals, nativePID, &authority,
+	)
 }
 
 // armTurnSupervisorGuardian drives the readiness handshake: it waits for the
@@ -744,6 +756,7 @@ func armTurnSupervisorGuardian(
 // then adjudicates what the liveness side reported on its way out.
 func superviseTurnSupervisorGuardian(
 	completion *os.File,
+	peer *os.File,
 	reader *bufio.Reader,
 	liveness *exec.Cmd,
 	waiter *commandWait,
@@ -752,18 +765,33 @@ func superviseTurnSupervisorGuardian(
 	nativePID int,
 	authority **turnSupervisorAuthority,
 ) error {
-	var waitErr error
+	type terminalResult struct {
+		line string
+		err  error
+	}
+
+	terminal := make(chan terminalResult, 1)
+
+	go func() {
+		line, err := reader.ReadString('\n')
+		terminal <- terminalResult{line: line, err: err}
+	}()
+
+	var (
+		result  terminalResult
+		waitErr error
+	)
 
 	for {
 		select {
-		case <-waiter.done:
-			waitErr = waiter.err
-
-			goto livenessExited
+		case result = <-terminal:
+			goto terminalReceived
 		case <-controlDone:
-			waitErr, _ = waiter.await(context.Background())
-
-			goto livenessExited
+			// Closing the control channel is the normal request for liveness to
+			// contain its native tree. Keep consuming the terminal channel while
+			// it does so; waiting for process exit first would deadlock the
+			// acknowledged handoff because liveness stays alive until ACK.
+			controlDone = nil
 		case received := <-signals:
 			nativeSignal, signalOK := received.(syscall.Signal)
 			if signalOK {
@@ -772,21 +800,55 @@ func superviseTurnSupervisorGuardian(
 		}
 	}
 
-livenessExited:
-	doneLine, doneErr := reader.ReadString('\n')
+terminalReceived:
+	_, terminalErr := parseTurnSupervisorTerminalFrame(result.line)
+	if result.err == nil && terminalErr == nil {
+		if turnSupervisorAfterTerminalRead != nil {
+			turnSupervisorAfterTerminalRead()
+		}
 
-	if doneErr == nil && doneLine == "done\n" {
-		completionErr := completeTurnSupervisorAuthority(completion, authority, true)
+		closeErr := closeTurnSupervisorAuthority(authority)
+		if closeErr != nil {
+			return errors.Join(waitErr, closeErr)
+		}
 
-		return errors.Join(waitErr, completionErr)
+		if turnSupervisorBeforeTerminalACK != nil {
+			turnSupervisorBeforeTerminalACK()
+		}
+
+		written, ackErr := turnSupervisorWritePeer(peer, []byte(result.line))
+		if ackErr == nil && written != len(result.line) {
+			ackErr = io.ErrShortWrite
+		}
+		if ackErr != nil {
+			return errors.Join(waitErr, fmt.Errorf("acknowledge Claude liveness completion: %w", ackErr))
+		}
+		_ = peer.Close()
+
+		if turnSupervisorAfterTerminalACK != nil {
+			turnSupervisorAfterTerminalACK()
+		}
+
+		if waitErr == nil {
+			waitErr, _ = waiter.await(context.Background())
+		}
+
+		return waitErr
+	}
+
+	if waitErr == nil {
+		waitErr, _ = waiter.await(context.Background())
 	}
 
 	containErr := turnSupervisorContain(turnSupervisorProcessID(), nativePID)
 
-	if failure, failed := strings.CutPrefix(strings.TrimSpace(doneLine), turnSupervisorFailure); failed {
+	if failure, failed := strings.CutPrefix(strings.TrimSpace(result.line), turnSupervisorFailure); failed {
 		closeErr := completeTurnSupervisorAuthority(completion, authority, false)
 
-		return errors.Join(waitErr, fmt.Errorf("claude liveness completion failed: %s", failure), doneErr, containErr, closeErr)
+		return errors.Join(waitErr, fmt.Errorf("claude liveness completion failed: %s", failure), result.err, containErr, closeErr)
+	}
+	if result.err == nil {
+		result.err = terminalErr
 	}
 
 	completionErr := completeTurnSupervisorAuthority(
@@ -795,7 +857,9 @@ livenessExited:
 		containErr == nil && turnSupervisorSignaledExit(waitErr),
 	)
 
-	return errors.Join(waitErr, fmt.Errorf("claude liveness exited without completion report: %v", doneErr), containErr, completionErr)
+	return errors.Join(
+		waitErr, fmt.Errorf("claude liveness exited without completion report: %v", result.err), containErr, completionErr,
+	)
 }
 
 type turnSupervisorAuthority struct {
@@ -837,6 +901,17 @@ func completeTurnSupervisorAuthority(
 	}
 
 	return nil
+}
+
+func closeTurnSupervisorAuthority(authority **turnSupervisorAuthority) error {
+	if authority == nil || *authority == nil {
+		return errors.New("claude guardian authority is unavailable at completion")
+	}
+
+	closeErr := (*authority).Close()
+	*authority = nil
+
+	return closeErr
 }
 
 func turnSupervisorSignaledExit(waitErr error) bool {
@@ -1223,14 +1298,15 @@ func runTurnSupervisorNative(
 		}(controlInput)
 	}
 
-	guardianDone := make(chan struct{})
+	guardianState := newTurnSupervisorGuardianState(guardianPeer)
 
-	if guardianPeer != nil {
+	if guardianState != nil {
 		go func() {
-			_, _ = io.Copy(io.Discard, guardianPeer)
+			guardianState.observe()
 
-			close(guardianDone)
-			controlOnce.Do(func() { close(controlDone) })
+			if guardianState.err != nil {
+				controlOnce.Do(func() { close(controlDone) })
+			}
 		}()
 	}
 
@@ -1279,7 +1355,7 @@ func runTurnSupervisorNative(
 			authorityDomain,
 			contained,
 			guardianExited,
-			guardianDone,
+			guardianState,
 			readyOutput,
 			completionOutput,
 		))
@@ -1301,7 +1377,7 @@ func runTurnSupervisorNative(
 	nativeIsolation.AuthorityDomain = nil
 	nativeIsolation.identityAuthorityAdopted = true
 
-	if err := validateTurnSupervisorGuardianPeer(guardianPeer, guardianDone); err != nil {
+	if err := validateTurnSupervisorGuardianPeer(guardianPeer, guardianState); err != nil {
 		guardianExited = errors.Is(err, errTurnSupervisorGuardianExited)
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
 		contained = containErr == nil
@@ -1317,7 +1393,7 @@ func runTurnSupervisorNative(
 	}
 
 	if err := readTurnSupervisorStartGate(startInput); err != nil {
-		peerErr := validateTurnSupervisorGuardianPeer(guardianPeer, guardianDone)
+		peerErr := validateTurnSupervisorGuardianPeer(guardianPeer, guardianState)
 		guardianExited = errors.Is(peerErr, errTurnSupervisorGuardianExited)
 		containErr := turnSupervisorContain(turnSupervisorProcessID(), 0)
 		contained = containErr == nil
@@ -1328,7 +1404,7 @@ func runTurnSupervisorNative(
 	var finalPeerErr error
 
 	waitDone, enableErr, startErr := startTurnSupervisorNative(native, &nativeIsolation, func() error {
-		finalPeerErr = validateTurnSupervisorGuardianPeer(guardianPeer, guardianDone)
+		finalPeerErr = validateTurnSupervisorGuardianPeer(guardianPeer, guardianState)
 
 		return finalPeerErr
 	})
@@ -1396,7 +1472,7 @@ func completeTurnSupervisorLiveness(
 	authorityDomain *agentIdentityLock,
 	contained bool,
 	guardianExited bool,
-	guardianDone <-chan struct{},
+	guardianState *turnSupervisorGuardianState,
 	readyOutput io.Writer,
 	completionOutput io.Writer,
 ) error {
@@ -1417,33 +1493,146 @@ func completeTurnSupervisorLiveness(
 		return nil
 	}
 
-	select {
-	case <-guardianDone:
-		guardianExited = true
-	default:
-	}
-
 	if guardianExited {
 		if _, err := io.WriteString(completionOutput, turnSupervisorProof); err != nil {
 			return fmt.Errorf("publish Claude liveness completion: %w", err)
 		}
-	} else {
-		if _, err := io.WriteString(readyOutput, "done\n"); err != nil {
-			return fmt.Errorf("publish Claude liveness terminal result: %w", err)
+
+		return nil
+	}
+
+	if guardianState == nil {
+		return errors.New("claude liveness guardian acknowledgement is unavailable")
+	}
+	if guardianState.preTerminalErr != nil {
+		return guardianState.preTerminalErr
+	}
+
+	select {
+	case <-guardianState.done:
+		if guardianState.err == nil {
+			return errors.New("claude guardian sent a terminal response before the terminal report")
 		}
+
+		if errors.Is(guardianState.err, io.EOF) {
+			return publishTurnSupervisorLivenessProof(completionOutput)
+		}
+
+		return guardianState.err
+	default:
+	}
+
+	terminalFrame, err := newTurnSupervisorTerminalFrame()
+	if err != nil {
+		return err
+	}
+
+	written, err := io.WriteString(readyOutput, terminalFrame)
+	if err == nil && written != len(terminalFrame) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		if errors.Is(err, syscall.EPIPE) {
+			<-guardianState.done
+
+			if errors.Is(guardianState.err, io.EOF) {
+				return publishTurnSupervisorLivenessProof(completionOutput)
+			}
+		}
+
+		return fmt.Errorf("publish Claude liveness terminal result: %w", err)
+	}
+
+	<-guardianState.done
+
+	if guardianState.err != nil && !errors.Is(guardianState.err, io.EOF) {
+		return guardianState.err
+	}
+	if guardianState.err == nil && guardianState.response != terminalFrame {
+		return errors.New("claude guardian completion acknowledgement did not echo the terminal challenge")
+	}
+
+	return publishTurnSupervisorLivenessProof(completionOutput)
+}
+
+func newTurnSupervisorTerminalFrame() (string, error) {
+	var challenge [turnSupervisorChallengeLen]byte
+	if _, err := io.ReadFull(turnSupervisorChallengeSource, challenge[:]); err != nil {
+		return "", fmt.Errorf("generate Claude liveness terminal challenge: %w", err)
+	}
+
+	return turnSupervisorDonePrefix + hex.EncodeToString(challenge[:]) + "\n", nil
+}
+
+func parseTurnSupervisorTerminalFrame(frame string) (string, error) {
+	if len(frame) != turnSupervisorTerminalLen || !strings.HasPrefix(frame, turnSupervisorDonePrefix) || frame[len(frame)-1] != '\n' {
+		return "", fmt.Errorf("invalid Claude liveness terminal frame %q", strings.TrimSpace(frame))
+	}
+
+	encoded := frame[len(turnSupervisorDonePrefix) : len(frame)-1]
+	challenge, err := hex.DecodeString(encoded)
+	if err != nil || len(challenge) != turnSupervisorChallengeLen {
+		return "", fmt.Errorf("invalid Claude liveness terminal challenge %q", encoded)
+	}
+
+	return encoded, nil
+}
+
+func publishTurnSupervisorLivenessProof(completionOutput io.Writer) error {
+	if _, err := io.WriteString(completionOutput, turnSupervisorProof); err != nil {
+		return fmt.Errorf("publish Claude liveness completion: %w", err)
 	}
 
 	return nil
 }
 
-func validateTurnSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) error {
+type turnSupervisorGuardianState struct {
+	peer           *os.File
+	done           chan struct{}
+	response       string
+	err            error
+	preTerminalErr error
+}
+
+func newTurnSupervisorGuardianState(peer *os.File) *turnSupervisorGuardianState {
 	if peer == nil {
 		return nil
 	}
 
+	return &turnSupervisorGuardianState{peer: peer, done: make(chan struct{})}
+}
+
+func (state *turnSupervisorGuardianState) observe() {
+	response, err := io.ReadAll(io.LimitReader(state.peer, int64(turnSupervisorTerminalLen+1)))
+	switch {
+	case err != nil:
+	case len(response) == 0:
+		err = io.EOF
+	case len(response) != turnSupervisorTerminalLen:
+		err = fmt.Errorf("invalid Claude guardian completion acknowledgement length %d", len(response))
+	default:
+		state.response = string(response)
+		if _, parseErr := parseTurnSupervisorTerminalFrame(state.response); parseErr != nil {
+			err = fmt.Errorf("invalid Claude guardian completion acknowledgement: %v", parseErr)
+		}
+	}
+
+	state.err = err
+	close(state.done)
+}
+
+func validateTurnSupervisorGuardianPeer(peer *os.File, state *turnSupervisorGuardianState) error {
+	if peer == nil {
+		return nil
+	}
+
+	if state == nil {
+		return errors.New("claude guardian peer state is unavailable")
+	}
+
 	select {
-	case <-done:
-		return errTurnSupervisorGuardianExited
+	case <-state.done:
+		return observedTurnSupervisorGuardianPeerState(state)
 	default:
 	}
 
@@ -1454,14 +1643,40 @@ func validateTurnSupervisorGuardianPeer(peer *os.File, done <-chan struct{}) err
 
 	ready, err := turnSupervisorPoll(poll, 0)
 	if err != nil {
-		return fmt.Errorf("poll Claude guardian before native launch: %w", err)
+		state.preTerminalErr = fmt.Errorf("poll Claude guardian before native launch: %w", err)
+
+		return state.preTerminalErr
 	}
 
-	if ready != 0 || poll[0].Revents != 0 {
+	if ready == 0 && poll[0].Revents == 0 {
+		return nil
+	}
+	if poll[0].Revents&unix.POLLHUP != 0 {
+		// A hangup makes the observer's bounded read finite. Let that single
+		// reader distinguish empty EOF (guardian death) from queued bytes plus
+		// EOF (a protocol fault); readiness alone proves neither.
+		<-state.done
+
+		return observedTurnSupervisorGuardianPeerState(state)
+	}
+
+	state.preTerminalErr = fmt.Errorf(
+		"claude guardian peer became readable before native launch without confirmed empty EOF (events %#x)",
+		poll[0].Revents,
+	)
+
+	return state.preTerminalErr
+}
+
+func observedTurnSupervisorGuardianPeerState(state *turnSupervisorGuardianState) error {
+	if errors.Is(state.err, io.EOF) {
 		return errTurnSupervisorGuardianExited
 	}
+	if state.err == nil {
+		return errors.New("claude guardian acknowledged completion before native launch")
+	}
 
-	return nil
+	return state.err
 }
 
 func validateTurnSupervisorIdentity(isolation *ProcessIsolation) error {

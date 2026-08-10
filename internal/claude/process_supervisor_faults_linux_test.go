@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -27,6 +28,23 @@ import (
 type supervisorCovWriteFault struct {
 	err    error
 	writes int
+}
+
+type supervisorCovWriteFunc func([]byte) (int, error)
+
+func (write supervisorCovWriteFunc) Write(value []byte) (int, error) {
+	return write(value)
+}
+
+func supervisorCovAuthorityLocks(t *testing.T) (*agentIdentityLock, *agentIdentityLock) {
+	t.Helper()
+
+	identity, err := os.CreateTemp(t.TempDir(), "identity")
+	require.NoError(t, err)
+	domain, err := os.CreateTemp(t.TempDir(), "domain")
+	require.NoError(t, err)
+
+	return &agentIdentityLock{file: identity}, &agentIdentityLock{file: domain}
 }
 
 func (fault *supervisorCovWriteFault) Write(value []byte) (int, error) {
@@ -500,31 +518,130 @@ func TestReadLinuxProcessIdentityRefusesAnUnparsableProcessGroup(t *testing.T) {
 }
 
 // TestValidateTurnSupervisorGuardianPeerReadsTheDescriptorNotOnlyTheChannel
-// proves the liveness helper decides its peer is gone from the descriptor
-// itself, not only from the drain goroutine's channel. The drain goroutine can
-// still be scheduled when the guardian dies, so a check that trusted the
-// channel alone would launch the native root with no guardian holding the
-// authority.
+// proves the descriptor may wake the observer, but only that observer's empty
+// EOF result proves guardian death. Readable bytes are not a death signal.
 func TestValidateTurnSupervisorGuardianPeerReadsTheDescriptorNotOnlyTheChannel(t *testing.T) {
 	restoreTurnSupervisorSeams(t)
 
 	require.NoError(t, validateTurnSupervisorGuardianPeer(nil, nil))
 
 	live, _ := supervisorCovPipe(t)
-	open := make(chan struct{})
+	require.ErrorContains(t, validateTurnSupervisorGuardianPeer(live, nil), "peer state is unavailable")
+	open := &turnSupervisorGuardianState{peer: live, done: make(chan struct{})}
 	require.NoError(t, validateTurnSupervisorGuardianPeer(live, open))
 
 	// A closed write end is exactly what a dead guardian leaves behind: the
 	// poll reports hangup even though the drain channel is still open.
 	dead, deadWrite := supervisorCovPipe(t)
+	deadState := newTurnSupervisorGuardianState(dead)
+	go deadState.observe()
 	require.NoError(t, deadWrite.Close())
-	require.ErrorIs(t, validateTurnSupervisorGuardianPeer(dead, open), errTurnSupervisorGuardianExited)
+	require.ErrorIs(t, validateTurnSupervisorGuardianPeer(dead, deadState), errTurnSupervisorGuardianExited)
+
+	// Even a hangup is not death proof when bytes preceded EOF. The observer
+	// owns that distinction and reports the partial frame as a protocol error.
+	partial, partialWrite := supervisorCovPipe(t)
+	partialState := newTurnSupervisorGuardianState(partial)
+	go partialState.observe()
+	_, err := io.WriteString(partialWrite, "queued-before-eof")
+	require.NoError(t, err)
+	require.NoError(t, partialWrite.Close())
+	err = validateTurnSupervisorGuardianPeer(partial, partialState)
+	require.ErrorContains(t, err, "invalid Claude guardian completion acknowledgement length")
+	require.NotErrorIs(t, err, errTurnSupervisorGuardianExited)
+
+	// Pin the poll-HUP path itself: the poll wakeup only waits for and returns
+	// the observer verdict; it never manufactures the guardian-exited sentinel.
+	poll := turnSupervisorPoll
+	hungup := &turnSupervisorGuardianState{peer: live, done: make(chan struct{})}
+	turnSupervisorPoll = func(fds []unix.PollFd, _ int) (int, error) {
+		hungup.err = io.EOF
+		close(hungup.done)
+		fds[0].Revents = unix.POLLHUP
+
+		return 1, nil
+	}
+	require.ErrorIs(t, validateTurnSupervisorGuardianPeer(live, hungup), errTurnSupervisorGuardianExited)
+	turnSupervisorPoll = poll
+
+	// The channel is the other half of the same verdict: once the drain
+	// goroutine has run, its report stands without consulting the descriptor.
+	drained := &turnSupervisorGuardianState{peer: live, done: make(chan struct{}), err: io.EOF}
+	close(drained.done)
+	require.ErrorIs(t, validateTurnSupervisorGuardianPeer(live, drained), errTurnSupervisorGuardianExited)
+
+	acknowledged := &turnSupervisorGuardianState{peer: live, done: make(chan struct{})}
+	close(acknowledged.done)
+	require.ErrorContains(
+		t, validateTurnSupervisorGuardianPeer(live, acknowledged), "acknowledged completion before native launch",
+	)
+
+	wantProtocol := errors.New("guardian protocol")
+	malformed := &turnSupervisorGuardianState{peer: live, done: make(chan struct{}), err: wantProtocol}
+	close(malformed.done)
+	require.ErrorIs(t, validateTurnSupervisorGuardianPeer(live, malformed), wantProtocol)
 
 	want := errors.New("poll")
 	turnSupervisorPoll = func([]unix.PollFd, int) (int, error) { return 0, want }
-	err := validateTurnSupervisorGuardianPeer(live, open)
+	err = validateTurnSupervisorGuardianPeer(live, open)
 	require.ErrorIs(t, err, want)
 	require.ErrorContains(t, err, "poll Claude guardian before native launch")
+}
+
+// TestValidateTurnSupervisorGuardianPeerRejectsUnreadEarlyBytesFromALivePeer
+// pins the scheduling edge where bytes are queued but the observer goroutine
+// has not run. POLLIN proves only readability: the still-open writer proves the
+// guardian may remain alive and authoritative, so liveness must neither call it
+// dead nor enter the terminal handshake from deferred completion.
+func TestValidateTurnSupervisorGuardianPeerRejectsUnreadEarlyBytesFromALivePeer(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "malformed bytes", payload: "early"},
+		{
+			name:    "valid-looking terminal echo",
+			payload: turnSupervisorDonePrefix + strings.Repeat("0", 2*turnSupervisorChallengeLen) + "\n",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			peer, guardian := supervisorCovPipe(t)
+			state := newTurnSupervisorGuardianState(peer)
+			// Deliberately do not start state.observe: this makes the unread
+			// observer scheduling boundary deterministic while the real pipe
+			// supplies POLLIN to the production validator.
+			_, err := io.WriteString(guardian, testCase.payload)
+			require.NoError(t, err)
+
+			peerErr := validateTurnSupervisorGuardianPeer(peer, state)
+			require.ErrorContains(t, peerErr, "without confirmed empty EOF")
+			require.NotErrorIs(t, peerErr, errTurnSupervisorGuardianExited)
+			_, err = io.WriteString(guardian, "still-alive")
+			require.NoError(t, err, "the guardian endpoint was not still writable")
+
+			identity, domain := supervisorCovAuthorityLocks(t)
+			var terminal, proof bytes.Buffer
+			completion := make(chan error, 1)
+			go func() {
+				completion <- completeTurnSupervisorLiveness(
+					nil, identity, domain, true, errors.Is(peerErr, errTurnSupervisorGuardianExited),
+					state, &terminal, &proof,
+				)
+			}()
+
+			select {
+			case completionErr := <-completion:
+				require.ErrorIs(t, completionErr, peerErr)
+			case <-time.After(time.Second):
+				state.err = errors.New("release a deadlocked regression")
+				close(state.done)
+				<-completion
+				t.Fatal("pre-terminal peer bytes deadlocked liveness completion")
+			}
+			require.Empty(t, terminal.String())
+			require.Empty(t, proof.String(), "peer readability published proof while the guardian remained live")
+		})
+	}
 }
 
 // TestTurnSupervisorAuthorityCloseReleasesWhicheverAuthorityItHolds proves the
@@ -685,7 +802,7 @@ func TestCompleteTurnSupervisorLivenessPublishesOnlyWhatItProved(t *testing.T) {
 
 		var ready, completion bytes.Buffer
 		require.NoError(t, completeTurnSupervisorLiveness(
-			nil, identity, domain, false, true, make(chan struct{}), &ready, &completion,
+			nil, identity, domain, false, true, nil, &ready, &completion,
 		))
 		require.Zero(t, ready.Len())
 		require.Zero(t, completion.Len())
@@ -693,15 +810,12 @@ func TestCompleteTurnSupervisorLivenessPublishesOnlyWhatItProved(t *testing.T) {
 
 	t.Run("unpublishable proof is reported", func(t *testing.T) {
 		identity, domain := locks(t)
-		guardianDone := make(chan struct{})
-		close(guardianDone)
-
 		want := errors.New("proof")
 		fault := &supervisorCovWriteFault{err: want}
 
 		var ready bytes.Buffer
 		err := completeTurnSupervisorLiveness(
-			nil, identity, domain, true, false, guardianDone, &ready, fault,
+			nil, identity, domain, true, true, nil, &ready, fault,
 		)
 		require.ErrorIs(t, err, want)
 		require.ErrorContains(t, err, "publish Claude liveness completion")
@@ -716,12 +830,363 @@ func TestCompleteTurnSupervisorLivenessPublishesOnlyWhatItProved(t *testing.T) {
 
 		var completion bytes.Buffer
 		err := completeTurnSupervisorLiveness(
-			nil, identity, domain, true, false, make(chan struct{}), fault, &completion,
+			nil, identity, domain, true, false, &turnSupervisorGuardianState{}, fault, &completion,
 		)
 		require.ErrorIs(t, err, want)
 		require.ErrorContains(t, err, "publish Claude liveness terminal result")
 		require.Zero(t, completion.Len())
 	})
+
+	t.Run("terminal challenge generation failure is fail closed", func(t *testing.T) {
+		identity, domain := locks(t)
+		originalSource := turnSupervisorChallengeSource
+		t.Cleanup(func() { turnSupervisorChallengeSource = originalSource })
+		turnSupervisorChallengeSource = strings.NewReader("short")
+
+		state := &turnSupervisorGuardianState{done: make(chan struct{})}
+		var ready, completion bytes.Buffer
+		err := completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, state, &ready, &completion,
+		)
+		require.ErrorContains(t, err, "generate Claude liveness terminal challenge")
+		require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+		require.Empty(t, ready.String())
+		require.Empty(t, completion.String())
+	})
+
+	t.Run("short terminal write is fail closed", func(t *testing.T) {
+		identity, domain := locks(t)
+		state := &turnSupervisorGuardianState{done: make(chan struct{})}
+		short := supervisorCovWriteFunc(func(value []byte) (int, error) { return len(value) - 1, nil })
+
+		var completion bytes.Buffer
+		err := completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, state, short, &completion,
+		)
+		require.ErrorIs(t, err, io.ErrShortWrite)
+		require.Empty(t, completion.String())
+	})
+
+	t.Run("valid guardian acknowledgement publishes exactly one proof", func(t *testing.T) {
+		identity, domain := locks(t)
+		peer, guardian := supervisorCovPipe(t)
+		state := newTurnSupervisorGuardianState(peer)
+		go state.observe()
+
+		var ready, completion bytes.Buffer
+		terminal := supervisorCovWriteFunc(func(value []byte) (int, error) {
+			written, err := ready.Write(value)
+			if err == nil {
+				_, err = guardian.Write(value)
+				err = errors.Join(err, guardian.Close())
+				<-state.done
+			}
+
+			return written, err
+		})
+		require.NoError(t, completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, state, terminal, &completion,
+		))
+		_, err := parseTurnSupervisorTerminalFrame(ready.String())
+		require.NoError(t, err)
+		require.Equal(t, turnSupervisorProof, completion.String())
+	})
+
+	t.Run("ACK before a terminal write failure is fail closed", func(t *testing.T) {
+		identity, domain := locks(t)
+		peer, guardian := supervisorCovPipe(t)
+		state := newTurnSupervisorGuardianState(peer)
+		go state.observe()
+
+		want := errors.New("terminal was not emitted")
+		terminal := supervisorCovWriteFunc(func(value []byte) (int, error) {
+			_, err := guardian.Write(value)
+			require.NoError(t, err)
+			require.NoError(t, guardian.Close())
+			<-state.done
+
+			return 0, want
+		})
+		var completion bytes.Buffer
+		err := completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, state, terminal, &completion,
+		)
+		require.ErrorIs(t, err, want)
+		require.ErrorContains(t, err, "publish Claude liveness terminal result")
+		require.Empty(t, completion.String(), "an echoed challenge cannot prove a terminal frame the writer rejected")
+	})
+
+	t.Run("guardian EOF before terminal publication transfers proof ownership", func(t *testing.T) {
+		identity, domain := locks(t)
+		peer, guardian := supervisorCovPipe(t)
+		state := newTurnSupervisorGuardianState(peer)
+		go state.observe()
+		require.NoError(t, guardian.Close())
+		<-state.done
+
+		var ready, completion bytes.Buffer
+		require.NoError(t, completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, state, &ready, &completion,
+		))
+		require.Empty(t, ready.String())
+		require.Equal(t, turnSupervisorProof, completion.String())
+	})
+
+	t.Run("guardian death racing the terminal write transfers proof ownership", func(t *testing.T) {
+		identity, domain := locks(t)
+		peer, guardian := supervisorCovPipe(t)
+		state := newTurnSupervisorGuardianState(peer)
+		go state.observe()
+
+		terminal := supervisorCovWriteFunc(func([]byte) (int, error) {
+			require.NoError(t, guardian.Close())
+			<-state.done
+
+			return 0, syscall.EPIPE
+		})
+		var completion bytes.Buffer
+		require.NoError(t, completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, state, terminal, &completion,
+		))
+		require.Equal(t, turnSupervisorProof, completion.String())
+	})
+
+	t.Run("malformed guardian acknowledgement is fail closed", func(t *testing.T) {
+		identity, domain := locks(t)
+		peer, guardian := supervisorCovPipe(t)
+		state := newTurnSupervisorGuardianState(peer)
+		go state.observe()
+
+		var ready, completion bytes.Buffer
+		terminal := supervisorCovWriteFunc(func(value []byte) (int, error) {
+			written, err := ready.Write(value)
+			if err == nil {
+				_, err = guardian.Write([]byte("malformed\n"))
+				err = errors.Join(err, guardian.Close())
+			}
+
+			return written, err
+		})
+		err := completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, state, terminal, &completion,
+		)
+		require.ErrorContains(t, err, "invalid Claude guardian completion acknowledgement")
+		_, parseErr := parseTurnSupervisorTerminalFrame(ready.String())
+		require.NoError(t, parseErr)
+		require.Empty(t, completion.String())
+	})
+
+	t.Run("wrong terminal challenge is fail closed", func(t *testing.T) {
+		identity, domain := locks(t)
+		peer, guardian := supervisorCovPipe(t)
+		state := newTurnSupervisorGuardianState(peer)
+		go state.observe()
+
+		var ready, completion bytes.Buffer
+		terminal := supervisorCovWriteFunc(func(value []byte) (int, error) {
+			written, err := ready.Write(value)
+			wrong := append([]byte(nil), value...)
+			if wrong[len(turnSupervisorDonePrefix)] == '0' {
+				wrong[len(turnSupervisorDonePrefix)] = '1'
+			} else {
+				wrong[len(turnSupervisorDonePrefix)] = '0'
+			}
+			_, responseErr := guardian.Write(wrong)
+			return written, errors.Join(err, responseErr, guardian.Close())
+		})
+		err := completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, state, terminal, &completion,
+		)
+		require.ErrorContains(t, err, "did not echo the terminal challenge")
+		require.Empty(t, completion.String())
+	})
+
+	for _, testCase := range []struct {
+		name     string
+		response func([]byte) []byte
+	}{
+		{name: "truncated acknowledgement", response: func(value []byte) []byte { return value[:len(value)-1] }},
+		{name: "acknowledgement with extra bytes", response: func(value []byte) []byte {
+			return append(append([]byte(nil), value...), 'x')
+		}},
+		{name: "non-hex acknowledgement", response: func(value []byte) []byte {
+			malformed := append([]byte(nil), value...)
+			malformed[len(turnSupervisorDonePrefix)] = 'z'
+
+			return malformed
+		}},
+	} {
+		t.Run(testCase.name+" is fail closed", func(t *testing.T) {
+			identity, domain := locks(t)
+			peer, guardian := supervisorCovPipe(t)
+			state := newTurnSupervisorGuardianState(peer)
+			go state.observe()
+
+			terminal := supervisorCovWriteFunc(func(value []byte) (int, error) {
+				_, responseErr := guardian.Write(testCase.response(value))
+
+				return len(value), errors.Join(responseErr, guardian.Close())
+			})
+			var completion bytes.Buffer
+			err := completeTurnSupervisorLiveness(
+				nil, identity, domain, true, false, state, terminal, &completion,
+			)
+			require.ErrorContains(t, err, "invalid Claude guardian completion acknowledgement")
+			require.Empty(t, completion.String())
+		})
+	}
+
+	t.Run("malformed guardian frame before terminal publication is fail closed", func(t *testing.T) {
+		identity, domain := locks(t)
+		want := errors.New("malformed guardian frame")
+		state := &turnSupervisorGuardianState{done: make(chan struct{}), err: want}
+		close(state.done)
+
+		var ready, completion bytes.Buffer
+		err := completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, state, &ready, &completion,
+		)
+		require.ErrorIs(t, err, want)
+		require.Empty(t, ready.String())
+		require.Empty(t, completion.String())
+	})
+
+	t.Run("proof failure after valid ACK is reported", func(t *testing.T) {
+		identity, domain := locks(t)
+		state := &turnSupervisorGuardianState{done: make(chan struct{})}
+		var ready bytes.Buffer
+		terminal := supervisorCovWriteFunc(func(value []byte) (int, error) {
+			written, err := ready.Write(value)
+			state.response = string(value)
+			close(state.done)
+
+			return written, err
+		})
+		want := errors.New("proof after ACK")
+		fault := &supervisorCovWriteFault{err: want}
+
+		err := completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, state, terminal, fault,
+		)
+		require.ErrorIs(t, err, want)
+		require.ErrorContains(t, err, "publish Claude liveness completion")
+		_, parseErr := parseTurnSupervisorTerminalFrame(ready.String())
+		require.NoError(t, parseErr)
+	})
+
+	t.Run("premature guardian acknowledgement is fail closed", func(t *testing.T) {
+		identity, domain := locks(t)
+		peer, guardian := supervisorCovPipe(t)
+		state := newTurnSupervisorGuardianState(peer)
+		go state.observe()
+		stale := turnSupervisorDonePrefix + strings.Repeat("0", 2*turnSupervisorChallengeLen) + "\n"
+		_, err := guardian.Write([]byte(stale))
+		require.NoError(t, err)
+		require.NoError(t, guardian.Close())
+		<-state.done
+
+		var ready, completion bytes.Buffer
+		err = completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, state, &ready, &completion,
+		)
+		require.ErrorContains(t, err, "terminal response before the terminal report")
+		require.Empty(t, ready.String())
+		require.Empty(t, completion.String())
+	})
+
+	t.Run("missing guardian channel is fail closed", func(t *testing.T) {
+		identity, domain := locks(t)
+
+		var ready, completion bytes.Buffer
+		err := completeTurnSupervisorLiveness(
+			nil, identity, domain, true, false, nil, &ready, &completion,
+		)
+		require.ErrorContains(t, err, "guardian acknowledgement is unavailable")
+		require.Empty(t, ready.String())
+		require.Empty(t, completion.String())
+	})
+}
+
+// TestTurnSupervisorTerminalHandoffHasOnePublisherAtEveryDeparturePhase drives
+// every edge in the acknowledged ownership transfer. A guardian SIGKILL closes
+// its authority descriptors and peer writer in one kernel-owned teardown; the
+// peer EOF therefore reaches liveness only after the dead guardian can no
+// longer hold authority. A live guardian closes those descriptors itself and
+// sends the ACK. In both cases liveness is the sole proof writer.
+func TestTurnSupervisorTerminalHandoffHasOnePublisherAtEveryDeparturePhase(t *testing.T) {
+	original := agentIdentityLockClose
+	t.Cleanup(func() { agentIdentityLockClose = original })
+	agentIdentityLockClose = func(file *os.File) error { return file.Close() }
+
+	for _, testCase := range []struct {
+		name       string
+		beforeDone bool
+		ack        bool
+	}{
+		{name: "guardian dies before done", beforeDone: true},
+		{name: "guardian dies after done before consume"},
+		{name: "guardian dies after consume before authority release"},
+		{name: "guardian dies after authority release before ACK"},
+		{name: "guardian remains alive through ACK", ack: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			livenessIdentity, livenessDomain := supervisorCovAuthorityLocks(t)
+			guardianIdentity, guardianDomain := supervisorCovAuthorityLocks(t)
+			peer, guardianPeer := supervisorCovPipe(t)
+			state := newTurnSupervisorGuardianState(peer)
+			go state.observe()
+
+			releaseGuardian := func(value []byte) {
+				require.NoError(t, guardianIdentity.Close())
+				require.NoError(t, guardianDomain.Close())
+				if testCase.ack {
+					_, err := guardianPeer.Write(value)
+					require.NoError(t, err)
+					require.NoError(t, guardianPeer.Close())
+
+					return
+				}
+
+				require.NoError(t, guardianPeer.Close())
+			}
+
+			if testCase.beforeDone {
+				releaseGuardian(nil)
+				<-state.done
+			}
+
+			var ready bytes.Buffer
+			terminal := supervisorCovWriteFunc(func(value []byte) (int, error) {
+				written, err := ready.Write(value)
+				if err == nil && !testCase.beforeDone {
+					releaseGuardian(value)
+				}
+
+				return written, err
+			})
+
+			var proof bytes.Buffer
+			proofWriter := supervisorCovWriteFunc(func(value []byte) (int, error) {
+				require.Nil(t, livenessIdentity.file, "liveness identity remained held at proof")
+				require.Nil(t, livenessDomain.file, "liveness domain remained held at proof")
+				require.Nil(t, guardianIdentity.file, "guardian identity remained held at proof")
+				require.Nil(t, guardianDomain.file, "guardian domain remained held at proof")
+
+				return proof.Write(value)
+			})
+
+			require.NoError(t, completeTurnSupervisorLiveness(
+				nil, livenessIdentity, livenessDomain, true, false, state, terminal, proofWriter,
+			))
+			if testCase.beforeDone {
+				require.Empty(t, ready.String())
+			} else {
+				_, parseErr := parseTurnSupervisorTerminalFrame(ready.String())
+				require.NoError(t, parseErr)
+			}
+			require.Equal(t, turnSupervisorProof, proof.String(), "proof must be one physical frame")
+		})
+	}
 }
 
 // TestAwaitProcessTreeReadyRefusesEveryPostArmedDeviation proves the parent

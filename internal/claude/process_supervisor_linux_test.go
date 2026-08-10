@@ -120,7 +120,12 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 	prctl := turnSupervisorPrctl
 	setrlimit := turnSupervisorSetrlimit
 	poll := turnSupervisorPoll
+	writePeer := turnSupervisorWritePeer
+	challengeSource := turnSupervisorChallengeSource
 	effectiveUID := turnSupervisorEffectiveUID
+	afterTerminalRead := turnSupervisorAfterTerminalRead
+	beforeTerminalACK := turnSupervisorBeforeTerminalACK
+	afterTerminalACK := turnSupervisorAfterTerminalACK
 	syscallKillOriginal := syscallKill
 	t.Cleanup(func() {
 		turnSupervisorExecutable = executable
@@ -154,7 +159,12 @@ func restoreTurnSupervisorSeams(t *testing.T) {
 		turnSupervisorPrctl = prctl
 		turnSupervisorSetrlimit = setrlimit
 		turnSupervisorPoll = poll
+		turnSupervisorWritePeer = writePeer
+		turnSupervisorChallengeSource = challengeSource
 		turnSupervisorEffectiveUID = effectiveUID
+		turnSupervisorAfterTerminalRead = afterTerminalRead
+		turnSupervisorBeforeTerminalACK = beforeTerminalACK
+		turnSupervisorAfterTerminalACK = afterTerminalACK
 		syscallKill = syscallKillOriginal
 	})
 }
@@ -1056,6 +1066,12 @@ func TestTurnSupervisorCompletionClosesAuthorityBeforeProof(t *testing.T) {
 		_ = files[0].Close()
 	})
 
+	t.Run("guardian authority is required for ACK", func(t *testing.T) {
+		require.ErrorContains(t, closeTurnSupervisorAuthority(nil), "authority is unavailable")
+		var authority *turnSupervisorAuthority
+		require.ErrorContains(t, closeTurnSupervisorAuthority(&authority), "authority is unavailable")
+	})
+
 	t.Run("liveness close failure after guardian death", func(t *testing.T) {
 		authority, files := newAuthority(t)
 		guardianDone := make(chan struct{})
@@ -1072,7 +1088,7 @@ func TestTurnSupervisorCompletionClosesAuthorityBeforeProof(t *testing.T) {
 		}
 		var ready, completion bytes.Buffer
 		err := completeTurnSupervisorLiveness(
-			nil, authority.identity, authority.domain, true, false, guardianDone, &ready, &completion,
+			nil, authority.identity, authority.domain, true, true, nil, &ready, &completion,
 		)
 		if !errors.Is(err, want) || calls != 2 || completion.Len() != 0 || !strings.HasPrefix(ready.String(), turnSupervisorFailure) {
 			t.Fatalf("liveness failure error=%v calls=%d ready=%q proof=%q", err, calls, ready.String(), completion.String())
@@ -1085,13 +1101,22 @@ func TestTurnSupervisorCompletionClosesAuthorityBeforeProof(t *testing.T) {
 			t.Run(strconv.FormatBool(guardianExited), func(t *testing.T) {
 				authority, _ := newAuthority(t)
 				agentIdentityLockClose = func(file *os.File) error { return file.Close() }
-				guardianDone := make(chan struct{})
-				if guardianExited {
-					close(guardianDone)
+				var state *turnSupervisorGuardianState
+				var ready bytes.Buffer
+				readyOutput := io.Writer(&ready)
+				if !guardianExited {
+					state = &turnSupervisorGuardianState{done: make(chan struct{})}
+					readyOutput = supervisorCovWriteFunc(func(value []byte) (int, error) {
+						written, err := ready.Write(value)
+						state.response = string(value)
+						close(state.done)
+
+						return written, err
+					})
 				}
-				var ready, completion bytes.Buffer
+				var completion bytes.Buffer
 				if err := completeTurnSupervisorLiveness(
-					nil, authority.identity, authority.domain, true, guardianExited, guardianDone, &ready, &completion,
+					nil, authority.identity, authority.domain, true, guardianExited, state, readyOutput, &completion,
 				); err != nil {
 					t.Fatal(err)
 				}
@@ -1099,8 +1124,13 @@ func TestTurnSupervisorCompletionClosesAuthorityBeforeProof(t *testing.T) {
 					if ready.Len() != 0 || completion.String() != turnSupervisorProof {
 						t.Fatalf("survivor ready=%q completion=%q", ready.String(), completion.String())
 					}
-				} else if ready.String() != "done\n" || completion.Len() != 0 {
-					t.Fatalf("paired ready=%q completion=%q", ready.String(), completion.String())
+				} else {
+					if _, terminalErr := parseTurnSupervisorTerminalFrame(ready.String()); terminalErr != nil {
+						t.Fatalf("paired terminal=%q: %v", ready.String(), terminalErr)
+					}
+					if completion.String() != turnSupervisorProof {
+						t.Fatalf("paired completion=%q", completion.String())
+					}
 				}
 			})
 		}

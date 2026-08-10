@@ -39,6 +39,8 @@ type supervisorCovGuardian struct {
 const (
 	supervisorCovLivenessData      = "5"
 	supervisorCovLivenessControl   = "4"
+	supervisorCovLivenessProof     = "8"
+	supervisorCovLivenessPeer      = "9"
 	supervisorCovLivenessStartGate = "10"
 )
 
@@ -199,8 +201,13 @@ var (
 	supervisorCovAwaitGate = "cat <&" + supervisorCovLivenessStartGate + " >/dev/null"
 	supervisorCovReport    = "printf 'ready:%d\\n' \"$$\" >&" + supervisorCovLivenessData
 	supervisorCovAwaitTurn = "cat <&" + supervisorCovLivenessControl + " >/dev/null"
-	supervisorCovDone      = "printf 'done\\n' >&" + supervisorCovLivenessData
-	supervisorCovLinger    = "sleep 30"
+	supervisorCovTerminal  = turnSupervisorDonePrefix + strings.Repeat("a", 2*turnSupervisorChallengeLen)
+	supervisorCovDone      = "terminal='" + supervisorCovTerminal + "'" +
+		"; printf '%s\\n' \"$terminal\" >&" + supervisorCovLivenessData +
+		"; IFS= read -r ack <&" + supervisorCovLivenessPeer +
+		" && [ \"$ack\" = \"$terminal\" ]" +
+		" && printf 'contained\\n' >&" + supervisorCovLivenessProof
+	supervisorCovLinger = "sleep 30"
 )
 
 // TestRunTurnSupervisorGuardianRefusesAnIncompleteInheritance proves the
@@ -586,6 +593,68 @@ func TestRunTurnSupervisorGuardianRetiresTheTurnOnItsTerminalReport(t *testing.T
 		require.Equal(t, turnSupervisorProof, fixture.proof(t))
 	})
 
+	t.Run("authority release failure withholds ACK and proof", func(t *testing.T) {
+		fixture := supervisorCovGuardianFixture(
+			t, supervisorCovConfig(),
+			supervisorCovLivenessScript(
+				supervisorCovArm, supervisorCovAwaitGate, supervisorCovReport, supervisorCovDone,
+			),
+		)
+		fixture.releaseOnArmed(t)
+
+		originalClose := agentIdentityLockClose
+		t.Cleanup(func() { agentIdentityLockClose = originalClose })
+		want := errors.New("release authority")
+		calls := 0
+		agentIdentityLockClose = func(file *os.File) error {
+			calls++
+			if calls == 1 {
+				return want
+			}
+
+			return file.Close()
+		}
+
+		err := fixture.await(t, fixture.start(t))
+		require.ErrorIs(t, err, want)
+		require.Empty(t, fixture.proof(t))
+	})
+
+	t.Run("ACK write failure withholds proof", func(t *testing.T) {
+		fixture := supervisorCovGuardianFixture(
+			t, supervisorCovConfig(),
+			supervisorCovLivenessScript(
+				supervisorCovArm, supervisorCovAwaitGate, supervisorCovReport, supervisorCovDone,
+			),
+		)
+		fixture.releaseOnArmed(t)
+
+		want := errors.New("write ACK")
+		turnSupervisorWritePeer = func(*os.File, []byte) (int, error) { return 0, want }
+
+		err := fixture.await(t, fixture.start(t))
+		require.ErrorIs(t, err, want)
+		require.ErrorContains(t, err, "acknowledge Claude liveness completion")
+		require.Empty(t, fixture.proof(t))
+	})
+
+	t.Run("short ACK write withholds proof", func(t *testing.T) {
+		fixture := supervisorCovGuardianFixture(
+			t, supervisorCovConfig(),
+			supervisorCovLivenessScript(
+				supervisorCovArm, supervisorCovAwaitGate, supervisorCovReport, supervisorCovDone,
+			),
+		)
+		fixture.releaseOnArmed(t)
+
+		turnSupervisorWritePeer = func(_ *os.File, value []byte) (int, error) { return len(value) - 1, nil }
+
+		err := fixture.await(t, fixture.start(t))
+		require.ErrorIs(t, err, io.ErrShortWrite)
+		require.ErrorContains(t, err, "acknowledge Claude liveness completion")
+		require.Empty(t, fixture.proof(t))
+	})
+
 	t.Run("liveness helper reports a failure", func(t *testing.T) {
 		fixture := supervisorCovGuardianFixture(
 			t, supervisorCovConfig(),
@@ -632,4 +701,35 @@ func TestRunTurnSupervisorGuardianRetiresTheTurnOnItsTerminalReport(t *testing.T
 		require.Equal(t, turnSupervisorProof, fixture.proof(t))
 		require.NotZero(t, (<-fixture.contained)[1])
 	})
+}
+
+// TestRunTurnSupervisorGuardianReleasesAuthorityBeforeAcknowledgement pins the
+// terminal ownership transfer itself. The guardian may consume done while the
+// liveness helper is still alive, but it cannot ACK until both of its authority
+// handles are closed. The helper is then the sole parent-proof publisher.
+func TestRunTurnSupervisorGuardianReleasesAuthorityBeforeAcknowledgement(t *testing.T) {
+	fixture := supervisorCovGuardianFixture(
+		t, supervisorCovConfig(),
+		supervisorCovLivenessScript(
+			supervisorCovArm, supervisorCovAwaitGate, supervisorCovReport, supervisorCovDone,
+		),
+	)
+	fixture.releaseOnArmed(t)
+
+	var order []string
+	turnSupervisorAfterTerminalRead = func() { order = append(order, "terminal") }
+	turnSupervisorBeforeTerminalACK = func() { order = append(order, "before-ack") }
+	turnSupervisorAfterTerminalACK = func() { order = append(order, "after-ack") }
+
+	originalClose := agentIdentityLockClose
+	t.Cleanup(func() { agentIdentityLockClose = originalClose })
+	agentIdentityLockClose = func(file *os.File) error {
+		order = append(order, "close")
+
+		return file.Close()
+	}
+
+	require.NoError(t, fixture.await(t, fixture.start(t)))
+	require.Equal(t, []string{"terminal", "close", "close", "before-ack", "after-ack"}, order)
+	require.Equal(t, turnSupervisorProof, fixture.proof(t))
 }

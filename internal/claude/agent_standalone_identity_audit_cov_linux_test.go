@@ -138,6 +138,36 @@ func TestAgentStandaloneCovAuthorityRootAuditRefusesEveryUnaccountableEntry(t *t
 			want: "standalone owner temporary requires registry cleanup",
 		},
 		{
+			// The borrower-scoped tolerance is uid-scoped, not blanket: the
+			// borrower's own unresolved publication is still its own fault.
+			name:        "borrower's own owner temporary",
+			borrowerUID: 62661,
+			setup: func(t *testing.T, directory *os.File) {
+				t.Helper()
+				agentStandaloneCovWriteRegistryFile(t, directory, "62661.owner.next-"+suffix, "partial")
+			},
+			want: `standalone owner temporary requires registry cleanup: "62661.owner.next-` + suffix + `"`,
+		},
+		{
+			name:        "malformed owner temporary with a borrower",
+			borrowerUID: 62663,
+			setup: func(t *testing.T, directory *os.File) {
+				t.Helper()
+				agentStandaloneCovWriteRegistryFile(t, directory, "bad.owner.next-"+suffix, "partial")
+			},
+			want: "invalid name",
+		},
+		{
+			name:        "untrusted foreign owner temporary with a borrower",
+			borrowerUID: 62663,
+			setup: func(t *testing.T, directory *os.File) {
+				t.Helper()
+				agentStandaloneCovWriteRegistryFile(t, directory, "62665.owner.next-"+suffix, "partial")
+				require.NoError(t, os.Chmod(filepath.Join(directory.Name(), "62665.owner.next-"+suffix), 0o644))
+			},
+			want: "not a trusted bounded regular file",
+		},
+		{
 			name: "domain temporary without exclusive cleanup",
 			setup: func(t *testing.T, directory *os.File) {
 				t.Helper()
@@ -547,6 +577,53 @@ func TestAgentStandaloneCovAuthorityRootAuditScopesMarkerTemporariesToItsBorrowe
 	require.ErrorContains(t, auditAgentStandaloneAuthorityRoot(
 		directory, ownerUID, ownerGID, false, false, false, borrower, deadline, nil, nil,
 	), "provider cannot recover ownerless ACTIVE uid 62619")
+}
+
+// TestAgentStandaloneCovAuthorityRootAuditScopesOwnerTemporariesToItsBorrower
+// pins the same rule one case up the temporary switch: an audit run on one
+// borrower's behalf tolerates another uid's in-flight owner publication —
+// exactly the entry rejectBorrowedAgentIdentityTemporaries has already ruled is
+// not this borrower's fault — and leaves it untouched, while the same entry
+// still refuses an audit that names no borrower, which is what keeps the
+// acquiring path draining owner temporaries under the owners lock. Naming a
+// borrower widens nothing else: an ownerless ACTIVE disposition this provider
+// has no authority to recover stays fail-closed either way.
+func TestAgentStandaloneCovAuthorityRootAuditScopesOwnerTemporariesToItsBorrower(t *testing.T) {
+	const (
+		borrower         = uint32(62667)
+		foreignTemporary = "64312.owner.next-" + agentStandaloneCovSuffix
+		wantRefusal      = `standalone owner temporary requires registry cleanup: "` + foreignTemporary + `"`
+	)
+	directory := openAgentStandaloneTestDirectory(t)
+	ownerUID, ownerGID := agentStandaloneTestAuthorityIDs()
+	agentStandaloneCovPermanentLock(t, directory, agentStandaloneCovOwnersLock)
+	agentStandaloneCovPermanentLock(t, directory, "62667.lock")
+	owner := agentStandaloneCovOwner(borrower, 62668, "owner-scope", "/srv/claude/owner-scope", 23, 24)
+	agentStandaloneCovWriteOwner(t, directory, owner)
+	agentStandaloneCovWriteActiveMarker(t, directory, owner)
+	inFlight := agentStandaloneCovWriteRegistryFile(t, directory, foreignTemporary, "partial")
+	deadline := time.Now().Add(time.Second)
+
+	require.NoError(t, auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, false, false, false, borrower, deadline, nil, nil,
+	))
+	require.FileExists(t, inFlight, "a tolerated foreign publication must never be cleaned up")
+	require.ErrorContains(t, auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, false, false, false, agentStandaloneNoBorrower, deadline, nil, nil,
+	), wantRefusal)
+	require.FileExists(t, inFlight)
+
+	agentStandaloneCovPermanentLock(t, directory, "62669.lock")
+	agentStandaloneCovPermanentLock(t, directory, agentStandaloneAffinityLockName("owner-scope-ownerless"))
+	agentStandaloneCovWriteRegistryFile(t, directory, "62669.quarantine",
+		agentStandaloneCovActiveMarker(
+			62669, 62670, "owner-scope-ownerless", "0123456789abcdef0123456789abcdef", "[]",
+		)+"\n",
+	)
+
+	require.ErrorContains(t, auditAgentStandaloneAuthorityRoot(
+		directory, ownerUID, ownerGID, false, false, false, borrower, deadline, nil, nil,
+	), "provider cannot recover ownerless ACTIVE uid 62669")
 }
 
 // TestAgentStandaloneCovOwnerUniquenessRefusesEveryCollision proves the

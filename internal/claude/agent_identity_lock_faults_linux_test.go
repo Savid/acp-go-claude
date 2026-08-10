@@ -1304,3 +1304,128 @@ func TestAdoptedStandaloneAgentIdentityDispositionScopesMarkerTemporariesByUID(t
 		}
 	})
 }
+
+// TestAdoptedStandaloneAgentIdentityDispositionScopesOwnerTemporariesByUID is
+// the same regression one case up the temporary switch. An owner temporary is
+// published by rename into the same shared authority root, so a second isolated
+// native launch acquiring its identity is visible to a concurrent adopter for
+// the width of that rename. The adopt-time proof applies the uid-scoped rule
+// the borrowed-temporary scan applies immediately before it rather than failing
+// one of two supported launches inside that window.
+//
+// Every arm holds the staged entry in place for the whole of the call under
+// test, so the overlap is decided by the fixture rather than by scheduling.
+// The refusals stay exactly as strict: the adopter's own unresolved temporary,
+// a temporary whose name does not parse, and one that is not a trusted bounded
+// regular file each still fail the adopt closed.
+func TestAdoptedStandaloneAgentIdentityDispositionScopesOwnerTemporariesByUID(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("standalone disposition adoption requires a root-owned authority and a distinct native identity")
+	}
+	const (
+		uid              = uint32(62491)
+		gid              = uint32(62492)
+		ownerID          = "standalone-concurrent-adopt-owner"
+		suffix           = "361afd7c59d01d96e4b2a2ab"
+		foreignTemporary = "64322.owner.next-" + suffix
+	)
+	identityLockCovSeams(t)
+	root := configureAgentIdentityLockTestRoot(t)
+	stateRoot := createAgentStandaloneProtectedStateRoot(t, uid, gid)
+	standalone, err := acquireAgentStandaloneIdentity(
+		uid, gid, ownerID, stateRoot, true, root, make(chan struct{}), make(chan os.Signal),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = standalone.Close() })
+	authority := filepath.Join(root, "acp-go", "agent-identities")
+
+	stage := func(t *testing.T, name string, mode os.FileMode) string {
+		t.Helper()
+		path := filepath.Join(authority, name)
+		if writeErr := os.WriteFile(path, []byte("partial"), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		if chmodErr := os.Chmod(path, mode); chmodErr != nil {
+			t.Fatal(chmodErr)
+		}
+		t.Cleanup(func() {
+			if removeErr := os.Remove(path); removeErr != nil {
+				t.Errorf("remove staged temporary %q: %v", name, removeErr)
+			}
+		})
+
+		return name
+	}
+	adopt := func() error {
+		return validateAdoptedStandaloneAgentIdentityDisposition(uid, gid, ownerID, stateRoot, true, root)
+	}
+
+	t.Run("a foreign uid's owner publication in flight never fails a concurrent adopt", func(t *testing.T) {
+		staged := stage(t, foreignTemporary, 0o600)
+
+		const adopters = 8
+
+		release := make(chan struct{})
+		refusals := make(chan error, adopters)
+
+		var arrived sync.WaitGroup
+
+		arrived.Add(adopters)
+
+		for range adopters {
+			go func() {
+				arrived.Done()
+				<-release
+				refusals <- adopt()
+			}()
+		}
+
+		arrived.Wait()
+		close(release)
+
+		// Every adopter is drained before anything is reported: leaving one
+		// running past the failure would race this subtest's cleanup against
+		// its own authority reads.
+		var refused error
+
+		for range adopters {
+			if adoptErr := <-refusals; adoptErr != nil {
+				refused = adoptErr
+			}
+		}
+
+		if refused != nil {
+			t.Fatalf("concurrent adopt refused foreign publication %q: %v", staged, refused)
+		}
+		if _, statErr := os.Stat(filepath.Join(authority, staged)); statErr != nil {
+			t.Fatalf("a tolerated foreign publication was not left alone: %v", statErr)
+		}
+	})
+
+	t.Run("the adopter's own owner publication in flight still refuses", func(t *testing.T) {
+		staged := stage(t, strconv.FormatUint(uint64(uid), 10)+".owner.next-"+suffix, 0o600)
+		adoptErr := adopt()
+		if adoptErr == nil || !strings.Contains(adoptErr.Error(), "unresolved temporary") ||
+			!strings.Contains(adoptErr.Error(), staged) {
+			t.Fatalf("own publication %q refusal = %v", staged, adoptErr)
+		}
+	})
+
+	t.Run("a malformed owner temporary still refuses", func(t *testing.T) {
+		staged := stage(t, "bad.owner.next-"+suffix, 0o600)
+		adoptErr := adopt()
+		if adoptErr == nil || !strings.Contains(adoptErr.Error(), "invalid name") {
+			t.Fatalf("malformed publication %q refusal = %v", staged, adoptErr)
+		}
+	})
+
+	t.Run("an untrusted foreign owner temporary still refuses", func(t *testing.T) {
+		staged := stage(t, "64323.owner.next-"+suffix, 0o644)
+		adoptErr := adopt()
+		if adoptErr == nil || !strings.Contains(adoptErr.Error(), "not a trusted bounded regular file") {
+			t.Fatalf("untrusted publication %q refusal = %v", staged, adoptErr)
+		}
+	})
+}

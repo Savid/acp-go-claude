@@ -1907,6 +1907,34 @@ func adjudicateAgentStandaloneAuthorityTemporary(
 ) (bool, error) {
 	switch {
 	case strings.Contains(name, ".owner.next-"):
+		// An owner temporary embeds the uid it publishes and only ever exists
+		// between that uid's write and its rename, exactly as a marker
+		// temporary does. An audit running for one borrower is therefore
+		// looking at another participant's in-flight atomic write, which the
+		// borrowed-temporary scan has already ruled is not this borrower's
+		// fault; the borrower's own unresolved temporary still is. The name
+		// must parse and the entry must prove trusted and bounded before any
+		// of that applies, so a malformed or untrusted temporary stays fatal
+		// to either party. An audit that names no borrower still refuses every
+		// owner temporary, which is what makes the acquiring path drain them
+		// under the domain-exclusive owners lock.
+		if borrowerUID != agentStandaloneNoBorrower {
+			uid, parseErr := parseAgentStandaloneOwnerTemporary(name)
+			if parseErr != nil {
+				return false, parseErr
+			}
+
+			if validateErr := validateAgentStandaloneTemporary(
+				directory, name, ownerUID, ownerGID, agentStandaloneOwnerMax,
+			); validateErr != nil {
+				return false, validateErr
+			}
+
+			if uid != borrowerUID {
+				return true, nil
+			}
+		}
+
 		return false, fmt.Errorf("%w: %q", errAgentStandaloneOwnerTemporary, name)
 	case strings.HasPrefix(name, "domain.json.next-"):
 		if !allowCleanup {

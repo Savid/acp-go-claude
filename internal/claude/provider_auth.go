@@ -586,9 +586,9 @@ func (l *AuthLogin) Submit(value string) error {
 // Exited reports whether the child has already exited, which is the only signal
 // that lets a status poll run at all: the login process's stdout never signals
 // success, and a browser that reaches the harness's loopback listener completes
-// the grant with no value ever pasted back. It reads the child's own reap, which
-// was started with the child, so it answers before and independently of the
-// fence below.
+// the grant with no value ever pasted back. Presentation ownership ends and the
+// child's reap is armed before the login is exposed, so this answers before and
+// independently of the fence below.
 func (l *AuthLogin) Exited() bool {
 	select {
 	case <-l.exit.done:

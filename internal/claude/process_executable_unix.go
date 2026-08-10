@@ -11,3 +11,7 @@ func ordinaryExecutableCandidate(path string, _ []string) (string, error) {
 func ordinaryEnvironmentValue(environment []string, key string) string {
 	return environmentMap(environment)[key]
 }
+
+func launchEnvironmentKey(key string) string {
+	return key
+}

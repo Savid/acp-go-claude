@@ -75,12 +75,18 @@ func ordinaryWindowsExecutableFile(path string) error {
 }
 
 func ordinaryEnvironmentValue(environment []string, key string) string {
+	value := ""
+
 	for _, entry := range environment {
-		candidate, value, ok := strings.Cut(entry, "=")
+		candidate, candidateValue, ok := strings.Cut(entry, "=")
 		if ok && strings.EqualFold(candidate, key) {
-			return value
+			value = candidateValue
 		}
 	}
 
-	return ""
+	return value
+}
+
+func launchEnvironmentKey(key string) string {
+	return strings.ToUpper(key)
 }

@@ -129,7 +129,8 @@ func BuildEnv(options Options) []string {
 	keys := make([]string, 0, len(base)+len(options.Env)+3)
 
 	set := func(key string, value string) {
-		if key == envClaudeCodeNested || strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) {
+		if launchEnvironmentKey(key) == launchEnvironmentKey(envClaudeCodeNested) ||
+			strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) {
 			return
 		}
 
@@ -137,11 +138,12 @@ func BuildEnv(options Options) []string {
 			return
 		}
 
-		if _, ok := values[key]; !ok {
-			keys = append(keys, key)
+		nativeKey := launchEnvironmentKey(key)
+		if _, ok := values[nativeKey]; !ok {
+			keys = append(keys, nativeKey)
 		}
 
-		values[key] = value
+		values[nativeKey] = value
 	}
 
 	baseKeys := make([]string, 0, len(base))
@@ -185,7 +187,10 @@ func BuildEnv(options Options) []string {
 	}
 
 	if len(options.ExtraPathDirs) > 0 {
-		set(envSearchPath, prependSearchPath(options.ExtraPathDirs, values[envSearchPath]))
+		set(envSearchPath, prependSearchPath(
+			options.ExtraPathDirs,
+			values[launchEnvironmentKey(envSearchPath)],
+		))
 	}
 
 	// The absolute-entry rule belongs to the hardened policy PATH. Ordinary

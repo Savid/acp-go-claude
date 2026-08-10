@@ -66,7 +66,7 @@ jobs:
           set -euo pipefail
           selector='^TestWindowsOrdinaryExecutableLookup'
           expected=$(go test -list "$selector" ./internal/claude | grep -Ec '^Test' || true)
-          [ "$expected" -eq 2 ] || { echo "windows lookup test count $expected, want 2"; exit 1; }
+          [ "$expected" -eq 4 ] || { echo "windows lookup test count $expected, want 4"; exit 1; }
           go test -v -count=1 -run "$selector" ./internal/claude | tee windows-ordinary.log
           passed=$(grep -Ec '^--- PASS: TestWindowsOrdinaryExecutableLookup' windows-ordinary.log || true)
           [ "$passed" -eq "$expected" ] || { echo "windows lookup pass count $passed, want $expected"; exit 1; }

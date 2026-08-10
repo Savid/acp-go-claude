@@ -1067,7 +1067,7 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 
 	transport = NewProcessTransport(nil, withTestProcessIsolation(Options{CLIPath: "/bin/sh", Cwd: t.TempDir()}))
 	claudeVersionProbe = func(context.Context, string, Options) error {
-		transport.options.ProcessIsolation = nil
+		transport.options.ProcessIsolation = &ProcessIsolation{}
 
 		return nil
 	}
@@ -1209,7 +1209,7 @@ func TestProcessTransportStart(t *testing.T) {
 		snapshotCount     int
 		snapshotAvailable bool
 		snapshotCalls     int
-		quiesced          int
+		completed         int
 	)
 	transport := NewProcessTransport(nil, platformTestTransportOptions(t, Options{
 		CLIPath: script,
@@ -1218,7 +1218,7 @@ func TestProcessTransportStart(t *testing.T) {
 			snapshotCount, snapshotAvailable = inventory()
 			snapshotCalls++
 		},
-		ObserveProcessQuiesced: func(context.Context) { quiesced++ },
+		ObserveBoundaryComplete: func(context.Context) { completed++ },
 	}))
 	require.NoError(t, transport.Start(context.Background()))
 	require.Equal(t, 1, snapshotCalls)
@@ -1229,7 +1229,7 @@ func TestProcessTransportStart(t *testing.T) {
 	require.NotNil(t, transport.stdout)
 	require.NotNil(t, transport.stderr)
 	require.NoError(t, transport.Close())
-	require.Equal(t, 1, quiesced)
+	require.Equal(t, 1, completed)
 
 	transport = NewProcessTransport(nil, platformTestTransportOptions(t, Options{CLIPath: script}))
 	require.NoError(t, transport.Start(context.Background()))

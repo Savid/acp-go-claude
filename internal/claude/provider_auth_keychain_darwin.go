@@ -29,7 +29,7 @@ func runContainedAuthKeychainTool(ctx context.Context, args []string, options Op
 		return nil, 0, errors.New("build keychain environment: invalid process isolation")
 	}
 
-	path, err := resolveProcessExecutable("security", env)
+	path, err := resolveLaunchExecutable(options, "security", env)
 	if err != nil {
 		return nil, 0, err
 	}

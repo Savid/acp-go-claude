@@ -60,8 +60,9 @@ root-owned ancestry; `/root` and `/nonexistent` are forbidden. `USER` and
 only `baseEnvironment` plus variables explicitly named in
 `inheritEnvironment`; identity, search-path, loader, interpreter, XDG/native
 home, and adapter-private variables cannot be inherited. Unset or duplicate
-inheritance entries fail startup. Darwin, Windows, and other platforms refuse
-standalone native mode rather than weakening this contract.
+inheritance entries fail startup. Darwin, Windows, FreeBSD, OpenBSD, and other
+platforms refuse a supplied policy rather than weakening this contract; they run
+ordinary same-identity mode when the flag is omitted.
 
 Provision the target as a locked system account with a non-login shell, its
 same-name private group, and no sudo policy. Its UID and primary GID cannot be

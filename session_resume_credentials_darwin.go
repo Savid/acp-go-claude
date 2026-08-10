@@ -25,10 +25,10 @@ func readClaudeResumeKeychainCredential(source string, provided ...claude.Option
 
 	// The Keychain travel exists for the explicit isolation deployments whose
 	// materialized homes the native identity cannot re-derive an item name for.
-	// An ordinary current-identity launch — no policy, or the implicit capture
-	// of one — keeps the CLI's own Keychain behavior instead of demanding the
-	// containment generation machinery the read runs under.
-	if options.ProcessIsolation == nil || options.ProcessIsolation.Implicit {
+	// Ordinary same-identity execution keeps the CLI's own Keychain behavior
+	// instead of demanding the containment generation machinery the read runs
+	// under.
+	if options.ProcessIsolation == nil {
 		return nil, nil
 	}
 

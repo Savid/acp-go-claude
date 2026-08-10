@@ -9,12 +9,19 @@ import (
 	"time"
 )
 
-type processContainment struct{}
+type processContainment struct {
+	ordinary *ordinaryBoundary
+}
 
-func prepareProcessTreeCommand(_ *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
-	if err := validateProcessIsolation(options.Isolation); err != nil {
-		return nil, err
+func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
+	if options.Isolation != nil {
+		return nil, fmt.Errorf(
+			"%w: explicit process isolation is unsupported on %s",
+			ErrProcessContainmentIncomplete,
+			runtime.GOOS,
+		)
 	}
+
 	if options.DarwinBestEffort {
 		return nil, fmt.Errorf(
 			"%w: Darwin best-effort containment is invalid on %s",
@@ -23,25 +30,24 @@ func prepareProcessTreeCommand(_ *exec.Cmd, options processLaunchOptions) (*proc
 		)
 	}
 
-	return nil, fmt.Errorf(
-		"%w: %s cannot prove Claude descendants that escape a process group",
-		ErrProcessContainmentIncomplete,
-		runtime.GOOS,
-	)
+	return prepareOrdinaryLaunch(native, options)
 }
 
 func startContainedProcess(launch *processTreeCommand) (*processContainment, error) {
-	if launch != nil {
-		launch.close()
+	boundary, err := startOrdinaryBoundary(launch)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, ErrProcessContainmentIncomplete
+	return &processContainment{ordinary: boundary}, nil
 }
 
-func (*processContainment) quiesce(time.Duration) error { return ErrProcessContainmentIncomplete }
-func (*processContainment) close() error                { return nil }
+func (c *processContainment) quiesce(timeout time.Duration) error {
+	return c.ordinary.complete(timeout)
+}
+func (*processContainment) close() error { return nil }
 func (*processContainment) processSnapshot() (int, bool) {
 	return 0, false
 }
-func (*processContainment) wait(command *exec.Cmd) error { return command.Wait() }
-func (*processContainment) ownsShutdown() bool           { return false }
+func (c *processContainment) wait(*exec.Cmd) error { return c.ordinary.wait() }
+func (*processContainment) ownsShutdown() bool     { return false }

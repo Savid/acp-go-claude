@@ -136,7 +136,7 @@ func (s *runtimeProcessSnapshotSource) started(ctx context.Context, inventory fu
 	}
 }
 
-func (s *runtimeProcessSnapshotSource) quiesced(ctx context.Context) {
+func (s *runtimeProcessSnapshotSource) completed(ctx context.Context) {
 	s.tracker.mu.Lock()
 	delete(s.tracker.sources, s)
 	startPublishing := s.tracker.markDirtyLocked(ctx)

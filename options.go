@@ -58,12 +58,13 @@ const privateAdapterEnvPrefix = "ACP_" + "GO_CLAUDE_INTERNAL_"
 const (
 	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
 	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
-	// RuntimeContainmentSharedIdentity is the boundary a supervisor proves when
-	// the native identity is the identity it already runs as. The subreaper
-	// tree, the descendant reaping and the process-group teardown are the
-	// authoritative ones, so whole-tree lifecycle is still proven; what is
-	// absent is the credential separation between the supervisor and the agent,
-	// and the host-global record of who holds the identity.
+	// RuntimeContainmentSharedIdentity is the ordinary default an omitted
+	// ProcessIsolation selects: native work runs as the adapter's own
+	// operating-system identity, root or not, on every supported platform. It is
+	// deliberately non-authoritative. It proves no credential separation between
+	// the adapter and the harness, publishes no provider-descendant inventory,
+	// and makes no whole-tree quiescence claim; completion means only that the
+	// directly owned process and its process group finished.
 	RuntimeContainmentSharedIdentity RuntimeContainmentMode = "shared_identity"
 	RuntimeContainmentUnavailable    RuntimeContainmentMode = "unavailable"
 )
@@ -134,10 +135,11 @@ type Options struct {
 	// Env is merged into every launched Claude process environment. Managed
 	// config and identity root variables are rejected.
 	Env map[string]string
-	// ProcessIsolation is an explicit process boundary for every native launch.
-	// Configure it with WithProcessIsolation; leaving it nil launches native
-	// work as the current identity over a deterministic capture of the ambient
-	// environment.
+	// ProcessIsolation is the explicitly supplied hardened Linux identity
+	// boundary. Configure it with WithProcessIsolation. Nil is not a defaulted
+	// policy: it selects ordinary same-identity execution, which launches native
+	// work as the current identity over a deterministic capture of the sanitized
+	// ambient environment.
 	ProcessIsolation *ProcessIsolation
 
 	// Logger receives structured diagnostic logs. If nil, the default logger is used.
@@ -324,13 +326,18 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithProcessIsolation is explicit hardening: it requires every native process
-// to run as the supplied uid/gid with no supplementary groups. BaseEnvironment
-// is the complete native environment base; the adapter never overlays
-// os.Environ onto an explicit policy. Omitting the option is the ordinary
-// default — native work runs as the current identity, root or not, over a
-// deterministically captured clone of the ambient environment. An invalid
-// explicit policy fails closed before any native spawn.
+// WithProcessIsolation is explicit hardening: it selects the Linux-only
+// trusted-root boundary and requires every native process to run as the
+// supplied nonzero uid/gid with no supplementary groups, distinct from the
+// supervisor. BaseEnvironment is the complete native environment base; the
+// adapter never overlays os.Environ onto an explicit policy. Omitting the
+// option is the ordinary default — native work runs as the current identity,
+// root or not, over a deterministically captured clone of the sanitized ambient
+// environment. A supplied policy fails closed before any native spawn when it
+// does not validate, the supervisor is not trusted root, or the platform is not
+// Linux; it never retries as ordinary or Darwin best-effort execution, even
+// when its ids name the identity the caller already holds. It cannot be
+// combined with WithDarwinBestEffortContainment.
 func WithProcessIsolation(isolation ProcessIsolation) Option {
 	return func(options *Options) {
 		cloned := isolation
@@ -399,7 +406,10 @@ func WithProviderAuthDirectHome(path string) Option {
 }
 
 // WithDarwinBestEffortContainment opts into the explicitly limited Darwin
-// process-group backend. It is invalid on every non-Darwin platform.
+// process-group backend, upgrading the ordinary same-identity launch Darwin
+// otherwise uses. It is invalid on every non-Darwin platform, and invalid
+// together with WithProcessIsolation: an explicit hardened identity policy
+// cannot be downgraded to best effort.
 func WithDarwinBestEffortContainment() Option {
 	return func(options *Options) {
 		options.DarwinBestEffortContainment = true

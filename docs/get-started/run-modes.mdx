@@ -11,13 +11,17 @@ the reader/writer streams directly.
 ## Standalone
 
 By default the command needs no isolation policy: native work runs as the
-identity the command already holds, root or not. Hardened standalone native
-mode is Linux-only and is selected by giving the root supervisor
+identity the command already holds, root or not, on Linux, macOS, Windows,
+FreeBSD, and OpenBSD alike. That ordinary mode reports `shared_identity`, needs
+no authority directory or privileged supervisor, and publishes no
+provider-descendant inventory. Hardened standalone native mode is Linux-only and
+is selected by giving the root supervisor
 `-process-isolation-config=/absolute/path/process-isolation.json`; the strict
 file schema, account/home checks, closed environment, and explicit
 `inheritEnvironment` behavior are documented in the
-[CLI reference](/docs/reference/cli). An explicit policy is rejected on Darwin
-and Windows rather than being downgraded to ordinary execution.
+[CLI reference](/docs/reference/cli). An explicit policy is rejected on Darwin,
+Windows, FreeBSD, and OpenBSD rather than being downgraded to ordinary or
+best-effort execution.
 
 `acp-go-claude` is launched by an ACP client, which drives it over stdin/stdout.
 stdout carries ACP JSON-RPC only; diagnostics go to stderr (and `-debug` when

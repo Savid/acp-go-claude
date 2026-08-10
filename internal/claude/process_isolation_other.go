@@ -2,25 +2,11 @@
 
 package claude
 
-import (
-	"errors"
-	"os/exec"
-)
+import "errors"
 
-func validateProcessIsolationPlatform(isolation *ProcessIsolation) error {
-	// The implicit current-identity policy asks for no isolation at all, so the
-	// platform having none to offer is not an error; the containment backend
-	// still decides whether a launch is possible here.
-	if isolation.Implicit {
-		return nil
-	}
-
-	return errors.New("process isolation is unsupported on this platform")
-}
-func sharedProcessIdentity(*ProcessIsolation) bool { return false }
-func applyProcessCredential(*exec.Cmd, *ProcessIsolation) error {
-	return errors.New("process isolation is unsupported on this platform")
-}
-func verifySupervisorIdentity() error {
+// validateProcessIsolationPlatform refuses every explicitly supplied hardened
+// policy here: the platform has no credential boundary to apply. Ordinary
+// same-identity execution supplies no policy, so it never reaches this gate.
+func validateProcessIsolationPlatform(*ProcessIsolation) error {
 	return errors.New("process isolation is unsupported on this platform")
 }

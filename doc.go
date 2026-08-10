@@ -31,9 +31,13 @@
 // Hosts that need deterministic Claude sessions can use [WithClaudeBareMode] or
 // per-session [ClaudeOptions] to launch Claude with --bare.
 //
-// Linux uses authoritative native-process containment. Windows refuses native
-// launch because it cannot apply the mandatory Unix UID/GID isolation. Darwin
-// rejects native launch unless [WithDarwinBestEffortContainment] is supplied;
-// that explicit mode reaps the direct child and empties its captured original
-// process group but cannot contain descendants that escape with setsid.
+// Omitting [WithProcessIsolation] selects ordinary same-identity execution on
+// every supported platform: native work runs as this process's own identity and
+// reports non-authoritative shared_identity. Supplying it selects authoritative
+// Linux containment, and is refused before any spawn on Windows, Darwin,
+// FreeBSD, and OpenBSD, which cannot apply the Unix UID/GID isolation it asks
+// for. Darwin may instead select [WithDarwinBestEffortContainment], which cannot
+// be combined with [WithProcessIsolation]; that explicit mode reaps the direct
+// child and empties its captured original process group but cannot contain
+// descendants that escape with setsid.
 package claudeacp

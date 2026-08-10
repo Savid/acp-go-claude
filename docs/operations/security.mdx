@@ -42,8 +42,41 @@ capability flag are available only when explicitly enabled — see
 
 ## Process isolation
 
-On Linux, each session's Claude process runs below an independent trusted-root
-guardian/liveness pair. Both processes enable `PR_SET_CHILD_SUBREAPER` before
+Process isolation is optional. Omitting `WithProcessIsolation` selects ordinary
+same-identity execution on every platform this adapter otherwise supports, and
+supplying it selects the hardened Linux identity boundary described below.
+
+### Ordinary same-identity execution (the default)
+
+With no `WithProcessIsolation` value, native Claude work runs as the adapter's
+current operating-system identity — root or non-root, unchanged either way. No
+`ProcessIsolation` value is manufactured on the caller's behalf, no privileged
+guardian or liveness supervisor is started, no `/var/lib/acp-go` authority is
+touched, and no UID/GID policy, standalone owner, or `sudo` is required. The
+adapter builds its ordinary sanitized environment — the ambient environment
+minus the private adapter prefix, `CLAUDECODE`, and the variables scrubbed from
+every child — and completes the process it started
+together with the process group it placed that process in.
+
+That boundary is deliberately non-authoritative. It proves no credential
+separation between the adapter and Claude, publishes no provider-descendant
+inventory — not even a terminal zero — and makes no whole-tree quiescence claim.
+Containment is reported as `shared_identity`. A host that requires those
+properties supplies `WithProcessIsolation` and requires `authoritative` before
+admitting work; it must never catch that refusal and retry without the option.
+
+### Hardened Linux identity isolation (explicit)
+
+Supplying `WithProcessIsolation` is a strict selection, never a preference. Its
+`UID` and `GID` must be nonzero and distinct from the trusted supervisor, and
+the value is refused before any spawn when the platform is not Linux, the
+supervisor is not root, or the policy does not validate. Such a refusal never
+falls back to ordinary same-identity or Darwin best-effort execution, and a
+policy whose ids happen to name the identity the caller already holds is refused
+on exactly those terms rather than degraded.
+
+On Linux, each session's Claude process then runs below an independent
+trusted-root guardian/liveness pair. Both processes enable `PR_SET_CHILD_SUBREAPER` before
 launch; the liveness supervisor directly parents Claude and the guardian is its
 fallback reaper. A
 tool descendant that double-forks, calls `setsid`, changes process group, or
@@ -68,21 +101,6 @@ it adopts, kills, and reaps daemonized and `setsid` descendants to kernel
 inherits none of the launch, control, proof, or lock descriptors, so it cannot
 signal its supervisor, forge completion, or overlap another native tree using
 the same host identity.
-When the configured native identity is the identity the adapter already runs as,
-there is no privilege boundary to establish and the supervisor takes a
-shared-identity arm. It skips only the steps that need one: the trusted-root
-assertion, the standalone owner fields, the whole `/var/lib/acp-go` authority,
-and the credential drop. The guardian and liveness pair, both subreaper claims,
-`PR_SET_NO_NEW_PRIVS`, core-dump suppression, descendant adoption to kernel
-`ECHILD`, the readiness handshake, and every inherited-descriptor fence are
-unchanged. The parent records that decision in the sealed launch configuration,
-and each child re-derives it from its own identity and refuses a configuration
-that disagrees. Containment is then reported as `shared_identity`: whole-tree
-lifecycle is still proven, but the agent runs with the adapter's credentials,
-concurrent sessions can read each other's state, and no host-global record of
-the identity exists. Non-empty standalone owner fields are refused in that
-shape, because the task vacancy they promise cannot be proven while the
-supervisor itself holds the identity.
 A dedicated guardian peer-liveness descriptor is fenced immediately before
 native start. Guardian death before readiness refuses native launch and lets
 liveness publish completion or quarantine only after kernel `ECHILD`.
@@ -202,15 +220,18 @@ same-directory atomic rename,
 and directory sync. Each newly created directory level is parent-synced before
 any lock becomes authoritative.
 
-Windows rejects native session launch before spawning Claude because its
-process API cannot apply the mandatory Unix UID/GID identity boundary with
-empty supplementary groups. A Windows cross-compile proves only that this
-refusal path builds; it does not establish runtime support. FreeBSD, OpenBSD,
-and other unsupported kernels also reject native session launch.
+Windows, FreeBSD, OpenBSD, and other non-Linux kernels reject a supplied
+`WithProcessIsolation` policy before spawning Claude, because their process APIs
+cannot apply the Unix UID/GID identity boundary with empty supplementary groups.
+A cross-compile proves only that this refusal path builds; it does not establish
+runtime support for the hardened boundary. Ordinary same-identity execution is
+unaffected on those platforms and remains the default there.
 
-Embedded Darwin hosts reject native launch by default. An operator can
-explicitly accept its weaker boundary with
-`WithDarwinBestEffortContainment`. Each launch then gets a fresh mode-`0700`
+Embedded Darwin hosts run ordinary `shared_identity` execution by default. An
+operator can explicitly select a stronger process-group boundary with
+`WithDarwinBestEffortContainment`, which is mutually exclusive with
+`WithProcessIsolation`: combining the two fails agent construction, so no native
+process is ever spawned for that configuration. Each launch then gets a fresh mode-`0700`
 generation under the selected scratch parent, a random runtime identity, and a
 new process group. Shutdown reaps the direct child, sends bounded group
 `SIGTERM` then `SIGKILL`, and polls the captured original group until absent.
@@ -243,8 +264,9 @@ deadline starts before registry and process enumeration.
 Turn cancellation is also contained. A native interrupt response is advisory;
 the adapter then completes the selected per-session boundary before settling a
 cancel, timeout, or caller-context cancellation. Authoritative Linux
-containment covers every descendant. Windows cannot launch the native process
-because the mandatory identity boundary is unavailable. Darwin best effort
+containment covers every descendant. Ordinary `shared_identity` execution
+completes only the process the adapter started and its process group. Darwin
+best effort
 requires only direct-child reaping and absence of the original process group,
 so a `setsid` escape may remain. Readiness and supervisor exit are not
 authoritative proof: Linux requires the dedicated proof descriptor, and an

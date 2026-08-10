@@ -62,16 +62,10 @@ func TestProcessIsolationEnvironmentIsReplacementAndOverlay(t *testing.T) {
 	require.Equal(t, "yes", values["ONLY_OPTION"])
 }
 
-func TestProcessIsolationFailsClosedAndClearsGroups(t *testing.T) {
-	require.Nil(t, BuildEnv(Options{}))
+func TestProcessIsolationFailsClosed(t *testing.T) {
 	require.Nil(t, BuildEnv(Options{ProcessIsolation: &ProcessIsolation{UID: 0, GID: 2, BaseEnvironment: map[string]string{}}}))
 	require.Nil(t, BuildEnv(Options{ProcessIsolation: &ProcessIsolation{UID: 1, GID: 2, BaseEnvironment: map[string]string{"PATH": "relative"}, StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test"}}))
-	cmd := exec.Command("/usr/bin/true")
-	policy := &ProcessIsolation{UID: 123, GID: 456, BaseEnvironment: map[string]string{}, StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test"}
-	require.NoError(t, applyProcessCredential(cmd, policy))
-	require.Equal(t, uint32(123), cmd.SysProcAttr.Credential.Uid)
-	require.Equal(t, uint32(456), cmd.SysProcAttr.Credential.Gid)
-	require.Empty(t, cmd.SysProcAttr.Credential.Groups)
+	require.Nil(t, BuildEnv(Options{OrdinaryEnvironment: map[string]string{"BAD=KEY": "x"}}))
 }
 
 func TestProcessIsolationValidationAndExecutableResolutionBranches(t *testing.T) {
@@ -124,32 +118,34 @@ func TestAdoptedIdentityDisposition(t *testing.T) {
 	require.NoError(t, validateStandaloneIdentityDisposition(adopted))
 	adopted.IdentityLock = testProcessIdentityCapability{}
 	require.ErrorContains(t, validateStandaloneIdentityDisposition(adopted), "cannot carry")
-	require.Error(t, applyProcessCredential(exec.Command("/usr/bin/true"), nil))
 }
 
-func TestSupervisorIdentityEnvironmentAndVerification(t *testing.T) {
+// TestNativeLaunchIdentityEnvironmentAndVerification proves the private launch
+// helper refuses to exec anything unless it already runs as the identity its
+// parent stamped, and that the stamp survives an unrelated inherited variable.
+func TestNativeLaunchIdentityEnvironmentAndVerification(t *testing.T) {
 	originalUID := processEffectiveUID
 	originalGID := processEffectiveGID
-	originalGroups := processGroups
 	t.Cleanup(func() {
 		processEffectiveUID = originalUID
 		processEffectiveGID = originalGID
-		processGroups = originalGroups
 	})
 
 	t.Setenv(processIsolationUIDEnv, "")
 	t.Setenv(processIsolationGIDEnv, "")
-	uid, _, _, err := expectedSupervisorIdentity()
+	uid, _, err := expectedLaunchIdentity()
 	require.ErrorContains(t, err, "uid")
 	require.Zero(t, uid)
-	require.ErrorContains(t, verifySupervisorIdentity(), "uid")
+	require.ErrorContains(t, verifyLaunchIdentity(), "uid")
 	t.Setenv(processIsolationUIDEnv, "41")
-	_, gid, implicit, err := expectedSupervisorIdentity()
+	_, gid, err := expectedLaunchIdentity()
 	require.ErrorContains(t, err, "gid")
 	require.Zero(t, gid)
-	require.False(t, implicit)
 
-	env := supervisorIdentityEnvironment([]string{"KEEP=yes"}, "MODE", "run", ProcessIsolation{UID: 41, GID: 42})
+	processEffectiveUID = func() int { return 41 }
+	processEffectiveGID = func() int { return 42 }
+
+	env := ordinaryLaunchIdentityEnvironment([]string{"KEEP=yes"}, "MODE", "run")
 	values := environmentMap(env)
 	require.Equal(t, "yes", values["KEEP"])
 	require.Equal(t, "run", values["MODE"])
@@ -157,14 +153,46 @@ func TestSupervisorIdentityEnvironmentAndVerification(t *testing.T) {
 	require.Equal(t, "42", values[processIsolationGIDEnv])
 
 	t.Setenv(processIsolationGIDEnv, "42")
+	require.NoError(t, verifyLaunchIdentity())
 	processEffectiveUID = func() int { return 99 }
-	processEffectiveGID = func() int { return 42 }
-	require.ErrorContains(t, verifySupervisorIdentity(), "mismatch")
-	processEffectiveUID = func() int { return 41 }
-	processGroups = func() ([]int, error) { return nil, errors.New("groups") }
-	require.ErrorContains(t, verifySupervisorIdentity(), "supplementary")
-	processGroups = func() ([]int, error) { return []int{7}, nil }
-	require.ErrorContains(t, verifySupervisorIdentity(), "not empty")
-	processGroups = func() ([]int, error) { return nil, nil }
-	require.NoError(t, verifySupervisorIdentity())
+	require.ErrorContains(t, verifyLaunchIdentity(), "mismatch")
+}
+
+// TestProcessIsolationOmissionAllowsRoot proves the ordinary launch identity
+// handshake is honest for a root caller too: root is a legitimate ordinary
+// identity, so a zero id round-trips instead of failing closed the way an
+// explicit policy's zero id must.
+func TestProcessIsolationOmissionAllowsRoot(t *testing.T) {
+	originalUID := processEffectiveUID
+	originalGID := processEffectiveGID
+	t.Cleanup(func() {
+		processEffectiveUID = originalUID
+		processEffectiveGID = originalGID
+	})
+
+	for _, identity := range []struct {
+		name     string
+		uid, gid int
+	}{
+		{name: "non-root", uid: 1000, gid: 1000},
+		{name: "root", uid: 0, gid: 0},
+	} {
+		t.Run(identity.name, func(t *testing.T) {
+			processEffectiveUID = func() int { return identity.uid }
+			processEffectiveGID = func() int { return identity.gid }
+
+			values := environmentMap(ordinaryLaunchIdentityEnvironment(nil, "MODE", "run"))
+			t.Setenv(processIsolationUIDEnv, values[processIsolationUIDEnv])
+			t.Setenv(processIsolationGIDEnv, values[processIsolationGIDEnv])
+
+			require.NoError(t, verifyLaunchIdentity())
+		})
+	}
+
+	// An explicit policy is held to the opposite rule: zero ids never name a
+	// hardened native identity, so the same shape fails closed.
+	require.ErrorContains(t,
+		validateProcessIsolation(&ProcessIsolation{BaseEnvironment: map[string]string{}}),
+		"must be nonzero",
+	)
 }

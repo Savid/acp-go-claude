@@ -120,12 +120,13 @@ func compactJSON(value any) string {
 // the residence probe describes a different one reports success about a store
 // nobody asked about.
 func BuildEnv(options Options) []string {
-	if err := validateProcessIsolation(options.ProcessIsolation); err != nil {
+	base, err := launchBaseEnvironment(options)
+	if err != nil {
 		return nil
 	}
 
-	values := make(map[string]string, len(options.ProcessIsolation.BaseEnvironment)+len(options.Env)+3)
-	keys := make([]string, 0, len(options.ProcessIsolation.BaseEnvironment)+len(options.Env)+3)
+	values := make(map[string]string, len(base)+len(options.Env)+3)
+	keys := make([]string, 0, len(base)+len(options.Env)+3)
 
 	set := func(key string, value string) {
 		if key == envClaudeCodeNested || strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) {
@@ -143,8 +144,8 @@ func BuildEnv(options Options) []string {
 		values[key] = value
 	}
 
-	baseKeys := make([]string, 0, len(options.ProcessIsolation.BaseEnvironment))
-	for key := range options.ProcessIsolation.BaseEnvironment {
+	baseKeys := make([]string, 0, len(base))
+	for key := range base {
 		baseKeys = append(baseKeys, key)
 	}
 
@@ -155,7 +156,7 @@ func BuildEnv(options Options) []string {
 			continue
 		}
 
-		set(key, options.ProcessIsolation.BaseEnvironment[key])
+		set(key, base[key])
 	}
 
 	set("CLAUDE_CODE_ENTRYPOINT", "acp-go-claude")
@@ -187,8 +188,12 @@ func BuildEnv(options Options) []string {
 		set(envSearchPath, prependSearchPath(options.ExtraPathDirs, values[envSearchPath]))
 	}
 
-	if err := validateProcessSearchPath(values[envSearchPath]); err != nil {
-		return nil
+	// The absolute-entry rule belongs to the hardened policy PATH. Ordinary
+	// execution inherits the operator's own search path and is not held to it.
+	if options.ProcessIsolation != nil {
+		if err := validateProcessSearchPath(values[envSearchPath]); err != nil {
+			return nil
+		}
 	}
 
 	env := make([]string, 0, len(keys))
@@ -197,6 +202,26 @@ func BuildEnv(options Options) []string {
 	}
 
 	return env
+}
+
+// launchBaseEnvironment answers with the base every native environment is built
+// on. An explicit policy supplies a complete replacement base; omission carries
+// no policy at all, so the base is the sanitized ambient capture ordinary
+// same-identity execution runs with.
+func launchBaseEnvironment(options Options) (map[string]string, error) {
+	if options.ProcessIsolation == nil {
+		if err := validateEnvironmentMap(options.OrdinaryEnvironment); err != nil {
+			return nil, fmt.Errorf("validate ordinary launch environment: %w", err)
+		}
+
+		return options.OrdinaryEnvironment, nil
+	}
+
+	if err := validateProcessIsolation(options.ProcessIsolation); err != nil {
+		return nil, err
+	}
+
+	return options.ProcessIsolation.BaseEnvironment, nil
 }
 
 func managedRootEnvKey(key string) bool {
@@ -234,7 +259,7 @@ func Discover(ctx context.Context, cliPath string, policy any) (string, error) {
 		return "", err
 	}
 
-	if err := validateProcessIsolation(options.ProcessIsolation); err != nil {
+	if _, err := launchBaseEnvironment(options); err != nil {
 		return "", err
 	}
 
@@ -242,7 +267,7 @@ func Discover(ctx context.Context, cliPath string, policy any) (string, error) {
 		cliPath = defaultCLIExecutable
 	}
 
-	path, err := resolveProcessExecutable(cliPath, BuildEnv(options))
+	path, err := resolveLaunchExecutable(options, cliPath, BuildEnv(options))
 	if err != nil {
 		return "", fmt.Errorf("find claude in PATH: %w", err)
 	}
@@ -453,8 +478,8 @@ func observeAuxiliaryQuiescence(options Options, containmentErr error) {
 		return
 	}
 
-	if options.ObserveProcessQuiesced != nil {
-		options.ObserveProcessQuiesced(context.Background())
+	if options.ObserveBoundaryComplete != nil {
+		options.ObserveBoundaryComplete(context.Background())
 	}
 }
 

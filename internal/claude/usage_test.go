@@ -175,7 +175,7 @@ func TestQueryRateLimits(t *testing.T) {
 	admitted := 0
 	released := 0
 	inventories := 0
-	quiesced := 0
+	completed := 0
 	options.PrepareUsageGeneration = func(ctx context.Context) (*DarwinGeneration, error) {
 		prepared++
 
@@ -191,7 +191,7 @@ func TestQueryRateLimits(t *testing.T) {
 		}, acquireErr
 	}
 	options.ObserveProcessInventory = func(context.Context, func() (int, bool)) { inventories++ }
-	options.ObserveProcessQuiesced = func(context.Context) { quiesced++ }
+	options.ObserveBoundaryComplete = func(context.Context) { completed++ }
 	limits, err := QueryRateLimits(context.Background(), options)
 	require.NoError(t, err)
 	require.Len(t, limits.Windows, 3)
@@ -200,7 +200,7 @@ func TestQueryRateLimits(t *testing.T) {
 	require.Equal(t, 1, admitted)
 	require.Equal(t, 1, released)
 	require.Positive(t, inventories)
-	require.Equal(t, 1, quiesced)
+	require.Equal(t, 1, completed)
 
 	failing := writeShellScript(t, filepath.Join(dir, "fail"), "#!/bin/sh\nexit 1\n")
 

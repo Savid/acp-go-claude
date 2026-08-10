@@ -108,12 +108,16 @@ providers.
 - Optional raw Claude stream-json extension notifications.
 - OpenTelemetry spans, metrics, trace propagation, and structured logs without
   recording prompt or tool secrets by default.
-- Authoritative native-process containment on Linux. Windows native launch
-  fails closed because its process API cannot apply the mandatory Unix UID/GID
-  identity boundary with empty supplementary groups; cross-compilation proves
-  only that this refusal path builds, not runtime support. Darwin fails closed
-  by default and has an explicit best-effort opt-in for operators who accept
-  escaped-descendant and numeric-PGID-reuse risks.
+- Ordinary same-identity native execution by default on every supported
+  platform: native work runs as the adapter's own identity, needs no privileged
+  supervisor, and reports non-authoritative `shared_identity` with no
+  provider-descendant inventory. Supplying `WithProcessIsolation` selects the
+  authoritative Linux boundary instead; that policy is refused before any spawn
+  on Windows, Darwin, FreeBSD, and OpenBSD, whose process APIs cannot apply the
+  Unix UID/GID identity boundary with empty supplementary groups, and
+  cross-compilation proves only that this refusal path builds. Darwin also has
+  an explicit best-effort opt-in — mutually exclusive with process isolation —
+  for operators who accept escaped-descendant and numeric-PGID-reuse risks.
 
 ## Slash Commands
 

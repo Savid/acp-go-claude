@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -142,6 +143,48 @@ func TestRunWithExplicitProcessIsolationConfigIsFailClosed(t *testing.T) {
 	code := run(t.Context(), isolatedArgs(), strings.NewReader(""), &strings.Builder{}, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "process isolation: policy unreadable") {
 		t.Fatalf("run code = %d, stderr = %q", code, stderr.String())
+	}
+
+	// A policy the loader accepts still fails closed where the platform cannot
+	// apply it: the option reaches the agent unchanged, and the agent refuses
+	// rather than retrying ordinary same-identity execution.
+	stubProcessIsolationConfig(t)
+
+	var got claudeacp.Options
+
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...claudeacp.Option) error {
+		for _, opt := range opts {
+			opt(&got)
+		}
+
+		return nil
+	}
+
+	stderr.Reset()
+
+	if code := run(t.Context(), isolatedArgs(), strings.NewReader(""), &strings.Builder{}, &stderr); code != 0 {
+		t.Fatalf("run code = %d, stderr = %q", code, stderr.String())
+	}
+
+	if got.ProcessIsolation == nil || got.ProcessIsolation.UID != 20001 {
+		t.Fatalf("ProcessIsolation = %#v", got.ProcessIsolation)
+	}
+
+	agent := claudeacp.NewAgent(claudeacp.WithProcessIsolation(*got.ProcessIsolation))
+	t.Cleanup(func() {
+		if err := agent.Close(); err != nil {
+			t.Fatalf("close agent: %v", err)
+		}
+	})
+
+	if runtime.GOOS != "linux" {
+		if mode := agent.ContainmentMode(); mode != claudeacp.RuntimeContainmentUnavailable {
+			t.Fatalf("containment mode = %q, want unavailable on %s", mode, runtime.GOOS)
+		}
+
+		if _, err := agent.NewSession(t.Context(), claudeacp.NewSessionRequest(t.TempDir())); err == nil {
+			t.Fatal("an unsupported platform must refuse an explicit policy rather than degrade")
+		}
 	}
 }
 

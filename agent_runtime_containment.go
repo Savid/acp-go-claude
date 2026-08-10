@@ -3,7 +3,6 @@ package claudeacp
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -22,60 +21,60 @@ func (a *Agent) ContainmentMode() RuntimeContainmentMode {
 	return a.containmentMode
 }
 
-// containmentEffectiveUID is the seam the shared-identity report is derived
-// through. The mode is selected from a faked GOOS in tests, so the identity it
-// is compared against has to be selectable there too.
-var containmentEffectiveUID = os.Geteuid
+// provesWholeTreeLifecycle reports whether the selected boundary can prove that
+// every process it started has exited. Only the hardened Linux boundary can:
+// its trusted-root guardian owns a subreaper tree it can enumerate. Ordinary
+// shared identity and Darwin best effort complete a directly owned boundary and
+// deliberately claim nothing beyond it.
+func (mode RuntimeContainmentMode) provesWholeTreeLifecycle() bool {
+	return mode == RuntimeContainmentAuthoritative
+}
 
-// sharedProcessIdentity reports whether the configured native identity is the
-// identity this process already runs as. Root never qualifies: a zero effective
-// uid is the trusted supervisor identity, and the native uid is required to be
-// nonzero.
-func sharedProcessIdentity(isolation *ProcessIsolation) bool {
-	if isolation == nil {
+// containmentOptionsConflict reports whether the two explicit containment
+// options were combined, or the Darwin one was selected off Darwin. An explicit
+// hardened identity policy cannot be downgraded to best effort, so the pair is
+// refused before any native construction rather than resolved.
+func containmentOptionsConflict(options Options) bool {
+	if !options.DarwinBestEffortContainment {
 		return false
 	}
 
-	effectiveUID := containmentEffectiveUID()
-
-	return effectiveUID > 0 && uint64(isolation.UID) == uint64(effectiveUID)
-}
-
-// provesWholeTreeLifecycle reports whether the selected boundary can prove that
-// every process it started has exited. Both linux boundaries can: they differ
-// in whether the agent runs under its own credentials, not in what the
-// subreaper observes.
-func (mode RuntimeContainmentMode) provesWholeTreeLifecycle() bool {
-	return mode == RuntimeContainmentAuthoritative || mode == RuntimeContainmentSharedIdentity
+	return runtimeGOOS != platformDarwin || options.ProcessIsolation != nil
 }
 
 func containmentMode(options Options) RuntimeContainmentMode {
-	if options.DarwinBestEffortContainment && runtimeGOOS != platformDarwin {
+	if containmentOptionsConflict(options) {
 		return RuntimeContainmentUnavailable
 	}
 
 	switch runtimeGOOS {
 	case platformLinux:
-		// Omission launches the native tree as the identity this process
-		// already runs as, so shared identity is the only truthful report; an
-		// authoritative claim belongs solely to an explicit distinct identity.
-		if options.ProcessIsolation == nil || sharedProcessIdentity(options.ProcessIsolation) {
-			return RuntimeContainmentSharedIdentity
+		if options.ProcessIsolation != nil {
+			return RuntimeContainmentAuthoritative
 		}
-
-		return RuntimeContainmentAuthoritative
 	case platformDarwin:
 		if options.DarwinBestEffortContainment {
 			return RuntimeContainmentBestEffort
 		}
 	}
 
-	return RuntimeContainmentUnavailable
+	// A supplied policy is a strict Linux selection: everywhere else it fails
+	// closed rather than degrading. Omission is the ordinary default and runs
+	// as this process's own identity on every platform the adapter supports.
+	if options.ProcessIsolation != nil {
+		return RuntimeContainmentUnavailable
+	}
+
+	return RuntimeContainmentSharedIdentity
 }
 
 func validateContainmentOptions(options Options) error {
 	if options.DarwinBestEffortContainment && runtimeGOOS != platformDarwin {
 		return errors.New("darwin best-effort containment is supported only on darwin")
+	}
+
+	if options.DarwinBestEffortContainment && options.ProcessIsolation != nil {
+		return errors.New("darwin best-effort containment cannot be combined with WithProcessIsolation")
 	}
 
 	for key := range options.Env {

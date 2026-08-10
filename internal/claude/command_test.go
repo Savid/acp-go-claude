@@ -430,7 +430,9 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	require.Equal(t, 2, observedUnavailable)
 
-	_, err = containedClaudeOutput(t.Context(), "/bin/sh", nil, Options{}, nil, "invalid environment")
+	_, err = containedClaudeOutput(
+		t.Context(), "/bin/sh", nil, Options{ProcessIsolation: &ProcessIsolation{}}, nil, "invalid environment",
+	)
 	require.ErrorContains(t, err, "invalid process isolation")
 
 	originalPipe := commandPipe
@@ -454,19 +456,19 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 
 func TestObserveAuxiliaryQuiescenceBranches(t *testing.T) {
 	inventories := 0
-	quiesced := 0
+	completed := 0
 	options := Options{
 		ObserveProcessInventory: func(context.Context, func() (int, bool)) { inventories++ },
-		ObserveProcessQuiesced:  func(context.Context) { quiesced++ },
+		ObserveBoundaryComplete: func(context.Context) { completed++ },
 	}
 	observeAuxiliaryQuiescence(options, errors.New("cleanup failed"))
 	require.Equal(t, 1, inventories)
-	require.Zero(t, quiesced)
+	require.Zero(t, completed)
 
 	observeAuxiliaryQuiescence(Options{}, errors.New("cleanup failed"))
 	observeAuxiliaryQuiescence(options, nil)
 	require.Equal(t, 1, inventories)
-	require.Equal(t, 1, quiesced)
+	require.Equal(t, 1, completed)
 }
 
 func TestDiscoverFromPath(t *testing.T) {

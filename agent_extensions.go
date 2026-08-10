@@ -74,11 +74,12 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 	}
 
 	claudeOptions := claude.Options{
-		CLIPath:          a.options.ExecutablePath,
-		ClaudeHome:       claudeHome,
-		Env:              a.options.Env,
-		ProcessIsolation: a.claudeIsolation(),
-		DarwinBestEffort: a.containmentMode == RuntimeContainmentBestEffort,
+		CLIPath:             a.options.ExecutablePath,
+		ClaudeHome:          claudeHome,
+		Env:                 a.options.Env,
+		ProcessIsolation:    a.claudeIsolation(),
+		OrdinaryEnvironment: a.ordinaryEnvironment(),
+		DarwinBestEffort:    a.containmentMode == RuntimeContainmentBestEffort,
 		AcquireUsageDiscovery: func(discoveryCtx context.Context) (func(), error) {
 			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
 		},
@@ -88,7 +89,7 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 	}
 	processSnapshotSource := a.descendantProcesses.newSource()
 	claudeOptions.ObserveProcessInventory = processSnapshotSource.started
-	claudeOptions.ObserveProcessQuiesced = processSnapshotSource.quiesced
+	claudeOptions.ObserveBoundaryComplete = processSnapshotSource.completed
 
 	probeCtx, cancel := context.WithTimeout(ctx, rateLimitsProbeTimeout)
 	defer cancel()

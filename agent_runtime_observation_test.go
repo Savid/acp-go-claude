@@ -67,7 +67,7 @@ func TestRuntimeProcessSnapshotTrackerSuppressesBestEffortInventories(t *testing
 	}, false)
 	source := tracker.newSource()
 	source.started(t.Context(), func() (int, bool) { return 7, true })
-	source.quiesced(t.Context())
+	source.completed(t.Context())
 	require.Empty(t, snapshots, "best-effort containment must not publish descendant totals, including zero")
 }
 
@@ -92,15 +92,15 @@ func TestRuntimeProcessSnapshotTrackerAggregatesOnlyCompleteInventories(t *testi
 	first.started(t.Context(), func() (int, bool) { return firstCount, true })
 	require.Equal(t, []int{1, 6}, snapshots, "every boundary must re-query all active inventories")
 
-	unknown.quiesced(t.Context())
-	second.quiesced(t.Context())
-	first.quiesced(t.Context())
+	unknown.completed(t.Context())
+	second.completed(t.Context())
+	first.completed(t.Context())
 	require.Equal(t, []int{1, 6, 7, 5, 0}, snapshots)
 
 	unproven := tracker.newSource()
 	unproven.started(t.Context(), func() (int, bool) { return 3, true })
 	unknown.started(t.Context(), func() (int, bool) { return 0, false })
-	unproven.quiesced(t.Context())
+	unproven.completed(t.Context())
 	require.Equal(t, []int{1, 6, 7, 5, 0, 3}, snapshots, "an unproven tree must retain unknown inventory and prevent zero")
 }
 
@@ -117,7 +117,7 @@ func TestRuntimeProcessSnapshotTrackerSerializesConcurrentLifecycles(t *testing.
 		source := tracker.newSource()
 		group.Go(func() {
 			source.started(t.Context(), func() (int, bool) { return 1, true })
-			source.quiesced(t.Context())
+			source.completed(t.Context())
 		})
 	}
 	group.Wait()
@@ -135,7 +135,7 @@ func TestRuntimeProcessSnapshotTrackerAllowsReentrantQuiescence(t *testing.T) {
 		ObserveProcessSnapshot: func(ctx context.Context, _ RuntimeProcessKind, count int) {
 			snapshots = append(snapshots, count)
 			if count == 1 {
-				source.quiesced(ctx)
+				source.completed(ctx)
 			}
 		},
 	})

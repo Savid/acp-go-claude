@@ -14,33 +14,29 @@ func claudeProcessIsolation(value *ProcessIsolation) *claude.ProcessIsolation {
 	}
 }
 
-// captureImplicitIsolation snapshots the ordinary current-identity launch
-// policy exactly once, at agent construction, and only when no explicit policy
-// was configured. Every native launch is then handed a clone of this one
-// capture, so the implicit base environment is deterministic for the agent's
-// whole lifetime.
-func captureImplicitIsolation(options Options) *claude.ProcessIsolation {
+// captureOrdinaryEnvironment snapshots the ambient environment ordinary
+// same-identity execution launches native processes with. It is taken exactly
+// once, at agent construction, and only when no explicit policy was configured,
+// so the base is deterministic for the agent's whole lifetime. It is an
+// ordinary runtime value: no ProcessIsolation is manufactured from it.
+func captureOrdinaryEnvironment(options Options) map[string]string {
 	if options.ProcessIsolation != nil {
 		return nil
 	}
 
-	return claude.ImplicitProcessIsolation()
+	return claude.OrdinaryEnvironment()
 }
 
-// claudeIsolation is the launch policy every native process runs under: the
-// explicit policy when one was configured, otherwise a clone of the implicit
-// current-identity capture.
+// claudeIsolation is the explicitly configured hardened policy, or nil when the
+// embedder configured none. Nil travels all the way to the launch selector,
+// where it selects ordinary same-identity execution.
 func (a *Agent) claudeIsolation() *claude.ProcessIsolation {
-	if isolation := claudeProcessIsolation(a.options.ProcessIsolation); isolation != nil {
-		return isolation
-	}
+	return claudeProcessIsolation(a.options.ProcessIsolation)
+}
 
-	if a.implicitIsolation == nil {
-		return nil
-	}
-
-	clone := *a.implicitIsolation
-	clone.BaseEnvironment = cloneStringMap(a.implicitIsolation.BaseEnvironment)
-
-	return &clone
+// ordinaryEnvironment answers with a copy of the one ambient capture every
+// ordinary native launch runs with. It is empty for an explicitly isolated
+// agent, whose replacement base comes from the policy instead.
+func (a *Agent) ordinaryEnvironment() map[string]string {
+	return cloneStringMap(a.ordinaryEnv)
 }

@@ -16,14 +16,21 @@ type processTreeCommand struct {
 	control   *os.File
 	ready     *os.File
 	proof     *os.File
+	ordinary  bool
 }
 
 // startChildExit starts the observation of the direct child's own exit. Every
 // boundary outside Darwin leaves the reap to whoever owns the child, so this is
 // that reap, and the owner collects its result instead of waiting a second
-// time. It signals only that the child ended; it terminates nothing, so the
-// containment boundary stays the sole authoritative shutdown channel.
-func startChildExit(_ *processContainment, cmd *exec.Cmd) *commandWait {
+// time. The ordinary boundary already started that sole reap with the child, so
+// it hands the same observation back. It signals only that the child ended; it
+// terminates nothing, so the containment boundary stays the sole authoritative
+// shutdown channel.
+func startChildExit(tree *processContainment, cmd *exec.Cmd) *commandWait {
+	if waiter := tree.ordinary.ordinaryWaiter(); waiter != nil {
+		return waiter
+	}
+
 	wait, begin := startPausedCommandWait(cmd.Wait)
 	begin()
 

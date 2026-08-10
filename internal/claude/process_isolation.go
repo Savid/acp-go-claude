@@ -3,7 +3,6 @@ package claude
 import (
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,71 +15,22 @@ import (
 )
 
 const (
-	processIsolationUIDEnv      = privateAdapterEnvPrefix + "UID"
-	processIsolationGIDEnv      = privateAdapterEnvPrefix + "GID"
-	processIsolationImplicitEnv = privateAdapterEnvPrefix + "IMPLICIT"
-	processIsolationLinux       = "linux"
+	processIsolationUIDEnv = privateAdapterEnvPrefix + "UID"
+	processIsolationGIDEnv = privateAdapterEnvPrefix + "GID"
+	processIsolationLinux  = "linux"
 )
 
-var (
-	processIsolationGOOS = runtime.GOOS
+var processIsolationGOOS = runtime.GOOS
 
-	implicitIsolationEnviron = os.Environ
-	implicitIsolationUID     = os.Geteuid
-	implicitIsolationGID     = os.Getegid
-)
-
-// ImplicitProcessIsolation captures the ordinary current-identity launch
-// policy used when the embedder configures no explicit isolation: the identity
-// this process already runs as — root or not — and a sanitized snapshot of the
-// ambient environment. The capture happens once per call, so every launch built
-// from one result sees the same base environment regardless of later ambient
-// mutation.
-func ImplicitProcessIsolation() *ProcessIsolation {
-	base := map[string]string{}
-
-	for _, entry := range implicitIsolationEnviron() {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok || key == "" || strings.ContainsRune(value, '\x00') ||
-			key == envClaudeCodeNested || strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) ||
-			authScrubbedEnvKey(key) {
-			continue
-		}
-
-		base[key] = value
-	}
-
-	return &ProcessIsolation{
-		UID:             implicitIdentityValue(implicitIsolationUID()),
-		GID:             implicitIdentityValue(implicitIsolationGID()),
-		BaseEnvironment: base,
-		Implicit:        true,
-	}
-}
-
-// implicitIdentityValue maps an effective id onto the 32 bits an isolation
-// policy stores. A platform that reports no id (-1) fails closed onto an id no
-// launch validation can match.
-func implicitIdentityValue(id int) uint32 {
-	if id < 0 || id > math.MaxUint32 {
-		return math.MaxUint32
-	}
-
-	return uint32(id)
-}
-
+// validateProcessIsolation validates an explicitly supplied hardened policy.
+// Omission is not a policy at all: it selects ordinary same-identity execution,
+// which never reaches this function and never manufactures a value for it.
 func validateProcessIsolation(isolation *ProcessIsolation) error {
 	if isolation == nil {
 		return errors.New("process isolation is required")
 	}
 
-	if isolation.Implicit {
-		if isolation.IdentityLock != nil || isolation.AuthorityDomain != nil ||
-			isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" ||
-			isolation.identityAuthorityAdopted {
-			return errors.New("implicit current-identity launch forbids identity capabilities and standalone owner fields")
-		}
-	} else if isolation.UID == 0 || isolation.GID == 0 {
+	if isolation.UID == 0 || isolation.GID == 0 {
 		return errors.New("process isolation uid and gid must be nonzero")
 	}
 
@@ -92,7 +42,7 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		return fmt.Errorf("validate process isolation base environment: %w", err)
 	}
 
-	if !isolation.Implicit && processIsolationGOOS == processIsolationLinux {
+	if processIsolationGOOS == processIsolationLinux {
 		if err := validateStandaloneIdentityDisposition(isolation); err != nil {
 			return err
 		}
@@ -100,14 +50,6 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 
 	return validateProcessIsolationPlatform(isolation)
 }
-
-// sharedIdentitySupervisorRemedy states what an operator can change when the
-// supervisor was asked to launch the native process under the very identity it
-// already runs as and the shape it was handed describes something else. There
-// is no privilege boundary to cross in that deployment, so the two answers are
-// to give the supervisor one, or to describe the launch as what it is.
-const sharedIdentitySupervisorRemedy = "run the supervisor as root to isolate the agent identity, " +
-	"or launch the agent under the identity the supervisor already holds"
 
 func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
 	identityLock := isolation.IdentityLock != nil
@@ -129,19 +71,6 @@ func validateStandaloneIdentityDisposition(isolation *ProcessIsolation) error {
 	if identityLock {
 		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
 			return errors.New("borrowed process identity forbids standalone owner fields")
-		}
-
-		return nil
-	}
-
-	// A native identity that is already the supervisor's own identity cannot be
-	// recorded as a standalone one: the durable record proves an identity no
-	// live task holds, and the supervisor asking for it is such a task. The
-	// canonical shape is therefore no capabilities and no standalone fields.
-	if sharedProcessIdentity(isolation) {
-		if isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" {
-			return errors.New("standalone owner fields describe an identity the supervisor already holds; " +
-				sharedIdentitySupervisorRemedy)
 		}
 
 		return nil
@@ -296,31 +225,31 @@ func validateProcessSearchPath(search string) error {
 	return nil
 }
 
-func supervisorIdentityEnvironment(env []string, modeKey string, mode string, isolation ProcessIsolation) []string {
+// launchIdentityEnvironment stamps the identity a private bootstrap helper must
+// already be running as before it execs the native command. The ids are the
+// caller's own, so a zero id is honest here: an ordinary launch names whoever
+// already runs the adapter, root included.
+func launchIdentityEnvironment(env []string, modeKey string, mode string, uid int, gid int) []string {
 	values := environmentMap(env)
 	values[modeKey] = mode
-	values[processIsolationUIDEnv] = strconv.FormatUint(uint64(isolation.UID), 10)
-	values[processIsolationGIDEnv] = strconv.FormatUint(uint64(isolation.GID), 10)
-	values[processIsolationImplicitEnv] = strconv.FormatBool(isolation.Implicit)
+	values[processIsolationUIDEnv] = strconv.FormatInt(int64(uid), 10)
+	values[processIsolationGIDEnv] = strconv.FormatInt(int64(gid), 10)
 
 	return environmentList(values)
 }
 
-// expectedSupervisorIdentity reads the identity the bootstrap must run as. The
-// implicit current-identity launch is the one shape where a zero id is honest:
-// it names whoever already runs the supervisor, root included.
-func expectedSupervisorIdentity() (uint32, uint32, bool, error) {
-	implicit := os.Getenv(processIsolationImplicitEnv) == "true"
-
-	uid, err := strconv.ParseUint(os.Getenv(processIsolationUIDEnv), 10, 32)
-	if err != nil || (uid == 0 && !implicit) {
-		return 0, 0, false, errors.New("missing or invalid process isolation uid")
+// expectedLaunchIdentity reads back the identity launchIdentityEnvironment
+// stamped.
+func expectedLaunchIdentity() (int64, int64, error) {
+	uid, err := strconv.ParseInt(os.Getenv(processIsolationUIDEnv), 10, 64)
+	if err != nil || uid < 0 {
+		return 0, 0, errors.New("missing or invalid native launch uid")
 	}
 
-	gid, err := strconv.ParseUint(os.Getenv(processIsolationGIDEnv), 10, 32)
-	if err != nil || (gid == 0 && !implicit) {
-		return 0, 0, false, errors.New("missing or invalid process isolation gid")
+	gid, err := strconv.ParseInt(os.Getenv(processIsolationGIDEnv), 10, 64)
+	if err != nil || gid < 0 {
+		return 0, 0, errors.New("missing or invalid native launch gid")
 	}
 
-	return uint32(uid), uint32(gid), implicit, nil
+	return uid, gid, nil
 }

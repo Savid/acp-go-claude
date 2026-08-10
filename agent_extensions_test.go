@@ -207,7 +207,7 @@ func TestHandleRateLimits(t *testing.T) {
 		release, acquireErr := options.AcquireUsageDiscovery(ctx)
 		require.NoError(t, acquireErr)
 		options.ObserveProcessInventory(ctx, func() (int, bool) { return 0, true })
-		options.ObserveProcessQuiesced(ctx)
+		options.ObserveBoundaryComplete(ctx)
 		require.NoError(t, generation.Release(true))
 		release()
 
@@ -233,7 +233,7 @@ func TestHandleRateLimits(t *testing.T) {
 	require.NotNil(t, gotOptions.AcquireUsageDiscovery)
 	require.NotNil(t, gotOptions.PrepareUsageGeneration)
 	require.NotNil(t, gotOptions.ObserveProcessInventory)
-	require.NotNil(t, gotOptions.ObserveProcessQuiesced)
+	require.NotNil(t, gotOptions.ObserveBoundaryComplete)
 
 	encoded, err := json.Marshal(resp)
 	require.NoError(t, err)

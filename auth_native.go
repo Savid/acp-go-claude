@@ -40,7 +40,9 @@ var authLoginBegin = func(
 }
 
 // authNativeUser reports the target account name the platform keystore items
-// carry. It comes only from the complete process policy environment.
+// carry. It comes only from the base environment the launch actually uses: the
+// complete policy environment under explicit isolation, and the sanitized
+// ambient capture under ordinary same-identity execution.
 var authNativeUser = func(options claude.Options) string {
 	if value := options.Env["USER"]; value != "" {
 		return value
@@ -50,7 +52,7 @@ var authNativeUser = func(options claude.Options) string {
 		return options.ProcessIsolation.BaseEnvironment["USER"]
 	}
 
-	return ""
+	return options.OrdinaryEnvironment["USER"]
 }
 
 // nativeOptions builds the launch options every provider-auth subcommand runs
@@ -70,12 +72,13 @@ func (p *providerAuth) nativeOptions() (claude.Options, error) {
 	}
 
 	return claude.Options{
-		CLIPath:          p.agent.options.ExecutablePath,
-		ClaudeHome:       p.home.path,
-		Env:              p.agent.options.Env,
-		ProcessIsolation: p.agent.claudeIsolation(),
-		ScratchParent:    scratch,
-		DarwinBestEffort: p.agent.containmentMode == RuntimeContainmentBestEffort,
+		CLIPath:             p.agent.options.ExecutablePath,
+		ClaudeHome:          p.home.path,
+		Env:                 p.agent.options.Env,
+		ProcessIsolation:    p.agent.claudeIsolation(),
+		OrdinaryEnvironment: p.agent.ordinaryEnvironment(),
+		ScratchParent:       scratch,
+		DarwinBestEffort:    p.agent.containmentMode == RuntimeContainmentBestEffort,
 		AcquireKeychainDiscovery: func(discoveryCtx context.Context) (func(), error) {
 			return acquireNativeRoot(discoveryCtx, p.agent.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
 		},

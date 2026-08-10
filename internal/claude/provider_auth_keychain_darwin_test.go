@@ -187,7 +187,7 @@ func TestAuthKeychainReadResultSurfacesTheBlobOnlyForAPresentItem(t *testing.T) 
 }
 
 func TestAuthKeychainToolsRequireContainmentAndNativeAdmission(t *testing.T) {
-	_, _, err := runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, Options{})
+	_, _, err := runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, Options{ProcessIsolation: &ProcessIsolation{}})
 	require.ErrorContains(t, err, "invalid process isolation")
 
 	isolation := testProcessIsolation()
@@ -305,9 +305,9 @@ func TestAuthKeychainToolsReportALaunchFailureAsOne(t *testing.T) {
 	require.Zero(t, code)
 	require.Nil(t, output)
 
-	_, err = authKeychainTool(t.Context(), []string{"list-keychains"}, Options{})
+	_, err = authKeychainTool(t.Context(), []string{"list-keychains"}, Options{ProcessIsolation: &ProcessIsolation{}})
 	require.ErrorContains(t, err, "invalid process isolation")
 
-	_, _, err = authKeychainReadTool(t.Context(), []string{"list-keychains"}, Options{})
+	_, _, err = authKeychainReadTool(t.Context(), []string{"list-keychains"}, Options{ProcessIsolation: &ProcessIsolation{}})
 	require.ErrorContains(t, err, "invalid process isolation")
 }

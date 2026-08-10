@@ -14,6 +14,7 @@ import (
 )
 
 type processContainment struct {
+	ordinary       *ordinaryBoundary
 	process        *os.Process
 	processGroupID int
 	waiter         *commandWait
@@ -34,6 +35,15 @@ var (
 )
 
 func startContainedProcess(launch *processTreeCommand) (*processContainment, error) {
+	if launch != nil && launch.ordinary {
+		boundary, err := startOrdinaryBoundary(launch)
+		if err != nil {
+			return nil, err
+		}
+
+		return &processContainment{ordinary: boundary}, nil
+	}
+
 	if launch == nil || launch.cmd == nil || !launch.bestEffort || launch.generation == nil {
 		if launch != nil {
 			launch.close()
@@ -161,7 +171,11 @@ func (tree *processContainment) cleanupFromProtectedObservation(beginWait func()
 	return tree.cleanupErr
 }
 
-func (tree *processContainment) quiesce(time.Duration) error {
+func (tree *processContainment) quiesce(timeout time.Duration) error {
+	if tree != nil && tree.ordinary != nil {
+		return tree.ordinary.complete(timeout)
+	}
+
 	if tree == nil || tree.processGroupID <= 0 {
 		return fmt.Errorf("%w: Darwin process-group identity is unavailable", ErrProcessContainmentIncomplete)
 	}
@@ -296,6 +310,10 @@ func (tree *processContainment) finish(err error) error {
 }
 
 func (tree *processContainment) wait(*exec.Cmd) error {
+	if tree != nil && tree.ordinary != nil {
+		return tree.ordinary.wait()
+	}
+
 	containmentErr := tree.quiesce(defaultCloseWait)
 
 	var waitErr error
@@ -314,7 +332,12 @@ func (tree *processContainment) wait(*exec.Cmd) error {
 	return errors.Join(waitErr, containmentErr)
 }
 
-func (*processContainment) ownsShutdown() bool { return true }
+// ownsShutdown reports whether the boundary drives shutdown itself. The
+// best-effort group boundary does; the ordinary boundary leaves the direct
+// child to the caller's own termination ladder.
+func (tree *processContainment) ownsShutdown() bool {
+	return tree == nil || tree.ordinary == nil
+}
 
 func (*processContainment) close() error { return nil }
 

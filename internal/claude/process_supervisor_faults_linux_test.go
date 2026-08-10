@@ -101,6 +101,15 @@ func TestTurnSupervisorIdentityRuleRefusesEveryNonTrustedShape(t *testing.T) {
 		"trusted root identity is required, effective uid is 1000",
 	)
 
+	// A supplied policy whose ids name the identity the caller already holds is
+	// refused on exactly the same terms. An explicit selection is strict: it
+	// never degrades into the ordinary shared-identity launch it describes.
+	require.ErrorContains(
+		t,
+		validateTurnSupervisorIdentity(&ProcessIsolation{UID: 1000, GID: 1000}),
+		"trusted root identity is required, effective uid is 1000",
+	)
+
 	turnSupervisorEffectiveUID = func() int { return 0 }
 	require.ErrorContains(
 		t,

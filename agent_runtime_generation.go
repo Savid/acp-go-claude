@@ -24,7 +24,10 @@ func (a *Agent) prepareDiscoveryGeneration(ctx context.Context) (*claude.DarwinG
 		return a.prepareDarwinGeneration(ctx, RuntimeResourceDiscovery)
 	}
 
-	if !a.containmentMode.provesWholeTreeLifecycle() {
+	// Every mode that can launch at all gets its own scratch generation; only a
+	// boundary that cannot launch refuses one. The generation is an adapter
+	// scratch root, so it carries no containment claim of its own.
+	if a.containmentMode == RuntimeContainmentUnavailable {
 		return nil, ErrProcessContainmentIncomplete
 	}
 

@@ -840,6 +840,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		ClaudeHome:              processClaudeHome,
 		Env:                     env,
 		ProcessIsolation:        a.claudeIsolation(),
+		OrdinaryEnvironment:     a.ordinaryEnvironment(),
 		ExtraPathDirs:           slices.Clone(start.MetaOptions.ExtraPathDirs),
 		SessionID:               string(id),
 		ResumeID:                start.ResumeID,
@@ -865,7 +866,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 			}
 		},
 		ObserveProcessInventory: processSnapshotSource.started,
-		ObserveProcessQuiesced:  processSnapshotSource.quiesced,
+		ObserveBoundaryComplete: processSnapshotSource.completed,
 		DarwinBestEffort:        a.containmentMode == RuntimeContainmentBestEffort,
 		AcquireVersionDiscovery: func(discoveryCtx context.Context) (func(), error) {
 			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)

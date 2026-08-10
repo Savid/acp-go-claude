@@ -44,16 +44,13 @@ func useDarwinTestSupervisorIdentity(t *testing.T) {
 	t.Helper()
 	originalUID := processEffectiveUID
 	originalGID := processEffectiveGID
-	originalGroups := processGroups
 	t.Setenv(processIsolationUIDEnv, "41")
 	t.Setenv(processIsolationGIDEnv, "42")
 	processEffectiveUID = func() int { return 41 }
 	processEffectiveGID = func() int { return 42 }
-	processGroups = func() ([]int, error) { return nil, nil }
 	t.Cleanup(func() {
 		processEffectiveUID = originalUID
 		processEffectiveGID = originalGID
-		processGroups = originalGroups
 	})
 }
 
@@ -65,10 +62,32 @@ func TestConfigureCommandDarwin(t *testing.T) {
 	}
 }
 
-func TestDarwinLaunchFailsClosedWithoutExplicitOptIn(t *testing.T) {
-	launch, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{})
-	if launch != nil || !errors.Is(err, ErrProcessContainmentIncomplete) {
-		t.Fatalf("launch = %#v, error = %v", launch, err)
+// TestDarwinLaunchFailsClosedForExplicitProcessIsolation proves Darwin refuses a
+// supplied hardened policy before any spawn — with and without the best-effort
+// opt-in, which is mutually exclusive with it — and that omission instead
+// selects the ordinary directly-owned boundary with no guardian handshake.
+func TestDarwinLaunchFailsClosedForExplicitProcessIsolation(t *testing.T) {
+	for _, bestEffort := range []bool{false, true} {
+		launch, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{
+			DarwinBestEffort: bestEffort,
+			Generation:       &DarwinGeneration{ScratchRoot: t.TempDir()},
+			Isolation:        testProcessIsolation(),
+		})
+		if launch != nil || !errors.Is(err, ErrProcessContainmentIncomplete) {
+			t.Fatalf("bestEffort=%v launch = %#v, error = %v", bestEffort, launch, err)
+		}
+	}
+
+	ordinary, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{})
+	if err != nil || ordinary == nil || !ordinary.ordinary {
+		t.Fatalf("ordinary launch = %#v, error = %v", ordinary, err)
+	}
+	if ordinary.startGate != nil || ordinary.control != nil || ordinary.ready != nil ||
+		ordinary.proof != nil || len(ordinary.inherited) != 0 || ordinary.generation != nil {
+		t.Fatalf("ordinary launch armed a supervisor handshake: %#v", ordinary)
+	}
+	if ordinary.cmd.SysProcAttr != nil && ordinary.cmd.SysProcAttr.Credential != nil {
+		t.Fatalf("ordinary launch applied a credential: %#v", ordinary.cmd.SysProcAttr.Credential)
 	}
 }
 
@@ -395,9 +414,14 @@ func TestDarwinBootstrapEnvironmentIsPrivate(t *testing.T) {
 	t.Setenv(DarwinScratchRootEnv, "/private/root")
 	t.Setenv("GORACE", "halt_on_error=1")
 
-	env := testEnvironmentMap(supervisorIdentityEnvironment(
+	originalUID, originalGID := processEffectiveUID, processEffectiveGID
+	processEffectiveUID = func() int { return 1 }
+	processEffectiveGID = func() int { return 2 }
+
+	t.Cleanup(func() { processEffectiveUID, processEffectiveGID = originalUID, originalGID })
+
+	env := testEnvironmentMap(ordinaryLaunchIdentityEnvironment(
 		[]string{"BASE=yes"}, darwinLaunchBootstrapEnv, darwinLaunchBootstrapMode,
-		ProcessIsolation{UID: 1, GID: 2},
 	))
 	if env[darwinLaunchBootstrapEnv] != darwinLaunchBootstrapMode {
 		t.Fatalf("bootstrap environment = %#v", env)
@@ -428,11 +452,8 @@ func TestPrepareDarwinLaunchResourceFailures(t *testing.T) {
 		darwinLaunchCommand = originalCommand
 	})
 
-	options := processLaunchOptions{DarwinBestEffort: true, Generation: &DarwinGeneration{ScratchRoot: t.TempDir()}, Isolation: testProcessIsolation()}
-	if _, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true, Generation: options.Generation}); err == nil {
-		t.Fatal("missing process isolation was accepted")
-	}
-	if _, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true, Isolation: testProcessIsolation()}); !errors.Is(err, ErrProcessContainmentIncomplete) {
+	options := processLaunchOptions{DarwinBestEffort: true, Generation: &DarwinGeneration{ScratchRoot: t.TempDir()}}
+	if _, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{DarwinBestEffort: true}); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("missing generation error = %v", err)
 	}
 	if _, err := prepareProcessTreeCommand(&exec.Cmd{}, options); err == nil || !strings.Contains(err.Error(), "incomplete") {
@@ -445,7 +466,6 @@ func TestPrepareDarwinLaunchResourceFailures(t *testing.T) {
 	if _, err := prepareProcessTreeCommand(exec.Command("true"), processLaunchOptions{
 		DarwinBestEffort: true,
 		Generation:       &DarwinGeneration{ScratchRoot: fileRoot},
-		Isolation:        testProcessIsolation(),
 	}); err == nil || !strings.Contains(err.Error(), "generation") {
 		t.Fatalf("generation preparation error = %v", err)
 	}
@@ -522,12 +542,15 @@ func TestPrepareDarwinLaunchResourceFailures(t *testing.T) {
 		t.Fatalf("bootstrap resolution error = %v", err)
 	}
 	darwinLaunchExecutable = originalExecutable
-	darwinLaunchCommand = func(name string, args ...string) *exec.Cmd {
-		options.Isolation.BaseEnvironment = nil
 
-		return exec.Command(name, args...)
+	// The best-effort helper runs as the identity the adapter already holds, so
+	// it never carries a credential change to apply.
+	launch, err := prepareProcessTreeCommand(exec.Command("true"), options)
+	if err != nil {
+		t.Fatalf("best-effort launch error = %v", err)
 	}
-	if _, err := prepareProcessTreeCommand(exec.Command("true"), options); err == nil || !strings.Contains(err.Error(), "base environment") {
-		t.Fatalf("bootstrap credential error = %v", err)
+	if launch.cmd.SysProcAttr == nil || !launch.cmd.SysProcAttr.Setpgid || launch.cmd.SysProcAttr.Credential != nil {
+		t.Fatalf("best-effort helper attributes = %#v", launch.cmd.SysProcAttr)
 	}
+	launch.close()
 }

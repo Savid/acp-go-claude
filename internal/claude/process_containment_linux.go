@@ -15,6 +15,7 @@ import (
 )
 
 type processContainment struct {
+	ordinary       *ordinaryBoundary
 	mu             sync.Mutex
 	processGroupID int
 	control        *os.File
@@ -24,6 +25,15 @@ type processContainment struct {
 }
 
 func startContainedProcess(launch *processTreeCommand) (*processContainment, error) {
+	if launch != nil && launch.ordinary {
+		boundary, err := startOrdinaryBoundary(launch)
+		if err != nil {
+			return nil, err
+		}
+
+		return &processContainment{ordinary: boundary}, nil
+	}
+
 	if launch == nil || launch.cmd == nil {
 		return nil, errors.New("claude containment launch is unavailable")
 	}
@@ -72,6 +82,10 @@ func startContainedProcess(launch *processTreeCommand) (*processContainment, err
 }
 
 func (c *processContainment) quiesce(timeout time.Duration) error {
+	if c != nil && c.ordinary != nil {
+		return c.ordinary.complete(timeout)
+	}
+
 	if c == nil || c.processGroupID <= 0 {
 		return errors.New("claude process supervisor identity is unavailable")
 	}
@@ -211,7 +225,7 @@ func runningProcessGroupMembers(groupID int) (int, error) {
 }
 
 func (c *processContainment) close() error {
-	if c == nil {
+	if c == nil || c.ordinary != nil {
 		return nil
 	}
 
@@ -242,6 +256,12 @@ func (c *processContainment) close() error {
 
 func (*processContainment) processSnapshot() (int, bool) { return 0, false }
 
-func (*processContainment) wait(command *exec.Cmd) error { return command.Wait() }
+func (c *processContainment) wait(command *exec.Cmd) error {
+	if c != nil && c.ordinary != nil {
+		return c.ordinary.wait()
+	}
+
+	return command.Wait()
+}
 
 func (*processContainment) ownsShutdown() bool { return false }

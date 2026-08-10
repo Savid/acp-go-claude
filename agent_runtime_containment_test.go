@@ -39,7 +39,7 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 	}
 
 	runtimeGOOS = "windows"
-	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
 		t.Fatalf("Windows mode = %q", got)
 	}
 
@@ -47,7 +47,7 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 	if got := containmentMode(Options{DarwinBestEffortContainment: true}); got != RuntimeContainmentBestEffort {
 		t.Fatalf("Darwin opt-in mode = %q", got)
 	}
-	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
 		t.Fatalf("Darwin default mode = %q", got)
 	}
 	if err := validateContainmentOptions(Options{Env: map[string]string{"acp_go_claude_internal_bad": "value"}}); err == nil {
@@ -58,69 +58,148 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 	}
 
 	runtimeGOOS = "freebsd"
-	if got := containmentMode(Options{}); got != RuntimeContainmentUnavailable {
-		t.Fatalf("unsupported mode = %q", got)
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
+		t.Fatalf("FreeBSD omission mode = %q", got)
+	}
+	if got := containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 1, GID: 2}}); got != RuntimeContainmentUnavailable {
+		t.Fatalf("FreeBSD explicit mode = %q", got)
 	}
 }
 
-// TestContainmentModeReportsASharedAgentIdentity proves the reported boundary
-// names what the launch actually proves. A supervisor that runs the agent under
-// its own identity still proves whole-tree lifecycle, so it is not best-effort
-// and not unavailable; what it does not prove is a credential boundary between
-// itself and the agent, so it must not keep calling itself authoritative.
-func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
-	originalGOOS, originalUID := runtimeGOOS, containmentEffectiveUID
-	t.Cleanup(func() { runtimeGOOS, containmentEffectiveUID = originalGOOS, originalUID })
+// TestOrdinaryExecutionIsPortableAcrossSupportedPlatforms proves omission is the
+// ordinary default everywhere the adapter otherwise runs, and that an explicitly
+// supplied hardened policy stays a strict Linux selection that fails closed
+// rather than degrading to shared identity or best effort.
+func TestOrdinaryExecutionIsPortableAcrossSupportedPlatforms(t *testing.T) {
+	originalGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = originalGOOS })
 
-	runtimeGOOS = "linux"
-	containmentEffectiveUID = func() int { return 1000 }
+	explicit := Options{ProcessIsolation: &ProcessIsolation{UID: 64251, GID: 64252}}
 
-	shared := Options{ProcessIsolation: &ProcessIsolation{UID: 1000, GID: 1000}}
-	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(shared))
-	require.True(t, RuntimeContainmentSharedIdentity.provesWholeTreeLifecycle())
-	require.False(t, sharedProcessIdentity(nil))
+	for _, platform := range []string{"linux", "darwin", "windows", "freebsd", "openbsd", "plan9"} {
+		t.Run(platform, func(t *testing.T) {
+			runtimeGOOS = platform
 
-	// An omitted policy launches the native tree as this process's own
-	// identity, so the shared report is the only truthful one — root included.
-	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(Options{}))
-	require.Equal(
-		t,
-		RuntimeContainmentAuthoritative,
-		containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 64251, GID: 64252}}),
-	)
+			require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(Options{}))
+			require.NoError(t, validateContainmentOptions(Options{}))
+			require.False(t, RuntimeContainmentSharedIdentity.provesWholeTreeLifecycle())
 
-	containmentEffectiveUID = func() int { return 0 }
-	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(shared))
-	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(Options{}))
+			if platform == "linux" {
+				require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(explicit))
 
-	containmentEffectiveUID = func() int { return 1000 }
-	runtimeGOOS = "darwin"
-	require.Equal(t, RuntimeContainmentUnavailable, containmentMode(shared))
+				return
+			}
+
+			require.Equal(t, RuntimeContainmentUnavailable, containmentMode(explicit))
+		})
+	}
 }
 
-// TestSharedIdentityAgentKeepsItsLifecycleSurfaces proves the new mode is
-// reported to the embedding and still admits every surface a proven tree is
-// allowed: the descendant inventory and the runtime generation both belong to
-// the lifecycle boundary, which a shared identity does not weaken.
-func TestSharedIdentityAgentKeepsItsLifecycleSurfaces(t *testing.T) {
-	originalGOOS, originalUID := runtimeGOOS, containmentEffectiveUID
-	t.Cleanup(func() { runtimeGOOS, containmentEffectiveUID = originalGOOS, originalUID })
+// TestDarwinBestEffortAndProcessIsolationAreMutuallyExclusive proves the two
+// explicit options are refused together at construction: an explicit hardened
+// identity policy cannot be downgraded to a process-group boundary, so the
+// combination never reaches a native spawn.
+func TestDarwinBestEffortAndProcessIsolationAreMutuallyExclusive(t *testing.T) {
+	originalGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = originalGOOS })
 
-	runtimeGOOS = "linux"
-	containmentEffectiveUID = func() int { return 1000 }
+	runtimeGOOS = "darwin"
 
-	var observed RuntimeContainmentMode
+	combined := Options{
+		DarwinBestEffortContainment: true,
+		ProcessIsolation:            &ProcessIsolation{UID: 64251, GID: 64252},
+	}
+	require.True(t, containmentOptionsConflict(combined))
+	require.Equal(t, RuntimeContainmentUnavailable, containmentMode(combined))
+	require.ErrorContains(t, validateContainmentOptions(combined), "cannot be combined")
 
 	agent := NewAgent(
-		WithProcessIsolation(ProcessIsolation{UID: 1000, GID: 1000}),
+		WithDarwinBestEffortContainment(),
+		WithProcessIsolation(ProcessIsolation{
+			UID: 64251, GID: 64252,
+			BaseEnvironment:     map[string]string{"PATH": "/policy/bin"},
+			StandaloneOwnerID:   "acp-go-claude-tests",
+			StandaloneStateRoot: "/var/lib/acp-go-claude-tests",
+		}),
+	)
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	agent.newClaudeClient = func(*slog.Logger, claude.Options) *claude.Client {
+		t.Fatal("the refused combination must never construct a native client")
+
+		return nil
+	}
+
+	require.Equal(t, RuntimeContainmentUnavailable, agent.ContainmentMode())
+
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{})
+	require.ErrorContains(t, err, "cannot be combined")
+
+	_, err = agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.Error(t, err)
+}
+
+// TestContainmentModeReportsASharedAgentIdentity proves shared identity has
+// exactly one source — an omitted policy — and that an explicitly supplied one
+// never degrades into it, not even when its ids name the very identity the
+// caller already holds.
+func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
+	originalGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = originalGOOS })
+
+	runtimeGOOS = "linux"
+
+	// An omitted policy launches native work as this process's own identity, so
+	// the shared report is the only truthful one — root included.
+	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(Options{}))
+	require.False(t, RuntimeContainmentSharedIdentity.provesWholeTreeLifecycle())
+	require.True(t, RuntimeContainmentAuthoritative.provesWholeTreeLifecycle())
+
+	// A supplied policy naming the caller's own identity is still a supplied
+	// policy: it selects the strict boundary, which then refuses it.
+	callerIdentity := Options{ProcessIsolation: &ProcessIsolation{
+		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+	}}
+	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(callerIdentity))
+
+	runtimeGOOS = "darwin"
+	require.Equal(t, RuntimeContainmentUnavailable, containmentMode(callerIdentity))
+	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(Options{}))
+}
+
+// TestSharedIdentityAgentPublishesNoDescendantInventory proves the ordinary
+// mode is reported to the embedding and deliberately publishes nothing it
+// cannot prove: no provider-descendant snapshot, including a terminal zero, and
+// no whole-tree claim. It still gets its own scratch generation, which is
+// adapter bookkeeping rather than containment evidence.
+func TestSharedIdentityAgentPublishesNoDescendantInventory(t *testing.T) {
+	originalGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = originalGOOS })
+
+	runtimeGOOS = "linux"
+
+	var (
+		observed  RuntimeContainmentMode
+		snapshots []int
+	)
+
+	agent := NewAgent(
 		WithScratchDir(t.TempDir()),
 		WithRuntimeResourceHooks(RuntimeResourceHooks{
 			ObserveContainment: func(_ context.Context, mode RuntimeContainmentMode) { observed = mode },
+			ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
+				snapshots = append(snapshots, count)
+			},
 		}),
 	)
 	require.Equal(t, RuntimeContainmentSharedIdentity, observed)
 	require.Equal(t, RuntimeContainmentSharedIdentity, agent.ContainmentMode())
-	require.True(t, agent.descendantProcesses.authoritative)
+	require.False(t, agent.descendantProcesses.authoritative)
+
+	source := agent.descendantProcesses.newSource()
+	source.started(t.Context(), func() (int, bool) { return 3, true })
+	source.completed(t.Context())
+	require.Empty(t, snapshots, "ordinary execution publishes no descendant sample, including zero")
 
 	generation, err := agent.prepareDiscoveryGeneration(t.Context())
 	require.NoError(t, err)
@@ -387,43 +466,68 @@ func TestPrepareUsageGenerationResources(t *testing.T) {
 }
 
 // TestAgentSessionDefaultsToOrdinaryExecution proves omitting
-// WithProcessIsolation is the ordinary default: session establishment
-// succeeds, and every native launch is handed a clone of the one
-// current-identity capture — the ambient environment included — rather than an
-// isolation policy.
+// WithProcessIsolation is the ordinary default: session establishment succeeds
+// as the current identity, no ProcessIsolation value is manufactured, the
+// launch carries the sanitized ambient environment, and the agent reports
+// shared identity with no descendant inventory and no whole-tree claim.
 func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 	t.Setenv("ACP_GO_CLAUDE_TEST_CANARY", "ambient-canary")
 
-	agent, _, _ := newFakeLifecycleAgent(t, nil)
+	var (
+		launched  []claude.Options
+		snapshots []int
+	)
+
+	agent, _, transport := newFakeLifecycleAgent(t, nil,
+		WithScratchDir(t.TempDir()),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
+				snapshots = append(snapshots, count)
+			},
+		}),
+	)
 	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		launched = append(launched, options)
+
+		return claude.NewClient(log, options, transport)
+	}
 
 	resp, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
 	require.NoError(t, err, "NewSession without isolation")
 	require.NotEmpty(t, resp.SessionId)
 
-	isolation := agent.claudeIsolation()
-	require.NotNil(t, isolation)
-	require.True(t, isolation.Implicit)
-	require.Equal(t, int64(os.Geteuid()), int64(isolation.UID))
-	require.Equal(t, int64(os.Getegid()), int64(isolation.GID))
-	require.Equal(t, "ambient-canary", isolation.BaseEnvironment["ACP_GO_CLAUDE_TEST_CANARY"])
-	require.Nil(t, isolation.IdentityLock)
-	require.Nil(t, isolation.AuthorityDomain)
-	require.Empty(t, isolation.StandaloneOwnerID)
-	require.Empty(t, isolation.StandaloneStateRoot)
+	require.Len(t, launched, 1)
+	require.Nil(t, launched[0].ProcessIsolation,
+		"omission must not manufacture a ProcessIsolation value")
+	require.Equal(t, "ambient-canary", launched[0].OrdinaryEnvironment["ACP_GO_CLAUDE_TEST_CANARY"])
 
-	isolation.BaseEnvironment["ACP_GO_CLAUDE_TEST_CANARY"] = "mutated"
-	require.Equal(t, "ambient-canary", agent.claudeIsolation().BaseEnvironment["ACP_GO_CLAUDE_TEST_CANARY"],
-		"implicit capture must be cloned, not shared")
+	// The one capture is cloned per launch, so a mutated launch environment
+	// cannot reach the next one.
+	launched[0].OrdinaryEnvironment["ACP_GO_CLAUDE_TEST_CANARY"] = "mutated"
+	require.Equal(t, "ambient-canary", agent.ordinaryEnvironment()["ACP_GO_CLAUDE_TEST_CANARY"])
+
+	require.Nil(t, agent.claudeIsolation())
+	require.Equal(t, RuntimeContainmentSharedIdentity, agent.ContainmentMode())
+	require.False(t, agent.ContainmentMode().provesWholeTreeLifecycle())
+	require.False(t, agent.descendantProcesses.authoritative)
+	require.Empty(t, snapshots, "ordinary execution publishes no provider-descendant sample")
+
+	// No authority root, standalone owner, or privileged supervisor is asked
+	// for: the ordinary agent carries none of that state at all.
+	require.Nil(t, agent.options.ProcessIsolation)
+	require.False(t, agent.options.DarwinBestEffortContainment)
 
 	require.Nil(t, (&Agent{}).claudeIsolation())
+	require.Nil(t, (&Agent{}).ordinaryEnvironment())
 }
 
 // TestExplicitProcessIsolationPreservesPolicy proves supplying
-// WithProcessIsolation stays explicit hardening: the policy reaches native
-// launches verbatim with no ambient environment mixed in, and an invalid
-// policy fails before any native process can spawn, with no ordinary-mode
-// fallback.
+// WithProcessIsolation stays a strict selection: the policy reaches the launch
+// verbatim with no ambient environment mixed in and no ordinary capture beside
+// it, an unavailable platform and an invalid policy both refuse before any
+// spawn, and neither retries ordinary or best-effort execution.
 func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	t.Setenv("ACP_GO_CLAUDE_TEST_CANARY", "ambient-canary")
 
@@ -437,22 +541,37 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 
 	isolation := agent.claudeIsolation()
 	require.NotNil(t, isolation)
-	require.False(t, isolation.Implicit)
 	require.Equal(t, uint32(64251), isolation.UID)
 	require.Equal(t, uint32(64252), isolation.GID)
 	require.NotContains(t, isolation.BaseEnvironment, "ACP_GO_CLAUDE_TEST_CANARY")
 	require.Equal(t, "/policy/bin", isolation.BaseEnvironment["PATH"])
-	require.Nil(t, agent.implicitIsolation, "explicit policy must not capture an implicit fallback")
+	require.Nil(t, agent.ordinaryEnvironment(),
+		"an explicit policy must not capture an ordinary ambient fallback")
 	require.Equal(t, "/var/lib/acp-go-claude-tests", agent.options.Home,
 		"standalone state root still names the managed home")
 
+	// The structurally valid policy above is refused before any spawn on every
+	// platform that cannot apply it, and the refusal never becomes shared
+	// identity or best effort.
+	originalGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = originalGOOS })
+
+	for _, platform := range []string{"darwin", "windows", "freebsd", "openbsd"} {
+		runtimeGOOS = platform
+		require.Equal(t, RuntimeContainmentUnavailable, containmentMode(agent.options))
+	}
+
+	runtimeGOOS = originalGOOS
+
+	spawns := 0
 	invalid := NewAgent(WithProcessIsolation(ProcessIsolation{UID: 0, GID: 0}))
 	t.Cleanup(func() { require.NoError(t, invalid.Close()) })
 	invalid.newClaudeClient = func(*slog.Logger, claude.Options) *claude.Client {
-		t.Fatal("an invalid explicit policy must fail before any native client exists")
+		spawns++
 
 		return nil
 	}
 	_, err := invalid.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
 	require.Error(t, err, "invalid explicit policy must fail session establishment closed")
+	require.Zero(t, spawns, "a refused explicit policy must not retry as ordinary execution")
 }

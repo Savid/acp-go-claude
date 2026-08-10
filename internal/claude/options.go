@@ -11,9 +11,18 @@ type Options struct {
 	CLIPath string
 	Cwd     string
 
-	ClaudeHome       string
-	Env              map[string]string
+	ClaudeHome string
+	Env        map[string]string
+	// ProcessIsolation is the explicitly supplied hardened Linux identity
+	// policy. Nil is not a defaulted policy: it selects ordinary same-identity
+	// execution, which applies no credential and starts no privileged
+	// supervisor.
 	ProcessIsolation *ProcessIsolation
+	// OrdinaryEnvironment is the sanitized ambient environment ordinary
+	// same-identity execution launches native processes with. It is read only
+	// while ProcessIsolation is nil, and it is an ordinary runtime value rather
+	// than an isolation policy.
+	OrdinaryEnvironment map[string]string
 	// ExtraPathDirs are absolute directories prepended, in order, to the child's
 	// PATH. They shadow every inherited entry, so an executable named here wins
 	// over the one the operator's PATH would otherwise resolve.
@@ -56,9 +65,10 @@ type Options struct {
 	// that returns its current exact absolute process count when the platform
 	// backend can prove one.
 	ObserveProcessInventory func(context.Context, func() (int, bool))
-	// ObserveProcessQuiesced reports authoritative whole-tree completion. It is
-	// suppressed when the selected backend cannot make that claim.
-	ObserveProcessQuiesced func(context.Context)
+	// ObserveBoundaryComplete reports that the selected process boundary
+	// completed. Only the authoritative backend makes that a whole-tree claim;
+	// for every other boundary it means the directly owned processes ended.
+	ObserveBoundaryComplete func(context.Context)
 	// DarwinBestEffort selects the explicitly limited process-group backend.
 	DarwinBestEffort bool
 	// Generation identifies one fresh wrapper-owned native launch root.
@@ -95,14 +105,9 @@ type ProcessIdentityLockCapability interface {
 }
 
 type ProcessIsolation struct {
-	UID             uint32
-	GID             uint32
-	BaseEnvironment map[string]string
-	// Implicit marks the ordinary current-identity launch policy captured when
-	// no explicit isolation is configured: UID and GID name the identity the
-	// process already runs as, BaseEnvironment is the sanitized ambient capture,
-	// and no credential is ever applied. Explicit policies never set it.
-	Implicit                 bool
+	UID                      uint32
+	GID                      uint32
+	BaseEnvironment          map[string]string
 	StandaloneOwnerID        string
 	StandaloneStateRoot      string
 	IdentityLock             ProcessIdentityLockCapability `json:"-"`

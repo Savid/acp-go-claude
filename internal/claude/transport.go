@@ -618,8 +618,8 @@ func (t *ProcessTransport) quiesceProcessTree() error {
 		return fmt.Errorf("%w: %v", ErrProcessContainmentIncomplete, err)
 	}
 
-	if t.options.ObserveProcessQuiesced != nil {
-		t.options.ObserveProcessQuiesced(context.Background())
+	if t.options.ObserveBoundaryComplete != nil {
+		t.options.ObserveBoundaryComplete(context.Background())
 	}
 
 	if err := processContainmentClose(t.tree); err != nil {

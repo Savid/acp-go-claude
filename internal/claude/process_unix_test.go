@@ -271,7 +271,7 @@ func TestProcessTransportQuiescenceProofFailures(t *testing.T) {
 	read, write, err := os.Pipe()
 	require.NoError(t, err)
 	require.NoError(t, read.Close())
-	quiesced := 0
+	completed := 0
 	var inventories []func() (int, bool)
 	transport := &ProcessTransport{
 		tree: &processContainment{processGroupID: 123, control: write, proof: supervisorProofFile(t)},
@@ -279,12 +279,12 @@ func TestProcessTransportQuiescenceProofFailures(t *testing.T) {
 			ObserveProcessInventory: func(_ context.Context, inventory func() (int, bool)) {
 				inventories = append(inventories, inventory)
 			},
-			ObserveProcessQuiesced: func(context.Context) { quiesced++ },
+			ObserveBoundaryComplete: func(context.Context) { completed++ },
 		},
 	}
 	syscallKill = func(int, syscall.Signal) error { return errors.New("probe failed") }
 	require.ErrorIs(t, transport.quiesceProcessTree(), ErrProcessContainmentIncomplete)
-	require.Zero(t, quiesced)
+	require.Zero(t, completed)
 	require.Len(t, inventories, 1)
 	_, exact := inventories[0]()
 	require.False(t, exact)
@@ -296,7 +296,7 @@ func TestProcessTransportQuiescenceProofFailures(t *testing.T) {
 	syscallKill = func(int, syscall.Signal) error { return syscall.ESRCH }
 	processContainmentClose = func(*processContainment) error { return errors.New("close failed") }
 	require.ErrorContains(t, transport.quiesceProcessTree(), "close Claude process containment")
-	require.Equal(t, 1, quiesced)
+	require.Equal(t, 1, completed)
 }
 
 func supervisorProofFile(t *testing.T) *os.File {

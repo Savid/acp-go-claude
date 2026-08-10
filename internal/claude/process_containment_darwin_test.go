@@ -414,16 +414,16 @@ func TestProcessTransportDarwinContainmentShutdownBranches(t *testing.T) {
 	t.Cleanup(func() { processContainmentClose = originalClose })
 	closedTree := &processContainment{processGroupID: 1, generation: &DarwinGeneration{}}
 	closedTree.cleanupOnce.Do(func() {})
-	quiesced := 0
+	completed := 0
 	transport = &ProcessTransport{
 		tree: closedTree,
-		options: Options{ObserveProcessQuiesced: func(context.Context) {
-			quiesced++
+		options: Options{ObserveBoundaryComplete: func(context.Context) {
+			completed++
 		}},
 	}
 	processContainmentClose = func(*processContainment) error { return want }
 	require.ErrorIs(t, transport.quiesceProcessTree(), want)
-	require.Equal(t, 1, quiesced)
+	require.Equal(t, 1, completed)
 	processContainmentClose = originalClose
 
 	originalDelay := processShutdownWaitDelay

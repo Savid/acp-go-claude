@@ -54,7 +54,7 @@ func darwinLaunchBootstrap() {
 		return
 	}
 
-	err := verifySupervisorIdentity()
+	err := verifyLaunchIdentity()
 
 	var (
 		configFile, gate io.ReadCloser
@@ -137,7 +137,7 @@ func reportDarwinLaunchStatus(status io.WriteCloser, launchErr error) {
 }
 
 func runDarwinLaunchBootstrap(configInput io.ReadCloser, gate io.ReadCloser) error {
-	if err := verifySupervisorIdentity(); err != nil {
+	if err := verifyLaunchIdentity(); err != nil {
 		return err
 	}
 
@@ -171,12 +171,18 @@ func runDarwinLaunchBootstrap(configInput io.ReadCloser, gate io.ReadCloser) err
 }
 
 func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
-	if !options.DarwinBestEffort {
-		return nil, fmt.Errorf("%w: Darwin best-effort containment requires explicit opt-in", ErrProcessContainmentIncomplete)
+	// The two explicit options are mutually exclusive, and a supplied hardened
+	// policy is refused here rather than downgraded: Darwin cannot apply the
+	// Linux identity boundary it asks for, and best effort is not a substitute.
+	if options.Isolation != nil {
+		return nil, fmt.Errorf(
+			"%w: explicit process isolation is unsupported on darwin",
+			ErrProcessContainmentIncomplete,
+		)
 	}
 
-	if err := validateProcessIsolation(options.Isolation); err != nil {
-		return nil, err
+	if !options.DarwinBestEffort {
+		return prepareOrdinaryLaunch(native, options)
 	}
 
 	if options.Generation == nil {
@@ -257,9 +263,9 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 		return nil, fmt.Errorf("resolve Darwin native launch bootstrap: %w", err)
 	}
 
-	helperEnv := supervisorIdentityEnvironment(nil, darwinLaunchBootstrapEnv, darwinLaunchBootstrapMode, *options.Isolation)
+	helperEnv := ordinaryLaunchIdentityEnvironment(nil, darwinLaunchBootstrapEnv, darwinLaunchBootstrapMode)
 
-	executable, err = resolveProcessExecutable(executable, helperEnv)
+	executable, err = resolveOrdinaryExecutable(executable, helperEnv)
 	if err != nil {
 		_ = configFile.Close()
 		_ = gateRead.Close()
@@ -279,16 +285,6 @@ func prepareProcessTreeCommand(native *exec.Cmd, options processLaunchOptions) (
 	helper.WaitDelay = defaultCloseKillAfter
 	helper.ExtraFiles = []*os.File{configFile, gateRead, statusWrite}
 	configureProcessCommandPlatform(helper)
-
-	if err := applyProcessCredential(helper, options.Isolation); err != nil {
-		_ = configFile.Close()
-		_ = gateRead.Close()
-		_ = gateWrite.Close()
-		_ = statusRead.Close()
-		_ = statusWrite.Close()
-
-		return nil, err
-	}
 
 	return &processTreeCommand{
 		cmd: helper, inherited: []*os.File{configFile, gateRead, statusWrite}, startGate: gateWrite, ready: statusRead,

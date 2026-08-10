@@ -879,7 +879,7 @@ if kill -KILL "$supervisor" 2>/dev/null; then echo kill=allowed; else echo kill=
 
 	want := "stop=blocked\nforge=blocked\ngroups=empty\nuid=64081\ngid=64082\nambient=scrubbed\nauthorityfds=none\nkill=blocked\n"
 	awaitClaudeSupervisorFile(t, status, want)
-	if err = tree.quiesce(10 * time.Second); err != nil {
+	if err = tree.complete(10 * time.Second); err != nil {
 		t.Fatalf("quiesce trusted Claude supervisor: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -1306,7 +1306,7 @@ func exerciseClaudeSupervisorPeerDeath(t *testing.T, fixture *claudeSupervisorPe
 	if err := syscall.Kill(survivorPID, syscall.SIGCONT); err != nil {
 		t.Fatalf("resume surviving Claude supervisor %d: %v", survivorPID, err)
 	}
-	if err := fixture.tree.quiesce(10 * time.Second); err != nil {
+	if err := fixture.tree.complete(10 * time.Second); err != nil {
 		t.Fatalf("quiesce Claude supervisor after peer death: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)

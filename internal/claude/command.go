@@ -448,12 +448,12 @@ func containedClaudeOutput(
 	case read = <-readDone:
 	case <-ctx.Done():
 		contextErr = ctx.Err()
-		containErr := processContainmentQuiesce(tree, processShutdownWaitDelay)
+		containErr := processBoundaryComplete(tree, processShutdownWaitDelay)
 		waitErr := processWaitContained(tree, launch.cmd)
 		read = <-readDone
 		closeErr := processContainmentClose(tree)
 
-		observeAuxiliaryQuiescence(options, containErr)
+		observeAuxiliaryBoundaryComplete(options, containErr)
 
 		return read.data, errors.Join(
 			contextErr, read.err, waitErr, containErr, closeErr, childStdoutCloseErr,
@@ -461,15 +461,18 @@ func containedClaudeOutput(
 	}
 
 	waitErr := processWaitContained(tree, launch.cmd)
-	containErr := processContainmentQuiesce(tree, processShutdownWaitDelay)
+	containErr := processBoundaryComplete(tree, processShutdownWaitDelay)
 	closeErr := processContainmentClose(tree)
 
-	observeAuxiliaryQuiescence(options, containErr)
+	observeAuxiliaryBoundaryComplete(options, containErr)
 
 	return read.data, errors.Join(read.err, waitErr, containErr, closeErr, childStdoutCloseErr)
 }
 
-func observeAuxiliaryQuiescence(options Options, containmentErr error) {
+// observeAuxiliaryBoundaryComplete reports how an auxiliary launch's boundary
+// ended. The boundary may be the ordinary one, so this says only that it
+// completed; a whole-tree claim belongs to the boundaries that can prove one.
+func observeAuxiliaryBoundaryComplete(options Options, containmentErr error) {
 	if containmentErr != nil {
 		if options.ObserveProcessInventory != nil {
 			options.ObserveProcessInventory(context.Background(), unavailableProcessInventory)

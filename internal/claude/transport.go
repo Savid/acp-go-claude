@@ -41,7 +41,7 @@ var (
 	processTerminate               = terminateProcess
 	processKill                    = killProcess
 	processContainmentOwnsShutdown = func(tree *processContainment) bool { return tree.ownsShutdown() }
-	processContainmentQuiesce      = func(tree *processContainment, timeout time.Duration) error { return tree.quiesce(timeout) }
+	processBoundaryComplete        = func(tree *processContainment, timeout time.Duration) error { return tree.complete(timeout) }
 	processContainmentClose        = func(tree *processContainment) error { return tree.close() }
 	maxJSONLineBytes               = defaultMaxJSONLineBytes
 	processShutdownWaitDelay       = 5 * time.Second
@@ -574,13 +574,13 @@ func (t *ProcessTransport) shutdownProcess(stdinClosed bool) error {
 				err = nil
 			}
 
-			return errors.Join(err, t.quiesceProcessTree())
+			return errors.Join(err, t.completeProcessBoundary())
 		case <-timer.C:
 		}
 	}
 
 	if t.tree != nil && processContainmentOwnsShutdown(t.tree) {
-		containmentErr := t.quiesceProcessTree()
+		containmentErr := t.completeProcessBoundary()
 
 		return errors.Join(containmentErr, t.waitForShutdown(waitErr, true))
 	}
@@ -599,10 +599,10 @@ func (t *ProcessTransport) shutdownProcess(stdinClosed bool) error {
 		closeErr = errors.Join(closeErr, err)
 	}
 
-	return errors.Join(closeErr, t.quiesceProcessTree())
+	return errors.Join(closeErr, t.completeProcessBoundary())
 }
 
-func (t *ProcessTransport) quiesceProcessTree() error {
+func (t *ProcessTransport) completeProcessBoundary() error {
 	if t.tree == nil {
 		// ProcessTransport.Start always installs containment. A nil tree is only
 		// possible for package-internal tests that construct a transport around
@@ -610,7 +610,7 @@ func (t *ProcessTransport) quiesceProcessTree() error {
 		return nil
 	}
 
-	if err := processContainmentQuiesce(t.tree, processShutdownWaitDelay); err != nil {
+	if err := processBoundaryComplete(t.tree, processShutdownWaitDelay); err != nil {
 		if t.options.ObserveProcessInventory != nil {
 			t.options.ObserveProcessInventory(context.Background(), unavailableProcessInventory)
 		}
@@ -656,7 +656,7 @@ func (t *ProcessTransport) waitForShutdown(waitErr <-chan error, shutdown bool) 
 	case <-timer.C:
 		closeErr := t.closeStdout()
 		if t.tree != nil {
-			closeErr = errors.Join(closeErr, t.quiesceProcessTree())
+			closeErr = errors.Join(closeErr, t.completeProcessBoundary())
 			shutdown = true
 		} else if killed, err := processKill(t.cmd); err != nil {
 			closeErr = errors.Join(closeErr, err)

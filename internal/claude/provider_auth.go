@@ -617,7 +617,7 @@ func (l *AuthLogin) Close() error {
 	l.once.Do(func() {
 		_ = l.stdin.Close()
 
-		containErr := processContainmentQuiesce(l.tree, authShutdownWait)
+		containErr := processBoundaryComplete(l.tree, authShutdownWait)
 		waitErr := l.reap()
 
 		_ = l.stdout.Close()

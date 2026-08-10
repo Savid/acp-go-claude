@@ -8,7 +8,7 @@ import "os/exec"
 // while the operator is still reading the authorization URL. Requests are
 // dispatched one goroutine each and their context is cancelled the moment the
 // handler returns, so a context-bound child dies before it has been used. The
-// containment boundary is the sole authoritative shutdown channel — quiesce,
+// containment boundary is the sole authoritative shutdown channel — complete,
 // wait, close — and it is driven by the owner whose lifetime the child shares.
 func newProcessCommand(path string, args ...string) *exec.Cmd {
 	return exec.Command(path, args...) // #nosec G702 -- The caller resolves an executable through the isolation policy.

@@ -909,16 +909,16 @@ func TestProcessTransportShutdownExpiresVoluntaryExitGrace(t *testing.T) {
 
 func TestProcessTransportContainedTreeOwnsShutdown(t *testing.T) {
 	originalOwnsShutdown := processContainmentOwnsShutdown
-	originalQuiesce := processContainmentQuiesce
+	originalQuiesce := processBoundaryComplete
 	originalClose := processContainmentClose
 	t.Cleanup(func() {
 		processContainmentOwnsShutdown = originalOwnsShutdown
-		processContainmentQuiesce = originalQuiesce
+		processBoundaryComplete = originalQuiesce
 		processContainmentClose = originalClose
 	})
 
 	processContainmentOwnsShutdown = func(*processContainment) bool { return true }
-	processContainmentQuiesce = func(*processContainment, time.Duration) error { return nil }
+	processBoundaryComplete = func(*processContainment, time.Duration) error { return nil }
 	processContainmentClose = func(*processContainment) error { return nil }
 
 	transport := &ProcessTransport{tree: &processContainment{}}

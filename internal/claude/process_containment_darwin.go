@@ -116,7 +116,7 @@ func startContainedProcess(launch *processTreeCommand) (*processContainment, err
 	beginWait()
 
 	if err := awaitProcessTreeReady(launch); err != nil {
-		cleanupErr := tree.quiesce(defaultCloseWait)
+		cleanupErr := tree.complete(defaultCloseWait)
 
 		launch.close()
 
@@ -171,7 +171,10 @@ func (tree *processContainment) cleanupFromProtectedObservation(beginWait func()
 	return tree.cleanupErr
 }
 
-func (tree *processContainment) quiesce(timeout time.Duration) error {
+// complete ends the selected boundary. The ordinary boundary completes when the
+// directly owned child does; the best-effort boundary drives the whole original
+// process group to a stop first, which is as much as Darwin lets it prove.
+func (tree *processContainment) complete(timeout time.Duration) error {
 	if tree != nil && tree.ordinary != nil {
 		return tree.ordinary.complete(timeout)
 	}
@@ -314,7 +317,7 @@ func (tree *processContainment) wait(*exec.Cmd) error {
 		return tree.ordinary.wait()
 	}
 
-	containmentErr := tree.quiesce(defaultCloseWait)
+	containmentErr := tree.complete(defaultCloseWait)
 
 	var waitErr error
 

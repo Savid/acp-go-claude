@@ -21,7 +21,7 @@ func useDirectTestContainment(t *testing.T) {
 	prepare := processPrepareContained
 	start := processStartContained
 	wait := processWaitContained
-	quiesce := processContainmentQuiesce
+	quiesce := processBoundaryComplete
 	closeContainment := processContainmentClose
 	processPrepareContained = func(command *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
 		return &processTreeCommand{cmd: command}, nil
@@ -34,7 +34,7 @@ func useDirectTestContainment(t *testing.T) {
 		return &processContainment{processGroupID: launch.cmd.Process.Pid}, nil
 	}
 	processWaitContained = func(_ *processContainment, command *exec.Cmd) error { return command.Wait() }
-	processContainmentQuiesce = func(tree *processContainment, _ time.Duration) error {
+	processBoundaryComplete = func(tree *processContainment, _ time.Duration) error {
 		if tree == nil || tree.processGroupID <= 0 {
 			return nil
 		}
@@ -50,7 +50,7 @@ func useDirectTestContainment(t *testing.T) {
 		processPrepareContained = prepare
 		processStartContained = start
 		processWaitContained = wait
-		processContainmentQuiesce = quiesce
+		processBoundaryComplete = quiesce
 		processContainmentClose = closeContainment
 	})
 }

@@ -158,10 +158,15 @@ func TestNativeLaunchIdentityEnvironmentAndVerification(t *testing.T) {
 	require.ErrorContains(t, verifyLaunchIdentity(), "mismatch")
 }
 
-// TestProcessIsolationOmissionAllowsRoot proves the ordinary launch identity
-// handshake is honest for a root caller too: root is a legitimate ordinary
-// identity, so a zero id round-trips instead of failing closed the way an
-// explicit policy's zero id must.
+// TestProcessIsolationOmissionAllowsRoot proves an omitted policy runs the
+// native command as whoever already runs the adapter, root included. The
+// evidence is the ordinary selector itself rather than an identity seam
+// ordinary execution never reaches: the platform selector is asked for a launch
+// as a root caller and as an unprivileged one, and hands back the same launch
+// both times — no credential, no stamped launch identity, and none of the
+// descriptors a privileged boundary would arm. Root is refused only where the
+// contract refuses it, in an explicit policy whose zero ids name no hardened
+// native identity.
 func TestProcessIsolationOmissionAllowsRoot(t *testing.T) {
 	originalUID := processEffectiveUID
 	originalGID := processEffectiveGID
@@ -169,6 +174,9 @@ func TestProcessIsolationOmissionAllowsRoot(t *testing.T) {
 		processEffectiveUID = originalUID
 		processEffectiveGID = originalGID
 	})
+
+	directory := t.TempDir()
+	selected := map[string]*processTreeCommand{}
 
 	for _, identity := range []struct {
 		name     string
@@ -181,13 +189,38 @@ func TestProcessIsolationOmissionAllowsRoot(t *testing.T) {
 			processEffectiveUID = func() int { return identity.uid }
 			processEffectiveGID = func() int { return identity.gid }
 
-			values := environmentMap(ordinaryLaunchIdentityEnvironment(nil, "MODE", "run"))
-			t.Setenv(processIsolationUIDEnv, values[processIsolationUIDEnv])
-			t.Setenv(processIsolationGIDEnv, values[processIsolationGIDEnv])
+			command := newProcessCommand("/bin/sh", "-c", "exit 0")
+			configureProcessCommand(command)
 
-			require.NoError(t, verifyLaunchIdentity())
+			command.Dir = directory
+			command.Env = BuildEnv(Options{
+				OrdinaryEnvironment: OrdinaryEnvironment(),
+				Cwd:                 directory,
+			})
+			require.NotNil(t, command.Env)
+
+			launch, err := prepareProcessTreeCommand(command, processLaunchOptions{})
+			require.NoError(t, err)
+			require.True(t, launch.ordinary, "an omitted policy selects ordinary execution for any caller")
+			require.Nil(t, launch.cmd.SysProcAttr.Credential,
+				"ordinary execution applies no credential, root or not")
+			require.Nil(t, launch.startGate, "ordinary execution arms no supervisor start gate")
+			require.Nil(t, launch.control, "ordinary execution arms no guardian control channel")
+			require.Nil(t, launch.proof, "ordinary execution publishes no containment proof")
+			require.Empty(t, launch.inherited, "ordinary execution hands the child no private descriptors")
+
+			values := environmentMap(launch.cmd.Env)
+			require.NotContains(t, values, processIsolationUIDEnv,
+				"ordinary execution stamps no launch identity to verify against")
+			require.NotContains(t, values, processIsolationGIDEnv)
+
+			selected[identity.name] = launch
 		})
 	}
+
+	require.Equal(t, selected["non-root"].cmd.Env, selected["root"].cmd.Env,
+		"the ordinary selector reads no identity, so a root caller selects the same launch")
+	require.Equal(t, selected["non-root"].cmd.SysProcAttr, selected["root"].cmd.SysProcAttr)
 
 	// An explicit policy is held to the opposite rule: zero ids never name a
 	// hardened native identity, so the same shape fails closed.

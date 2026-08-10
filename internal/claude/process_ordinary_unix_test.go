@@ -57,7 +57,7 @@ func TestProcessIsolationOmissionAllowsOrdinaryUser(t *testing.T) {
 	require.NoError(t, output.Close())
 
 	require.NoError(t, processWaitContained(tree, launch.cmd))
-	require.NoError(t, processContainmentQuiesce(tree, time.Second))
+	require.NoError(t, processBoundaryComplete(tree, time.Second))
 	require.NoError(t, processContainmentClose(tree))
 
 	identity := strings.Fields(string(reported))
@@ -79,6 +79,58 @@ func TestOrdinaryLaunchReportsAStartFailure(t *testing.T) {
 	require.Nil(t, tree)
 }
 
+// TestOrdinaryBoundaryHoldsItsReapUntilAnOwnerAppears proves the boundary does
+// not begin exec.Cmd.Wait when it starts the child. os/exec closes the parent
+// ends of the command's own pipes inside Wait, so a reap begun with the child
+// would close the caller's stdout before the caller drained it — here, the
+// child's whole transcript would be lost even though it exited zero.
+func TestOrdinaryBoundaryHoldsItsReapUntilAnOwnerAppears(t *testing.T) {
+	dir := t.TempDir()
+	command := newProcessCommand("/bin/sh", "-c",
+		`i=0; while [ "$i" -lt 200 ]; do echo "line-$i"; i=$((i + 1)); done; printf wrote > "$1"; exit 0`,
+		"sh", filepath.Join(dir, "wrote"),
+	)
+	configureProcessCommand(command)
+
+	command.Dir = dir
+	command.Env = BuildEnv(Options{OrdinaryEnvironment: OrdinaryEnvironment(), Cwd: dir})
+
+	stdout, err := command.StdoutPipe()
+	require.NoError(t, err)
+
+	launch, err := prepareProcessTreeCommand(command, processLaunchOptions{})
+	require.NoError(t, err)
+
+	tree, err := processStartContained(launch)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(filepath.Join(dir, "wrote"))
+
+		return statErr == nil
+	}, 10*time.Second, 5*time.Millisecond)
+
+	// The child has finished and is exiting, and still nothing reaps it: the
+	// single reap belongs to whoever owns the wait, and nobody does yet.
+	require.Never(t, func() bool {
+		select {
+		case <-tree.ordinary.waiter.done:
+			return true
+		default:
+			return false
+		}
+	}, 200*time.Millisecond, 10*time.Millisecond,
+		"the reap must not run before an owner begins it")
+
+	written, err := io.ReadAll(stdout)
+	require.NoError(t, err, "the child's output pipe must outlive the child")
+	require.Len(t, strings.Fields(string(written)), 200)
+
+	require.NoError(t, processWaitContained(tree, launch.cmd))
+	require.NoError(t, processBoundaryComplete(tree, time.Second))
+	require.NoError(t, processContainmentClose(tree))
+}
+
 // TestOrdinaryBoundaryCompletesADirectlyOwnedChild proves the ordinary boundary
 // stops a child that would otherwise outlive the adapter, reaps it exactly once,
 // and leaves the caller's termination ladder in charge of shutdown.
@@ -95,10 +147,10 @@ func TestOrdinaryBoundaryCompletesADirectlyOwnedChild(t *testing.T) {
 		"the ordinary boundary leaves shutdown to the caller's ladder")
 
 	waiter := startChildExit(tree, launch.cmd)
-	require.Same(t, tree.ordinary.ordinaryWaiter(), waiter,
+	require.Same(t, tree.ordinary.observeExit(), waiter,
 		"the boundary's own reap is the only one")
 
-	require.NoError(t, processContainmentQuiesce(tree, 5*time.Second))
+	require.NoError(t, processBoundaryComplete(tree, 5*time.Second))
 
 	var exitErr *exec.ExitError
 	require.ErrorAs(t, processWaitContained(tree, launch.cmd), &exitErr)

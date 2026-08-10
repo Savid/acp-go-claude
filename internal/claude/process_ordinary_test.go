@@ -121,7 +121,8 @@ func TestOrdinaryLaunchPreparationRequiresACommand(t *testing.T) {
 	require.Error(t, err)
 
 	require.ErrorContains(t, (*ordinaryBoundary)(nil).complete(time.Second), "boundary is unavailable")
-	require.Nil(t, (*ordinaryBoundary)(nil).ordinaryWaiter())
+	require.ErrorContains(t, (*ordinaryBoundary)(nil).wait(), "boundary is unavailable")
+	require.Nil(t, (*ordinaryBoundary)(nil).observeExit())
 }
 
 // TestOrdinaryBoundaryEscalatesAndReportsIncompleteness proves the directly
@@ -152,7 +153,7 @@ func TestOrdinaryBoundaryEscalatesAndReportsIncompleteness(t *testing.T) {
 	close(reaped.waiter.done)
 	require.NoError(t, reaped.complete(time.Second))
 	require.NoError(t, reaped.wait())
-	require.NotNil(t, reaped.ordinaryWaiter())
+	require.NotNil(t, reaped.observeExit())
 }
 
 // newStalledOrdinaryBoundary builds a boundary whose direct child never reports

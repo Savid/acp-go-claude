@@ -28,7 +28,7 @@ func useAuthDirectContainment(t *testing.T) {
 	prepare := processPrepareContained
 	start := processStartContained
 	wait := processWaitContained
-	quiesce := processContainmentQuiesce
+	quiesce := processBoundaryComplete
 	closeContainment := processContainmentClose
 
 	processPrepareContained = func(command *exec.Cmd, options processLaunchOptions) (*processTreeCommand, error) {
@@ -58,7 +58,7 @@ func useAuthDirectContainment(t *testing.T) {
 
 		return waitErr
 	}
-	processContainmentQuiesce = func(tree *processContainment, timeout time.Duration) error {
+	processBoundaryComplete = func(tree *processContainment, timeout time.Duration) error {
 		// A group whose last member has already been reaped answers ESRCH, and
 		// Darwin answers EPERM for one whose pid the kernel has not recycled yet;
 		// the real boundary tolerates both for the same reason.
@@ -84,7 +84,7 @@ func useAuthDirectContainment(t *testing.T) {
 		processPrepareContained = prepare
 		processStartContained = start
 		processWaitContained = wait
-		processContainmentQuiesce = quiesce
+		processBoundaryComplete = quiesce
 		processContainmentClose = closeContainment
 	})
 }

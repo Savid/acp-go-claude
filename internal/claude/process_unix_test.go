@@ -82,8 +82,8 @@ func TestUnixSignalProcessGroupErrors(t *testing.T) {
 }
 
 func TestLinuxProcessContainmentProofBranches(t *testing.T) {
-	require.Error(t, (*processContainment)(nil).quiesce(time.Millisecond))
-	require.Error(t, (&processContainment{}).quiesce(time.Millisecond))
+	require.Error(t, (*processContainment)(nil).complete(time.Millisecond))
+	require.Error(t, (&processContainment{}).complete(time.Millisecond))
 	require.NoError(t, (*processContainment)(nil).close())
 
 	oldKill := syscallKill
@@ -94,8 +94,8 @@ func TestLinuxProcessContainmentProofBranches(t *testing.T) {
 	require.NoError(t, read.Close())
 	tree := &processContainment{processGroupID: 123, control: write, proof: supervisorProofFile(t)}
 	syscallKill = func(int, syscall.Signal) error { return syscall.ESRCH }
-	require.NoError(t, tree.quiesce(0))
-	require.NoError(t, tree.quiesce(time.Second), "proof must be memoized")
+	require.NoError(t, tree.complete(0))
+	require.NoError(t, tree.complete(time.Second), "proof must be memoized")
 	require.NoError(t, tree.close())
 	count, exact := tree.processSnapshot()
 	require.Zero(t, count)
@@ -106,17 +106,17 @@ func TestLinuxProcessContainmentProofBranches(t *testing.T) {
 	require.NoError(t, read.Close())
 	tree = &processContainment{processGroupID: 124, control: write, proof: supervisorProofFile(t)}
 	syscallKill = func(int, syscall.Signal) error { return errors.New("probe failed") }
-	require.Error(t, tree.quiesce(time.Second))
+	require.Error(t, tree.complete(time.Second))
 
 	tree = &processContainment{processGroupID: 125}
-	require.Error(t, tree.quiesce(time.Second))
+	require.Error(t, tree.complete(time.Second))
 
 	read, write, err = os.Pipe()
 	require.NoError(t, err)
 	require.NoError(t, read.Close())
 	require.NoError(t, write.Close())
 	tree = &processContainment{processGroupID: 125, control: write}
-	require.Error(t, tree.quiesce(time.Second))
+	require.Error(t, tree.complete(time.Second))
 
 	// The deadline branch needs a group that still holds a running member, so
 	// the test names its own: an unoccupied group now reports quiescence
@@ -129,7 +129,7 @@ func TestLinuxProcessContainmentProofBranches(t *testing.T) {
 	require.NoError(t, read.Close())
 	tree = &processContainment{processGroupID: group, control: write, proof: supervisorProofFile(t)}
 	syscallKill = func(int, syscall.Signal) error { return nil }
-	require.Error(t, tree.quiesce(time.Nanosecond))
+	require.Error(t, tree.complete(time.Nanosecond))
 	require.Error(t, tree.waitUntilEmpty(time.Nanosecond))
 }
 
@@ -283,7 +283,7 @@ func TestProcessTransportQuiescenceProofFailures(t *testing.T) {
 		},
 	}
 	syscallKill = func(int, syscall.Signal) error { return errors.New("probe failed") }
-	require.ErrorIs(t, transport.quiesceProcessTree(), ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, transport.completeProcessBoundary(), ErrProcessContainmentIncomplete)
 	require.Zero(t, completed)
 	require.Len(t, inventories, 1)
 	_, exact := inventories[0]()
@@ -295,7 +295,7 @@ func TestProcessTransportQuiescenceProofFailures(t *testing.T) {
 	transport.tree = &processContainment{processGroupID: 124, control: write, proof: supervisorProofFile(t)}
 	syscallKill = func(int, syscall.Signal) error { return syscall.ESRCH }
 	processContainmentClose = func(*processContainment) error { return errors.New("close failed") }
-	require.ErrorContains(t, transport.quiesceProcessTree(), "close Claude process containment")
+	require.ErrorContains(t, transport.completeProcessBoundary(), "close Claude process containment")
 	require.Equal(t, 1, completed)
 }
 

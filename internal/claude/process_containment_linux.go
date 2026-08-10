@@ -81,7 +81,11 @@ func startContainedProcess(launch *processTreeCommand) (*processContainment, err
 	return tree, nil
 }
 
-func (c *processContainment) quiesce(timeout time.Duration) error {
+// complete ends the selected boundary. The ordinary boundary completes when the
+// directly owned child does; the trusted supervisor boundary is held to the
+// stronger claim its name carries and completes only once it has published
+// quiescence for the whole process group.
+func (c *processContainment) complete(timeout time.Duration) error {
 	if c != nil && c.ordinary != nil {
 		return c.ordinary.complete(timeout)
 	}

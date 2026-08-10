@@ -103,6 +103,7 @@ func prepareOrdinaryLaunch(cmd *exec.Cmd, _ processLaunchOptions) (*processTreeC
 type ordinaryBoundary struct {
 	cmd    *exec.Cmd
 	waiter *commandWait
+	begin  func()
 
 	once sync.Once
 	err  error
@@ -121,22 +122,46 @@ func startOrdinaryBoundary(launch *processTreeCommand) (*ordinaryBoundary, error
 
 	launch.releaseInherited()
 
+	// The reap is created here and deliberately left paused. The command this
+	// boundary owns is the one the caller took its stdout, stderr and stdin
+	// pipes from, and os/exec closes the parent ends of those pipes the moment
+	// Wait returns. A reap started with the child would therefore race the
+	// caller's own reader: a Claude turn that wrote its final result line and
+	// exited would be reported as a truncated read instead. Whoever owns the
+	// wait begins it.
 	waiter, begin := startPausedCommandWait(launch.cmd.Wait)
-	begin()
 
-	return &ordinaryBoundary{cmd: launch.cmd, waiter: waiter}, nil
+	return &ordinaryBoundary{cmd: launch.cmd, waiter: waiter, begin: begin}, nil
 }
 
-// complete ends the directly owned boundary: the process group is asked to
-// stop, killed if it does not, and the direct child is reaped. It is the
-// ordinary counterpart of an authoritative quiescence proof and deliberately
-// claims nothing about a descendant that left the group.
+// beginWait starts the boundary's sole reap. Every caller that owns or observes
+// the child's exit reaches it, and startPausedCommandWait makes the start
+// idempotent, so the child is still waited on exactly once however many of them
+// run.
+func (b *ordinaryBoundary) beginWait() {
+	if b.begin == nil {
+		return
+	}
+
+	b.begin()
+}
+
+// complete ends the directly owned boundary: the reap is started, the process
+// group is asked to stop, killed if it does not, and the direct child is
+// reaped. It is what the ordinary boundary has instead of an authoritative
+// quiescence proof and deliberately claims nothing about a descendant that left
+// the group.
 func (b *ordinaryBoundary) complete(timeout time.Duration) error {
 	if b == nil {
 		return errors.New("claude ordinary boundary is unavailable")
 	}
 
 	b.once.Do(func() {
+		// A child that never exits on its own must still be terminated and
+		// collected here, so the paused reap is started before the ladder runs
+		// rather than left waiting for a reader that already gave up.
+		b.beginWait()
+
 		if _, err := processTerminate(b.cmd); err != nil {
 			b.err = fmt.Errorf("%w: terminate Claude process: %v", ErrProcessContainmentIncomplete, err)
 
@@ -174,21 +199,32 @@ func (b *ordinaryBoundary) awaitChild(timeout time.Duration) bool {
 	return completed
 }
 
-// wait reports the direct child's own exit. The boundary started the sole
-// waiter when it started the child, so this collects that result instead of
+// wait reports the direct child's own exit. This is the point that owns the
+// wait for a caller that read the child's output to EOF first, so it starts the
+// boundary's single paused reap and then collects its result rather than
 // reaping a second time.
 func (b *ordinaryBoundary) wait() error {
+	if b == nil {
+		return errors.New("claude ordinary boundary is unavailable")
+	}
+
+	b.beginWait()
+
 	waitErr, _ := b.waiter.await(context.Background())
 
 	return waitErr
 }
 
-// ordinaryWaiter exposes the sole direct-child reap to callers that observe the
-// child's exit without owning the boundary.
-func (b *ordinaryBoundary) ordinaryWaiter() *commandWait {
+// observeExit hands the boundary's single reap to a caller that watches for the
+// child's exit without owning the boundary. Such a caller polls the reap for an
+// answer, so the observation has to be running for it to have one; the boundary
+// still reaps exactly once.
+func (b *ordinaryBoundary) observeExit() *commandWait {
 	if b == nil {
 		return nil
 	}
+
+	b.beginWait()
 
 	return b.waiter
 }

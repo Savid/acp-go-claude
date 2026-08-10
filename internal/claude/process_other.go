@@ -40,7 +40,14 @@ func startContainedProcess(launch *processTreeCommand) (*processContainment, err
 	return &processContainment{ordinary: boundary}, nil
 }
 
-func (c *processContainment) quiesce(timeout time.Duration) error {
+// complete ends the directly owned boundary. A nil receiver is answered rather
+// than dereferenced so the boundary reports its own absence the way every other
+// platform's does.
+func (c *processContainment) complete(timeout time.Duration) error {
+	if c == nil {
+		return fmt.Errorf("%w: claude process boundary is unavailable", ErrProcessContainmentIncomplete)
+	}
+
 	return c.ordinary.complete(timeout)
 }
 
@@ -48,7 +55,13 @@ func (*processContainment) close() error { return nil }
 
 func (*processContainment) processSnapshot() (int, bool) { return 0, false }
 
-func (c *processContainment) wait(*exec.Cmd) error { return c.ordinary.wait() }
+func (c *processContainment) wait(*exec.Cmd) error {
+	if c == nil {
+		return fmt.Errorf("%w: claude process boundary is unavailable", ErrProcessContainmentIncomplete)
+	}
+
+	return c.ordinary.wait()
+}
 
 func (*processContainment) ownsShutdown() bool { return false }
 

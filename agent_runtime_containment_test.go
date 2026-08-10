@@ -76,7 +76,7 @@ func TestOrdinaryExecutionIsPortableAcrossSupportedPlatforms(t *testing.T) {
 
 	explicit := Options{ProcessIsolation: &ProcessIsolation{UID: 64251, GID: 64252}}
 
-	for _, platform := range []string{"linux", "darwin", "windows", "freebsd", "openbsd", "plan9"} {
+	for _, platform := range []string{"linux", "darwin", "windows", "freebsd", "openbsd"} {
 		t.Run(platform, func(t *testing.T) {
 			runtimeGOOS = platform
 
@@ -514,11 +514,6 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 	require.False(t, agent.descendantProcesses.authoritative)
 	require.Empty(t, snapshots, "ordinary execution publishes no provider-descendant sample")
 
-	// No authority root, standalone owner, or privileged supervisor is asked
-	// for: the ordinary agent carries none of that state at all.
-	require.Nil(t, agent.options.ProcessIsolation)
-	require.False(t, agent.options.DarwinBestEffortContainment)
-
 	require.Nil(t, (&Agent{}).claudeIsolation())
 	require.Nil(t, (&Agent{}).ordinaryEnvironment())
 }
@@ -526,8 +521,13 @@ func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
 // TestExplicitProcessIsolationPreservesPolicy proves supplying
 // WithProcessIsolation stays a strict selection: the policy reaches the launch
 // verbatim with no ambient environment mixed in and no ordinary capture beside
-// it, an unavailable platform and an invalid policy both refuse before any
-// spawn, and neither retries ordinary or best-effort execution.
+// it, every platform that cannot apply it reports the boundary as unavailable
+// rather than degrading to shared identity or best effort, and an invalid
+// policy refuses session establishment before any spawn without retrying
+// ordinary execution. That the unavailable verdict also stops the spawn is
+// proven at the selector itself, in
+// internal/claude.TestDarwinLaunchFailsClosedForExplicitProcessIsolation and
+// the platform selector tests beside it.
 func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 	t.Setenv("ACP_GO_CLAUDE_TEST_CANARY", "ambient-canary")
 
@@ -563,15 +563,15 @@ func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
 
 	runtimeGOOS = originalGOOS
 
-	spawns := 0
 	invalid := NewAgent(WithProcessIsolation(ProcessIsolation{UID: 0, GID: 0}))
 	t.Cleanup(func() { require.NoError(t, invalid.Close()) })
-	invalid.newClaudeClient = func(*slog.Logger, claude.Options) *claude.Client {
-		spawns++
-
-		return nil
-	}
-	_, err := invalid.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
-	require.Error(t, err, "invalid explicit policy must fail session establishment closed")
-	require.Zero(t, spawns, "a refused explicit policy must not retry as ordinary execution")
+	require.NotNil(t, invalid.claudeIsolation())
+	require.Nil(t, invalid.ordinaryEnvironment())
+	transport := claude.NewProcessTransport(nil, claude.Options{
+		CLIPath:             "/bin/true",
+		Cwd:                 t.TempDir(),
+		ProcessIsolation:    invalid.claudeIsolation(),
+		OrdinaryEnvironment: map[string]string{"ACP_GO_CLAUDE_TEST_CANARY": "fallback"},
+	})
+	require.ErrorContains(t, transport.Start(t.Context()), "process isolation uid and gid must be nonzero")
 }

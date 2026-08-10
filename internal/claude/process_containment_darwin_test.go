@@ -72,10 +72,10 @@ func TestDarwinCleanupLadderMemoizationAndAbsenceTerminality(t *testing.T) {
 			return nil
 		}},
 	}
-	if err := tree.quiesce(time.Nanosecond); err != nil {
+	if err := tree.complete(time.Nanosecond); err != nil {
 		t.Fatal(err)
 	}
-	if err := tree.quiesce(time.Hour); err != nil || finished != 1 {
+	if err := tree.complete(time.Hour); err != nil || finished != 1 {
 		t.Fatalf("memoized cleanup error=%v finished=%d", err, finished)
 	}
 	firstKill := -1
@@ -97,7 +97,7 @@ func TestDarwinCleanupLadderMemoizationAndAbsenceTerminality(t *testing.T) {
 
 		return syscall.ESRCH
 	}
-	if err := absent.quiesce(defaultCloseWait); err != nil {
+	if err := absent.complete(defaultCloseWait); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(signals, []syscall.Signal{syscall.SIGTERM}) {
@@ -121,7 +121,7 @@ func TestDarwinCleanupFailureBranches(t *testing.T) {
 
 	want := errors.New("syscall")
 	syscallKill = func(int, syscall.Signal) error { return want }
-	if err := newTree().quiesce(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), "terminate") {
+	if err := newTree().complete(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), "terminate") {
 		t.Fatalf("term error = %v", err)
 	}
 
@@ -134,7 +134,7 @@ func TestDarwinCleanupFailureBranches(t *testing.T) {
 
 		return nil
 	}
-	if err := newTree().quiesce(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), "inspect") {
+	if err := newTree().complete(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), "inspect") {
 		t.Fatalf("probe error = %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestDarwinCleanupFailureBranches(t *testing.T) {
 
 		return nil
 	}
-	if err := newTree().quiesce(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), "kill") {
+	if err := newTree().complete(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), "kill") {
 		t.Fatalf("kill error = %v", err)
 	}
 
@@ -163,19 +163,19 @@ func TestDarwinCleanupFailureBranches(t *testing.T) {
 
 		return nil
 	}
-	if err := newTree().quiesce(defaultCloseWait); err != nil || killCalls != 1 {
+	if err := newTree().complete(defaultCloseWait); err != nil || killCalls != 1 {
 		t.Fatalf("kill ESRCH cleanup error=%v calls=%d", err, killCalls)
 	}
 
 	syscallKill = func(int, syscall.Signal) error { return nil }
-	if err := newTree().quiesce(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), "remained observable") {
+	if err := newTree().complete(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) || !strings.Contains(err.Error(), "remained observable") {
 		t.Fatalf("deadline error = %v", err)
 	}
 
-	if err := (*processContainment)(nil).quiesce(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) {
+	if err := (*processContainment)(nil).complete(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("nil cleanup error = %v", err)
 	}
-	if err := (&processContainment{}).quiesce(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) {
+	if err := (&processContainment{}).complete(defaultCloseWait); !errors.Is(err, ErrProcessContainmentIncomplete) {
 		t.Fatalf("missing identity cleanup error = %v", err)
 	}
 }
@@ -407,7 +407,7 @@ func TestProcessTransportDarwinContainmentShutdownBranches(t *testing.T) {
 			inventories = append(inventories, inventory)
 		}},
 	}
-	require.ErrorIs(t, transport.quiesceProcessTree(), ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, transport.completeProcessBoundary(), ErrProcessContainmentIncomplete)
 	require.Len(t, inventories, 1)
 
 	originalClose := processContainmentClose
@@ -422,7 +422,7 @@ func TestProcessTransportDarwinContainmentShutdownBranches(t *testing.T) {
 		}},
 	}
 	processContainmentClose = func(*processContainment) error { return want }
-	require.ErrorIs(t, transport.quiesceProcessTree(), want)
+	require.ErrorIs(t, transport.completeProcessBoundary(), want)
 	require.Equal(t, 1, completed)
 	processContainmentClose = originalClose
 
@@ -479,7 +479,7 @@ func TestDarwinStartContainedProcessRealBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if quiesceErr := tree.quiesce(defaultCloseWait); quiesceErr != nil {
+	if quiesceErr := tree.complete(defaultCloseWait); quiesceErr != nil {
 		t.Fatal(quiesceErr)
 	}
 
@@ -541,7 +541,7 @@ func TestDarwinSetsidEscapeSurvivesSelectedBoundary(t *testing.T) {
 		t.Errorf("setsid escapee pid %d remained after test cleanup deadline", escapedPID)
 	})
 
-	if err := tree.quiesce(defaultCloseWait); err != nil {
+	if err := tree.complete(defaultCloseWait); err != nil {
 		t.Fatal(err)
 	}
 	if err := syscall.Kill(escapedPID, 0); err != nil {

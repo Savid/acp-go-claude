@@ -297,13 +297,13 @@ func TestContainedClaudeOutputSurvivesWaitBeforeRead(t *testing.T) {
 	originalPrepare := processPrepareContained
 	originalStart := processStartContained
 	originalWait := processWaitContained
-	originalQuiesce := processContainmentQuiesce
+	originalQuiesce := processBoundaryComplete
 	originalClose := processContainmentClose
 	t.Cleanup(func() {
 		processPrepareContained = originalPrepare
 		processStartContained = originalStart
 		processWaitContained = originalWait
-		processContainmentQuiesce = originalQuiesce
+		processBoundaryComplete = originalQuiesce
 		processContainmentClose = originalClose
 	})
 
@@ -317,7 +317,7 @@ func TestContainedClaudeOutputSurvivesWaitBeforeRead(t *testing.T) {
 		return &processContainment{}, nil
 	}
 	processWaitContained = func(*processContainment, *exec.Cmd) error { return nil }
-	processContainmentQuiesce = func(*processContainment, time.Duration) error { return nil }
+	processBoundaryComplete = func(*processContainment, time.Duration) error { return nil }
 	processContainmentClose = func(*processContainment) error { return nil }
 	t.Setenv(helperEnv, "1")
 
@@ -454,19 +454,19 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 	}
 }
 
-func TestObserveAuxiliaryQuiescenceBranches(t *testing.T) {
+func TestObserveAuxiliaryBoundaryCompleteBranches(t *testing.T) {
 	inventories := 0
 	completed := 0
 	options := Options{
 		ObserveProcessInventory: func(context.Context, func() (int, bool)) { inventories++ },
 		ObserveBoundaryComplete: func(context.Context) { completed++ },
 	}
-	observeAuxiliaryQuiescence(options, errors.New("cleanup failed"))
+	observeAuxiliaryBoundaryComplete(options, errors.New("cleanup failed"))
 	require.Equal(t, 1, inventories)
 	require.Zero(t, completed)
 
-	observeAuxiliaryQuiescence(Options{}, errors.New("cleanup failed"))
-	observeAuxiliaryQuiescence(options, nil)
+	observeAuxiliaryBoundaryComplete(Options{}, errors.New("cleanup failed"))
+	observeAuxiliaryBoundaryComplete(options, nil)
 	require.Equal(t, 1, inventories)
 	require.Equal(t, 1, completed)
 }

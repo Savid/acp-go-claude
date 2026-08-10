@@ -24,11 +24,14 @@ type processTreeCommand struct {
 }
 
 // startChildExit hands back the observation of the direct child's own exit.
-// Every Darwin boundary reaps the child from the moment it starts it, so this
-// is that reap rather than a second one: two goroutines waiting on one command
-// make the loser answer at once and wrongly, whatever the child is still doing.
+// Every Darwin boundary owns exactly one reap of that child, so this is that
+// reap rather than a second one: two goroutines waiting on one command make the
+// loser answer at once and wrongly, whatever the child is still doing. The
+// best-effort boundary already started its reap on the launch helper; the
+// ordinary boundary holds its own paused until an owner appears, and an exit
+// observer is one.
 func startChildExit(tree *processContainment, _ *exec.Cmd) *commandWait {
-	if waiter := tree.ordinary.ordinaryWaiter(); waiter != nil {
+	if waiter := tree.ordinary.observeExit(); waiter != nil {
 		return waiter
 	}
 

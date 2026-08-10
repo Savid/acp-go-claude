@@ -10,13 +10,14 @@ the reader/writer streams directly.
 
 ## Standalone
 
-Standalone native mode is Linux-only. The root supervisor must receive
+By default the command needs no isolation policy: native work runs as the
+identity the command already holds, root or not. Hardened standalone native
+mode is Linux-only and is selected by giving the root supervisor
 `-process-isolation-config=/absolute/path/process-isolation.json`; the strict
 file schema, account/home checks, closed environment, and explicit
 `inheritEnvironment` behavior are documented in the
-[CLI reference](/docs/reference/cli). `-version` and Darwin containment
-diagnostics do not require the policy. There is no Darwin or Windows
-standalone-launch fallback.
+[CLI reference](/docs/reference/cli). An explicit policy is rejected on Darwin
+and Windows rather than being downgraded to ordinary execution.
 
 `acp-go-claude` is launched by an ACP client, which drives it over stdin/stdout.
 stdout carries ACP JSON-RPC only; diagnostics go to stderr (and `-debug` when

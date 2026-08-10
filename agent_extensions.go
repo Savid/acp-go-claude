@@ -77,7 +77,7 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 		CLIPath:          a.options.ExecutablePath,
 		ClaudeHome:       claudeHome,
 		Env:              a.options.Env,
-		ProcessIsolation: claudeProcessIsolation(a.options.ProcessIsolation),
+		ProcessIsolation: a.claudeIsolation(),
 		DarwinBestEffort: a.containmentMode == RuntimeContainmentBestEffort,
 		AcquireUsageDiscovery: func(discoveryCtx context.Context) (func(), error) {
 			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)

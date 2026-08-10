@@ -87,7 +87,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	scratchDir := flags.String("scratch-dir", "", "parent directory for ephemeral session scratch; empty means the system temp directory")
 	providerAuthRoot := flags.String("provider-auth-root", "", "durable host-owned root holding the provider-auth ledger; empty, static auth, or bare mode leaves the surface unadvertised")
 	providerAuthDirectHome := flags.String("provider-auth-direct-home", "", "exact Claude config directory a native-login disconnect may clear")
-	isolationConfigPath := flags.String(processIsolationConfigFlag, "", "absolute path to the required root-owned mode-0600 Linux child-isolation policy")
+	isolationConfigPath := flags.String(processIsolationConfigFlag, "", "absolute path to an optional root-owned mode-0600 Linux child-isolation policy; omitted runs native work as the current identity")
 	model := flags.String("model", "", "default Claude model")
 	bare := flags.Bool("claude-bare", false, "launch Claude sessions with --bare; requires API-key or apiKeyHelper auth")
 	permissionMode := flags.String("claude-permission-mode", "", "default Claude permission mode")
@@ -111,28 +111,38 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		return 0
 	}
 
-	if *isolationConfigPath == "" {
-		_, _ = fmt.Fprintf(stderr, "acp-go-claude: -%s is required for standalone native mode\n", processIsolationConfigFlag)
+	// An explicit policy path is strict hardening: it loads and validates
+	// before anything serves, and any failure refuses startup. Omission appends
+	// no isolation option at all, so native work runs as the current identity
+	// and -home keeps its ordinary managed-home meaning.
+	var isolationOptions []claudeacp.Option
 
-		return 2
-	}
+	if *isolationConfigPath != "" {
+		isolation, err := processIsolationConfigLoader(*isolationConfigPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "acp-go-claude: process isolation: %v\n", err)
 
-	isolation, err := processIsolationConfigLoader(*isolationConfigPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "acp-go-claude: process isolation: %v\n", err)
+			return 1
+		}
 
-		return 1
-	}
+		if *claudeHome == "" {
+			*claudeHome = isolation.StandaloneStateRoot
+		}
 
-	if *claudeHome == "" {
-		*claudeHome = isolation.StandaloneStateRoot
-	}
+		if !filepath.IsAbs(*claudeHome) || filepath.Clean(*claudeHome) != *claudeHome ||
+			*claudeHome != isolation.StandaloneStateRoot {
+			_, _ = fmt.Fprintf(stderr, "acp-go-claude: -home must equal standaloneStateRoot %q\n", isolation.StandaloneStateRoot)
 
-	if !filepath.IsAbs(*claudeHome) || filepath.Clean(*claudeHome) != *claudeHome ||
-		*claudeHome != isolation.StandaloneStateRoot {
-		_, _ = fmt.Fprintf(stderr, "acp-go-claude: -home must equal standaloneStateRoot %q\n", isolation.StandaloneStateRoot)
+			return 1
+		}
 
-		return 1
+		isolationOptions = append(isolationOptions, claudeacp.WithProcessIsolation(claudeacp.ProcessIsolation{
+			UID:                 isolation.UID,
+			GID:                 isolation.GID,
+			BaseEnvironment:     isolation.BaseEnvironment,
+			StandaloneOwnerID:   isolation.StandaloneOwnerID,
+			StandaloneStateRoot: isolation.StandaloneStateRoot,
+		}))
 	}
 
 	logger := slog.New(slog.DiscardHandler)
@@ -173,14 +183,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		claudeacp.WithClaudeBareMode(*bare),
 		claudeacp.WithClaudeHideAuth(*hideClaudeAuth),
 		claudeacp.WithLogger(logger),
-		claudeacp.WithProcessIsolation(claudeacp.ProcessIsolation{
-			UID:                 isolation.UID,
-			GID:                 isolation.GID,
-			BaseEnvironment:     isolation.BaseEnvironment,
-			StandaloneOwnerID:   isolation.StandaloneOwnerID,
-			StandaloneStateRoot: isolation.StandaloneStateRoot,
-		}),
 	)
+
+	serveOptions = append(serveOptions, isolationOptions...)
 	if *permissionMode != "" {
 		serveOptions = append(serveOptions, claudeacp.WithClaudeDefaultPermissionMode(*permissionMode))
 	}

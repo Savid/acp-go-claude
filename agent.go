@@ -65,6 +65,9 @@ type Agent struct {
 	options Options
 	log     *slog.Logger
 	observe *observer.Observer
+	// implicitIsolation is the one-time current-identity capture native
+	// launches clone when no explicit ProcessIsolation was configured.
+	implicitIsolation *claude.ProcessIsolation
 
 	// Lock order: acquire mu before docsMu when both are needed. Do not call
 	// session or bridge close methods while holding either lock.
@@ -127,15 +130,16 @@ func NewAgent(opts ...Option) *Agent {
 	}
 
 	agent := &Agent{
-		options:          options,
-		log:              log,
-		observe:          observe,
-		sessions:         make(map[acp.SessionId]*agentSession),
-		store:            NewInMemorySessionStore(),
-		deleted:          make(map[acp.SessionId]struct{}),
-		positionEncoding: acp.PositionEncodingKindUtf16,
-		permissionCache:  make(map[acp.SessionId]map[string]string),
-		activeLimitErr:   validateConcurrencyLimits(options.ConcurrencyLimits),
+		options:           options,
+		log:               log,
+		observe:           observe,
+		implicitIsolation: captureImplicitIsolation(options),
+		sessions:          make(map[acp.SessionId]*agentSession),
+		store:             NewInMemorySessionStore(),
+		deleted:           make(map[acp.SessionId]struct{}),
+		positionEncoding:  acp.PositionEncodingKindUtf16,
+		permissionCache:   make(map[acp.SessionId]map[string]string),
+		activeLimitErr:    validateConcurrencyLimits(options.ConcurrencyLimits),
 		configurationErr: errors.Join(
 			homeErr,
 			validateContainmentOptions(options),

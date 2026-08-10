@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
+
+	claudeacp "github.com/savid/acp-go-claude"
 )
 
 const testProcessIsolationConfigPath = "/test/process-isolation.json"
@@ -82,22 +86,57 @@ func TestScanJSONValueRejectsUnexpectedDelimiter(t *testing.T) {
 	}
 }
 
-func TestRunRequiresProcessIsolationConfig(t *testing.T) {
+func TestStandaloneCLIProcessIsolationConfigOptional(t *testing.T) {
+	originalServe, originalLoader := serve, processIsolationConfigLoader
+	t.Cleanup(func() {
+		serve = originalServe
+		processIsolationConfigLoader = originalLoader
+	})
+
+	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
+		t.Fatal("omitted -process-isolation-config must not load a policy")
+
+		return processIsolationConfig{}, nil
+	}
+
+	var got claudeacp.Options
+
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...claudeacp.Option) error {
+		for _, opt := range opts {
+			opt(&got)
+		}
+
+		return nil
+	}
+
 	var stderr strings.Builder
-	if code := run(t.Context(), nil, strings.NewReader(""), &strings.Builder{}, &stderr); code != 2 {
+	if code := run(t.Context(), []string{"-home", "/tmp/ordinary-home"}, strings.NewReader(""), &strings.Builder{}, &stderr); code != 0 {
 		t.Fatalf("run code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "-"+processIsolationConfigFlag+" is required") {
-		t.Fatalf("stderr = %q", stderr.String())
+
+	if got.ProcessIsolation != nil {
+		t.Fatalf("ProcessIsolation = %#v, want nil", got.ProcessIsolation)
+	}
+	if got.Home != "/tmp/ordinary-home" {
+		t.Fatalf("Home = %q", got.Home)
 	}
 }
 
-func TestRunReportsProcessIsolationConfigLoadFailure(t *testing.T) {
-	original := processIsolationConfigLoader
+func TestExplicitProcessIsolationNeverFallsBack(t *testing.T) {
+	originalServe, originalLoader := serve, processIsolationConfigLoader
+	t.Cleanup(func() {
+		serve = originalServe
+		processIsolationConfigLoader = originalLoader
+	})
+
 	processIsolationConfigLoader = func(string) (processIsolationConfig, error) {
 		return processIsolationConfig{}, errors.New("policy unreadable")
 	}
-	t.Cleanup(func() { processIsolationConfigLoader = original })
+	serve = func(context.Context, io.Reader, io.Writer, ...claudeacp.Option) error {
+		t.Fatal("a rejected explicit policy must never reach Serve")
+
+		return nil
+	}
 
 	var stderr strings.Builder
 	code := run(t.Context(), isolatedArgs(), strings.NewReader(""), &strings.Builder{}, &stderr)

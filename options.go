@@ -134,8 +134,10 @@ type Options struct {
 	// Env is merged into every launched Claude process environment. Managed
 	// config and identity root variables are rejected.
 	Env map[string]string
-	// ProcessIsolation is the mandatory process boundary for every native
-	// launch. Configure it with WithProcessIsolation.
+	// ProcessIsolation is an explicit process boundary for every native launch.
+	// Configure it with WithProcessIsolation; leaving it nil launches native
+	// work as the current identity over a deterministic capture of the ambient
+	// environment.
 	ProcessIsolation *ProcessIsolation
 
 	// Logger receives structured diagnostic logs. If nil, the default logger is used.
@@ -322,9 +324,13 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithProcessIsolation requires every native process to run as the supplied
-// uid/gid with no supplementary groups. BaseEnvironment is the complete native
-// environment base; the adapter never overlays os.Environ.
+// WithProcessIsolation is explicit hardening: it requires every native process
+// to run as the supplied uid/gid with no supplementary groups. BaseEnvironment
+// is the complete native environment base; the adapter never overlays
+// os.Environ onto an explicit policy. Omitting the option is the ordinary
+// default — native work runs as the current identity, root or not, over a
+// deterministically captured clone of the ambient environment. An invalid
+// explicit policy fails closed before any native spawn.
 func WithProcessIsolation(isolation ProcessIsolation) Option {
 	return func(options *Options) {
 		cloned := isolation

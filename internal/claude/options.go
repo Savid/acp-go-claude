@@ -95,9 +95,14 @@ type ProcessIdentityLockCapability interface {
 }
 
 type ProcessIsolation struct {
-	UID                      uint32
-	GID                      uint32
-	BaseEnvironment          map[string]string
+	UID             uint32
+	GID             uint32
+	BaseEnvironment map[string]string
+	// Implicit marks the ordinary current-identity launch policy captured when
+	// no explicit isolation is configured: UID and GID name the identity the
+	// process already runs as, BaseEnvironment is the sanitized ambient capture,
+	// and no credential is ever applied. Explicit policies never set it.
+	Implicit                 bool
 	StandaloneOwnerID        string
 	StandaloneStateRoot      string
 	IdentityLock             ProcessIdentityLockCapability `json:"-"`

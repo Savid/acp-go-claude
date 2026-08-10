@@ -139,12 +139,15 @@ func TestSupervisorIdentityEnvironmentAndVerification(t *testing.T) {
 
 	t.Setenv(processIsolationUIDEnv, "")
 	t.Setenv(processIsolationGIDEnv, "")
-	_, _, err := expectedSupervisorIdentity()
+	uid, _, _, err := expectedSupervisorIdentity()
 	require.ErrorContains(t, err, "uid")
+	require.Zero(t, uid)
 	require.ErrorContains(t, verifySupervisorIdentity(), "uid")
 	t.Setenv(processIsolationUIDEnv, "41")
-	_, _, err = expectedSupervisorIdentity()
+	_, gid, implicit, err := expectedSupervisorIdentity()
 	require.ErrorContains(t, err, "gid")
+	require.Zero(t, gid)
+	require.False(t, implicit)
 
 	env := supervisorIdentityEnvironment([]string{"KEEP=yes"}, "MODE", "run", ProcessIsolation{UID: 41, GID: 42})
 	values := environmentMap(env)

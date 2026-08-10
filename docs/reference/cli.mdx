@@ -9,11 +9,15 @@ description: "Every flag the acp-go-claude binary accepts and what it maps to"
 acp-go-claude -path /usr/local/bin/claude -home /tmp/claude-home -model sonnet -claude-permission-mode default
 ```
 
-## Required standalone isolation policy
+## Optional standalone isolation policy
 
-Normal serve mode is Linux-only and requires
-`-process-isolation-config=/absolute/path/process-isolation.json`.
-`-version` and the Darwin containment diagnostic subcommands are exempt.
+Serve mode needs no isolation policy: omitting
+`-process-isolation-config` launches native work as the identity the command
+already runs as, over a deterministic capture of the ambient environment, and
+`-home` keeps its ordinary managed-home meaning. Supplying
+`-process-isolation-config=/absolute/path/process-isolation.json`
+selects the Linux-only hardened standalone mode; a policy that fails to load
+or validate refuses startup before serving, with no ordinary-mode fallback.
 The policy must be a root-owned, single-link regular file with mode `0600`.
 Every component is opened from `/` without following symlinks, and every
 ancestor must be root-owned and not writable by group or other. Unknown JSON
@@ -70,8 +74,8 @@ home for native tools.
 | Flag | Purpose |
 | --- | --- |
 | `-path` | Claude CLI executable (default: search `PATH`). |
-| `-process-isolation-config` | Required absolute path to the standalone Linux isolation policy described above. |
-| `-home` | Claude config directory (`CLAUDE_CONFIG_DIR`) for launched sessions; defaults to and, when set, must equal `standaloneStateRoot`. |
+| `-process-isolation-config` | Optional absolute path to the standalone Linux isolation policy described above. Omitted launches native work as the current identity. |
+| `-home` | Claude config directory (`CLAUDE_CONFIG_DIR`) for launched sessions. In hardened mode it defaults to and, when set, must equal `standaloneStateRoot`; ordinary mode accepts an independent clean path. |
 | `-scratch-dir` | Parent directory for ephemeral session scratch; empty means the system temp directory. |
 | `-provider-auth-root` | Durable host-owned directory holding the values-free provider-auth ledger. Empty, bare mode, or agent-wide static authentication leaves every `_claude/auth/*` method unadvertised. |
 | `-provider-auth-direct-home` | Exact Claude config directory the operator consents to native-login disconnect clearing. Secret-backed disconnect never clears it. |

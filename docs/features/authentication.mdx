@@ -9,8 +9,13 @@ nothing for a host to log into through ACP.
 
 ## Standalone credential input
 
-The standalone root supervisor never forwards its ambient environment.
-To pass `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN`, name each variable explicitly in the
+Without a `-process-isolation-config` policy, the adapter forwards a
+deterministic sanitized capture of its own ambient environment, so ambient
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN`
+values work as-is.
+
+With a policy, the standalone root supervisor never forwards its ambient
+environment. To pass `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN`, name each variable explicitly in the
 `inheritEnvironment` array of the root-owned
 `-process-isolation-config` policy. The value must be set in the supervisor
 environment or startup fails; identity, path, loader, XDG/native-home, and

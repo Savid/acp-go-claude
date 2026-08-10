@@ -839,7 +839,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		Cwd:                     start.Cwd,
 		ClaudeHome:              processClaudeHome,
 		Env:                     env,
-		ProcessIsolation:        claudeProcessIsolation(a.options.ProcessIsolation),
+		ProcessIsolation:        a.claudeIsolation(),
 		ExtraPathDirs:           slices.Clone(start.MetaOptions.ExtraPathDirs),
 		SessionID:               string(id),
 		ResumeID:                start.ResumeID,

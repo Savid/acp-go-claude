@@ -73,7 +73,7 @@ func (p *providerAuth) nativeOptions() (claude.Options, error) {
 		CLIPath:          p.agent.options.ExecutablePath,
 		ClaudeHome:       p.home.path,
 		Env:              p.agent.options.Env,
-		ProcessIsolation: claudeProcessIsolation(p.agent.options.ProcessIsolation),
+		ProcessIsolation: p.agent.claudeIsolation(),
 		ScratchParent:    scratch,
 		DarwinBestEffort: p.agent.containmentMode == RuntimeContainmentBestEffort,
 		AcquireKeychainDiscovery: func(discoveryCtx context.Context) (func(), error) {

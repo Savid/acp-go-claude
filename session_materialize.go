@@ -300,7 +300,7 @@ func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, options clau
 
 func (a *Agent) resumeCredentialOptions() claude.Options {
 	return claude.Options{
-		ProcessIsolation: claudeProcessIsolation(a.options.ProcessIsolation),
+		ProcessIsolation: a.claudeIsolation(),
 		DarwinBestEffort: a.containmentMode == RuntimeContainmentBestEffort,
 		AcquireKeychainDiscovery: func(discoveryCtx context.Context) (func(), error) {
 			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)

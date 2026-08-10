@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,8 +25,11 @@ func TestContainmentModeAndValidationAcrossPlatforms(t *testing.T) {
 	t.Cleanup(func() { runtimeGOOS = originalGOOS })
 
 	runtimeGOOS = "linux"
-	if got := containmentMode(Options{}); got != RuntimeContainmentAuthoritative {
+	if got := containmentMode(Options{}); got != RuntimeContainmentSharedIdentity {
 		t.Fatalf("Linux mode = %q", got)
+	}
+	if got := containmentMode(Options{ProcessIsolation: &ProcessIsolation{UID: 64251, GID: 64252}}); got != RuntimeContainmentAuthoritative {
+		t.Fatalf("Linux explicit mode = %q", got)
 	}
 	if got := containmentMode(Options{DarwinBestEffortContainment: true}); got != RuntimeContainmentUnavailable {
 		t.Fatalf("off-Darwin opt-in mode = %q", got)
@@ -74,8 +78,11 @@ func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
 	shared := Options{ProcessIsolation: &ProcessIsolation{UID: 1000, GID: 1000}}
 	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(shared))
 	require.True(t, RuntimeContainmentSharedIdentity.provesWholeTreeLifecycle())
+	require.False(t, sharedProcessIdentity(nil))
 
-	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(Options{}))
+	// An omitted policy launches the native tree as this process's own
+	// identity, so the shared report is the only truthful one — root included.
+	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(Options{}))
 	require.Equal(
 		t,
 		RuntimeContainmentAuthoritative,
@@ -84,6 +91,7 @@ func TestContainmentModeReportsASharedAgentIdentity(t *testing.T) {
 
 	containmentEffectiveUID = func() int { return 0 }
 	require.Equal(t, RuntimeContainmentAuthoritative, containmentMode(shared))
+	require.Equal(t, RuntimeContainmentSharedIdentity, containmentMode(Options{}))
 
 	containmentEffectiveUID = func() int { return 1000 }
 	runtimeGOOS = "darwin"
@@ -376,4 +384,75 @@ func TestPrepareUsageGenerationResources(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, generation.Release(true))
 	require.Equal(t, 4, releases)
+}
+
+// TestAgentSessionDefaultsToOrdinaryExecution proves omitting
+// WithProcessIsolation is the ordinary default: session establishment
+// succeeds, and every native launch is handed a clone of the one
+// current-identity capture — the ambient environment included — rather than an
+// isolation policy.
+func TestAgentSessionDefaultsToOrdinaryExecution(t *testing.T) {
+	t.Setenv("ACP_GO_CLAUDE_TEST_CANARY", "ambient-canary")
+
+	agent, _, _ := newFakeLifecycleAgent(t, nil)
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	resp, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err, "NewSession without isolation")
+	require.NotEmpty(t, resp.SessionId)
+
+	isolation := agent.claudeIsolation()
+	require.NotNil(t, isolation)
+	require.True(t, isolation.Implicit)
+	require.Equal(t, int64(os.Geteuid()), int64(isolation.UID))
+	require.Equal(t, int64(os.Getegid()), int64(isolation.GID))
+	require.Equal(t, "ambient-canary", isolation.BaseEnvironment["ACP_GO_CLAUDE_TEST_CANARY"])
+	require.Nil(t, isolation.IdentityLock)
+	require.Nil(t, isolation.AuthorityDomain)
+	require.Empty(t, isolation.StandaloneOwnerID)
+	require.Empty(t, isolation.StandaloneStateRoot)
+
+	isolation.BaseEnvironment["ACP_GO_CLAUDE_TEST_CANARY"] = "mutated"
+	require.Equal(t, "ambient-canary", agent.claudeIsolation().BaseEnvironment["ACP_GO_CLAUDE_TEST_CANARY"],
+		"implicit capture must be cloned, not shared")
+
+	require.Nil(t, (&Agent{}).claudeIsolation())
+}
+
+// TestExplicitProcessIsolationPreservesPolicy proves supplying
+// WithProcessIsolation stays explicit hardening: the policy reaches native
+// launches verbatim with no ambient environment mixed in, and an invalid
+// policy fails before any native process can spawn, with no ordinary-mode
+// fallback.
+func TestExplicitProcessIsolationPreservesPolicy(t *testing.T) {
+	t.Setenv("ACP_GO_CLAUDE_TEST_CANARY", "ambient-canary")
+
+	agent := NewAgent(WithProcessIsolation(ProcessIsolation{
+		UID: 64251, GID: 64252,
+		BaseEnvironment:     map[string]string{"PATH": "/policy/bin", "USER": "acp"},
+		StandaloneOwnerID:   "acp-go-claude-tests",
+		StandaloneStateRoot: "/var/lib/acp-go-claude-tests",
+	}))
+	t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+	isolation := agent.claudeIsolation()
+	require.NotNil(t, isolation)
+	require.False(t, isolation.Implicit)
+	require.Equal(t, uint32(64251), isolation.UID)
+	require.Equal(t, uint32(64252), isolation.GID)
+	require.NotContains(t, isolation.BaseEnvironment, "ACP_GO_CLAUDE_TEST_CANARY")
+	require.Equal(t, "/policy/bin", isolation.BaseEnvironment["PATH"])
+	require.Nil(t, agent.implicitIsolation, "explicit policy must not capture an implicit fallback")
+	require.Equal(t, "/var/lib/acp-go-claude-tests", agent.options.Home,
+		"standalone state root still names the managed home")
+
+	invalid := NewAgent(WithProcessIsolation(ProcessIsolation{UID: 0, GID: 0}))
+	t.Cleanup(func() { require.NoError(t, invalid.Close()) })
+	invalid.newClaudeClient = func(*slog.Logger, claude.Options) *claude.Client {
+		t.Fatal("an invalid explicit policy must fail before any native client exists")
+
+		return nil
+	}
+	_, err := invalid.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	require.Error(t, err, "invalid explicit policy must fail session establishment closed")
 }

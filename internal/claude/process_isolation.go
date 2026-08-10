@@ -3,6 +3,7 @@ package claude
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,19 +16,71 @@ import (
 )
 
 const (
-	processIsolationUIDEnv = privateAdapterEnvPrefix + "UID"
-	processIsolationGIDEnv = privateAdapterEnvPrefix + "GID"
-	processIsolationLinux  = "linux"
+	processIsolationUIDEnv      = privateAdapterEnvPrefix + "UID"
+	processIsolationGIDEnv      = privateAdapterEnvPrefix + "GID"
+	processIsolationImplicitEnv = privateAdapterEnvPrefix + "IMPLICIT"
+	processIsolationLinux       = "linux"
 )
 
-var processIsolationGOOS = runtime.GOOS
+var (
+	processIsolationGOOS = runtime.GOOS
+
+	implicitIsolationEnviron = os.Environ
+	implicitIsolationUID     = os.Geteuid
+	implicitIsolationGID     = os.Getegid
+)
+
+// ImplicitProcessIsolation captures the ordinary current-identity launch
+// policy used when the embedder configures no explicit isolation: the identity
+// this process already runs as — root or not — and a sanitized snapshot of the
+// ambient environment. The capture happens once per call, so every launch built
+// from one result sees the same base environment regardless of later ambient
+// mutation.
+func ImplicitProcessIsolation() *ProcessIsolation {
+	base := map[string]string{}
+
+	for _, entry := range implicitIsolationEnviron() {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key == "" || strings.ContainsRune(value, '\x00') ||
+			key == envClaudeCodeNested || strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) ||
+			authScrubbedEnvKey(key) {
+			continue
+		}
+
+		base[key] = value
+	}
+
+	return &ProcessIsolation{
+		UID:             implicitIdentityValue(implicitIsolationUID()),
+		GID:             implicitIdentityValue(implicitIsolationGID()),
+		BaseEnvironment: base,
+		Implicit:        true,
+	}
+}
+
+// implicitIdentityValue maps an effective id onto the 32 bits an isolation
+// policy stores. A platform that reports no id (-1) fails closed onto an id no
+// launch validation can match.
+func implicitIdentityValue(id int) uint32 {
+	if id < 0 || id > math.MaxUint32 {
+		return math.MaxUint32
+	}
+
+	return uint32(id)
+}
 
 func validateProcessIsolation(isolation *ProcessIsolation) error {
 	if isolation == nil {
 		return errors.New("process isolation is required")
 	}
 
-	if isolation.UID == 0 || isolation.GID == 0 {
+	if isolation.Implicit {
+		if isolation.IdentityLock != nil || isolation.AuthorityDomain != nil ||
+			isolation.StandaloneOwnerID != "" || isolation.StandaloneStateRoot != "" ||
+			isolation.identityAuthorityAdopted {
+			return errors.New("implicit current-identity launch forbids identity capabilities and standalone owner fields")
+		}
+	} else if isolation.UID == 0 || isolation.GID == 0 {
 		return errors.New("process isolation uid and gid must be nonzero")
 	}
 
@@ -39,13 +92,13 @@ func validateProcessIsolation(isolation *ProcessIsolation) error {
 		return fmt.Errorf("validate process isolation base environment: %w", err)
 	}
 
-	if processIsolationGOOS == processIsolationLinux {
+	if !isolation.Implicit && processIsolationGOOS == processIsolationLinux {
 		if err := validateStandaloneIdentityDisposition(isolation); err != nil {
 			return err
 		}
 	}
 
-	return validateProcessIsolationPlatform()
+	return validateProcessIsolationPlatform(isolation)
 }
 
 // sharedIdentitySupervisorRemedy states what an operator can change when the
@@ -248,20 +301,26 @@ func supervisorIdentityEnvironment(env []string, modeKey string, mode string, is
 	values[modeKey] = mode
 	values[processIsolationUIDEnv] = strconv.FormatUint(uint64(isolation.UID), 10)
 	values[processIsolationGIDEnv] = strconv.FormatUint(uint64(isolation.GID), 10)
+	values[processIsolationImplicitEnv] = strconv.FormatBool(isolation.Implicit)
 
 	return environmentList(values)
 }
 
-func expectedSupervisorIdentity() (uint32, uint32, error) {
+// expectedSupervisorIdentity reads the identity the bootstrap must run as. The
+// implicit current-identity launch is the one shape where a zero id is honest:
+// it names whoever already runs the supervisor, root included.
+func expectedSupervisorIdentity() (uint32, uint32, bool, error) {
+	implicit := os.Getenv(processIsolationImplicitEnv) == "true"
+
 	uid, err := strconv.ParseUint(os.Getenv(processIsolationUIDEnv), 10, 32)
-	if err != nil || uid == 0 {
-		return 0, 0, errors.New("missing or invalid process isolation uid")
+	if err != nil || (uid == 0 && !implicit) {
+		return 0, 0, false, errors.New("missing or invalid process isolation uid")
 	}
 
 	gid, err := strconv.ParseUint(os.Getenv(processIsolationGIDEnv), 10, 32)
-	if err != nil || gid == 0 {
-		return 0, 0, errors.New("missing or invalid process isolation gid")
+	if err != nil || (gid == 0 && !implicit) {
+		return 0, 0, false, errors.New("missing or invalid process isolation gid")
 	}
 
-	return uint32(uid), uint32(gid), nil
+	return uint32(uid), uint32(gid), implicit, nil
 }

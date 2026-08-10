@@ -36,7 +36,7 @@ accidentally release the quarantined admission.
 | Option | Purpose |
 | --- | --- |
 | `WithExecutablePath` | Set the Claude CLI path (default: search the isolation policy's `PATH`). |
-| `WithProcessIsolation` | Mandatory nonzero target UID/GID and complete replacement environment for native Claude processes. On Linux the embedded supervisor stays trusted root; only the native child receives the configured identity, with supplementary groups cleared. |
+| `WithProcessIsolation` | Optional explicit hardening: a nonzero target UID/GID and complete replacement environment for native Claude processes. On Linux the embedded supervisor stays trusted root; only the native child receives the configured identity, with supplementary groups cleared. Omitting the option launches native work as the current identity — root or not — over a deterministic clone of the ambient environment, reported as `shared_identity` on Linux. |
 | `WithHome` | Set `CLAUDE_CONFIG_DIR` for launched Claude processes. Standalone isolation defaults it to `StandaloneStateRoot` and rejects any different explicit path. |
 | `WithScratchDir` | Parent directory for ephemeral on-disk materialization, created `0700` when missing (default: system temp). |
 | `WithInputHandoffRoot` | Absolute directory prompt images may be handed over in as local files. Read-only to the adapter; unset rejects every handoff-form block. |

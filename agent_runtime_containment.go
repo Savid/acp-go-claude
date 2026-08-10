@@ -56,7 +56,10 @@ func containmentMode(options Options) RuntimeContainmentMode {
 
 	switch runtimeGOOS {
 	case platformLinux:
-		if sharedProcessIdentity(options.ProcessIsolation) {
+		// Omission launches the native tree as the identity this process
+		// already runs as, so shared identity is the only truthful report; an
+		// authoritative claim belongs solely to an explicit distinct identity.
+		if options.ProcessIsolation == nil || sharedProcessIdentity(options.ProcessIsolation) {
 			return RuntimeContainmentSharedIdentity
 		}
 

@@ -55,8 +55,9 @@ guardian or liveness supervisor is started, no `/var/lib/acp-go` authority is
 touched, and no UID/GID policy, standalone owner, or `sudo` is required. The
 adapter builds its ordinary sanitized environment — the ambient environment
 minus the private adapter prefix, `CLAUDECODE`, and the variables scrubbed from
-every child — and completes the process it started
-together with the process group it placed that process in.
+every child — and reaps the direct child after sending bounded best-effort
+TERM/KILL to its original process group. It does not prove that group absent or
+that a descendant which left it stopped.
 
 That boundary is deliberately non-authoritative. It proves no credential
 separation between the adapter and Claude, publishes no provider-descendant

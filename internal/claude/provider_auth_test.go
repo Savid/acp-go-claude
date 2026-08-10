@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -677,14 +679,138 @@ func TestAuthLoginSubmitFailsWhenTheChildIsGone(t *testing.T) {
 		"printf '" + AuthLoginPrompt + "'\n" +
 		"exit 0\n"
 
-	options, generation := authTestOptions(t, Options{Cwd: dir})
-	options.CLIPath = writeShellScript(t, filepath.Join(dir, "quick"), script)
+	options := Options{
+		CLIPath:             writeShellScript(t, filepath.Join(dir, "quick"), script),
+		Cwd:                 dir,
+		ScratchParent:       dir,
+		OrdinaryEnvironment: OrdinaryEnvironment(),
+	}
 
-	login, _, err := StartAuthLogin(t.Context(), options, generation)
+	login, _, err := StartAuthLogin(t.Context(), options, nil)
 	require.NoError(t, err)
 	require.NoError(t, login.Close())
 
 	require.Error(t, login.Submit("code#state"))
+}
+
+func TestAuthLoginOrdinaryWaitStartsAfterThePresentationVerdict(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' '" + testAuthorizeURL + "'\n" +
+		"printf '" + AuthLoginPrompt + "'\n" +
+		"sleep 30\n"
+	options := Options{
+		CLIPath:             writeShellScript(t, filepath.Join(dir, "gated"), script),
+		Cwd:                 dir,
+		ScratchParent:       dir,
+		OrdinaryEnvironment: OrdinaryEnvironment(),
+	}
+
+	readerEntered := make(chan struct{})
+	releaseReader := make(chan struct{})
+	originalReader := authLoginPresentationReader
+	authLoginPresentationReader = func(reader io.Reader) (string, error) {
+		close(readerEntered)
+		<-releaseReader
+
+		return ReadAuthLoginPresentation(reader)
+	}
+	t.Cleanup(func() { authLoginPresentationReader = originalReader })
+
+	waiterReady, starts := observeAuthLoginExitStart(t)
+	type startResult struct {
+		login *AuthLogin
+		url   string
+		err   error
+	}
+	started := make(chan startResult, 1)
+	go func() {
+		login, url, err := StartAuthLogin(t.Context(), options, nil)
+		started <- startResult{login: login, url: url, err: err}
+	}()
+
+	waiter := <-waiterReady
+	<-readerEntered
+	require.Zero(t, starts.Load())
+	select {
+	case <-waiter.done:
+		t.Fatal("ordinary login child was reaped before presentation ownership ended")
+	default:
+	}
+
+	close(releaseReader)
+	result := <-started
+	require.NoError(t, result.err)
+	require.Equal(t, testAuthorizeURL, result.url)
+	require.Equal(t, int64(1), starts.Load())
+	require.NoError(t, result.login.Close())
+	require.Equal(t, int64(1), starts.Load())
+	select {
+	case <-waiter.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ordinary login child was not reaped")
+	}
+}
+
+func TestAuthLoginPresentationTimeoutStartsAndReapsTheOrdinaryWaiter(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses /bin/sh scripts")
+	}
+
+	dir := t.TempDir()
+	options := Options{
+		CLIPath:             writeShellScript(t, filepath.Join(dir, "silent"), "#!/bin/sh\nsleep 30\n"),
+		Cwd:                 dir,
+		ScratchParent:       dir,
+		OrdinaryEnvironment: OrdinaryEnvironment(),
+	}
+	originalWait := authLoginPresentationWait
+	authLoginPresentationWait = 20 * time.Millisecond
+	t.Cleanup(func() { authLoginPresentationWait = originalWait })
+
+	waiterReady, starts := observeAuthLoginExitStart(t)
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := StartAuthLogin(t.Context(), options, nil)
+		result <- err
+	}()
+
+	waiter := <-waiterReady
+	require.ErrorIs(t, <-result, context.DeadlineExceeded)
+	require.Equal(t, int64(1), starts.Load())
+	select {
+	case <-waiter.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed-out ordinary login child was not reaped")
+	}
+}
+
+func observeAuthLoginExitStart(t *testing.T) (<-chan *commandWait, *atomic.Int64) {
+	t.Helper()
+
+	original := authLoginPrepareChildExit
+	waiterReady := make(chan *commandWait, 1)
+	starts := &atomic.Int64{}
+	authLoginPrepareChildExit = func(tree *processContainment, command *exec.Cmd) (*commandWait, func()) {
+		waiter, begin := prepareChildExit(tree, command)
+		waiterReady <- waiter
+
+		var once sync.Once
+
+		return waiter, func() {
+			once.Do(func() {
+				starts.Add(1)
+				begin()
+			})
+		}
+	}
+	t.Cleanup(func() { authLoginPrepareChildExit = original })
+
+	return waiterReady, starts
 }
 
 func TestAuthCloseErrorTreatsAnExitStatusAsExpected(t *testing.T) {

@@ -48,7 +48,7 @@ func resolveOrdinaryExecutable(name string, env []string) (string, error) {
 	}
 
 	if filepath.Base(name) != name {
-		resolved, err := ordinaryLookPath(name)
+		resolved, err := ordinaryLookPath(name, env)
 		if err != nil {
 			return "", fmt.Errorf("resolve executable %q: %w", name, err)
 		}
@@ -56,12 +56,12 @@ func resolveOrdinaryExecutable(name string, env []string) (string, error) {
 		return resolved, nil
 	}
 
-	for _, directory := range filepath.SplitList(environmentMap(env)[envSearchPath]) {
+	for _, directory := range filepath.SplitList(ordinaryEnvironmentValue(env, envSearchPath)) {
 		if directory == "" {
 			continue
 		}
 
-		if resolved, err := ordinaryLookPath(filepath.Join(directory, name)); err == nil {
+		if resolved, err := ordinaryLookPath(filepath.Join(directory, name), env); err == nil {
 			return resolved, nil
 		}
 	}
@@ -69,7 +69,7 @@ func resolveOrdinaryExecutable(name string, env []string) (string, error) {
 	return "", fmt.Errorf("find %s in PATH: %w", name, exec.ErrNotFound)
 }
 
-var ordinaryLookPath = exec.LookPath
+var ordinaryLookPath = ordinaryExecutableCandidate
 
 // resolveLaunchExecutable picks the resolution rules the selected launch mode
 // actually has. A hardened policy owns its whole PATH and is held to absolute

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -30,6 +31,8 @@ const authLoginHost = "claude.com"
 const authLoginMaxURLBytes = 2048
 
 var authLoginHandoffGeneratedNativeTree = handoffGeneratedNativeTree
+var authLoginPresentationReader = ReadAuthLoginPresentation
+var authLoginPrepareChildExit = prepareChildExit
 
 // authRedirectQueryKey names the query parameter carrying the hosted callback.
 const authRedirectQueryKey = "redirect_uri"
@@ -409,6 +412,7 @@ type AuthLogin struct {
 	generation *DarwinGeneration
 	shim       *browserShim
 	exit       *commandWait
+	beginExit  func()
 
 	once     sync.Once
 	closeErr error
@@ -442,7 +446,7 @@ func StartAuthLogin(ctx context.Context, options Options, generation *DarwinGene
 	presented := make(chan authPresentation, 1)
 
 	go func() {
-		authorizeURL, readErr := ReadAuthLoginPresentation(login.stdout)
+		authorizeURL, readErr := authLoginPresentationReader(login.stdout)
 		presented <- authPresentation{url: authorizeURL, err: readErr}
 	}()
 
@@ -451,6 +455,8 @@ func StartAuthLogin(ctx context.Context, options Options, generation *DarwinGene
 
 	select {
 	case result := <-presented:
+		login.beginExit()
+
 		if result.err != nil {
 			return nil, "", errors.Join(result.err, login.Close())
 		}
@@ -554,6 +560,7 @@ func startAuthLoginChild(
 	}
 
 	started = true
+	exit, beginExit := authLoginPrepareChildExit(tree, launch.cmd)
 
 	return &AuthLogin{
 		stdin:      stdin,
@@ -561,7 +568,8 @@ func startAuthLoginChild(
 		tree:       tree,
 		generation: generation,
 		shim:       shim,
-		exit:       startChildExit(tree, launch.cmd),
+		exit:       exit,
+		beginExit:  beginExit,
 	}, nil
 }
 
@@ -617,14 +625,19 @@ func (l *AuthLogin) Close() error {
 	l.once.Do(func() {
 		_ = l.stdin.Close()
 
+		stdoutErr := l.stdout.Close()
+		if errors.Is(stdoutErr, os.ErrClosed) {
+			stdoutErr = nil
+		}
+
+		l.beginExit()
+
 		containErr := processBoundaryComplete(l.tree, authShutdownWait)
 		waitErr := l.reap()
 
-		_ = l.stdout.Close()
-
 		closeErr := processContainmentClose(l.tree)
 
-		l.closeErr = errors.Join(authCloseError(containErr, waitErr, closeErr), l.shim.remove())
+		l.closeErr = errors.Join(authCloseError(containErr, waitErr, closeErr), stdoutErr, l.shim.remove())
 		l.closeErr = errors.Join(l.closeErr, l.generation.finish(!errors.Is(l.closeErr, ErrProcessContainmentIncomplete)))
 	})
 

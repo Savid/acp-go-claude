@@ -19,20 +19,24 @@ type processTreeCommand struct {
 	ordinary  bool
 }
 
-// startChildExit starts the observation of the direct child's own exit. Every
-// boundary outside Darwin leaves the reap to whoever owns the child, so this is
-// that reap, and the owner collects its result instead of waiting a second
-// time. The ordinary boundary holds that sole reap paused until someone owns
-// the wait, so this starts it and hands the same observation back. It signals
-// only that the child ended; it terminates nothing, so the containment boundary
-// stays the sole authoritative shutdown channel.
-func startChildExit(tree *processContainment, cmd *exec.Cmd) *commandWait {
-	if waiter := tree.ordinary.observeExit(); waiter != nil {
-		return waiter
+// prepareChildExit returns the boundary's sole direct-child waiter and its
+// idempotent arm. Ordinary execution leaves the wait paused for the owner of
+// the command's pipes. The hardened Linux helper has no competing parent pipe,
+// so its existing eager observation remains armed.
+func prepareChildExit(tree *processContainment, cmd *exec.Cmd) (*commandWait, func()) {
+	if tree != nil && tree.ordinary != nil {
+		return tree.ordinary.waiter, tree.ordinary.beginWait
 	}
 
-	wait, begin := startPausedCommandWait(cmd.Wait)
+	waiter, begin := startPausedCommandWait(cmd.Wait)
 	begin()
 
-	return wait
+	return waiter, begin
+}
+
+func startChildExit(tree *processContainment, command *exec.Cmd) *commandWait {
+	waiter, begin := prepareChildExit(tree, command)
+	begin()
+
+	return waiter
 }

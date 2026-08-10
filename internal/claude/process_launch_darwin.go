@@ -23,17 +23,21 @@ type processTreeCommand struct {
 	generation *DarwinGeneration
 }
 
-// startChildExit hands back the observation of the direct child's own exit.
-// Every Darwin boundary owns exactly one reap of that child, so this is that
-// reap rather than a second one: two goroutines waiting on one command make the
-// loser answer at once and wrongly, whatever the child is still doing. The
-// best-effort boundary already started its reap on the launch helper; the
-// ordinary boundary holds its own paused until an owner appears, and an exit
-// observer is one.
-func startChildExit(tree *processContainment, _ *exec.Cmd) *commandWait {
-	if waiter := tree.ordinary.observeExit(); waiter != nil {
-		return waiter
+// prepareChildExit returns the boundary's sole direct-child waiter and the
+// operation that arms it. The ordinary waiter stays paused so a caller that
+// owns a command pipe can finish reading first. Darwin best-effort already
+// armed its waiter during process-group validation, so its arm is a no-op.
+func prepareChildExit(tree *processContainment, _ *exec.Cmd) (*commandWait, func()) {
+	if tree != nil && tree.ordinary != nil {
+		return tree.ordinary.waiter, tree.ordinary.beginWait
 	}
 
-	return tree.waiter
+	return tree.waiter, func() {}
+}
+
+func startChildExit(tree *processContainment, command *exec.Cmd) *commandWait {
+	waiter, begin := prepareChildExit(tree, command)
+	begin()
+
+	return waiter
 }

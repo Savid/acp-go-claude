@@ -419,8 +419,12 @@ func containedClaudeOutput(
 	generationOwnedByTree = true
 
 	childStdoutCloseErr := childStdout.Close()
+
+	stdoutClosed := false
 	defer func() {
-		returnErr = errors.Join(returnErr, stdout.Close())
+		if !stdoutClosed {
+			returnErr = errors.Join(returnErr, stdout.Close())
+		}
 	}()
 
 	if options.ObserveProcessInventory != nil {
@@ -448,6 +452,8 @@ func containedClaudeOutput(
 	case read = <-readDone:
 	case <-ctx.Done():
 		contextErr = ctx.Err()
+		stdoutCloseErr := stdout.Close()
+		stdoutClosed = true
 		containErr := processBoundaryComplete(tree, processShutdownWaitDelay)
 		waitErr := processWaitContained(tree, launch.cmd)
 		read = <-readDone
@@ -456,7 +462,7 @@ func containedClaudeOutput(
 		observeAuxiliaryBoundaryComplete(options, containErr)
 
 		return read.data, errors.Join(
-			contextErr, read.err, waitErr, containErr, closeErr, childStdoutCloseErr,
+			contextErr, read.err, waitErr, containErr, closeErr, stdoutCloseErr, childStdoutCloseErr,
 		)
 	}
 

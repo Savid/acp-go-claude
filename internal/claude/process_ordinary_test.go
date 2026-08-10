@@ -66,7 +66,7 @@ func TestResolveOrdinaryExecutableUsesAmbientRules(t *testing.T) {
 	_, err := resolveOrdinaryExecutable("  ", nil)
 	require.ErrorContains(t, err, "empty")
 
-	ordinaryLookPath = func(name string) (string, error) {
+	ordinaryLookPath = func(name string, _ []string) (string, error) {
 		if filepath.Base(name) != "claude" {
 			return "", exec.ErrNotFound
 		}

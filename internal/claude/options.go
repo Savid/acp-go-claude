@@ -67,7 +67,8 @@ type Options struct {
 	ObserveProcessInventory func(context.Context, func() (int, bool))
 	// ObserveBoundaryComplete reports that the selected process boundary
 	// completed. Only the authoritative backend makes that a whole-tree claim;
-	// for every other boundary it means the directly owned processes ended.
+	// every other boundary reports only its documented direct-child or original-
+	// group guarantee.
 	ObserveBoundaryComplete func(context.Context)
 	// DarwinBestEffort selects the explicitly limited process-group backend.
 	DarwinBestEffort bool
@@ -98,8 +99,8 @@ type Options struct {
 	Hooks         Hooks
 }
 
-// ProcessIsolation is the mandatory credential and complete environment base
-// applied to every provider process.
+// ProcessIsolation selects the explicit hardened Linux identity boundary and
+// supplies its credential and complete environment base.
 type ProcessIdentityLockCapability interface {
 	Duplicate() (*os.File, error)
 }

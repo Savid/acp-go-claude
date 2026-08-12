@@ -1326,15 +1326,17 @@ func exerciseClaudeSupervisorPeerDeath(t *testing.T, fixture *claudeSupervisorPe
 		t.Fatalf("kill Claude supervisor peer %d: %v", victimPID, err)
 	}
 	awaitClaudeSupervisorProcessDead(t, victimPID)
-	assertClaudeSupervisorAuthorityLocks(t, "/var/lib/acp-go/agent-identities", fixture.uid, false)
-	for _, pid := range fixture.descendantPIDs {
-		if !processExists(pid) {
-			t.Fatalf("Claude supervised descendant %d exited before survivor containment", pid)
+	if victimPID != fixture.guardianPID {
+		assertClaudeSupervisorAuthorityLocks(t, "/var/lib/acp-go/agent-identities", fixture.uid, false)
+		for _, pid := range fixture.descendantPIDs {
+			if !processExists(pid) {
+				t.Fatalf("Claude supervised descendant %d exited before survivor containment", pid)
+			}
 		}
-	}
 
-	if err := syscall.Kill(survivorPID, syscall.SIGCONT); err != nil {
-		t.Fatalf("resume surviving Claude supervisor %d: %v", survivorPID, err)
+		if err := syscall.Kill(survivorPID, syscall.SIGCONT); err != nil {
+			t.Fatalf("resume surviving Claude supervisor %d: %v", survivorPID, err)
+		}
 	}
 	if err := fixture.tree.complete(10 * time.Second); err != nil {
 		t.Fatalf("quiesce Claude supervisor after peer death: %v", err)

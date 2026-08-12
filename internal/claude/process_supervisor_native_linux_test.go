@@ -465,9 +465,13 @@ func TestRunTurnSupervisorNativeEndsTheTurnOnEveryTerminalEvent(t *testing.T) {
 		require.Contains(t, <-registered, os.Signal(syscall.SIGHUP))
 		ready.await(t, ready.ready, "native readiness")
 
-		// A signal that is not a kernel signal has no number to forward, so it
-		// must be dropped rather than turned into signal zero — which probes a
-		// process group instead of terminating it.
+		// A bare SIGHUP is not authenticated by guardian-peer EOF, so it must not
+		// reach the native group or suspend liveness.
+		target <- syscall.SIGHUP
+
+		// A signal that is not a kernel signal has no number to forward either,
+		// so it must be dropped rather than turned into signal zero — which probes
+		// a process group instead of terminating it.
 		target <- supervisorTestSignal("not-a-kernel-signal")
 		target <- syscall.SIGTERM
 

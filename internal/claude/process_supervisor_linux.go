@@ -1449,6 +1449,10 @@ func runTurnSupervisorNative(
 
 			return waitErr
 		case <-controlDone:
+			guardianExited = errors.Is(
+				validateTurnSupervisorGuardianPeer(guardianPeer, guardianState),
+				errTurnSupervisorGuardianExited,
+			)
 			_ = turnSupervisorSignalGroup(native.Process.Pid, syscall.SIGKILL)
 			waitErr := <-waitDone
 
@@ -1462,6 +1466,13 @@ func runTurnSupervisorNative(
 		case received := <-signals:
 			nativeSignal, ok := received.(syscall.Signal)
 			if !ok {
+				continue
+			}
+
+			if nativeSignal == syscall.SIGHUP {
+				// Linux sends SIGHUP followed by SIGCONT when guardian death
+				// orphans a stopped liveness process group. Guardian-peer EOF,
+				// not this unauthenticated signal, authorizes containment.
 				continue
 			}
 

@@ -802,6 +802,7 @@ func superviseTurnSupervisorGuardian(
 
 terminalReceived:
 	_, terminalErr := parseTurnSupervisorTerminalFrame(result.line)
+
 	if result.err == nil && terminalErr == nil {
 		if turnSupervisorAfterTerminalRead != nil {
 			turnSupervisorAfterTerminalRead()
@@ -820,9 +821,11 @@ terminalReceived:
 		if ackErr == nil && written != len(result.line) {
 			ackErr = io.ErrShortWrite
 		}
+
 		if ackErr != nil {
 			return errors.Join(waitErr, fmt.Errorf("acknowledge Claude liveness completion: %w", ackErr))
 		}
+
 		_ = peer.Close()
 
 		if turnSupervisorAfterTerminalACK != nil {
@@ -847,9 +850,8 @@ terminalReceived:
 
 		return errors.Join(waitErr, fmt.Errorf("claude liveness completion failed: %s", failure), result.err, containErr, closeErr)
 	}
-	if result.err == nil {
-		result.err = terminalErr
-	}
+
+	result.err = errors.Join(result.err, terminalErr)
 
 	completionErr := completeTurnSupervisorAuthority(
 		completion,
@@ -1283,7 +1285,9 @@ func runTurnSupervisorNative(
 
 	signals := make(chan os.Signal, 2)
 
-	turnSupervisorSignalNotify(signals, syscall.SIGINT, syscall.SIGTERM)
+	// A stopped liveness group receives SIGHUP when guardian death orphans it.
+	// Keep that event inside the normal forwarding and containment path.
+	turnSupervisorSignalNotify(signals, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
 	defer turnSupervisorSignalStop(signals)
 
 	controlDone := make(chan struct{})
@@ -1504,6 +1508,7 @@ func completeTurnSupervisorLiveness(
 	if guardianState == nil {
 		return errors.New("claude liveness guardian acknowledgement is unavailable")
 	}
+
 	if guardianState.preTerminalErr != nil {
 		return guardianState.preTerminalErr
 	}
@@ -1531,6 +1536,7 @@ func completeTurnSupervisorLiveness(
 	if err == nil && written != len(terminalFrame) {
 		err = io.ErrShortWrite
 	}
+
 	if err != nil {
 		if errors.Is(err, syscall.EPIPE) {
 			<-guardianState.done
@@ -1548,6 +1554,7 @@ func completeTurnSupervisorLiveness(
 	if guardianState.err != nil && !errors.Is(guardianState.err, io.EOF) {
 		return guardianState.err
 	}
+
 	if guardianState.err == nil && guardianState.response != terminalFrame {
 		return errors.New("claude guardian completion acknowledgement did not echo the terminal challenge")
 	}
@@ -1570,6 +1577,7 @@ func parseTurnSupervisorTerminalFrame(frame string) (string, error) {
 	}
 
 	encoded := frame[len(turnSupervisorDonePrefix) : len(frame)-1]
+
 	challenge, err := hex.DecodeString(encoded)
 	if err != nil || len(challenge) != turnSupervisorChallengeLen {
 		return "", fmt.Errorf("invalid Claude liveness terminal challenge %q", encoded)
@@ -1651,6 +1659,7 @@ func validateTurnSupervisorGuardianPeer(peer *os.File, state *turnSupervisorGuar
 	if ready == 0 && poll[0].Revents == 0 {
 		return nil
 	}
+
 	if poll[0].Revents&unix.POLLHUP != 0 {
 		// A hangup makes the observer's bounded read finite. Let that single
 		// reader distinguish empty EOF (guardian death) from queued bytes plus
@@ -1672,6 +1681,7 @@ func observedTurnSupervisorGuardianPeerState(state *turnSupervisorGuardianState)
 	if errors.Is(state.err, io.EOF) {
 		return errTurnSupervisorGuardianExited
 	}
+
 	if state.err == nil {
 		return errors.New("claude guardian acknowledged completion before native launch")
 	}

@@ -992,6 +992,7 @@ func TestCompleteTurnSupervisorLivenessPublishesOnlyWhatItProved(t *testing.T) {
 				wrong[len(turnSupervisorDonePrefix)] = '0'
 			}
 			_, responseErr := guardian.Write(wrong)
+
 			return written, errors.Join(err, responseErr, guardian.Close())
 		})
 		err := completeTurnSupervisorLiveness(

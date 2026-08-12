@@ -434,6 +434,12 @@ func TestRunTurnSupervisorNativeEndsTheTurnOnEveryTerminalEvent(t *testing.T) {
 
 	t.Run("signals are forwarded to the native group", func(t *testing.T) {
 		notified := supervisorCovNativeSeams(t)
+		originalNotify := turnSupervisorSignalNotify
+		registered := make(chan []os.Signal, 1)
+		turnSupervisorSignalNotify = func(target chan<- os.Signal, signals ...os.Signal) {
+			registered <- append([]os.Signal(nil), signals...)
+			originalNotify(target, signals...)
+		}
 
 		signaled := make(chan [2]int, 8)
 		turnSupervisorSignalGroup = func(pgid int, processSignal syscall.Signal) error {
@@ -456,6 +462,7 @@ func TestRunTurnSupervisorNativeEndsTheTurnOnEveryTerminalEvent(t *testing.T) {
 		}()
 
 		target := <-notified
+		require.Contains(t, <-registered, os.Signal(syscall.SIGHUP))
 		ready.await(t, ready.ready, "native readiness")
 
 		// A signal that is not a kernel signal has no number to forward, so it

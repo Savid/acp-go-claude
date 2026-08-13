@@ -78,8 +78,8 @@ to open the path. The [elicitation guide](/docs/features/elicitation) describes
 the capability gate in full.
 
 - `TestClientElicitationCapabilityGating` (`session_elicitation_test.go`) fixes
-  the gate: a nil capability blocks both modes, an empty object opens form, and
-  a URL-only capability opens only URL.
+  the gate: nil, an empty object, and explicit null mode fields block both
+  modes; only an explicit non-null form or URL capability opens that mode.
 - `TestHandleAskUserQuestion` (`session_elicitation_test.go`) denies the native
   AskUserQuestion callback when no elicitation-capable connection is present,
   then accepts, declines, and fails closed across the answered paths once the

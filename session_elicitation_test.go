@@ -336,9 +336,11 @@ func TestClientElicitationCapabilityGating(t *testing.T) {
 		wantURL  bool
 	}{
 		{name: "nil", caps: nil, wantForm: false, wantURL: false},
-		{name: "empty object", caps: &acp.ElicitationCapabilities{}, wantForm: true, wantURL: false},
+		{name: "empty object", caps: &acp.ElicitationCapabilities{}, wantForm: false, wantURL: false},
+		{name: "both null", caps: &acp.ElicitationCapabilities{Form: nil, Url: nil}, wantForm: false, wantURL: false},
 		{name: "url only", caps: &acp.ElicitationCapabilities{Url: &acp.ElicitationUrlCapabilities{}}, wantForm: false, wantURL: true},
-		{name: "form explicit", caps: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}, wantForm: true, wantURL: false},
+		{name: "form only", caps: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}, wantForm: true, wantURL: false},
+		{name: "form and url", caps: &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}, Url: &acp.ElicitationUrlCapabilities{}}, wantForm: true, wantURL: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -349,6 +351,15 @@ func TestClientElicitationCapabilityGating(t *testing.T) {
 			require.Equal(t, tt.wantURL, agent.clientSupportsURLElicitation())
 		})
 	}
+
+	var decoded acp.ClientCapabilities
+	require.NoError(t, json.Unmarshal([]byte(`{"elicitation":{"form":null,"url":null}}`), &decoded))
+	require.NotNil(t, decoded.Elicitation)
+
+	agent := NewAgent()
+	agent.clientCapabilities = decoded
+	require.False(t, agent.clientSupportsFormElicitation())
+	require.False(t, agent.clientSupportsURLElicitation())
 }
 
 func TestElicitationHelpersAndHandlers(t *testing.T) {
@@ -382,7 +393,8 @@ func TestElicitationHelpersAndHandlers(t *testing.T) {
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{}
 	response, err = session.handleElicitation(t.Context(), claude.ElicitationRequest{Mode: claude.ElicitationModeForm})
 	require.NoError(t, err)
-	require.Equal(t, claude.ElicitationActionAccept, response.Action)
+	require.Equal(t, claude.ElicitationActionDecline, response.Action)
+	require.Len(t, conn.Elicitations(), 1)
 
 	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Url: &acp.ElicitationUrlCapabilities{}}
 	response, err = session.handleElicitation(t.Context(), claude.ElicitationRequest{Mode: claude.ElicitationModeForm})

@@ -32,6 +32,7 @@ func TestInitializeContractCapabilities(t *testing.T) {
 
 	claudeMeta := requireAnyMap(t, resp.AgentCapabilities.Meta[claudeMetaKey])
 	require.Equal(t, ForkSessionMethod, requireAnyMap(t, claudeMeta["fork"])["method"])
+	require.Equal(t, "ACP v1 elicitation", requireAnyMap(t, claudeMeta["elicitation"])["tracks"])
 	require.Equal(t, RawEventMethod, requireAnyMap(t, claudeMeta["rawEvent"])["method"])
 	require.Equal(t, SessionStoreFormat, requireAnyMap(t, claudeMeta["sessionStore"])["format"])
 	require.Equal(t, "_meta.claude.options.outputSchema", requireAnyMap(t, claudeMeta["structuredOutput"])["config"])

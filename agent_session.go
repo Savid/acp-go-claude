@@ -561,11 +561,8 @@ func (a *Agent) clientElicitationCapabilities() *acp.ElicitationCapabilities {
 
 func (a *Agent) clientSupportsFormElicitation() bool {
 	caps := a.clientElicitationCapabilities()
-	if caps == nil {
-		return false
-	}
 
-	return caps.Form != nil || caps.Url == nil
+	return caps != nil && caps.Form != nil
 }
 
 func (a *Agent) clientSupportsURLElicitation() bool {

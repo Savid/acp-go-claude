@@ -9,15 +9,18 @@ forward it to the host as an ACP elicitation request. This is how Claude's
 
 ## Capability gating
 
-Elicitation is only used when the client advertised elicitation support during
+Elicitation is only used when the client advertised the matching mode during
 ACP initialize. The adapter checks that capability before sending anything, so a
 client that never opted in is never handed an elicitation request it cannot
-render.
+render. A mode is advertised only by an explicit non-null `form` or `url`
+field; a bare elicitation object advertises no modes.
 
 | Client elicitation capability | Adapter behavior |
 | --- | --- |
-| Advertised | Claude's question is forwarded as an ACP elicitation request. |
-| Absent | No request is sent; Claude receives a bounded failure and the turn continues or stops per Claude's own logic. |
+| `form: {}` | Claude's form question is forwarded as an ACP elicitation request. |
+| `url: {}` | Claude's URL question is forwarded as an ACP elicitation request. |
+| Both explicit modes | Claude's form and URL questions can both be forwarded. |
+| Absent, `{}`, or both mode fields `null` | No request is sent; Claude receives a bounded failure and the turn continues or stops per Claude's own logic. |
 
 <Note>
 Elicitation is not the permission channel. Tool-access approvals always use
@@ -25,8 +28,8 @@ Elicitation is not the permission channel. Tool-access approvals always use
 questions only.
 </Note>
 
-Because behavior depends on the client's advertised capability, test both paths:
-a client that supports elicitation and one that does not.
+Because behavior depends on the client's advertised capability, tests cover
+nil, empty, both-null, URL-only, form-only, and both-mode shapes.
 
 ## Route correlation
 

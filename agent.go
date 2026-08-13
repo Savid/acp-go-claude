@@ -342,7 +342,7 @@ func (a *Agent) capabilityMeta() map[string]any {
 			"elicitation": map[string]any{
 				"unstable": true,
 				"scope":    string(RuntimeResourceSession),
-				"tracks":   "in-progress ACP elicitation RFD",
+				"tracks":   "ACP v1 elicitation",
 			},
 			"rawEvent": map[string]any{
 				jsonFieldMethod:  RawEventMethod,

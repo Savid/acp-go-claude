@@ -138,6 +138,30 @@ func TestBuildEnv(t *testing.T) {
 	require.NotContains(t, env, "XDG_CONFIG_HOME=/override/xdg-config")
 }
 
+// TestBuildEnvKeepsEnvironmentNamesDistinctByPlatformIdentity proves the launch
+// environment answers variable identity through the platform seam rather than by
+// folding case everywhere. On Unix a lowercase spelling of a managed root is a
+// variable of the host's own and survives; on Windows it names the managed root
+// itself and is replaced.
+func TestBuildEnvKeepsEnvironmentNamesDistinctByPlatformIdentity(t *testing.T) {
+	options := withTestProcessIsolation(Options{
+		ClaudeHome: "/tmp/claude-home",
+		Env:        map[string]string{"claude_config_dir": "/host/own"},
+	})
+	options.ProcessIsolation.BaseEnvironment["home"] = "/host/own-home"
+
+	env := BuildEnv(options)
+
+	folded := EnvironmentKey("claude_config_dir") == EnvironmentKey(envClaudeConfigDir)
+	require.Equal(t, !folded, slices.Contains(env, EnvironmentKey("claude_config_dir")+"=/host/own"))
+	require.Equal(t, !folded, slices.Contains(env, EnvironmentKey("home")+"=/host/own-home"))
+	require.Contains(t, env, envClaudeConfigDir+"=/tmp/claude-home")
+	require.Equal(t, 1, countEnvKey(env, envClaudeConfigDir))
+
+	require.True(t, managedRootEnvKey(envClaudeConfigDir))
+	require.Equal(t, folded, managedRootEnvKey("claude_config_dir"))
+}
+
 func TestBuildEnvPrependsExtraPathDirs(t *testing.T) {
 	separator := string(os.PathListSeparator)
 

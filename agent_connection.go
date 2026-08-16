@@ -89,12 +89,3 @@ func requestError(err error) *acp.RequestError {
 
 	return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
 }
-
-func lifecycleMetaError(err error) error {
-	var reqErr *acp.RequestError
-	if errors.As(err, &reqErr) {
-		return reqErr
-	}
-
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
-}

@@ -90,7 +90,7 @@ func TestSessionMetaCannotRedirectTheManagedClaudeHome(t *testing.T) {
 			},
 		},
 	})))
-	require.ErrorContains(t, err, "_meta.claude.options.env.CLAUDE_CONFIG_DIR is not allowed")
+	requireExactUnsupportedField(t, err, "_meta.claude.options.env.CLAUDE_CONFIG_DIR")
 	require.False(t, copyCalled)
 }
 
@@ -111,130 +111,130 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		meta    map[string]any
-		wantErr string
+		name      string
+		meta      map[string]any
+		wantField string
 	}{
 		{
-			name:    "claude namespace not object",
-			meta:    map[string]any{claudeMetaKey: "bad"},
-			wantErr: "_meta.claude",
+			name:      "claude namespace not object",
+			meta:      map[string]any{claudeMetaKey: "bad"},
+			wantField: "_meta.claude",
 		},
 		{
-			name:    "unknown claude field",
-			meta:    map[string]any{claudeMetaKey: map[string]any{"extra": true}},
-			wantErr: "_meta.claude.extra",
+			name:      "unknown claude field",
+			meta:      map[string]any{claudeMetaKey: map[string]any{"extra": true}},
+			wantField: "_meta.claude.extra",
 		},
 		{
-			name:    "raw event not object",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaRawEventKey: true}},
-			wantErr: "_meta.claude.rawEvent",
+			name:      "raw event not object",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaRawEventKey: true}},
+			wantField: "_meta.claude.rawEvent",
 		},
 		{
 			name: "raw event enabled not bool",
 			meta: map[string]any{claudeMetaKey: map[string]any{
 				metaRawEventKey: map[string]any{metaRawEventEnabledKey: "yes"},
 			}},
-			wantErr: "_meta.claude.rawEvent.enabled",
+			wantField: "_meta.claude.rawEvent.enabled",
 		},
 		{
 			name: "raw event unknown field",
 			meta: map[string]any{claudeMetaKey: map[string]any{
 				metaRawEventKey: map[string]any{"extra": true},
 			}},
-			wantErr: "_meta.claude.rawEvent.extra",
+			wantField: "_meta.claude.rawEvent.extra",
 		},
 		{
-			name:    "options not object",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: "bad"}},
-			wantErr: "_meta.claude.options",
+			name:      "options not object",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: "bad"}},
+			wantField: "_meta.claude.options",
 		},
 		{
-			name:    "bare not bool",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaBareKey: "yes"}}},
-			wantErr: "_meta.claude.options.bare",
+			name:      "bare not bool",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaBareKey: "yes"}}},
+			wantField: "_meta.claude.options.bare",
 		},
 		{
-			name:    "env not object",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: "bad"}}},
-			wantErr: "_meta.claude.options.env",
+			name:      "env not object",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: "bad"}}},
+			wantField: "_meta.claude.options.env",
 		},
 		{
-			name:    "env value not string",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"A": 1}}}},
-			wantErr: "_meta.claude.options.env.A",
+			name:      "env value not string",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"A": 1}}}},
+			wantField: "_meta.claude.options.env.A",
 		},
 		{
-			name:    "system prompt not string",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaSystemPromptKey: 1}}},
-			wantErr: "_meta.claude.options.systemPrompt",
+			name:      "system prompt not string",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaSystemPromptKey: 1}}},
+			wantField: "_meta.claude.options.systemPrompt",
 		},
 		{
-			name:    "model not string",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaModelKey: 1}}},
-			wantErr: "_meta.claude.options.model",
+			name:      "model not string",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaModelKey: 1}}},
+			wantField: "_meta.claude.options.model",
 		},
 		{
-			name:    "permission mode not string",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaPermissionModeKey: 1}}},
-			wantErr: "_meta.claude.options.permissionMode",
+			name:      "permission mode not string",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaPermissionModeKey: 1}}},
+			wantField: "_meta.claude.options.permissionMode",
 		},
 		{
-			name:    "permission mode unsupported",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaPermissionModeKey: "invalid"}}},
-			wantErr: "is not supported",
+			name:      "permission mode unsupported",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaPermissionModeKey: "invalid"}}},
+			wantField: "_meta.claude.options.permissionMode",
 		},
 		{
-			name:    "schema not object",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaOutputSchemaKey: "bad"}}},
-			wantErr: "_meta.claude.options.outputSchema",
+			name:      "schema not object",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaOutputSchemaKey: "bad"}}},
+			wantField: metaOptionPath(metaOutputSchemaKey),
 		},
 		{
-			name:    "schema not serializable",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaOutputSchemaKey: map[string]any{"bad": func() {}}}}},
-			wantErr: "must be JSON-serializable",
+			name:      "schema not serializable",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaOutputSchemaKey: map[string]any{"bad": func() {}}}}},
+			wantField: metaOptionPath(metaOutputSchemaKey),
 		},
 		{
-			name:    "blocked env key",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"PATH": "/bin"}}}},
-			wantErr: "is not allowed",
+			name:      "blocked env key",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"PATH": "/bin"}}}},
+			wantField: "_meta.claude.options.env.PATH",
 		},
 		{
 			name: "managed root env key",
 			meta: map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{
 				"XDG_CONFIG_HOME": "/attacker-selected",
 			}}}},
-			wantErr: "is not allowed",
+			wantField: "_meta.claude.options.env.XDG_CONFIG_HOME",
 		},
 		{
-			name:    "invalid env key",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"BAD-NAME": "x"}}}},
-			wantErr: "is not a valid environment variable name",
+			name:      "invalid env key",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"BAD-NAME": "x"}}}},
+			wantField: "_meta.claude.options.env.BAD-NAME",
 		},
 		{
-			name:    "extra path dirs not array",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: "/opt/bin"}}},
-			wantErr: "_meta.claude.options.extraPathDirs",
+			name:      "extra path dirs not array",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: "/opt/bin"}}},
+			wantField: "_meta.claude.options.extraPathDirs",
 		},
 		{
-			name:    "extra path dirs entry not string",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{"/opt/bin", 1}}}},
-			wantErr: "_meta.claude.options.extraPathDirs[1]",
+			name:      "extra path dirs entry not string",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{"/opt/bin", 1}}}},
+			wantField: "_meta.claude.options.extraPathDirs[1]",
 		},
 		{
-			name:    "extra path dirs entry relative",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{"/opt/bin", "relative/bin"}}}},
-			wantErr: `_meta.claude.options.extraPathDirs[1] must be an absolute path: "relative/bin"`,
+			name:      "extra path dirs entry relative",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{"/opt/bin", "relative/bin"}}}},
+			wantField: "_meta.claude.options.extraPathDirs[1]",
 		},
 		{
-			name:    "extra path dirs entry empty",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{""}}}},
-			wantErr: "must be an absolute path",
+			name:      "extra path dirs entry empty",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{""}}}},
+			wantField: "_meta.claude.options.extraPathDirs[0]",
 		},
 		{
-			name:    "unknown option",
-			meta:    map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{"extra": true}}},
-			wantErr: "_meta.claude.options.extra",
+			name:      "unknown option",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{"extra": true}}},
+			wantField: "_meta.claude.options.extra",
 		},
 	}
 
@@ -243,7 +243,7 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 			t.Parallel()
 
 			_, err := claudeOptionsFromMeta(tc.meta)
-			require.ErrorContains(t, err, tc.wantErr)
+			requireExactUnsupportedField(t, err, tc.wantField)
 		})
 	}
 }
@@ -253,7 +253,12 @@ func TestClaudeMetaSmallHelpers(t *testing.T) {
 
 	require.Equal(t, []string{"/a", "/b"}, sessionAdditionalDirectories([]string{"/a", "/b"}))
 	require.True(t, blockedClaudeEnvKey("LD_PRELOAD"))
-	require.True(t, blockedClaudeEnvKey("dyld_library_path"))
+	// The blocklist compares through the platform seam, so a lowercase spelling
+	// is a distinct variable on Unix and the same one on Windows.
+	require.Equal(t,
+		claude.EnvironmentKey("dyld_library_path") == "DYLD_LIBRARY_PATH",
+		blockedClaudeEnvKey("dyld_library_path"),
+	)
 	require.True(t, blockedClaudeEnvKey(privateAdapterEnvPrefix+"TEST"))
 	require.True(t, blockedClaudeEnvKey("CLAUDE_CONFIG_DIR"))
 	require.True(t, blockedClaudeEnvKey("HOME"))
@@ -279,6 +284,8 @@ func TestClaudeMetaSmallHelpers(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"/a", "/b"}, dirs)
 
-	_, err = validateOutputSchema(map[string]any{})
-	require.ErrorContains(t, err, "must be a non-empty object")
+	_, err = claudeOptionsFromMeta(map[string]any{
+		claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaOutputSchemaKey: map[string]any{}}},
+	})
+	requireExactUnsupportedField(t, err, metaOptionPath(metaOutputSchemaKey))
 }

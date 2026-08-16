@@ -41,7 +41,7 @@ func TestNewSessionEdgeBranches(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := NewAgent().NewSession(ctx, NewSessionRequest("relative"))
-	require.ErrorContains(t, err, "absolute")
+	requireExactUnsupportedField(t, err, jsonFieldCwd)
 
 	previousUUIDRandom := uuidRandom
 	uuidRandom = bytes.NewBuffer(nil)
@@ -69,7 +69,7 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	require.Error(t, err)
 
 	_, err = NewAgent().ResumeSession(ctx, ResumeSessionRequest(sessionID, "relative"))
-	require.ErrorContains(t, err, "absolute")
+	requireExactUnsupportedField(t, err, jsonFieldCwd)
 
 	loadErrAgent := NewAgent(WithSessionStore(&faultSessionStore{SessionStore: NewInMemorySessionStore(), loadErr: errors.New("load failed")}))
 	_, err = loadErrAgent.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
@@ -141,7 +141,7 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	require.Error(t, err)
 
 	_, err = NewAgent().LoadSession(ctx, LoadSessionRequest(sessionID, "relative"))
-	require.ErrorContains(t, err, "absolute")
+	requireExactUnsupportedField(t, err, jsonFieldCwd)
 
 	loadErrAgent := NewAgent(WithSessionStore(&faultSessionStore{SessionStore: NewInMemorySessionStore(), loadErr: errors.New("load failed")}))
 	_, err = loadErrAgent.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
@@ -277,7 +277,7 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 	sessionID := acp.SessionId("55555555-5555-4555-8555-555555555555")
 
 	_, err := NewAgent().ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd("relative")))
-	require.ErrorContains(t, err, "absolute")
+	requireExactUnsupportedField(t, err, jsonFieldCwd)
 
 	badHome := string([]byte{0})
 	badHomeResp, err := NewAgent(WithHome(badHome)).ListSessions(ctx, ListSessionsRequest())

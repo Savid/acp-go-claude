@@ -43,7 +43,7 @@ func TestRouteEnvelopeHardCutover(t *testing.T) {
 		{routeMetaKey: map[string]any{routeFieldVer: 1, routeFieldTurn: "turn", "extra": true}},
 	} {
 		_, routeErr := parseInboundTurnRoute(meta)
-		require.Error(t, routeErr)
+		requireExactUnsupportedField(t, routeErr, routeMetaKey)
 	}
 
 	meta, err := stampRouteMeta(map[string]any{"claude": map[string]any{"native": true}}, elicitationScope{

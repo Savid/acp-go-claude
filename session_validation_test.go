@@ -18,18 +18,18 @@ func TestSessionPathValidationHelpers(t *testing.T) {
 	require.NoError(t, validateAbsolutePaths("additionalDirectories", []string{abs}))
 	require.NoError(t, validateSessionStartPaths(abs, []string{abs}))
 
-	requireInvalidParams(t, validateRequiredAbsolutePath("cwd", ""))
-	requireInvalidParams(t, validateRequiredAbsolutePath("cwd", "relative"))
-	requireInvalidParams(t, validateOptionalAbsolutePath("cwd", acp.Ptr("relative")))
-	requireInvalidParams(t, validateAbsolutePaths("additionalDirectories", []string{""}))
-	requireInvalidParams(t, validateAbsolutePaths("additionalDirectories", []string{"relative"}))
-	requireInvalidParams(t, validateSessionStartPaths("relative", nil))
-}
+	requireExactUnsupportedField(t, validateRequiredAbsolutePath("cwd", ""), "cwd")
+	requireExactUnsupportedField(t, validateRequiredAbsolutePath("cwd", "relative"), "cwd")
+	requireExactUnsupportedField(t, validateOptionalAbsolutePath("cwd", acp.Ptr("relative")), "cwd")
 
-func requireInvalidParams(t *testing.T, err error) {
-	t.Helper()
-
-	var reqErr *acp.RequestError
-	require.ErrorAs(t, err, &reqErr)
-	require.Equal(t, -32602, reqErr.Code)
+	// The index rides in the field path, so a rejected entry is never echoed
+	// back to the caller that sent it.
+	requireExactUnsupportedField(t, validateAbsolutePaths("additionalDirectories", []string{""}), "additionalDirectories[0]")
+	requireExactUnsupportedField(
+		t,
+		validateAbsolutePaths("additionalDirectories", []string{abs, "relative"}),
+		"additionalDirectories[1]",
+	)
+	requireExactUnsupportedField(t, validateSessionStartPaths("relative", nil), "cwd")
+	requireExactUnsupportedField(t, validateSessionStartPaths(abs, []string{"relative"}), "additionalDirectories[0]")
 }

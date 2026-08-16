@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
-
-	"github.com/coder/acp-go-sdk"
 )
 
 const (
@@ -26,27 +24,14 @@ type turnRouteContextKey struct{}
 var routeRandRead = rand.Read
 
 func parseInboundTurnRoute(meta map[string]any) (inboundTurnRoute, error) {
-	value, ok := meta[routeMetaKey]
-	if !ok {
-		return inboundTurnRoute{}, routeInvalid("missing reserved route metadata")
-	}
-
-	object, ok := value.(map[string]any)
-	if !ok || len(object) != 2 {
-		return inboundTurnRoute{}, routeInvalid("route metadata must contain exactly version and turnNonce")
-	}
-
-	if !routeVersionIsOne(object[routeFieldVer]) {
-		return inboundTurnRoute{}, routeInvalid("unsupported route metadata version")
+	object, ok := meta[routeMetaKey].(map[string]any)
+	if !ok || len(object) != 2 || !routeVersionIsOne(object[routeFieldVer]) {
+		return inboundTurnRoute{}, unsupportedField(routeMetaKey)
 	}
 
 	nonce, ok := object[routeFieldTurn].(string)
-	if !ok || strings.TrimSpace(nonce) == "" {
-		return inboundTurnRoute{}, routeInvalid("route turnNonce is required")
-	}
-
-	if len(nonce) > routeTurnNonceMaxBytes {
-		return inboundTurnRoute{}, routeInvalid("route turnNonce exceeds the maximum size")
+	if !ok || strings.TrimSpace(nonce) == "" || len(nonce) > routeTurnNonceMaxBytes {
+		return inboundTurnRoute{}, unsupportedField(routeMetaKey)
 	}
 
 	return inboundTurnRoute{turnNonce: nonce}, nil
@@ -61,10 +46,6 @@ func routeVersionIsOne(value any) bool {
 	default:
 		return false
 	}
-}
-
-func routeInvalid(message string) error {
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: message, jsonFieldField: routeMetaKey})
 }
 
 func stampRouteMeta(meta map[string]any, scope elicitationScope) (map[string]any, error) {

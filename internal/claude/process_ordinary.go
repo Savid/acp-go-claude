@@ -26,7 +26,7 @@ func OrdinaryEnvironment() map[string]string {
 	for _, entry := range ordinaryEnviron() {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok || key == "" || strings.ContainsRune(value, '\x00') ||
-			key == envClaudeCodeNested || strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) ||
+			EnvironmentKey(key) == EnvironmentKey(envClaudeCodeNested) || privateAdapterEnvName(key) ||
 			authScrubbedEnvKey(key) {
 			continue
 		}

@@ -87,6 +87,9 @@ func ordinaryEnvironmentValue(environment []string, key string) string {
 	return value
 }
 
-func launchEnvironmentKey(key string) string {
+// EnvironmentKey normalizes an environment variable name for identity
+// comparison. Windows environment names are case-insensitive, so FOO and foo
+// name one variable and the upper-cased spelling is its identity.
+func EnvironmentKey(key string) string {
 	return strings.ToUpper(key)
 }

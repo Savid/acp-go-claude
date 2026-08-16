@@ -389,7 +389,7 @@ func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) er
 		}
 
 		if route.turnNonce != activeNonce {
-			return routeInvalid("stale route turnNonce")
+			return unsupportedField(routeMetaKey)
 		}
 	}
 

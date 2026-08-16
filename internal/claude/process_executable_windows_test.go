@@ -166,3 +166,13 @@ func TestWindowsEnvironmentChildProcess(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(resultPath, data, 0o600))
 }
+
+// TestEnvironmentKeyFoldsOnWindows pins the identity half of the platform seam.
+// Windows environment names are case-insensitive, so Path and PATH are one
+// variable and the seam must report one identity for both.
+func TestEnvironmentKeyFoldsOnWindows(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, envSearchPath, EnvironmentKey("path"))
+	require.Equal(t, EnvironmentKey(envSearchPath), EnvironmentKey("Path"))
+}

@@ -23,12 +23,11 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	case params.ValueId != nil:
 		return a.setSessionConfigValue(ctx, params.ValueId)
 	case params.Boolean != nil:
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{
-			jsonFieldError: validationUnsupported,
-			jsonFieldField: "boolean",
-		})
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField("boolean")
 	default:
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{acpFieldConfig: validationRequired})
+		// Neither variant decoded, so the discriminator is what the caller got
+		// wrong: a payload the SDK union could not classify names no option.
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldType)
 	}
 }
 
@@ -48,7 +47,7 @@ func (a *Agent) setSessionConfigValue(
 	switch params.ConfigId {
 	case configModel, configMode, configOutputStyle, configEffort:
 	default:
-		return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{acpFieldConfig: "unsupported option"})
+		return acp.SetSessionConfigOptionResponse{}, unsupportedField("configId")
 	}
 
 	releaseTurn, err := session.acquireTurn(ctx)
@@ -85,12 +84,12 @@ func (a *Agent) setSessionConfigValue(
 
 		permissionMode, ok := permissionModeForACP(mode)
 		if !ok {
-			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{acpFieldConfig: "unsupported mode"})
+			return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
 		}
 
 		_, model, available := session.modeInfo()
 		if !modeAvailableForModel(mode, model, available) {
-			return acp.SetSessionConfigOptionResponse{}, acp.NewInvalidParams(map[string]any{acpFieldConfig: "unavailable mode"})
+			return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
 		}
 
 		if err := session.client.SetPermissionMode(ctx, permissionMode); err != nil {

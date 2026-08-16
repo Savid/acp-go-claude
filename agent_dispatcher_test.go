@@ -138,8 +138,6 @@ func TestLocalAgentDispatcherBranches(t *testing.T) {
 	_, reqErr = localNotification((*Agent).Cancel)(ctx, agent, json.RawMessage(`{bad`))
 	require.NotNil(t, reqErr)
 	require.Equal(t, -32602, reqErr.Code)
-	require.Equal(t, acp.NewInvalidParams(map[string]any{"x": "y"}), lifecycleMetaError(acp.NewInvalidParams(map[string]any{"x": "y"})))
-	require.Error(t, lifecycleMetaError(context.Canceled))
 }
 
 func TestLocalAgentDispatcherRejectsClosedBeforeDispatchOrDecode(t *testing.T) {

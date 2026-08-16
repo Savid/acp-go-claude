@@ -233,6 +233,17 @@ func TestAgentRejectsManagedRootEnvironmentOverrides(t *testing.T) {
 			require.ErrorContains(t, err, "managed by the process isolation policy")
 		})
 	}
+
+	// The managed roots are answered through the platform seam: the native
+	// process reads them under one exact spelling per platform, so a lowercase
+	// name is a variable of the host's own on Unix and the managed root itself
+	// on Windows.
+	lowered := strings.ToLower(homeEnv)
+	require.Equal(t,
+		claude.EnvironmentKey(lowered) == claude.EnvironmentKey(homeEnv),
+		managedClaudeRootEnvKey(lowered),
+	)
+	require.True(t, managedClaudeRootEnvKey(homeEnv))
 }
 
 func TestAgentContainmentModeObservationAndWarning(t *testing.T) {

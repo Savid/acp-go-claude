@@ -33,7 +33,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
-		return acp.NewSessionResponse{}, lifecycleMetaError(err)
+		return acp.NewSessionResponse{}, err
 	}
 
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
@@ -77,7 +77,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
-		return acp.ResumeSessionResponse{}, lifecycleMetaError(err)
+		return acp.ResumeSessionResponse{}, err
 	}
 
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
@@ -141,7 +141,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
-		return acp.LoadSessionResponse{}, lifecycleMetaError(err)
+		return acp.LoadSessionResponse{}, err
 	}
 
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)

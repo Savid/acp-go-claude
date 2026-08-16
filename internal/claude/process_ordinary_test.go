@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,29 @@ func TestOrdinaryEnvironmentIsTheSanitizedAmbientCapture(t *testing.T) {
 		"PATH":              "/usr/bin",
 		"ANTHROPIC_API_KEY": "ambient-key",
 	}, OrdinaryEnvironment())
+}
+
+// TestOrdinaryEnvironmentDropsTheNestedMarkerByPlatformIdentity proves the
+// ambient capture and BuildEnv answer the nested-launch marker the same way. A
+// lowercase spelling is a distinct variable on Unix and the marker itself on
+// Windows, and the capture must not disagree with the launch about which.
+func TestOrdinaryEnvironmentDropsTheNestedMarkerByPlatformIdentity(t *testing.T) {
+	original := ordinaryEnviron
+	t.Cleanup(func() { ordinaryEnviron = original })
+
+	lowered := strings.ToLower(envClaudeCodeNested)
+	ordinaryEnviron = func() []string {
+		return []string{lowered + "=1"}
+	}
+
+	captured := OrdinaryEnvironment()
+	if EnvironmentKey(lowered) == EnvironmentKey(envClaudeCodeNested) {
+		require.Empty(t, captured)
+
+		return
+	}
+
+	require.Equal(t, map[string]string{lowered: "1"}, captured)
 }
 
 // TestOrdinaryLaunchEnvironmentIsNotHeldToPolicyPathRules proves ordinary

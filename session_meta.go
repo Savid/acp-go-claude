@@ -2,7 +2,6 @@ package claudeacp
 
 import (
 	"encoding/json"
-	"fmt"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -10,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 const (
@@ -99,18 +99,18 @@ func claudeOptionsFromMeta(meta map[string]any) (ClaudeOptions, error) {
 func claudeOptionsFromMetaWithProviderAuth(meta map[string]any, providerAuthEnabled bool) (ClaudeOptions, error) {
 	options := ClaudeOptions{}
 
-	claude, ok := meta[claudeMetaKey].(map[string]any)
+	namespace, ok := meta[claudeMetaKey].(map[string]any)
 	if !ok {
 		if _, exists := meta[claudeMetaKey]; exists {
 			return ClaudeOptions{}, unsupportedField("_meta." + claudeMetaKey)
 		}
 	}
 
-	if err := validateClaudeLifecycleMeta(claude); err != nil {
+	if err := validateClaudeLifecycleMeta(namespace); err != nil {
 		return ClaudeOptions{}, err
 	}
 
-	if rawOptions, ok := claude[metaOptionsKey]; ok {
+	if rawOptions, ok := namespace[metaOptionsKey]; ok {
 		parsed, err := parseClaudeOptions(rawOptions, providerAuthEnabled)
 		if err != nil {
 			return ClaudeOptions{}, err
@@ -122,12 +122,12 @@ func claudeOptionsFromMetaWithProviderAuth(meta map[string]any, providerAuthEnab
 	return options, nil
 }
 
-func validateClaudeLifecycleMeta(claude map[string]any) error {
-	if claude == nil {
+func validateClaudeLifecycleMeta(namespace map[string]any) error {
+	if namespace == nil {
 		return nil
 	}
 
-	for key := range claude {
+	for key := range namespace {
 		switch key {
 		case metaOptionsKey, metaRawEventKey:
 		default:
@@ -135,7 +135,7 @@ func validateClaudeLifecycleMeta(claude map[string]any) error {
 		}
 	}
 
-	if rawEvent, ok := claude[metaRawEventKey]; ok {
+	if rawEvent, ok := namespace[metaRawEventKey]; ok {
 		if err := validateRawEventMeta(rawEvent); err != nil {
 			return err
 		}
@@ -233,8 +233,11 @@ func parseClaudeOptionsMap(raw map[string]any, providerAuthEnabled bool) (Claude
 
 			options.PermissionMode = permissionMode
 		case metaOutputSchemaKey:
+			// An empty object is refused here rather than treated as "no
+			// schema": a host that asked for structured output and got an
+			// ordinary turn back has no way to tell the two apart.
 			schema, ok := value.(map[string]any)
-			if !ok {
+			if !ok || len(schema) == 0 {
 				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
 			}
 
@@ -329,23 +332,19 @@ func unsupportedField(path string) error {
 
 func validateClaudeOptions(options ClaudeOptions) (ClaudeOptions, error) {
 	if strings.TrimSpace(options.PermissionMode) != "" && !validClaudePermissionMode(options.PermissionMode) {
-		return ClaudeOptions{}, fmt.Errorf("%s is not supported: %s", metaOptionPath(metaPermissionModeKey), options.PermissionMode)
+		return ClaudeOptions{}, unsupportedField(metaOptionPath(metaPermissionModeKey))
 	}
 
 	for key := range options.Env {
-		if !validSettingsEnvName(key) {
-			return ClaudeOptions{}, fmt.Errorf("%s.%s is not a valid environment variable name", metaOptionPath(settingsFieldEnv), key)
-		}
-
-		if blockedClaudeEnvKey(key) {
-			return ClaudeOptions{}, fmt.Errorf("%s.%s is not allowed", metaOptionPath(settingsFieldEnv), key)
+		if !validSettingsEnvName(key) || blockedClaudeEnvKey(key) {
+			return ClaudeOptions{}, unsupportedField(metaOptionPath(settingsFieldEnv) + "." + key)
 		}
 	}
 
 	for index, dir := range options.ExtraPathDirs {
 		if !filepath.IsAbs(dir) {
-			return ClaudeOptions{}, fmt.Errorf(
-				"%s[%d] must be an absolute path: %q", metaOptionPath(metaExtraPathDirsKey), index, dir,
+			return ClaudeOptions{}, unsupportedField(
+				metaOptionPath(metaExtraPathDirsKey) + "[" + strconv.Itoa(index) + "]",
 			)
 		}
 	}
@@ -362,17 +361,24 @@ func validateClaudeOptions(options ClaudeOptions) (ClaudeOptions, error) {
 	return options, nil
 }
 
+// blockedClaudeEnvKey reports whether a host-supplied session env key names a
+// variable the adapter refuses to forward. Every name here is one the native
+// process, its loader, or its shell reads under an exact platform spelling, so
+// the comparison goes through the platform seam: on Unix `path` and `env` are
+// variables of the host's own, and refusing them would break a legitimate
+// session over a name nothing dangerous ever reads.
 func blockedClaudeEnvKey(key string) bool {
-	upper := strings.ToUpper(key)
-	if strings.HasPrefix(upper, privateAdapterEnvPrefix) || managedClaudeRootEnvKey(key) {
+	if privateAdapterEnvName(key) || managedClaudeRootEnvKey(key) {
 		return true
 	}
 
-	switch upper {
+	name := claude.EnvironmentKey(key)
+
+	switch name {
 	case "PATH", "NODE_OPTIONS", "BASH_ENV", "ENV", "CLAUDECODE": //nolint:goconst // Protocol allowlist is clearer with literal names.
 		return true
 	default:
-		return strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_")
+		return strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_")
 	}
 }
 
@@ -436,13 +442,9 @@ func cloneStringMap(values map[string]string) map[string]string {
 }
 
 func validateOutputSchema(schema map[string]any) (map[string]any, error) {
-	if len(schema) == 0 {
-		return nil, fmt.Errorf("%s must be a non-empty object", metaOptionPath(metaOutputSchemaKey))
-	}
-
 	cloned := cloneAnyMap(schema)
 	if _, err := json.Marshal(cloned); err != nil {
-		return nil, fmt.Errorf("%s must be JSON-serializable: %w", metaOptionPath(metaOutputSchemaKey), err)
+		return nil, unsupportedField(metaOptionPath(metaOutputSchemaKey))
 	}
 
 	return cloned, nil

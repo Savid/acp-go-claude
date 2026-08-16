@@ -31,7 +31,7 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	raw, err = json.Marshal(ForkSessionRequest("parent", "relative"))
 	require.NoError(t, err)
 	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
-	require.ErrorContains(t, err, "absolute")
+	requireExactUnsupportedField(t, err, jsonFieldCwd)
 
 	raw, err = json.Marshal(ForkSessionRequest("parent", cwd, WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}})))
 	require.NoError(t, err)
@@ -257,6 +257,22 @@ func TestHandleRateLimits(t *testing.T) {
 	resp, ok = respAny.(RateLimitsResponse)
 	require.True(t, ok)
 	require.Len(t, resp.Windows, 2)
+}
+
+// TestRateLimitsParamsRejectionNamesTheOffendingMember proves a no-params
+// extension leg answers with the uniform two-key shape and names the member the
+// caller sent, rather than handing back the decoder's own prose.
+func TestRateLimitsParamsRejectionNamesTheOffendingMember(t *testing.T) {
+	t.Parallel()
+
+	agent := NewAgent(WithHome(t.TempDir()))
+	ctx := context.Background()
+
+	_, err := agent.HandleExtensionMethod(ctx, RateLimitsMethod, json.RawMessage(`{"zebra":1,"apple":2}`))
+	requireExactUnsupportedField(t, err, "apple")
+
+	_, err = agent.HandleExtensionMethod(ctx, RateLimitsMethod, json.RawMessage(`[]`))
+	requireExactUnsupportedField(t, err, jsonFieldParams)
 }
 
 const sessionWindowID = "session"

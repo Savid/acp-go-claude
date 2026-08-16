@@ -352,9 +352,9 @@ func TestAgentLifecycleWithFakeClaude(t *testing.T) {
 	_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, configEffort, effortHigh))
 	require.NoError(t, err)
 	_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, "bad", "x"))
-	require.ErrorContains(t, err, "unsupported option")
+	requireExactUnsupportedField(t, err, "configId")
 	_, err = agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(newResp.SessionId, configMode, "bad"))
-	require.ErrorContains(t, err, "unsupported mode")
+	requireExactUnsupportedField(t, err, jsonFieldValue)
 
 	listResp, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(session.cwd)))
 	require.NoError(t, err)

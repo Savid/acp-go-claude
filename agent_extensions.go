@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -52,7 +54,7 @@ type RateLimitWindow struct {
 
 func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ RateLimitsResponse, returnErr error) {
 	if err := validateEmptyParams(raw); err != nil {
-		return RateLimitsResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+		return RateLimitsResponse{}, err
 	}
 
 	if err := a.beginSessionConstruction(); err != nil {
@@ -164,18 +166,24 @@ func (a *Agent) rateLimitsFromAPI(ctx context.Context, options claude.Options) c
 }
 
 // validateEmptyParams accepts absent, null, or empty-object params and rejects
-// everything else.
+// everything else by the offending member's own name. Sorting makes the answer
+// deterministic when a caller sends several: one request always names the same
+// field back.
 func validateEmptyParams(raw json.RawMessage) error {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return nil
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return unsupportedField(jsonFieldParams)
+	}
 
-	var params struct{}
+	if keys := slices.Sorted(maps.Keys(params)); len(keys) > 0 {
+		return unsupportedField(keys[0])
+	}
 
-	return decoder.Decode(&params)
+	return nil
 }
 
 // Logout clears auth state owned by this adapter.
@@ -198,7 +206,7 @@ func (a *Agent) handleForkSession(
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
-		return acp.UnstableForkSessionResponse{}, lifecycleMetaError(err)
+		return acp.UnstableForkSessionResponse{}, err
 	}
 
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)

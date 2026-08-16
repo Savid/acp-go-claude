@@ -12,6 +12,9 @@ func ordinaryEnvironmentValue(environment []string, key string) string {
 	return environmentMap(environment)[key]
 }
 
-func launchEnvironmentKey(key string) string {
+// EnvironmentKey normalizes an environment variable name for identity
+// comparison. Unix environments are case-sensitive, so FOO and foo name two
+// different variables and the name is its own identity.
+func EnvironmentKey(key string) string {
 	return key
 }

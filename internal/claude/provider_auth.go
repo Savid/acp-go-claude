@@ -219,6 +219,10 @@ func authCommandOutput(
 
 // authScrubbedEnvKey reports whether a variable is dropped from every child's
 // environment. None is disarmable in-process, so the spawner owns all of them.
+// The test folds case on every platform, unlike EnvironmentKey: these names
+// carry a credential-store repoint and an output-grammar break rather than
+// identity, and the cost of over-scrubbing a lowercase Unix spelling nothing
+// reads is nil beside the cost of forwarding one.
 func authScrubbedEnvKey(key string) bool {
 	upper := strings.ToUpper(key)
 	for _, scrubbed := range authScrubbedEnvNames {

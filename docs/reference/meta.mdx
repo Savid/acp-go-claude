@@ -112,7 +112,7 @@ Session-lifecycle requests accept options and raw-event opt-in:
         "systemPrompt": "Use concise answers.",
         "bare": true,
         "extraPathDirs": ["/run/session-42/bin"],
-        "outputSchema": {}
+        "outputSchema": {"type": "object"}
       },
       "rawEvent": {
         "enabled": true
@@ -130,6 +130,13 @@ rejected in `env`; this is the supported way to extend the child's search path.
 `CLAUDE_CONFIG_DIR`, `HOME`, and the XDG cache, config, data, runtime, and state
 root variables are also rejected in session `env`. The host-selected
 `WithHome` and trusted process-isolation base environment remain authoritative.
+Every one of those names is matched the way the platform names variables: exact
+case on Unix, where `PATH` and `path` are two variables, and case-insensitively
+on Windows, where they are one.
+
+`outputSchema` must be a non-empty JSON Schema object. An empty object is
+rejected rather than read as "no schema", so a request asking for structured
+output never silently returns an ordinary turn.
 
 ## Model metadata
 

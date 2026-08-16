@@ -19,6 +19,15 @@ const (
 	defaultCloseKillAfter   = 500 * time.Millisecond
 )
 
+// privateAdapterEnvName reports whether key falls inside the adapter's own
+// reserved environment namespace. The test folds case on every platform,
+// unlike EnvironmentKey: the namespace is reserved by name rather than by
+// variable identity, so no spelling of it is a host's to set, and folding keeps
+// the option-admission gate and the launch-time scrub answering one question.
+func privateAdapterEnvName(key string) bool {
+	return strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix)
+}
+
 // DarwinGeneration carries the wrapper-owned identity and scratch root for
 // one native launch. Its completion and release are memoized together.
 type DarwinGeneration struct {
@@ -77,7 +86,7 @@ func (generation *DarwinGeneration) prepareCommand(command *exec.Cmd) error {
 
 	for _, entry := range command.Env {
 		key, _, ok := strings.Cut(entry, "=")
-		if !ok || strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) {
+		if !ok || privateAdapterEnvName(key) {
 			continue
 		}
 
@@ -110,7 +119,7 @@ func withoutPrivateAdapterEnv(entries []string) []string {
 	environment := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		key, _, ok := strings.Cut(entry, "=")
-		if ok && strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) {
+		if ok && privateAdapterEnvName(key) {
 			continue
 		}
 

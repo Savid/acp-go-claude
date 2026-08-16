@@ -52,11 +52,11 @@ func TestSessionConfigStateHelpers(t *testing.T) {
 
 	agent := NewAgent()
 	_, err := agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{})
-	require.ErrorContains(t, err, validationRequired)
+	requireExactUnsupportedField(t, err, jsonFieldType)
 	_, err = agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{
 		Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: "missing", ConfigId: configModel, Value: true},
 	})
-	require.ErrorContains(t, err, validationUnsupported)
+	requireExactUnsupportedField(t, err, "boolean")
 	_, err = agent.SetSessionConfigOption(t.Context(), SetConfigOptionRequest("missing", configModel, "sonnet"))
 	require.Error(t, err)
 }
@@ -80,7 +80,7 @@ func TestSetSessionConfigValueBranches(t *testing.T) {
 		defer cleanup()
 
 		_, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sessionID, configMode, acp.SessionConfigValueId(modeAuto)))
-		require.ErrorContains(t, err, "unavailable mode")
+		requireExactUnsupportedField(t, err, jsonFieldValue)
 	})
 
 	for _, tc := range []struct {

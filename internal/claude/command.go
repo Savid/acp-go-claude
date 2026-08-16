@@ -15,6 +15,7 @@ import (
 
 const envClaudeCodeNested = "CLAUDECODE"
 const envSearchPath = "PATH"
+const envClaudeConfigDir = "CLAUDE_CONFIG_DIR"
 const cliArgOutputFormat = "--output-format"
 
 // defaultCLIExecutable is the executable the adapter resolves when no CLI path
@@ -129,8 +130,7 @@ func BuildEnv(options Options) []string {
 	keys := make([]string, 0, len(base)+len(options.Env)+3)
 
 	set := func(key string, value string) {
-		if launchEnvironmentKey(key) == launchEnvironmentKey(envClaudeCodeNested) ||
-			strings.HasPrefix(strings.ToUpper(key), privateAdapterEnvPrefix) {
+		if EnvironmentKey(key) == EnvironmentKey(envClaudeCodeNested) || privateAdapterEnvName(key) {
 			return
 		}
 
@@ -138,7 +138,7 @@ func BuildEnv(options Options) []string {
 			return
 		}
 
-		nativeKey := launchEnvironmentKey(key)
+		nativeKey := EnvironmentKey(key)
 		if _, ok := values[nativeKey]; !ok {
 			keys = append(keys, nativeKey)
 		}
@@ -154,7 +154,7 @@ func BuildEnv(options Options) []string {
 	slices.Sort(baseKeys)
 
 	for _, key := range baseKeys {
-		if strings.EqualFold(key, "CLAUDE_CONFIG_DIR") {
+		if EnvironmentKey(key) == EnvironmentKey(envClaudeConfigDir) {
 			continue
 		}
 
@@ -179,7 +179,7 @@ func BuildEnv(options Options) []string {
 	}
 
 	if options.ClaudeHome != "" {
-		set("CLAUDE_CONFIG_DIR", options.ClaudeHome)
+		set(envClaudeConfigDir, options.ClaudeHome)
 	}
 
 	if options.Cwd != "" {
@@ -189,14 +189,14 @@ func BuildEnv(options Options) []string {
 	if len(options.ExtraPathDirs) > 0 {
 		set(envSearchPath, prependSearchPath(
 			options.ExtraPathDirs,
-			values[launchEnvironmentKey(envSearchPath)],
+			values[EnvironmentKey(envSearchPath)],
 		))
 	}
 
 	// The absolute-entry rule belongs to the hardened policy PATH. Ordinary
 	// execution inherits the operator's own search path and is not held to it.
 	if options.ProcessIsolation != nil {
-		if err := validateProcessSearchPath(values[envSearchPath]); err != nil {
+		if err := validateProcessSearchPath(values[EnvironmentKey(envSearchPath)]); err != nil {
 			return nil
 		}
 	}
@@ -230,8 +230,8 @@ func launchBaseEnvironment(options Options) (map[string]string, error) {
 }
 
 func managedRootEnvKey(key string) bool {
-	switch strings.ToUpper(key) {
-	case "CLAUDE_CONFIG_DIR", "HOME",
+	switch EnvironmentKey(key) {
+	case envClaudeConfigDir, "HOME",
 		"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
 		return true
 	default:

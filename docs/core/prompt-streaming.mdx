@@ -45,9 +45,10 @@ Claude Code advertises its slash commands, and the adapter projects them into AC
 prompt whose first text block begins with `/name` runs that command as its turn.
 Commands sourced from MCP servers are re-emitted as `/server:command (MCP)`.
 
-Two native commands are refused because they would break wrapper invariants; the
-adapter returns an `unsupported command` error naming the supported ACP
-alternative instead:
+Two native commands are refused because they would break wrapper invariants. The
+adapter rejects the turn with the uniform invalid-params shape
+`{"error":"unsupported","field":"prompt"}`; each has a supported ACP method that
+does the same job:
 
 | Native command | Use instead |
 | --- | --- |

@@ -51,8 +51,11 @@ func TestSessionConfigStateHelpers(t *testing.T) {
 	require.Len(t, sessionUnstableConfigOptions(session), 4)
 
 	agent := NewAgent()
+	// The two ways to miss the value-id variant fault different members: a
+	// request that decoded to nothing carried no value, while a boolean payload
+	// chose the wrong discriminator.
 	_, err := agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{})
-	requireExactUnsupportedField(t, err, jsonFieldType)
+	requireExactUnsupportedField(t, err, jsonFieldValue)
 	_, err = agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{
 		Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: "missing", ConfigId: configModel, Value: true},
 	})

@@ -213,6 +213,86 @@ func TestLocalAgentDispatcherRefusesAdmissionBeforeDispatchOrDecode(t *testing.T
 	}
 }
 
+// TestLocalAgentDispatcherReportsAnHonoredCancelFromEveryFailurePath proves the
+// request context reaches the error mapper on every dispatch path that can
+// fail. Each of these answers its own specific code while the request is live;
+// once the peer has withdrawn it they must all answer -32800, which they can
+// only do if the handler's own context was threaded through instead of a
+// detached one that could never observe the cancel.
+func TestLocalAgentDispatcherReportsAnHonoredCancelFromEveryFailurePath(t *testing.T) {
+	t.Parallel()
+
+	closedAgent := func(t *testing.T) *Agent {
+		t.Helper()
+
+		agent := NewAgent()
+		require.NoError(t, agent.Close())
+
+		return agent
+	}
+
+	tests := []struct {
+		name     string
+		agent    func(*testing.T) *Agent
+		method   string
+		params   json.RawMessage
+		liveCode int
+	}{
+		{
+			name:     "admission guard",
+			agent:    closedAgent,
+			method:   acp.AgentMethodSessionList,
+			liveCode: -32600,
+		},
+		{
+			name:     "extension method",
+			method:   "_unknown",
+			liveCode: -32601,
+		},
+		{
+			name:     "response handler",
+			method:   acp.AgentMethodAuthenticate,
+			params:   json.RawMessage(`{"methodId":"m"}`),
+			liveCode: -32602,
+		},
+		{
+			name:     "notification handler",
+			method:   acp.AgentMethodSessionCancel,
+			params:   json.RawMessage(`{"sessionId":"missing"}`),
+			liveCode: -32602,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			newConn := func() *localAgentConnection {
+				agent := NewAgent()
+				if tc.agent != nil {
+					agent = tc.agent(t)
+				}
+
+				conn := &localAgentConnection{agent: agent}
+				conn.initialized.Store(true)
+
+				return conn
+			}
+
+			_, liveErr := newConn().handle(t.Context(), tc.method, tc.params)
+			require.NotNil(t, liveErr)
+			require.Equal(t, tc.liveCode, liveErr.Code)
+
+			cancelled, cancel := context.WithCancelCause(t.Context())
+			cancel(context.Canceled)
+
+			_, cancelledErr := newConn().handle(cancelled, tc.method, tc.params)
+			require.NotNil(t, cancelledErr)
+			require.Equal(t, -32800, cancelledErr.Code)
+		})
+	}
+}
+
 func TestStableSessionForkReturnsMethodNotFound(t *testing.T) {
 	t.Parallel()
 

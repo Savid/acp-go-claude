@@ -73,18 +73,33 @@ func scopedElicitationParams(
 	return json.Marshal(payload)
 }
 
-func requestError(err error) *acp.RequestError {
+// requestError maps a handler failure onto the wire error the peer receives.
+//
+// Cancellation is read off the request context, not off the error. An honored
+// $/cancel_request is the only thing that cancels a request context with cause
+// context.Canceled: connection teardown cancels the parent with the transport
+// cause, and an adapter deadline yields context.DeadlineExceeded, so neither
+// becomes -32800 and a deadline stays an internal failure. Asking the error
+// instead answers a different question — what the handler happened to return —
+// which both misses a cancel the handler swallowed and reports -32800 for a
+// request nobody cancelled but whose error merely wrapped context.Canceled.
+//
+// The cause is consulted first because work aborted by a cancel routinely
+// carries a typed RequestError out with it. Passing that through would tell a
+// peer that withdrew its request that its parameters were bad; a cancelled
+// request has no honest answer other than -32800.
+func requestError(ctx context.Context, err error) *acp.RequestError {
 	if err == nil {
 		return nil
+	}
+
+	if context.Cause(ctx) == context.Canceled {
+		return acp.NewRequestCancelled(map[string]any{jsonFieldError: err.Error()})
 	}
 
 	var reqErr *acp.RequestError
 	if errors.As(err, &reqErr) {
 		return reqErr
-	}
-
-	if errors.Is(err, context.Canceled) {
-		return acp.NewRequestCancelled(map[string]any{jsonFieldError: err.Error()})
 	}
 
 	return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})

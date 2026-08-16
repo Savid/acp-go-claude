@@ -94,7 +94,7 @@ func (c *localAgentConnection) Done() <-chan struct{} {
 
 func (c *localAgentConnection) handle(ctx context.Context, method string, params json.RawMessage) (any, *acp.RequestError) {
 	if err := c.agent.ensureOpen(); err != nil {
-		return nil, requestError(err)
+		return nil, requestError(ctx, err)
 	}
 
 	if method != acp.AgentMethodInitialize && !c.initialized.Load() {
@@ -107,7 +107,7 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 	if strings.HasPrefix(method, "_") {
 		result, err := c.agent.HandleExtensionMethod(ctx, method, params)
 
-		reqErr := requestError(err)
+		reqErr := requestError(ctx, err)
 		if reqErr == nil {
 			c.enqueueLifecycleCommandHook(ctx, method, params, result)
 		}
@@ -385,7 +385,7 @@ func localResponse[Req any, ReqPtr localAgentParams[Req], Resp any](
 
 		resp, err := call(agent, ctx, value)
 		if err != nil {
-			return nil, requestError(err)
+			return nil, requestError(ctx, err)
 		}
 
 		return resp, nil
@@ -402,7 +402,7 @@ func localNotification[Req any, ReqPtr localAgentParams[Req]](
 		}
 
 		if err := call(agent, ctx, value); err != nil {
-			return nil, requestError(err)
+			return nil, requestError(ctx, err)
 		}
 
 		return nil, nil

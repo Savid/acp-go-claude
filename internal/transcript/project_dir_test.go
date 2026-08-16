@@ -10,9 +10,10 @@ import (
 func TestProjectDirName(t *testing.T) {
 	t.Parallel()
 
-	// The long-path cases pin directory names Claude Code 2.1.219 actually
-	// created on disk. A resume transcript written under any other name is
-	// invisible to `claude --resume`.
+	// The long-path cases pin the truncate-and-hash rule Claude Code 2.1.219
+	// applies on disk, including both signs of the 32-bit hash it renders as an
+	// unsigned base-36 magnitude. A resume transcript written under any other
+	// name is invisible to `claude --resume`.
 	tests := []struct {
 		name string
 		path string
@@ -40,13 +41,13 @@ func TestProjectDirName(t *testing.T) {
 		},
 		{
 			name: "positive hash suffix",
-			path: "/home/savid/ai/wagie/tests/acceptance/live/runs/20260726T042506Z-3770974/data/workspaces/whiteboard-agent-sessions/ses_93b95d08-a3d1-482d-8f64-20ad84f9672a/_runs/ses_93b95d08-a3d1-482d-8f64-20ad84f9672a",
-			want: "-home-savid-ai-wagie-tests-acceptance-live-runs-20260726T042506Z-3770974-data-workspaces-whiteboard-agent-sessions-ses-93b95d08-a3d1-482d-8f64-20ad84f9672a--runs-ses-93b95d08-a3d1-482d-8f64-20ad84f967-tg7t6a",
+			path: "/srv/agent-workspaces/deeply/nested/tenant-alpha/project-whiteboard/live-runs/run-000042/data/workspaces/sessions/ses_00000000-0000-4000-8000-000000000002/_runs/ses_00000000-0000-4000-8000-000000000002",
+			want: "-srv-agent-workspaces-deeply-nested-tenant-alpha-project-whiteboard-live-runs-run-000042-data-workspaces-sessions-ses-00000000-0000-4000-8000-000000000002--runs-ses-00000000-0000-4000-8000-00000000000-ef0grw",
 		},
 		{
 			name: "negative hash suffix",
-			path: "/home/savid/ai/wagie/tests/acceptance/live/runs/20260726T042506Z-3770974/data/workspaces/whiteboard-agent-sessions/ses_9e71ad2e-e1f7-4682-9583-3631f4ebb423/_runs/ses_9e71ad2e-e1f7-4682-9583-3631f4ebb423",
-			want: "-home-savid-ai-wagie-tests-acceptance-live-runs-20260726T042506Z-3770974-data-workspaces-whiteboard-agent-sessions-ses-9e71ad2e-e1f7-4682-9583-3631f4ebb423--runs-ses-9e71ad2e-e1f7-4682-9583-3631f4ebb4-mekuq6",
+			path: "/srv/agent-workspaces/deeply/nested/tenant-alpha/project-whiteboard/live-runs/run-000042/data/workspaces/sessions/ses_00000000-0000-4000-8000-000000000001/_runs/ses_00000000-0000-4000-8000-000000000001",
+			want: "-srv-agent-workspaces-deeply-nested-tenant-alpha-project-whiteboard-live-runs-run-000042-data-workspaces-sessions-ses-00000000-0000-4000-8000-000000000001--runs-ses-00000000-0000-4000-8000-00000000000-1m90qc",
 		},
 		{
 			name: "length and hash count UTF-16 code units",

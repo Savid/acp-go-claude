@@ -268,7 +268,7 @@ func TestClaudeFirstMCPPromptRefreshesFixedRegistryOnce(t *testing.T) {
 	response, err := agent.NewSession(t.Context(), NewSessionRequest(
 		t.TempDir(),
 		WithSessionMCPServers(
-			HTTPMCPServer("wagie", "http://127.0.0.1:1/mcp", map[string]string{"Authorization": "Bearer test"}),
+			HTTPMCPServer("runtime", "http://127.0.0.1:1/mcp", map[string]string{"Authorization": "Bearer test"}),
 			StdioMCPServer("playwright", "playwright-mcp", []string{"--headless"}, nil),
 		),
 	))
@@ -338,7 +338,7 @@ func TestClaudeCancelledMCPRefreshUnwindsAndRetries(t *testing.T) {
 
 	response, err := agent.NewSession(t.Context(), NewSessionRequest(
 		t.TempDir(),
-		WithSessionMCPServers(HTTPMCPServer("wagie", "http://127.0.0.1:1/mcp", nil)),
+		WithSessionMCPServers(HTTPMCPServer("runtime", "http://127.0.0.1:1/mcp", nil)),
 	))
 	require.NoError(t, err)
 

@@ -56,7 +56,7 @@ func TestSessionConfigStateHelpers(t *testing.T) {
 	_, err = agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{
 		Boolean: &acp.SetSessionConfigOptionBoolean{SessionId: "missing", ConfigId: configModel, Value: true},
 	})
-	requireExactUnsupportedField(t, err, "boolean")
+	requireExactUnsupportedField(t, err, jsonFieldType)
 	_, err = agent.SetSessionConfigOption(t.Context(), SetConfigOptionRequest("missing", configModel, "sonnet"))
 	require.Error(t, err)
 }

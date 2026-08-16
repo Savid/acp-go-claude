@@ -38,7 +38,7 @@ func TestClaudeCLIAuthorizedMCPRefresh(t *testing.T) {
 	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
 	cwd := t.TempDir()
 	request := claudeacp.NewSessionRequest(cwd, claudeacp.WithSessionMCPServers(
-		claudeacp.HTTPMCPServer("wagie", runtime.server.URL, nil),
+		claudeacp.HTTPMCPServer("runtime", runtime.server.URL, nil),
 		claudeacp.HTTPMCPServer("playwright", external.server.URL, nil),
 	))
 
@@ -52,7 +52,7 @@ func TestClaudeCLIAuthorizedMCPRefresh(t *testing.T) {
 		return conn.Prompt(ctx, claudeacp.TextPromptRequest(
 			session.SessionId,
 			"authorized-mcp-turn-1",
-			"Call mcp__wagie__execute exactly once with {\"probe\":\"first\"}. "+
+			"Call mcp__runtime__execute exactly once with {\"probe\":\"first\"}. "+
 				"After the tool returns, reply with exactly "+claudeMCPRefreshMarker+" and no punctuation.",
 		))
 	})
@@ -84,7 +84,7 @@ func TestClaudeCLIAuthorizedMCPRefresh(t *testing.T) {
 		return conn.Prompt(ctx, claudeacp.TextPromptRequest(
 			session.SessionId,
 			"authorized-mcp-turn-2",
-			"Call mcp__wagie__execute exactly once with {\"probe\":\"second\"}. "+
+			"Call mcp__runtime__execute exactly once with {\"probe\":\"second\"}. "+
 				"After the tool returns, reply with exactly "+claudeMCPRefreshMarker+" and no punctuation.",
 		))
 	})

@@ -19,16 +19,16 @@ func (a *Agent) SetSessionMode(context.Context, acp.SetSessionModeRequest) (acp.
 
 // SetSessionConfigOption handles supported configuration changes.
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
-	switch {
-	case params.ValueId != nil:
+	if params.ValueId != nil {
 		return a.setSessionConfigValue(ctx, params.ValueId)
-	case params.Boolean != nil:
-		return acp.SetSessionConfigOptionResponse{}, unsupportedField("boolean")
-	default:
-		// Neither variant decoded, so the discriminator is what the caller got
-		// wrong: a payload the SDK union could not classify names no option.
-		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldType)
 	}
+
+	// Both request variants are json:"-" in the SDK, which discriminates the
+	// union on "type", so the discriminator is the only JSON path a rejection
+	// can name. A boolean option and a payload the union could not classify at
+	// all are the same mistake seen from the wire: the type names no option
+	// this agent exposes.
+	return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldType)
 }
 
 func (a *Agent) setSessionConfigValue(

@@ -140,12 +140,47 @@ func TestLocalAgentDispatcherBranches(t *testing.T) {
 	require.Equal(t, -32602, reqErr.Code)
 }
 
-func TestLocalAgentDispatcherRejectsClosedBeforeDispatchOrDecode(t *testing.T) {
+// TestLocalAgentDispatcherRefusesAdmissionBeforeDispatchOrDecode pins the stdio
+// path an embedded host actually speaks. Admission runs ahead of method dispatch
+// and parameter decoding, and each refusal keeps its own verdict on the wire: a
+// closed agent cannot accept the request at all, while a refused construction
+// option is the host's build and must arrive with the payload it was given
+// rather than restated as prose inside a different code.
+func TestLocalAgentDispatcherRefusesAdmissionBeforeDispatchOrDecode(t *testing.T) {
 	t.Parallel()
 
-	agent := NewAgent()
-	require.NoError(t, agent.Close())
+	closed := NewAgent()
+	require.NoError(t, closed.Close())
+
+	refused := NewAgent(WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1}))
+
+	var refusedErr *acp.RequestError
+	require.ErrorAs(t, refused.configurationError(), &refusedErr)
+
 	ctx := context.Background()
+
+	admissions := []struct {
+		name    string
+		agent   *Agent
+		code    int
+		message string
+		data    any
+	}{
+		{
+			name:    "closed agent",
+			agent:   closed,
+			code:    -32600,
+			message: "Invalid request",
+			data:    map[string]any{jsonFieldError: errAgentClosed.Error()},
+		},
+		{
+			name:    "refused construction option",
+			agent:   refused,
+			code:    -32603,
+			message: "Internal error",
+			data:    refusedErr.Data,
+		},
+	}
 
 	tests := []struct {
 		name        string
@@ -160,18 +195,21 @@ func TestLocalAgentDispatcherRejectsClosedBeforeDispatchOrDecode(t *testing.T) {
 		{name: "known malformed params", initialized: true, method: acp.AgentMethodAuthenticate, params: json.RawMessage(`{bad`)},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+	for _, admission := range admissions {
+		for _, tc := range tests {
+			t.Run(admission.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
 
-			conn := &localAgentConnection{agent: agent}
-			conn.initialized.Store(tc.initialized)
+				conn := &localAgentConnection{agent: admission.agent}
+				conn.initialized.Store(tc.initialized)
 
-			_, reqErr := conn.handle(ctx, tc.method, tc.params)
-			require.NotNil(t, reqErr)
-			require.Equal(t, -32600, reqErr.Code)
-			require.Equal(t, map[string]any{jsonFieldError: errAgentClosed.Error()}, reqErr.Data)
-		})
+				_, reqErr := conn.handle(ctx, tc.method, tc.params)
+				require.NotNil(t, reqErr)
+				require.Equal(t, admission.code, reqErr.Code)
+				require.Equal(t, admission.message, reqErr.Message)
+				require.Equal(t, admission.data, reqErr.Data)
+			})
+		}
 	}
 }
 

@@ -150,6 +150,20 @@ func requireExactUnsupportedField(t *testing.T, err error, field string) {
 	}, reqErr.Data)
 }
 
+// requireAgentClosedRefusal asserts the closed-agent verdict every entry point
+// shares: the request cannot be accepted at all, so it is -32600 and not the
+// -32603 a refused construction option answers.
+func requireAgentClosedRefusal(t *testing.T, err error) {
+	t.Helper()
+
+	require.Error(t, err)
+	var reqErr *acp.RequestError
+	require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
+	require.Equal(t, -32600, reqErr.Code)
+	require.Equal(t, "Invalid request", reqErr.Message)
+	require.Equal(t, map[string]any{jsonFieldError: errAgentClosed.Error()}, reqErr.Data)
+}
+
 func requireUnknownSession(t *testing.T, err error) {
 	t.Helper()
 

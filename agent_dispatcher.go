@@ -94,7 +94,7 @@ func (c *localAgentConnection) Done() <-chan struct{} {
 
 func (c *localAgentConnection) handle(ctx context.Context, method string, params json.RawMessage) (any, *acp.RequestError) {
 	if err := c.agent.ensureOpen(); err != nil {
-		return nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: err.Error()})
+		return nil, requestError(err)
 	}
 
 	if method != acp.AgentMethodInitialize && !c.initialized.Load() {

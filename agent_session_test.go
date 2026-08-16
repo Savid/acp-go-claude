@@ -81,7 +81,7 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	closed := NewAgent(WithHome(t.TempDir()))
 	require.NoError(t, closed.Close())
 	_, err = closed.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
-	require.ErrorIs(t, err, errAgentClosed)
+	requireAgentClosedRefusal(t, err)
 
 	missingTransport := newFakeClaudeTransport()
 	missingTransport.startErr = claude.ErrSessionNotFound
@@ -189,7 +189,7 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	closed := NewAgent(WithHome(t.TempDir()), WithSessionStore(closedStore))
 	require.NoError(t, closed.Close())
 	_, err = closed.LoadSession(ctx, LoadSessionRequest("77777777-7777-4777-8777-777777777777", cwd))
-	require.ErrorIs(t, err, errAgentClosed)
+	requireAgentClosedRefusal(t, err)
 
 	missingTransport := newFakeClaudeTransport()
 	missingTransport.startErr = claude.ErrSessionNotFound

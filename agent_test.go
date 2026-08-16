@@ -397,7 +397,7 @@ func TestAgentLifecycleErrors(t *testing.T) {
 	closed := NewAgent(WithHome(t.TempDir()))
 	require.NoError(t, closed.Close())
 	_, err = closed.NewSession(ctx, NewSessionRequest(t.TempDir()))
-	require.ErrorIs(t, err, errAgentClosed)
+	requireAgentClosedRefusal(t, err)
 
 	startFail := NewAgent(WithHome(t.TempDir()))
 	startFail.setConnection(newRecordingAgentClient())

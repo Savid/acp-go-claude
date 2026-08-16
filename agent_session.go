@@ -439,12 +439,18 @@ func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, sess
 	}
 }
 
+// ensureOpen answers the admission check every entry point runs, and answers it
+// already shaped for the wire so the two refusals stay apart: a closed agent
+// cannot accept the request at all (-32600), while a refused construction
+// option is the embedding host's fault (-32603). Returning the bare sentinel for
+// one branch and a structured verdict for the other invites a caller to coerce
+// both into a single code and flatten the configuration payload into prose.
 func (a *Agent) ensureOpen() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.closed {
-		return errAgentClosed
+		return acp.NewInvalidRequest(map[string]any{jsonFieldError: errAgentClosed.Error()})
 	}
 
 	return a.configurationError()

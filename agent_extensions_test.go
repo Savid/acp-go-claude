@@ -70,7 +70,7 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	raw, err = json.Marshal(ForkSessionRequest("parent", cwd))
 	require.NoError(t, err)
 	_, err = closed.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
-	require.ErrorIs(t, err, errAgentClosed)
+	requireAgentClosedRefusal(t, err)
 
 	permissionLoadErr := NewAgent(WithHome(string([]byte{0})))
 	permissionLoadErr.setConnection(newRecordingAgentClient())
@@ -483,7 +483,7 @@ func TestHandleRateLimitsErrors(t *testing.T) {
 	closed := NewAgent(WithHome(t.TempDir()))
 	require.NoError(t, closed.Close())
 	_, err = closed.HandleExtensionMethod(ctx, RateLimitsMethod, nil)
-	require.ErrorIs(t, err, errAgentClosed)
+	requireAgentClosedRefusal(t, err)
 }
 
 func TestHandleRateLimitsContainmentFailureFencesClose(t *testing.T) {

@@ -19,11 +19,13 @@ func (a *Agent) SetSessionMode(context.Context, acp.SetSessionModeRequest) (acp.
 
 // SetSessionConfigOption handles supported configuration changes.
 func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
-	// Neither request variant is a wire field: the SDK discriminates the union
-	// on "type" and falls back to the value-id variant whenever "value" is
-	// present. So a boolean payload faults the discriminator, while a payload
-	// that decoded to no variant at all is one the union could not key on
-	// because it carried no value.
+	// Neither variant is a wire field. The union keys on "value" — present
+	// selects the value-id form, absent selects the boolean form — and a "type"
+	// it does not recognise fails to decode before reaching here. So over the
+	// wire the boolean form is what a request naming no value becomes, and the
+	// discriminator is the only path worth pointing the caller at. No variant
+	// at all is unreachable from JSON; an in-process caller can still build it,
+	// and there "value" is the member it left out.
 	if params.Boolean != nil {
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldType)
 	}

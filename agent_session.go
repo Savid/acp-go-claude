@@ -312,15 +312,7 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	closeErr := session.Close(ctx)
 	a.recordContainmentError(closeErr)
 
-	a.mu.Lock()
-	_, existed := a.sessions[params.SessionId]
-	delete(a.sessions, params.SessionId)
-	a.deleteCachedPermissionRulesLocked(params.SessionId)
-	a.mu.Unlock()
-
-	if existed {
-		a.observe.AddActiveSession(ctx, -1)
-	}
+	a.dropSession(ctx, params.SessionId, session)
 
 	if closeErr != nil {
 		return acp.CloseSessionResponse{}, closeErr
@@ -340,7 +332,6 @@ func (a *Agent) UnstableDeleteSession(
 
 	a.mu.Lock()
 	session := a.sessions[params.SessionId]
-	delete(a.sessions, params.SessionId)
 	a.deleted[params.SessionId] = struct{}{}
 	a.deleteCachedPermissionRulesLocked(params.SessionId)
 	a.mu.Unlock()
@@ -353,7 +344,7 @@ func (a *Agent) UnstableDeleteSession(
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 
-		a.observe.AddActiveSession(ctx, -1)
+		a.dropSession(ctx, params.SessionId, session)
 	}
 
 	if err := deleteNativeTranscript(ctx, a.options.Home, string(params.SessionId)); err != nil {
@@ -417,22 +408,28 @@ func promptResultForObserver(resp acp.PromptResponse, err error, model string) o
 	return result
 }
 
-func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) {
+// dropSession evicts one session from the active map only while the map still
+// holds that exact instance. Removal by id alone would let a closer that raced
+// a same-id load, resume or fork evict the live session that replaced it, and
+// would decrement the active-session gauge for a removal it never performed.
+func (a *Agent) dropSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) {
 	a.mu.Lock()
-	removed := false
+	removed := session != nil && a.sessions[sessionID] == session
 
-	if a.sessions[sessionID] == session {
+	if removed {
 		delete(a.sessions, sessionID)
 		a.deleteCachedPermissionRulesLocked(sessionID)
-
-		removed = true
 	}
 
 	a.mu.Unlock()
 
 	if removed {
-		a.observe.AddActiveSession(context.Background(), -1)
+		a.observe.AddActiveSession(ctx, -1)
 	}
+}
+
+func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) {
+	a.dropSession(ctx, sessionID, session)
 
 	if session != nil {
 		if err := session.Close(ctx); err != nil {
@@ -584,10 +581,16 @@ func (a *Agent) activeSessionForStart(id acp.SessionId, start sessionStart) *age
 	fingerprint := sessionStartFingerprint(start)
 
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	session := a.sessions[id]
+	a.mu.Unlock()
+
 	if session == nil || session.fingerprint != fingerprint {
+		return nil
+	}
+
+	// A session whose close has begun is on its way out of the map, so reusing
+	// it would hand the caller a handle onto a native process being torn down.
+	if session.isClosing() {
 		return nil
 	}
 
@@ -938,6 +941,11 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		return nil, startErr
 	}
 
+	// The launch admitted one executable identity. Freezing it onto the session
+	// means a relaunch runs that same file rather than re-resolving the CLI path
+	// against a search path that may have changed since this session started.
+	session.clientOptions.Executable = session.client.Executable()
+
 	info := session.client.InitializeInfo()
 	availableModels := info.Models
 
@@ -1008,12 +1016,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	cleanupNeeded = false
 
 	return session, nil
-}
-
-func closeSessionStartResources(materialized *materializedSession) {
-	if materialized != nil {
-		_ = materialized.Close()
-	}
 }
 
 func (a *Agent) mcpConfigForStart(start sessionStart) (string, error) {

@@ -67,6 +67,11 @@ type ProcessTransport struct {
 	log     *slog.Logger
 	options Options
 
+	// executable is the identity this transport admitted and launched. It is
+	// written once by Start and read after Start returns, so the session that
+	// owns the transport can carry the same identity into a relaunch.
+	executable Executable
+
 	cmd      *exec.Cmd
 	tree     *processContainment
 	waitTree *processContainment
@@ -135,12 +140,20 @@ func NewProcessTransport(log *slog.Logger, options Options) *ProcessTransport {
 
 // Start launches the Claude CLI.
 func (t *ProcessTransport) Start(ctx context.Context) (returnErr error) {
-	path, err := Discover(ctx, t.options.CLIPath, t.options)
-	if err != nil {
-		return err
+	// A session admits its executable once and carries that identity across
+	// every relaunch; only a launch that has none of its own resolves a name.
+	executable := t.options.Executable
+
+	var err error
+
+	if !executable.Admitted() {
+		executable, err = Discover(ctx, t.options.CLIPath, t.options)
+		if err != nil {
+			return err
+		}
 	}
 
-	if probeErr := claudeVersionProbe(ctx, path, t.options); probeErr != nil {
+	if probeErr := claudeVersionProbe(ctx, executable, t.options); probeErr != nil {
 		return probeErr
 	}
 
@@ -159,8 +172,15 @@ func (t *ProcessTransport) Start(ctx context.Context) (returnErr error) {
 		}
 	}()
 
+	// The probe above ran the admitted file. Re-reading its identity here is what
+	// makes the launch run that same file rather than whatever the path names by
+	// the time execve reaches it.
+	if verifyErr := executable.verify(); verifyErr != nil {
+		return fmt.Errorf("admit claude launch executable: %w", verifyErr)
+	}
+
 	args := BuildArgs(t.options)
-	cmd := processCommand(path, args...)
+	cmd := processCommand(executable.Path(), args...)
 	configureProcessCommand(cmd)
 
 	cmd.Dir = t.options.Cwd
@@ -245,6 +265,7 @@ func (t *ProcessTransport) Start(ctx context.Context) (returnErr error) {
 		return fmt.Errorf("start claude: %w", err)
 	}
 
+	t.executable = executable
 	t.cmd = cmd
 	t.tree = tree
 	t.waitTree = tree

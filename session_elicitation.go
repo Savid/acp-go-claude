@@ -12,8 +12,74 @@ import (
 	"github.com/savid/acp-go-claude/internal/observer"
 )
 
+// askUserQuestionSecretRefusal is the whole answer a secret-marked question
+// gets. It names the rule and nothing else.
+const askUserQuestionSecretRefusal = "AskUserQuestion refused: this agent does not collect secrets through ACP elicitation"
+
+const (
+	schemaFieldWriteOnly = "writeOnly"
+	schemaFormatPassword = "password"
+)
+
 type elicitationRequestCancel struct {
 	cancel context.CancelFunc
+}
+
+// questionsSolicitSecret reports whether the native harness marked any question
+// as asking for a credential.
+func questionsSolicitSecret(questions []askUserQuestion) bool {
+	for _, question := range questions {
+		if question.IsSecret {
+			return true
+		}
+	}
+
+	return false
+}
+
+// schemaSolicitsSecret walks a native elicitation schema for the markers a form
+// uses to say a field holds a credential. The adapter refuses such a form whole
+// rather than forwarding it with a redaction hint: host-side masking is
+// presentation, not permission, and an answer collected under it would still
+// come back here in plaintext. The value is one decoded JSON document, so the
+// walk terminates.
+func schemaSolicitsSecret(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		if secretSchemaMarker(typed) {
+			return true
+		}
+
+		for _, nested := range typed {
+			if schemaSolicitsSecret(nested) {
+				return true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if schemaSolicitsSecret(nested) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func secretSchemaMarker(property map[string]any) bool {
+	if format, _ := property[jsonFieldFormat].(string); strings.EqualFold(format, schemaFormatPassword) {
+		return true
+	}
+
+	if writeOnly, _ := property[schemaFieldWriteOnly].(bool); writeOnly {
+		return true
+	}
+
+	// The harness spells the marker the same way in an MCP schema property as it
+	// does in an AskUserQuestion question.
+	isSecret, _ := property[askFieldIsSecret].(bool)
+
+	return isSecret
 }
 
 // registerElicitation wraps ctx in a tracked cancellable context so that
@@ -75,6 +141,17 @@ func (s *agentSession) handleAskUserQuestion(
 		return claude.PermissionDecision{
 			Behavior: claude.BehaviorDeny,
 			Message:  "AskUserQuestion parse error: " + parseMessage,
+		}, nil
+	}
+
+	// The refusal precedes the pending tool call and the elicitation request
+	// alike, so a secret-marked question is never published, never rendered and
+	// never answered. The message carries no field, value or caller text: the
+	// point of failing closed is that nothing about the credential leaves here.
+	if questionsSolicitSecret(questions) {
+		return claude.PermissionDecision{
+			Behavior: claude.BehaviorDeny,
+			Message:  askUserQuestionSecretRefusal,
 		}, nil
 	}
 
@@ -413,6 +490,13 @@ func (s *agentSession) createFormElicitation(
 	conn agentClient,
 	request claude.ElicitationRequest,
 ) (claude.ElicitationResponse, error) {
+	// The schema is inspected before the pending tool call publishes the native
+	// input and before the form is built, so a credential-soliciting form is
+	// declined without ever reaching the client.
+	if schemaSolicitsSecret(request.RequestedSchema) {
+		return claude.ElicitationResponse{Action: claude.ElicitationActionDecline}, nil
+	}
+
 	if request.ToolUseID != "" {
 		if err := s.emitPendingToolCall(ctx, "MCP elicitation", request.ToolUseID, request.Message, request.Raw, request.Raw); err != nil {
 			return claude.ElicitationResponse{}, err

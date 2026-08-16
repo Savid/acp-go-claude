@@ -160,6 +160,19 @@ func (c *Client) Start(ctx context.Context) error {
 	return nil
 }
 
+// Executable answers the native executable identity this client's transport
+// admitted, so the session that owns it can reuse that identity for a relaunch
+// rather than resolving the CLI path a second time. An injected transport
+// launches nothing and admits nothing.
+func (c *Client) Executable() Executable {
+	transport, ok := c.transport.(*ProcessTransport)
+	if !ok {
+		return Executable{}
+	}
+
+	return transport.executable
+}
+
 func (c *Client) observeStartupStage(ctx context.Context, stage string, started time.Time, err error) {
 	if c.options.ObserveStartupStage != nil {
 		c.options.ObserveStartupStage(ctx, stage, time.Since(started), err)

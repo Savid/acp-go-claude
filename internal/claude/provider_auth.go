@@ -188,12 +188,12 @@ func authCommandOutput(
 	generation *DarwinGeneration,
 	operation string,
 ) ([]byte, int, error) {
-	path, err := Discover(ctx, options.CLIPath, options)
+	executable, err := Discover(ctx, options.CLIPath, options)
 	if err != nil {
 		return nil, 0, errors.Join(err, generation.finish(true))
 	}
 
-	output, err := containedClaudeOutput(ctx, path, args, options, generation, operation)
+	output, err := containedClaudeOutput(ctx, executable, args, options, generation, operation)
 	if err == nil {
 		return output, 0, nil
 	}
@@ -433,12 +433,12 @@ const (
 // with a scrubbed environment and returns once the grammar has yielded the
 // validated authorization URL.
 func StartAuthLogin(ctx context.Context, options Options, generation *DarwinGeneration) (*AuthLogin, string, error) {
-	path, err := Discover(ctx, options.CLIPath, options)
+	executable, err := Discover(ctx, options.CLIPath, options)
 	if err != nil {
 		return nil, "", errors.Join(err, generation.finish(true))
 	}
 
-	login, err := startAuthLoginChild(path, options, generation)
+	login, err := startAuthLoginChild(executable, options, generation)
 	if err != nil {
 		return nil, "", err
 	}
@@ -474,7 +474,7 @@ type authPresentation struct {
 }
 
 func startAuthLoginChild(
-	path string,
+	executable Executable,
 	options Options,
 	generation *DarwinGeneration,
 ) (login *AuthLogin, returnErr error) {
@@ -486,7 +486,11 @@ func startAuthLoginChild(
 		}
 	}()
 
-	command := processCommand(path, "auth", "login")
+	if err := executable.verify(); err != nil {
+		return nil, fmt.Errorf("admit claude auth login executable: %w", err)
+	}
+
+	command := processCommand(executable.Path(), "auth", "login")
 	configureProcessCommand(command)
 
 	cwd, err := processGetwd()

@@ -46,7 +46,7 @@ func TestContainedClaudeOutputCancellationClosesEscapedStdout(t *testing.T) {
 	defer cancel()
 
 	started := time.Now()
-	_, err := containedClaudeOutput(ctx, os.Args[0], []string{
+	_, err := containedClaudeOutput(ctx, admitExecutable(t, os.Args[0]), []string{
 		"-test.run=^TestContainedClaudeOutputCancellationClosesEscapedStdout$",
 	}, Options{
 		Cwd:                 dir,

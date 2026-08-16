@@ -60,8 +60,11 @@ func TestOrdinaryLaunchEnvironmentIsNotHeldToPolicyPathRules(t *testing.T) {
 }
 
 func TestResolveOrdinaryExecutableUsesAmbientRules(t *testing.T) {
-	original := ordinaryLookPath
-	t.Cleanup(func() { ordinaryLookPath = original })
+	originalLookPath, originalGetwd := ordinaryLookPath, processGetwd
+	t.Cleanup(func() { ordinaryLookPath, processGetwd = originalLookPath, originalGetwd })
+
+	workdir := t.TempDir()
+	processGetwd = func() (string, error) { return workdir, nil }
 
 	_, err := resolveOrdinaryExecutable("  ", nil)
 	require.ErrorContains(t, err, "empty")
@@ -71,25 +74,41 @@ func TestResolveOrdinaryExecutableUsesAmbientRules(t *testing.T) {
 			return "", exec.ErrNotFound
 		}
 
-		return "/resolved/" + name, nil
+		return name, nil
 	}
 
-	resolved, err := resolveOrdinaryExecutable("dir/claude", nil)
+	// Every candidate reaches the platform check anchored to the adapter's own
+	// working directory, so the file examined here is the file execve runs even
+	// though the launch replaces the child's working directory.
+	resolved, err := resolveOrdinaryExecutable(filepath.Join("dir", "claude"), nil)
 	require.NoError(t, err)
-	require.Equal(t, "/resolved/dir/claude", resolved)
+	require.Equal(t, filepath.Join(workdir, "dir", "claude"), resolved)
 
-	_, err = resolveOrdinaryExecutable("dir/missing", nil)
+	_, err = resolveOrdinaryExecutable(filepath.Join("dir", "missing"), nil)
 	require.ErrorContains(t, err, "resolve executable")
 
-	// A relative PATH entry is ordinary here; an empty one is skipped.
+	// A relative PATH entry is ordinary here; an empty one is skipped. A "."
+	// entry cleans to a bare name, which without anchoring would send the
+	// platform check back to the adapter's ambient search path.
 	resolved, err = resolveOrdinaryExecutable("claude", []string{
-		envSearchPath + "=" + string(os.PathListSeparator) + "relative",
+		envSearchPath + "=" + string(os.PathListSeparator) + ".",
 	})
 	require.NoError(t, err)
-	require.Equal(t, "/resolved/"+filepath.Join("relative", "claude"), resolved)
+	require.Equal(t, filepath.Join(workdir, "claude"), resolved)
 
 	_, err = resolveOrdinaryExecutable("missing", []string{envSearchPath + "=/usr/bin"})
 	require.ErrorIs(t, err, exec.ErrNotFound)
+
+	unknownWorkdir := errors.New("no working directory")
+	processGetwd = func() (string, error) { return "", unknownWorkdir }
+
+	_, err = resolveOrdinaryExecutable(filepath.Join("dir", "claude"), nil)
+	require.ErrorIs(t, err, unknownWorkdir)
+
+	_, err = resolveOrdinaryExecutable("claude", []string{envSearchPath + "=relative"})
+	require.ErrorIs(t, err, unknownWorkdir)
+
+	processGetwd = originalGetwd
 
 	_, err = resolveLaunchExecutable(Options{}, "missing", nil)
 	require.ErrorIs(t, err, exec.ErrNotFound)

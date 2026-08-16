@@ -224,13 +224,25 @@ func (a *Agent) close() error {
 		a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 	}
 
-	var closeErrs []error
+	// Each session's close waits, bounded, for its own in-flight turn. Closing
+	// them one after another would make agent shutdown take that bound once per
+	// session, so every session serves its wait at the same time.
+	closeErrs := make([]error, len(sessions))
 
-	for _, session := range sessions {
-		if err := session.Close(context.Background()); err != nil {
-			closeErrs = append(closeErrs, err)
-		}
+	var closes sync.WaitGroup
+
+	for index, session := range sessions {
+		closes.Add(1)
+
+		go func() {
+			defer closes.Done()
+			defer recoverAgentGoroutine(context.Background(), a.log, "session close")
+
+			closeErrs[index] = session.Close(context.Background())
+		}()
 	}
+
+	closes.Wait()
 
 	a.mu.Lock()
 	containmentErr := a.containmentErr

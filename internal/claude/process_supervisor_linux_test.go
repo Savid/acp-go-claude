@@ -179,7 +179,7 @@ func TestTrustedSupervisorPreservesCapturedNativeOutput(t *testing.T) {
 	)
 	output, err := containedClaudeOutput(
 		t.Context(),
-		"/bin/sh",
+		admitExecutable(t, "/bin/sh"),
 		[]string{"-c", `printf '2.1.80 (Claude Code)\n'`},
 		Options{
 			Cwd: "/",

@@ -973,6 +973,17 @@ func writeShellScript(t *testing.T, path string, script string) string {
 	return path
 }
 
+// admitExecutable freezes an already-known path the way discovery would, for
+// tests that drive a launch helper directly instead of going through Discover.
+func admitExecutable(t *testing.T, path string) Executable {
+	t.Helper()
+
+	executable, err := freezeExecutable(path)
+	require.NoError(t, err)
+
+	return executable
+}
+
 func TestProcessTransportStartProbesVersion(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh scripts")
@@ -1066,7 +1077,7 @@ func TestProcessTransportStartSetupErrors(t *testing.T) {
 	processGetwd = getwd
 
 	transport = NewProcessTransport(nil, withTestProcessIsolation(Options{CLIPath: "/bin/sh", Cwd: t.TempDir()}))
-	claudeVersionProbe = func(context.Context, string, Options) error {
+	claudeVersionProbe = func(context.Context, Executable, Options) error {
 		transport.options.ProcessIsolation = &ProcessIsolation{}
 
 		return nil

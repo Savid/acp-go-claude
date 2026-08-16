@@ -30,6 +30,14 @@ func (s *agentSession) Prompt(
 		return acp.PromptResponse{}, poisonErr
 	}
 
+	// A session that is already closing is refused before it is admitted, so a
+	// caller gets the terminal answer rather than a native failure from the
+	// process being torn down. The section that publishes the turn holds the
+	// authoritative check.
+	if s.isClosing() {
+		return acp.PromptResponse{}, closedSessionError()
+	}
+
 	availableCommands := s.commands()
 	commandName := mapper.PromptCommandName(params.Prompt)
 	deniedName, alternative, denied := mapper.DeniedPromptCommand(params.Prompt, availableCommands)
@@ -53,8 +61,6 @@ func (s *agentSession) Prompt(
 			jsonFieldMessage: "Use " + alternative + " instead of /" + deniedName + ".",
 		})
 	}
-
-	s.stopLateMirrorProcessor(ctx)
 
 	localOnlyCommand := localOnlySlashCommand(params.Prompt)
 	prompt := params.Prompt
@@ -84,6 +90,16 @@ func (s *agentSession) Prompt(
 	s.cancelMu.Lock()
 	s.resetPublishedToolCalls()
 	s.mu.Lock()
+
+	// This is the section that publishes the turn, so it is the one that has to
+	// see the close: a check anywhere earlier only moves the race.
+	if s.closing {
+		s.mu.Unlock()
+		s.cancelMu.Unlock()
+
+		return acp.PromptResponse{}, closedSessionError()
+	}
+
 	turnCtx, cancel := context.WithCancel(ctx)
 	turnCtx = withTurnRoute(turnCtx, route.turnNonce)
 	s.cancel = cancel
@@ -242,8 +258,6 @@ func (s *agentSession) finishPromptSystemIdle(
 		return acp.PromptResponse{}, s.interruptAfterEmitError(interruptCtx, err)
 	}
 
-	s.startLateMirrorProcessor(interruptCtx, toolUpdateOptions)
-
 	if err := s.refreshCommandsAfterPromptCommand(turnCtx, commandName); err != nil {
 		return acp.PromptResponse{}, s.interruptAfterEmitError(interruptCtx, err)
 	}
@@ -354,8 +368,6 @@ func (s *agentSession) finishPromptResult(
 	if err := s.drainSessionMirror(turnCtx, toolUpdateOptions); err != nil {
 		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
 	}
-
-	s.startLateMirrorProcessor(interruptCtx, toolUpdateOptions)
 
 	s.logUnknownStopReason(turnCtx, result)
 

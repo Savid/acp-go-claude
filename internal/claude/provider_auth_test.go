@@ -657,15 +657,26 @@ func TestStartAuthLoginChildRefusesBeforeItSpawns(t *testing.T) {
 	options, generation := authTestOptions(t, Options{Cwd: t.TempDir()})
 	options.ProcessIsolation = &ProcessIsolation{}
 
-	_, err := startAuthLoginChild("/bin/sh", options, generation)
+	_, err := startAuthLoginChild(admitExecutable(t, "/bin/sh"), options, generation)
 	require.ErrorContains(t, err, "invalid process isolation")
 
 	options, generation = authTestOptions(t, Options{Cwd: t.TempDir()})
 	authLoginHandoffGeneratedNativeTree = func(string, *ProcessIsolation) error { return errAuthTest }
 
-	_, err = startAuthLoginChild("/bin/sh", options, generation)
+	_, err = startAuthLoginChild(admitExecutable(t, "/bin/sh"), options, generation)
 	require.ErrorIs(t, err, errAuthTest)
 	require.ErrorContains(t, err, "handoff claude auth login browser shim")
+
+	// The login child is the one exec with no version probe ahead of it, so the
+	// admitted identity is re-read here rather than trusted a second time.
+	replaced := writeShellScript(t, filepath.Join(t.TempDir(), "login"), "#!/bin/sh\nexit 0\n")
+	executable := admitExecutable(t, replaced)
+	require.NoError(t, os.Remove(replaced))
+
+	options, generation = authTestOptions(t, Options{Cwd: t.TempDir()})
+
+	_, err = startAuthLoginChild(executable, options, generation)
+	require.ErrorContains(t, err, "admit claude auth login executable")
 }
 
 func TestAuthLoginSubmitFailsWhenTheChildIsGone(t *testing.T) {

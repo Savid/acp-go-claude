@@ -73,6 +73,24 @@ func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
 	}
 }
 
+// acquireClosingTurn admits close into the session's turn queue. It is the one
+// admission with no fail-fast arm: a prompt that finds the queue full can be
+// answered with backpressure and retried, while close is about to tear the
+// native process out from under whatever holds the slot and therefore has to
+// wait for it. The caller's context bounds the wait.
+func (s *agentSession) acquireClosingTurn(ctx context.Context) (func(), error) {
+	turn := s.turnQueue()
+
+	select {
+	case turn <- struct{}{}:
+		s.afterTurnSlotAcquired(1)
+
+		return func() { <-turn }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func (s *agentSession) acquireExclusiveTurn(ctx context.Context) (func(), error) {
 	turn := s.turnQueue()
 
@@ -173,6 +191,7 @@ func (s *agentSession) refreshMCPRegistry(ctx context.Context) error {
 	s.mu.Lock()
 	pending := s.mcpRefreshPending
 	canRelaunch := s.canRelaunch
+	closing := s.closing
 	client := s.client
 	nativeRelease := s.nativeRootRelease
 	opts := s.clientOptions
@@ -180,6 +199,10 @@ func (s *agentSession) refreshMCPRegistry(ctx context.Context) error {
 
 	if !pending {
 		return nil
+	}
+
+	if closing {
+		return closedSessionError()
 	}
 
 	if !canRelaunch {
@@ -230,6 +253,10 @@ func (s *agentSession) relaunchClient(
 	nativeRelease func(),
 	opts claude.Options,
 ) (returnErr error) {
+	if s.isClosing() {
+		return closedSessionError()
+	}
+
 	if err := s.agent.beginSessionConstruction(); err != nil {
 		return err
 	}
@@ -293,6 +320,15 @@ func (s *agentSession) relaunchClient(
 	}
 
 	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+
+		// A relaunch that lost the race to close must not leave a native process
+		// behind it: the replacement is torn down and its admission returned
+		// before the refusal is answered.
+		return s.cleanupFailedRelaunch(closedSessionError(), relaunched, nativeRelease, previousCloseErr)
+	}
+
 	s.client = relaunched
 	s.nativeRootRelease = nativeRelease
 	s.mu.Unlock()
@@ -492,12 +528,53 @@ func (s *agentSession) cancelElicitationRequestsLocked() []context.CancelFunc {
 }
 
 // Close closes the underlying Claude process and memoizes the terminal result.
+// A second caller blocks until the first finishes and observes that same
+// result; teardown, native signalling and the active-session accounting all run
+// exactly once.
 func (s *agentSession) Close(ctx context.Context) (err error) {
 	s.closeOnce.Do(func() {
 		s.closeErr = s.close(ctx)
 	})
 
 	return s.closeErr
+}
+
+// beginClose latches the terminal close state before any teardown runs, so a
+// prompt, relaunch, registry refresh or reuse that is deciding whether to start
+// native work sees the close that is about to remove the process it would use.
+func (s *agentSession) beginClose() {
+	s.mu.Lock()
+	s.closing = true
+	s.mu.Unlock()
+}
+
+// isClosing reports the terminal close state.
+func (s *agentSession) isClosing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.closing
+}
+
+// closedSessionError is the answer every door gives once close has begun. The
+// id is on its way out of the active map, so a caller that raced the close is
+// told what it would be told a moment later.
+func closedSessionError() error {
+	return unknownSessionError()
+}
+
+// awaitQuietTurn is the bounded close barrier. Close holds the returned release
+// until it finishes, so the teardown runs with no turn in flight.
+func (s *agentSession) awaitQuietTurn(ctx context.Context) (func(), error) {
+	waitCtx, stopWaiting := context.WithTimeout(ctx, s.closeTurnTimeout())
+	defer stopWaiting()
+
+	releaseTurn, err := s.acquireClosingTurn(waitCtx)
+	if err != nil {
+		return func() {}, fmt.Errorf("await the in-flight Claude turn: %w", err)
+	}
+
+	return releaseTurn, nil
 }
 
 func (s *agentSession) close(ctx context.Context) (err error) {
@@ -507,6 +584,8 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 		ctx, finish = s.agent.observe.StartClaudeProcess(ctx, "close")
 		defer func() { finish(err) }()
 	}
+
+	s.beginClose()
 
 	s.cancelPendingInteractions(true)
 
@@ -521,22 +600,18 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 	cancel := s.cancel
 	s.mu.Unlock()
 
-	s.stopLateMirrorProcessor(ctx)
-
 	if cancel != nil {
 		cancel()
 	}
 
-	err = s.client.Close()
+	// The barrier runs before the native teardown rather than after it: closing
+	// the process under a turn that is still reading from it is the very thing
+	// waiting for that turn prevents. The wait is real and bounded, so a busy
+	// session is waited for instead of being answered with backpressure.
+	releaseTurn, err := s.awaitQuietTurn(ctx)
+	defer releaseTurn()
 
-	waitCtx, stopWaiting := context.WithTimeout(ctx, s.closeTurnTimeout())
-	defer stopWaiting()
-
-	if releaseTurn, waitErr := s.acquireTurn(waitCtx); waitErr != nil {
-		err = errors.Join(err, waitErr)
-	} else {
-		releaseTurn()
-	}
+	err = errors.Join(err, s.client.Close())
 
 	err = finalizeSessionRuntimeResources(
 		err,

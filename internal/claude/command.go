@@ -253,19 +253,17 @@ func prependSearchPath(dirs []string, search string) string {
 	return strings.Join(entries, string(os.PathListSeparator))
 }
 
-// Discover finds the Claude executable.
-func Discover(ctx context.Context, cliPath string, policy any) (string, error) {
-	options, ok := policy.(Options)
-	if !ok {
-		return "", errors.New("process isolation is required")
-	}
-
+// Discover admits the Claude executable exactly once and freezes what it found.
+// The result is an identity, not a name to look up again: every exec that
+// follows re-reads the admitted path and refuses when the file underneath it
+// changed.
+func Discover(ctx context.Context, cliPath string, options Options) (Executable, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return Executable{}, err
 	}
 
 	if _, err := launchBaseEnvironment(options); err != nil {
-		return "", err
+		return Executable{}, err
 	}
 
 	if strings.TrimSpace(cliPath) == "" {
@@ -274,16 +272,16 @@ func Discover(ctx context.Context, cliPath string, policy any) (string, error) {
 
 	path, err := resolveLaunchExecutable(options, cliPath, BuildEnv(options))
 	if err != nil {
-		return "", fmt.Errorf("find claude in PATH: %w", err)
+		return Executable{}, fmt.Errorf("find claude in PATH: %w", err)
 	}
 
-	return path, nil
+	return freezeExecutable(path)
 }
 
 // validateClaudeVersion probes the Claude CLI version and fails fast when it is
 // older than minClaudeVersion. The adapter never silently downgrades to an
 // unsupported CLI.
-func validateClaudeVersion(ctx context.Context, path string, options Options) error {
+func validateClaudeVersion(ctx context.Context, executable Executable, options Options) error {
 	release := func() {}
 
 	if options.AcquireVersionDiscovery != nil {
@@ -299,7 +297,7 @@ func validateClaudeVersion(ctx context.Context, path string, options Options) er
 		release = acquired
 	}
 
-	output, err := containedClaudeVersionOutput(ctx, path, options)
+	output, err := containedClaudeVersionOutput(ctx, executable, options)
 	if !errors.Is(err, ErrProcessContainmentIncomplete) {
 		release()
 	}
@@ -320,7 +318,7 @@ func validateClaudeVersion(ctx context.Context, path string, options Options) er
 	return nil
 }
 
-func containedClaudeVersionOutput(ctx context.Context, path string, options Options) (output []byte, returnErr error) {
+func containedClaudeVersionOutput(ctx context.Context, executable Executable, options Options) (output []byte, returnErr error) {
 	var (
 		generation *DarwinGeneration
 		err        error
@@ -337,12 +335,12 @@ func containedClaudeVersionOutput(ctx context.Context, path string, options Opti
 		}
 	}
 
-	return containedClaudeOutput(ctx, path, []string{"--version"}, options, generation, "claude version")
+	return containedClaudeOutput(ctx, executable, []string{"--version"}, options, generation, "claude version")
 }
 
 func containedClaudeOutput(
 	ctx context.Context,
-	path string,
+	executable Executable,
 	args []string,
 	options Options,
 	generation *DarwinGeneration,
@@ -358,7 +356,11 @@ func containedClaudeOutput(
 		}
 	}()
 
-	command := processCommand(path, args...)
+	if verifyErr := executable.verify(); verifyErr != nil {
+		return nil, fmt.Errorf("admit %s executable: %w", operation, verifyErr)
+	}
+
+	command := processCommand(executable.Path(), args...)
 	configureProcessCommand(command)
 	command.Dir = options.Cwd
 

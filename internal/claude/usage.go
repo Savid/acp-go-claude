@@ -33,7 +33,7 @@ var loadUsageLocation = time.LoadLocation
 // subscription usage panel. Every value is harness-reported; when the panel
 // carries no usage windows (for example on API billing) the result is empty.
 func QueryRateLimits(ctx context.Context, options Options) (RateLimits, error) {
-	path, err := Discover(ctx, options.CLIPath, options)
+	executable, err := Discover(ctx, options.CLIPath, options)
 	if err != nil {
 		return RateLimits{}, err
 	}
@@ -68,7 +68,7 @@ func QueryRateLimits(ctx context.Context, options Options) (RateLimits, error) {
 
 	output, err := containedClaudeOutput(
 		ctx,
-		path,
+		executable,
 		[]string{"/usage", "--print", cliArgOutputFormat, "json"},
 		options,
 		generation,

@@ -40,6 +40,18 @@ intentional fork behavior. `bypass_permissions` and the skip-permissions
 capability flag are available only when explicitly enabled — see
 [Permissions](/docs/features/permissions).
 
+## Executable admission
+
+A session admits its Claude executable once. Discovery resolves the configured
+`-path` (`WithExecutablePath`), or the search path when none was configured, to
+an absolute path — including when a search-path entry is relative — and records
+the identity of the file that path named. The version probe, the launch it
+admits, and every later relaunch re-read that one path and refuse when the file
+underneath it is no longer the admitted one. Because the adapter examines the
+executable in its own working directory while the child runs in the session's,
+absolute admission is what keeps the file that was validated and the file that
+is executed the same file.
+
 ## Process isolation
 
 Process isolation is optional. Omitting `WithProcessIsolation` selects ordinary

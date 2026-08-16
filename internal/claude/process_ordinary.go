@@ -40,15 +40,22 @@ func OrdinaryEnvironment() map[string]string {
 // resolveOrdinaryExecutable resolves a native executable the way the operator's
 // own shell would. Ordinary execution inherits the ambient search path rather
 // than a curated policy one, so the hardened absolute-entry rule does not apply
-// here; the platform's own rules — including Windows executable extensions —
-// decide what is runnable.
+// to the PATH itself; the platform's own rules — including Windows executable
+// extensions — decide what is runnable. Every candidate is anchored to the
+// adapter's own working directory before it is examined, so what this answers
+// is the file the launch will run and not a name resolved a second time.
 func resolveOrdinaryExecutable(name string, env []string) (string, error) {
 	if strings.TrimSpace(name) == "" {
 		return "", errors.New("executable path is empty")
 	}
 
 	if filepath.Base(name) != name {
-		resolved, err := ordinaryLookPath(name, env)
+		anchored, err := ordinaryAnchoredPath(name)
+		if err != nil {
+			return "", err
+		}
+
+		resolved, err := ordinaryLookPath(anchored, env)
 		if err != nil {
 			return "", fmt.Errorf("resolve executable %q: %w", name, err)
 		}
@@ -61,12 +68,36 @@ func resolveOrdinaryExecutable(name string, env []string) (string, error) {
 			continue
 		}
 
-		if resolved, err := ordinaryLookPath(filepath.Join(directory, name), env); err == nil {
+		// filepath.Join cleans, so a "." entry would otherwise yield a bare name
+		// and send the platform candidate check back to the adapter's ambient
+		// PATH instead of the search path this launch was built with.
+		anchored, err := ordinaryAnchoredPath(filepath.Join(directory, name))
+		if err != nil {
+			return "", err
+		}
+
+		if resolved, err := ordinaryLookPath(anchored, env); err == nil {
 			return resolved, nil
 		}
 	}
 
 	return "", fmt.Errorf("find %s in PATH: %w", name, exec.ErrNotFound)
+}
+
+// ordinaryAnchoredPath anchors a candidate to the directory the adapter itself
+// runs in. The launch replaces the child's working directory with the session's,
+// so a relative candidate would be examined here and executed there.
+func ordinaryAnchoredPath(path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+
+	directory, err := processGetwd()
+	if err != nil {
+		return "", fmt.Errorf("anchor executable %q to the working directory: %w", path, err)
+	}
+
+	return filepath.Join(directory, path), nil
 }
 
 var ordinaryLookPath = ordinaryExecutableCandidate

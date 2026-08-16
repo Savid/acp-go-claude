@@ -523,7 +523,6 @@ func TestAgentSessionHelperBranches(t *testing.T) {
 	config, err := agent.mcpConfigForStart(sessionStart{McpServers: []acp.McpServer{stdioServer, httpServer}})
 	require.NoError(t, err)
 	require.NotEmpty(t, config)
-	closeSessionStartResources(&materializedSession{})
 }
 
 func TestStoredSessionEntries(t *testing.T) {

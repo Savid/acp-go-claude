@@ -34,6 +34,11 @@ func runContainedAuthKeychainTool(ctx context.Context, args []string, options Op
 		return nil, 0, err
 	}
 
+	executable, err := freezeExecutable(path)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	if options.PrepareKeychainGeneration == nil || options.AcquireKeychainDiscovery == nil {
 		return nil, 0, fmt.Errorf("%w: keychain native admission is unavailable", ErrProcessContainmentIncomplete)
 	}
@@ -51,7 +56,7 @@ func runContainedAuthKeychainTool(ctx context.Context, args []string, options Op
 	containedOptions := options
 	containedOptions.Cwd = "/"
 
-	output, runErr := containedClaudeOutput(ctx, path, args, containedOptions, generation, "security keychain")
+	output, runErr := containedClaudeOutput(ctx, executable, args, containedOptions, generation, "security keychain")
 	if !errors.Is(runErr, ErrProcessContainmentIncomplete) {
 		release()
 	}

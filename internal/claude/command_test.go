@@ -202,14 +202,10 @@ func countEnvKey(env []string, key string) int {
 func TestDiscover(t *testing.T) {
 	t.Parallel()
 
-	path, err := Discover(context.Background(), "/bin/sh", withTestProcessIsolation(Options{}))
+	executable, err := Discover(context.Background(), "/bin/sh", withTestProcessIsolation(Options{}))
 	require.NoError(t, err)
-	require.Equal(t, "/bin/sh", path)
-}
-
-func TestDiscoverRejectsMissingPolicy(t *testing.T) {
-	_, err := Discover(t.Context(), "/bin/sh", struct{}{})
-	require.ErrorContains(t, err, "process isolation is required")
+	require.Equal(t, "/bin/sh", executable.Path())
+	require.True(t, executable.Admitted())
 }
 
 func TestDiscoverCancelledExplicitPath(t *testing.T) {
@@ -270,16 +266,16 @@ func TestValidateClaudeVersion(t *testing.T) {
 
 	current := writeShellScript(t, filepath.Join(dir, "current"), "#!/bin/sh\necho '2.1.201 (Claude Code)'\n")
 	options := platformTestTransportOptions(t, Options{})
-	require.NoError(t, validateClaudeVersion(context.Background(), current, options))
+	require.NoError(t, validateClaudeVersion(context.Background(), admitExecutable(t, current), options))
 
 	old := writeShellScript(t, filepath.Join(dir, "old"), "#!/bin/sh\necho '1.9.9 (Claude Code)'\n")
-	require.ErrorContains(t, validateClaudeVersion(context.Background(), old, options), "too old")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), admitExecutable(t, old), options), "too old")
 
 	unparsable := writeShellScript(t, filepath.Join(dir, "bad"), "#!/bin/sh\necho 'no version'\n")
-	require.ErrorContains(t, validateClaudeVersion(context.Background(), unparsable, options), "could not parse")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), admitExecutable(t, unparsable), options), "could not parse")
 
 	failing := writeShellScript(t, filepath.Join(dir, "fail"), "#!/bin/sh\nexit 1\n")
-	require.Error(t, validateClaudeVersion(context.Background(), failing, options))
+	require.Error(t, validateClaudeVersion(context.Background(), admitExecutable(t, failing), options))
 }
 
 func TestContainedClaudeOutputSurvivesWaitBeforeRead(t *testing.T) {
@@ -323,7 +319,7 @@ func TestContainedClaudeOutputSurvivesWaitBeforeRead(t *testing.T) {
 
 	output, err := containedClaudeOutput(
 		t.Context(),
-		os.Args[0],
+		admitExecutable(t, os.Args[0]),
 		[]string{"-test.run=^TestContainedClaudeOutputSurvivesWaitBeforeRead$"},
 		withTestProcessIsolation(Options{Cwd: t.TempDir()}),
 		nil,
@@ -336,16 +332,16 @@ func TestContainedClaudeOutputSurvivesWaitBeforeRead(t *testing.T) {
 func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 	want := errors.New("version seam")
 	releases := 0
-	err := validateClaudeVersion(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
+	err := validateClaudeVersion(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
 		AcquireVersionDiscovery: func(context.Context) (func(), error) { return nil, want },
 	}))
 	require.ErrorIs(t, err, want)
-	err = validateClaudeVersion(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
+	err = validateClaudeVersion(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
 		AcquireVersionDiscovery: func(context.Context) (func(), error) { return nil, nil }, //nolint:nilnil // Invalid callback result under test.
 	}))
 	require.ErrorContains(t, err, "nil release")
 
-	err = validateClaudeVersion(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
+	err = validateClaudeVersion(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
 		DarwinBestEffort: true,
 		AcquireVersionDiscovery: func(context.Context) (func(), error) {
 			return func() { releases++ }, nil
@@ -354,7 +350,7 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 	require.Zero(t, releases)
 
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
+	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
 		DarwinBestEffort: true,
 		PrepareDarwinVersionGeneration: func(context.Context) (*DarwinGeneration, error) {
 			return nil, want
@@ -383,19 +379,19 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 		},
 	})
 	processGetwd = func() (string, error) { return "", want }
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", generationOptions)
+	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), generationOptions)
 	require.ErrorIs(t, err, want)
 	require.Equal(t, 1, finished)
 	processGetwd = originalGetwd
 
 	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) { return nil, want }
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{Cwd: t.TempDir()}))
+	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{Cwd: t.TempDir()}))
 	require.ErrorIs(t, err, want)
 	observedUnavailable := 0
 	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) {
 		return nil, ErrProcessContainmentIncomplete
 	}
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
+	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
 		Cwd: t.TempDir(),
 		ObserveProcessInventory: func(context.Context, func() (int, bool)) {
 			observedUnavailable++
@@ -409,19 +405,19 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 
 		return &processTreeCommand{cmd: command}, nil
 	}
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{Cwd: t.TempDir()}))
+	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{Cwd: t.TempDir()}))
 	require.ErrorContains(t, err, "capture claude version output")
 
 	processPrepareContained = func(command *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
 		return &processTreeCommand{cmd: command}, nil
 	}
 	processStartContained = func(*processTreeCommand) (*processContainment, error) { return nil, want }
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{Cwd: t.TempDir()}))
+	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{Cwd: t.TempDir()}))
 	require.ErrorIs(t, err, want)
 	processStartContained = func(*processTreeCommand) (*processContainment, error) {
 		return nil, ErrProcessContainmentIncomplete
 	}
-	_, err = containedClaudeVersionOutput(t.Context(), "/bin/sh", withTestProcessIsolation(Options{
+	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
 		Cwd: t.TempDir(),
 		ObserveProcessInventory: func(context.Context, func() (int, bool)) {
 			observedUnavailable++
@@ -431,14 +427,14 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 	require.Equal(t, 2, observedUnavailable)
 
 	_, err = containedClaudeOutput(
-		t.Context(), "/bin/sh", nil, Options{ProcessIsolation: &ProcessIsolation{}}, nil, "invalid environment",
+		t.Context(), admitExecutable(t, "/bin/sh"), nil, Options{ProcessIsolation: &ProcessIsolation{}}, nil, "invalid environment",
 	)
 	require.ErrorContains(t, err, "invalid process isolation")
 
 	originalPipe := commandPipe
 	t.Cleanup(func() { commandPipe = originalPipe })
 	commandPipe = func() (*os.File, *os.File, error) { return nil, nil, want }
-	_, err = containedClaudeOutput(t.Context(), "/bin/sh", nil, withTestProcessIsolation(Options{Cwd: t.TempDir()}), nil, "pipe failure")
+	_, err = containedClaudeOutput(t.Context(), admitExecutable(t, "/bin/sh"), nil, withTestProcessIsolation(Options{Cwd: t.TempDir()}), nil, "pipe failure")
 	require.ErrorIs(t, err, want)
 	commandPipe = originalPipe
 
@@ -449,7 +445,7 @@ func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
 		hanging := writeShellScript(t, filepath.Join(dir, "hanging"), "#!/bin/sh\nsleep 30\n")
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 		defer cancel()
-		_, err = containedClaudeVersionOutput(ctx, hanging, platformTestTransportOptions(t, Options{Cwd: dir}))
+		_, err = containedClaudeVersionOutput(ctx, admitExecutable(t, hanging), platformTestTransportOptions(t, Options{Cwd: dir}))
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 	}
 }
@@ -483,5 +479,5 @@ func TestDiscoverFromPath(t *testing.T) {
 
 	found, err := Discover(context.Background(), "", withTestProcessIsolation(Options{}))
 	require.NoError(t, err)
-	require.Equal(t, path, found)
+	require.Equal(t, path, found.Path())
 }

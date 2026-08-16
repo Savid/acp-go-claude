@@ -208,6 +208,11 @@ type agentSession struct {
 	turnAcquiredHook func(int)
 	closeOnce        sync.Once
 	closeErr         error
+	// closing is the terminal close state, guarded by mu. It is latched once,
+	// before any teardown runs, and never cleared. Every door that would start
+	// new native work for this session reads it inside the same critical section
+	// that installs that work, so once it is set no such work can begin.
+	closing bool
 }
 
 type promptLoopState struct {

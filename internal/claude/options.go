@@ -9,7 +9,12 @@ import (
 // Options configures one Claude CLI session.
 type Options struct {
 	CLIPath string
-	Cwd     string
+	// Executable is an already-admitted native executable identity. A session
+	// freezes the identity its first launch admitted and hands it back here, so
+	// a relaunch runs that same file instead of resolving CLIPath again against
+	// a search path that may have changed underneath it.
+	Executable Executable
+	Cwd        string
 
 	ClaudeHome string
 	Env        map[string]string

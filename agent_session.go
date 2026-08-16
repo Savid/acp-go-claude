@@ -450,17 +450,20 @@ func (a *Agent) ensureOpen() error {
 	return a.configurationError()
 }
 
-// configurationError reports the options this agent was built with as refused.
-// Every entry point answers it, not only initialize: an in-process host that
-// drives the agent directly may never call initialize, and an agent whose limits
-// or read root were rejected must not serve a turn under them.
+// configurationError reports the options this agent was built with as refused,
+// as an internal error: the caller's params are fine, the embedding host built
+// an agent that cannot serve them. Every entry point answers it, not only
+// initialize: an in-process host that drives the agent directly may never call
+// initialize, and an agent whose limits or read root were rejected must not
+// serve a turn under them. The joined prose is the whole payload because no
+// single wire field is at fault for an operator to be pointed at.
 func (a *Agent) configurationError() error {
 	err := errors.Join(a.activeLimitErr, a.configurationErr)
 	if err == nil {
 		return nil
 	}
 
-	return acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+	return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
 }
 
 func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) error {

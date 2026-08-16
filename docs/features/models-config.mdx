@@ -178,8 +178,10 @@ err := claudeacp.Serve(ctx, input, output,
 ```
 
 Supplying `WithImageLimits` replaces the whole struct. A zero field disables
-that specific adapter policy limit; a negative field fails initialization with
-the uniform invalid-parameters error. Zero never bypasses the hard ACP frame
+that specific adapter policy limit; a negative field is a refused construction
+option, so every entry point answers `-32603 Internal error` with
+`{"error": "<reason>"}` — the caller's parameters were valid and the agent the
+host built is what cannot serve them. Zero never bypasses the hard ACP frame
 bound that limits one emitted image. Typed image output and its durable replay
 are covered in [Session store](/docs/features/session-store).
 

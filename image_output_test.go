@@ -1283,7 +1283,10 @@ func TestImageLimitConstruction(t *testing.T) {
 	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{})
 	var requestErr *acp.RequestError
 	require.ErrorAs(t, err, &requestErr)
-	require.Equal(t, -32602, requestErr.Code)
+
+	// The caller's initialize params were fine; the agent this host built was not.
+	require.Equal(t, -32603, requestErr.Code)
+	require.Equal(t, "Internal error", requestErr.Message)
 }
 
 func TestImageScratchDirectoryLifecycle(t *testing.T) {

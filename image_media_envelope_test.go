@@ -202,12 +202,15 @@ func TestInitializeAdvertisesHandoffOnlyWithARoot(t *testing.T) {
 func TestInputHandoffRootMustBeAbsolute(t *testing.T) {
 	t.Parallel()
 
+	// A refused construction option is the embedding host's fault, not the
+	// caller's, so it answers -32603 rather than -32602.
 	requireRelativeRootRefused := func(t *testing.T, err error) {
 		t.Helper()
 
 		var requestErr *acp.RequestError
 		require.ErrorAs(t, err, &requestErr)
-		require.Equal(t, -32602, requestErr.Code)
+		require.Equal(t, -32603, requestErr.Code)
+		require.Equal(t, "Internal error", requestErr.Message)
 
 		details, ok := requestErr.Data.(map[string]any)
 		require.True(t, ok)

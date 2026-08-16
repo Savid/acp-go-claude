@@ -47,9 +47,21 @@ func TestAdmittedExecutableRunsTheFileItValidatedAcrossACwdTransition(t *testing
 	require.Equal(t, "adapter-file", string(output))
 
 	// The file underneath the admitted path is replaced by a different one. The
-	// path still resolves, so only the recorded identity can refuse it.
-	require.NoError(t, os.Remove(filepath.Join(adapterDir, "claude")))
-	writeShellScript(t, filepath.Join(adapterDir, "claude"), "#!/bin/sh\nprintf replaced-file\n")
+	// path still resolves, so only the recorded identity can refuse it. The
+	// replacement is created beside the original and renamed over it: removing
+	// first frees an inode the very next create can be handed straight back on
+	// a disk-backed filesystem, which would make the two files identical to the
+	// recorded identity and the refusal below vacuous.
+	admitted := filepath.Join(adapterDir, "claude")
+	before, err := os.Stat(admitted)
+	require.NoError(t, err)
+
+	replacement := writeShellScript(t, filepath.Join(adapterDir, "claude.replacement"), "#!/bin/sh\nprintf replaced-file\n")
+	require.NoError(t, os.Rename(replacement, admitted))
+
+	after, err := os.Stat(admitted)
+	require.NoError(t, err)
+	require.False(t, os.SameFile(before, after), "replacement reused the admitted file's identity")
 
 	_, err = containedClaudeOutput(t.Context(), executable, nil, options, nil, "identity proof")
 	require.ErrorContains(t, err, "no longer the admitted file")

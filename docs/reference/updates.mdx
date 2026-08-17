@@ -1,0 +1,39 @@
+---
+title: "Updates"
+description: "The exact ACP session updates a Claude turn emits and where each comes from"
+---
+
+## Update mapping
+
+During a prompt turn, Claude stream frames are translated into ACP session
+updates:
+
+| Update | Source |
+| --- | --- |
+| assistant message chunks | Claude assistant text |
+| assistant image chunks | Claude assistant image results, one image per chunk |
+| thought chunks | Claude thinking text |
+| tool call | Claude tool start/input |
+| tool result | Claude tool result |
+| plan | Claude plan updates |
+| available commands | Claude slash-command set (and refreshes) |
+| usage | Claude usage counters (`_meta.claude.usage`) |
+| session info | title and state changes |
+
+## Related channels
+
+- Raw Claude frames, when enabled, arrive separately on `_claude/rawEvent` and
+  are **not** session updates — see [Raw events](/docs/features/raw-events).
+- A turn *failure* is a JSON-RPC error on `session/prompt`, not an update — see
+  the failure contract in [ACP methods](/docs/reference/acp-methods).
+- Structured-output results are emitted on the turn's `usage_update` metadata
+  under `_meta.claude.structuredOutput`, never on the prompt response.
+- A terminal empty session-info notification and the successful prompt
+  response carry the same durable transcript UUID under
+  `_meta.claude.messageId`; load replay preserves the identity on the saved
+  assistant update for native checkpoint reconciliation.
+- Subagent output flattens into this same update stream, tagged with
+  `_meta.claude.parentToolUseId`; untagged updates are the main agent — see
+  [Metadata](/docs/reference/meta).
+- A content-bearing tool update contains the complete current content array;
+  clients replace the prior array. Status-only updates omit `content`.

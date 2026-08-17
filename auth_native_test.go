@@ -1,0 +1,419 @@
+package claudeacp
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+
+	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/stretchr/testify/require"
+)
+
+func TestNativeOptionsRunsFlowsInTheSessionHome(t *testing.T) {
+	home := t.TempDir()
+	broker, _ := newAuthBroker(t, WithHome(home), WithExecutablePath("/bin/claude"), WithEnv(map[string]string{"A": "B"}))
+
+	options, err := broker.nativeOptions()
+	require.NoError(t, err)
+	require.Equal(t, "/bin/claude", options.CLIPath)
+	require.Equal(t, map[string]string{"A": "B"}, options.Env)
+	require.False(t, options.DarwinBestEffort)
+	release, err := options.AcquireKeychainDiscovery(t.Context())
+	require.NoError(t, err)
+	release()
+	requireKeychainGenerationWithoutBestEffort(t, options)
+
+	resolved, err := filepath.EvalSymlinks(home)
+	require.NoError(t, err)
+	require.Equal(t, resolved, options.ClaudeHome)
+
+	broker.agent.containmentMode = RuntimeContainmentBestEffort
+
+	bestEffort, err := broker.nativeOptions()
+	require.NoError(t, err)
+	require.True(t, bestEffort.DarwinBestEffort)
+	requireKeychainGenerationUnderBestEffort(t, bestEffort)
+
+	resume := broker.agent.resumeCredentialOptions()
+	release, err = resume.AcquireKeychainDiscovery(t.Context())
+	require.NoError(t, err)
+	release()
+	requireKeychainGenerationUnderBestEffort(t, resume)
+}
+
+func TestNativeLogoutCannotBeRedirectedFromTheConsentedHome(t *testing.T) {
+	seams := newAuthSeams(t)
+	managed := t.TempDir()
+	hostile := t.TempDir()
+	broker, _ := newAuthBroker(t,
+		WithHome(managed),
+		WithProviderAuthDirectHome(managed),
+		WithProcessIsolation(ProcessIsolation{
+			UID: 4242,
+			GID: 4242,
+			BaseEnvironment: map[string]string{
+				homeEnv: "/home/claude",
+				"PATH":  "/usr/bin:/bin",
+			},
+			StandaloneOwnerID:   "logout-test",
+			StandaloneStateRoot: managed,
+		}),
+	)
+	broker.agent.options.Env["CLAUDE_CONFIG_DIR"] = hostile
+
+	originalLogout := authLogoutCommand
+	var launchedEnv []string
+	authLogoutCommand = func(_ context.Context, options claude.Options, _ *claude.DarwinGeneration) (int, error) {
+		seams.logoutCalls++
+		launchedEnv = claude.BuildEnv(options)
+
+		return 0, nil
+	}
+	t.Cleanup(func() { authLogoutCommand = originalLogout })
+
+	require.NoError(t, broker.nativeLogout(t.Context()))
+	resolved, err := filepath.EvalSymlinks(managed)
+	require.NoError(t, err)
+	require.Contains(t, launchedEnv, "CLAUDE_CONFIG_DIR="+resolved)
+	require.NotContains(t, launchedEnv, "CLAUDE_CONFIG_DIR="+hostile)
+	require.Equal(t, 1, seams.logoutCalls)
+}
+
+func TestNativeOptionsFailsOnAnUnresolvableHome(t *testing.T) {
+	broker, _ := newAuthBroker(t, WithHome(filepath.Join(t.TempDir(), "absent")))
+
+	_, err := broker.nativeOptions()
+	require.Error(t, err)
+}
+
+func TestNativeOptionsCarriesTheScratchParentTheLoginLegNeeds(t *testing.T) {
+	scratch := filepath.Join(t.TempDir(), "scratch")
+	broker, _ := newAuthBroker(t, WithHome(t.TempDir()), WithScratchDir(scratch))
+
+	options, err := broker.nativeOptions()
+	require.NoError(t, err)
+	require.Equal(t, scratch, options.ScratchParent)
+
+	occupied := filepath.Join(t.TempDir(), "occupied")
+	require.NoError(t, os.WriteFile(occupied, []byte("x"), 0o600))
+
+	broker, _ = newAuthBroker(t, WithHome(t.TempDir()), WithScratchDir(occupied))
+
+	_, err = broker.nativeOptions()
+	require.ErrorContains(t, err, "create scratch parent dir")
+}
+
+func TestNativeLegsFailClosedOnAnUnresolvableHome(t *testing.T) {
+	newAuthSeams(t)
+
+	broker, _ := newAuthBroker(t, WithHome(filepath.Join(t.TempDir(), "absent")))
+
+	_, cause := broker.readAccount(t.Context())
+	require.Equal(t, authCauseProcess, cause)
+
+	requireAuthFailed(t, broker.nativeLogout(t.Context()), authCauseProcess)
+	requireAuthFailed(t, broker.removeKeystoreItems(t.Context()), authCauseProcess)
+
+	_, _, cause = broker.startLogin(t.Context())
+	require.Equal(t, authCauseProcess, cause)
+}
+
+func TestNativeLegsFailClosedWhenAdmissionIsRefused(t *testing.T) {
+	newAuthSeams(t)
+
+	home := t.TempDir()
+	broker, _ := newAuthBroker(t, WithHome(home), WithProviderAuthDirectHome(home), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+			return nil, errTestRandom
+		},
+	}))
+	broker.agent.containmentMode = RuntimeContainmentAuthoritative
+
+	_, cause := broker.readAccount(t.Context())
+	require.Equal(t, authCauseProcess, cause)
+
+	requireAuthFailed(t, broker.nativeLogout(t.Context()), authCauseProcess)
+
+	_, _, cause = broker.startLogin(t.Context())
+	require.Equal(t, authCauseProcess, cause)
+}
+
+func TestAuthNativeAdmissionFailsWhenNoGenerationCanBePrepared(t *testing.T) {
+	broker, _ := newAuthBroker(t)
+	broker.agent.containmentMode = RuntimeContainmentUnavailable
+
+	_, _, err := broker.authNativeAdmission(t.Context())
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+}
+
+func TestAuthNativeCauseClassifiesWithoutForwardingText(t *testing.T) {
+	broker, _ := newAuthBroker(t)
+
+	require.Equal(t, authCauseProcess, broker.authNativeCause(claude.ErrProcessContainmentIncomplete))
+	require.ErrorIs(t, broker.agent.containmentErr, claude.ErrProcessContainmentIncomplete)
+
+	require.Equal(t, authCauseTimeout, broker.authNativeCause(context.DeadlineExceeded))
+	require.Equal(t, authCauseProcess, broker.authNativeCause(errTestRandom))
+}
+
+func TestReadAccountReportsTheExitCodeTheLoggedInFlagAndTheAccount(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, _ := newAuthBroker(t)
+
+	seams.account = claude.AuthAccount{LoggedIn: true, AuthMethod: "oauth", Email: "owner@example.test"}
+
+	reading, cause := broker.readAccount(t.Context())
+	require.Empty(t, cause)
+	require.True(t, reading.loggedIn)
+	require.Equal(t, authAccountIdentityOf(seams.account), reading.identity)
+
+	seams.statusExt = 1
+
+	reading, cause = broker.readAccount(t.Context())
+	require.Empty(t, cause)
+	require.False(t, reading.loggedIn)
+
+	seams.statusExt = 0
+	seams.account = claude.AuthAccount{LoggedIn: false, AuthMethod: "oauth_token"}
+
+	reading, cause = broker.readAccount(t.Context())
+	require.Empty(t, cause)
+	require.False(t, reading.loggedIn)
+}
+
+// TestAccountReadingAdvancesOnlyOnAChange pins the no-callback completion rule.
+// A logged-in reading identical to the baseline is the credential the config
+// dir already held; only a reading that differs can answer an unattended flow.
+func TestAccountReadingAdvancesOnlyOnAChange(t *testing.T) {
+	resident := authAccountReading{
+		identity: authAccountIdentityOf(claude.AuthAccount{LoggedIn: true, Email: "resident@example.test"}),
+		loggedIn: true,
+	}
+	switched := authAccountReading{
+		identity: authAccountIdentityOf(claude.AuthAccount{LoggedIn: true, Email: "switched@example.test"}),
+		loggedIn: true,
+	}
+	empty := authAccountReading{}
+
+	require.False(t, resident.advancedPast(resident))
+	require.False(t, empty.advancedPast(empty))
+	require.False(t, empty.advancedPast(resident))
+	require.True(t, resident.advancedPast(empty))
+	require.True(t, switched.advancedPast(resident))
+}
+
+// TestAccountReadingComparesOnlyFieldsThisPackageChose pins what the completion
+// signal is allowed to be equality over. The signal is whole-value equality on
+// a reading, so any type reaching into it decides whether a refused
+// authorization looks like a landed login. An upstream struct there carries
+// whatever a later release adds to it — and a pointer member is comparable,
+// never equal across two decodes, and would report every refusal as a success.
+func TestAccountReadingComparesOnlyFieldsThisPackageChose(t *testing.T) {
+	reading := reflect.TypeOf(authAccountReading{})
+	owner := reading.PkgPath()
+
+	var walk func(typ reflect.Type, path string)
+
+	walk = func(typ reflect.Type, path string) {
+		switch typ.Kind() {
+		case reflect.Bool, reflect.String,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+			reflect.Float32, reflect.Float64:
+			return
+		case reflect.Struct:
+			require.Equal(t, owner, typ.PkgPath(), "%s is %s, declared outside this package", path, typ)
+
+			for index := range typ.NumField() {
+				field := typ.Field(index)
+				walk(field.Type, path+"."+field.Name)
+			}
+		default:
+			require.Failf(t, "unusable in the completion signal",
+				"%s is %s; only scalars this package chose may decide it", path, typ.Kind())
+		}
+	}
+
+	walk(reading, reading.Name())
+}
+
+func TestNativeSeamsHoldTheContainmentPermitOnAnIncompleteBoundary(t *testing.T) {
+	seams := newAuthSeams(t)
+
+	released := 0
+	home := t.TempDir()
+	broker, _ := newAuthBroker(t, WithHome(home), WithProviderAuthDirectHome(home), WithRuntimeResourceHooks(RuntimeResourceHooks{
+		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+			return func() { released++ }, nil
+		},
+	}))
+	broker.agent.containmentMode = RuntimeContainmentAuthoritative
+
+	seams.statusErr = claude.ErrProcessContainmentIncomplete
+
+	_, cause := broker.readAccount(t.Context())
+	require.Equal(t, authCauseProcess, cause)
+	require.Zero(t, released)
+
+	seams.logoutErr = claude.ErrProcessContainmentIncomplete
+	requireAuthFailed(t, broker.nativeLogout(t.Context()), authCauseProcess)
+	require.Zero(t, released)
+
+	seams.loginErr = claude.ErrProcessContainmentIncomplete
+
+	_, _, cause = broker.startLogin(t.Context())
+	require.Equal(t, authCauseProcess, cause)
+	require.Zero(t, released)
+}
+
+func TestRemoveKeystoreItemsNamesTheConfigDirAndTheAccount(t *testing.T) {
+	seams := newAuthSeams(t)
+
+	home := t.TempDir()
+	broker, _ := newAuthBroker(t, WithHome(home))
+
+	require.NoError(t, broker.removeKeystoreItems(t.Context()))
+	require.Equal(t, 1, seams.removeCalls)
+	require.Equal(t, "canary-user", seams.removedUser)
+
+	resolved, err := filepath.EvalSymlinks(home)
+	require.NoError(t, err)
+	require.Equal(t, resolved, seams.removedDir)
+
+	seams.removeErr = errTestRandom
+	requireAuthFailed(t, broker.removeKeystoreItems(t.Context()), authCauseTransport)
+
+	seams.removeErr = claude.ErrProcessContainmentIncomplete
+	requireAuthFailed(t, broker.removeKeystoreItems(t.Context()), authCauseProcess)
+}
+
+func TestAuthNativeUserReadsThePolicyEnvironment(t *testing.T) {
+	require.Equal(t, "overlay", authNativeUser(claude.Options{Env: map[string]string{"USER": "overlay"}}))
+	options := claude.Options{ProcessIsolation: &claude.ProcessIsolation{BaseEnvironment: map[string]string{"USER": "operator"}}}
+	require.Equal(t, "operator", authNativeUser(options))
+	require.Empty(t, authNativeUser(claude.Options{}))
+}
+
+func TestAuthLoginBeginWrapsTheNativeStart(t *testing.T) {
+	original := authLoginStart
+
+	authLoginStart = func(context.Context, claude.Options, *claude.DarwinGeneration) (*claude.AuthLogin, string, error) {
+		return nil, "", errTestRandom
+	}
+
+	t.Cleanup(func() { authLoginStart = original })
+
+	_, _, err := authLoginBegin(t.Context(), claude.Options{}, nil)
+	require.ErrorIs(t, err, errTestRandom)
+
+	authLoginStart = func(context.Context, claude.Options, *claude.DarwinGeneration) (*claude.AuthLogin, string, error) {
+		return &claude.AuthLogin{}, "https://claude.com/", nil
+	}
+
+	login, url, err := authLoginBegin(t.Context(), claude.Options{}, nil)
+	require.NoError(t, err)
+	require.NotNil(t, login)
+	require.Equal(t, "https://claude.com/", url)
+}
+
+func TestAuthLoginHandleClose(t *testing.T) {
+	newAuthSeams(t)
+
+	broker, _ := newAuthBroker(t)
+
+	(*authLoginHandle)(nil).close()
+
+	released := false
+	child := &fakeAuthLogin{}
+	handle := &authLoginHandle{login: child, release: func() { released = true }, agent: broker.agent}
+
+	handle.close()
+	require.True(t, released)
+	require.Equal(t, 1, child.closeCount())
+
+	incomplete := &fakeAuthLogin{closeErr: claude.ErrProcessContainmentIncomplete}
+	held := &authLoginHandle{login: incomplete, release: func() { t.Fatal("permit released on an incomplete boundary") }, agent: broker.agent}
+
+	held.close()
+	require.ErrorIs(t, broker.agent.containmentErr, claude.ErrProcessContainmentIncomplete)
+}
+
+func TestAuthLoginHandleSubmitAndExited(t *testing.T) {
+	child := &fakeAuthLogin{seams: &authTestSeams{}}
+	handle := &authLoginHandle{login: child}
+
+	require.NoError(t, handle.submit("value"))
+	require.Equal(t, []string{"value"}, child.values())
+	require.False(t, handle.exited())
+
+	child.submitErr = errTestRandom
+	require.ErrorIs(t, handle.submit("value"), errTestRandom)
+}
+
+// TestStartLoginNamesTheRefusedLineAtDebug pins the one diagnostic a broken pin
+// leaves behind. Without it every grammar kill is an indistinguishable
+// native_veto and the line is only recoverable by capturing the harness out of
+// band.
+func TestStartLoginNamesTheRefusedLineAtDebug(t *testing.T) {
+	seams := newAuthSeams(t)
+
+	sink := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	broker, sessionID := newAuthBroker(t, WithLogger(logger))
+	generation := authCatalogGeneration(t, broker, sessionID)
+
+	seams.loginErr = &claude.AuthLoginGrammarError{Line: "Warning: something new"}
+
+	_, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+	requireAuthFailed(t, err, authCauseNativeVeto)
+
+	require.Contains(t, sink.String(), "claude auth login line rejected by the pinned grammar")
+	require.Contains(t, sink.String(), "Warning: something new")
+
+	// A URL-bearing line is scrubbed on the terms the flow's url is: the
+	// authorization code rides in the query and never reaches the sink.
+	sink.Reset()
+
+	authorizeURL := "https://claude.com/oauth/authorize?code=canary&redirect_uri=" + claude.AuthLoginRedirectURI
+	seams.loginErr = &claude.AuthLoginGrammarError{Line: "visit: " + authorizeURL + " now"}
+
+	_, err = broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
+	requireAuthFailed(t, err, authCauseNativeVeto)
+
+	require.Contains(t, sink.String(), "https://claude.com/oauth/authorize")
+	require.NotContains(t, sink.String(), "canary")
+}
+
+func TestSessionCloseCancelsPendingProviderAuthFlows(t *testing.T) {
+	seams := newAuthSeams(t)
+	broker, sessionID := newAuthBroker(t)
+
+	startAuthFlow(t, broker, sessionID)
+
+	session := broker.agent.sessions[sessionID]
+	session.client = &claude.Client{}
+
+	_ = session.Close(t.Context())
+
+	require.Equal(t, 1, seams.login.closeCount())
+}
+
+func TestProviderAuthLedgerRootIsCreatedWithRestrictedModes(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "nested", "root")
+	broker, _ := newAuthBroker(t, WithProviderAuthRoot(root))
+
+	info, err := os.Stat(broker.ledger.dir)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+
+	entries, err := os.ReadDir(broker.ledger.dir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the writability probe leaves nothing behind")
+
+	require.True(t, errors.Is(os.ErrNotExist, os.ErrNotExist))
+}

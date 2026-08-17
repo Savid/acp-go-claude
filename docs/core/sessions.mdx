@@ -1,0 +1,88 @@
+---
+title: "Sessions"
+description: "The session lifecycle model and how transcripts map to durable keys"
+---
+
+An ACP session owns at most one live Claude Code process. The adapter creates
+that process on demand, keeps it alive across prompt turns, and tears it down
+when the session closes. An MCP-bearing lifecycle first launches a provisional
+process, then replaces it once immediately before the first user turn so Claude
+rebuilds its startup-fixed MCP registry under the armed turn's authority. The
+old contained process tree is fully closed and its runtime admission released
+before the replacement is admitted, so the two roots never overlap.
+
+## Lifecycle
+
+The adapter implements the full ACP session surface: create, load, resume, list,
+prompt, cancel, close, and delete. A session identifier is an ACP session id and
+is reused as the durable store key, so a host can address the same session
+across restarts. Forking an existing session is exposed only through the
+`_claude/session/fork` extension method — there is no separate fork ACP method.
+
+Close is terminal and bounded. It waits, bounded, for an in-flight turn to
+finish before it tears the native process down, so the process is never closed
+under a turn still reading from it; a busy session is waited for rather than
+answered with backpressure. Once close has begun the session admits nothing
+further — a prompt, a relaunch, an MCP registry refresh, and reuse by load,
+resume, or fork all answer the unknown-session error — and a repeated close
+observes the first result without repeating any teardown. A session leaves the
+active map only while the map still holds that same instance, so a close never
+evicts a session that a same-id load, resume, or fork installed behind it.
+
+Loading, resuming, and forking an inactive session require authoritative main
+rows in the [session store](/docs/features/session-store). The adapter
+materializes those rows into an isolated temporary Claude config directory
+under the scratch directory (default: system temp) so the CLI can restore them.
+A residual native transcript is never adopted when the store has no session.
+Missing store rows do not make an already-active binding residual:
+store-authoritative load fails unknown without deleting that binding's native
+transcript, and its bound prompt route remains usable.
+
+## Store keys and subpaths
+
+Durable storage is keyed by session id plus a subpath:
+
+```go
+type SessionKey struct {
+	SessionID string
+	Subpath   string
+}
+```
+
+The main transcript uses the empty subpath (`SessionStoreMainSubpath`).
+Additional files Claude produces for a session — for example subagent
+transcripts — are mirrored under a safe relative subpath sharing the same
+session id, so one session id addresses every transcript file the session
+produces.
+
+## Turn bounds and failures
+
+Each prompt is a *turn*. A turn ends with an ACP `StopReason`, a user cancel, or
+a native failure. Cancelling a turn resolves as a successful `cancelled`
+response, not an error. A turn that never terminates can be bounded with
+`WithTurnTimeout`; on expiry the native turn is aborted and the prompt fails with
+a `claude_turn_failed` error whose cause is `timeout`. See
+[Prompt streaming](/docs/core/prompt-streaming) for how turn output is delivered
+and [ACP methods](/docs/reference/acp-methods) for the failure contract.
+
+Cancellation is a contained native-process cutover, not only a control-protocol
+interrupt. The adapter acknowledges the native interrupt, closes the session's
+Claude process, and completes the selected containment boundary before either
+`session/cancel` or the cancelled prompt may settle. `WithTurnTimeout` expiry
+and cancellation of the prompt's caller context use the same boundary.
+The next prompt lazily launches Claude with `--resume <session-id>`, so the ACP
+session remains addressable without reusing the aborted process.
+
+Linux uses an embedded subreaper supervisor and a dedicated proof descriptor;
+the proof covers descendants that escape Claude's process group or session.
+Windows rejects native launch because the mandatory Unix UID/GID identity
+boundary with empty supplementary groups is unavailable. Cross-compiling that
+refusal path does not establish runtime support. Darwin rejects launch by
+default; its explicit best-effort mode reaps the direct child and empties the
+captured original process group without claiming escaped descendants ended.
+Unsupported kernels reject launch.
+
+If the selected containment boundary does not complete, the prompt never
+reports a successful cancellation. It fails with cause `transport`, lazy
+relaunch is disabled, and the native-root admission remains quarantined for
+operator recovery.

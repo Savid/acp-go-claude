@@ -1,0 +1,178 @@
+---
+title: "Metadata"
+description: "Every key the adapter reads and writes under the _meta.claude namespace"
+---
+
+All Claude-specific public metadata lives under `_meta.claude`. Foreign metadata
+namespaces are preserved untouched for their owners. Inside the Claude
+namespace, lifecycle requests are strict: a non-object `_meta.claude`, an
+unknown key, and a wrong-typed known value are all rejected with an
+invalid-params error naming the offending field.
+
+## Initialize capabilities
+
+Initialize advertises capability descriptors under `_meta.claude`:
+
+| Descriptor | Describes |
+| --- | --- |
+| `fork` | The `_claude/session/fork` extension method. |
+| `elicitation` | Session-scoped elicitation support. |
+| `rawEvent` | The raw-event opt-in (`enabledBy`, `maxBytes`, `defaultEnabled`). |
+| `sessionStore` | Store `format` and key shape. |
+| `structuredOutput` | Where the output schema is supplied and the result is emitted. |
+| `providerAuth` | Present only while `WithProviderAuthRoot` is usable, bare mode is disabled, and no agent-wide static authentication owns the process. Carries `methods` and `injectionKey: "_meta.claude.options.providerAuth"`. Lifecycle injection accepts one strictly decoded `anthropic` binding with an `api` credential whose sole metadata entry is `env: "CLAUDE_CODE_OAUTH_TOKEN"` or `env: "ANTHROPIC_API_KEY"`. Responses report `_meta.claude.providerAuth.injection` as `applied`, `noop`, or `conflict`. |
+
+Initialize also advertises reserved envelopes separately from the Claude
+namespace:
+
+```json
+{"acp-go.dev/route":{"versions":[1]}}
+```
+
+```json
+{
+  "acp-go.dev/mediaEnvelope": {
+    "maxBytes": 6291456,
+    "maxPromptBytes": 6291456,
+    "maxDimension": 0,
+    "imageFormats": ["image/png", "image/jpeg", "image/gif", "image/webp"],
+    "documentFormats": ["application/pdf"]
+  }
+}
+```
+
+The media envelope is always advertised. `maxBytes` and `maxPromptBytes` are the
+decoded per-image and per-prompt byte gates this adapter actually enforces, so
+they move with `WithImageLimits`. They are the *effective* bounds, not the
+configured fields: a zero or oversized `MaxInputBytesPerImage` is enforced at the
+ACP frame clamp and `maxBytes` reports that clamp, while a zero
+`MaxInputBytesPerPrompt` enforces no total and `maxPromptBytes` truthfully
+reports `0`. `maxDimension` is `0` because Claude enforces
+no per-dimension pixel bound — `0` means "no bound", never "zero". `imageFormats`
+is the inbound media-type allowlist and `documentFormats` lists the media types
+an embedded blob resource becomes a native document block for. Every value is
+an adapter bound; none of them describes what a selected model accepts, which
+stays a prompt-time result.
+
+```json
+{"acp-go.dev/handoff":{"versions":[1]}}
+```
+
+The handoff envelope is advertised **only** when `WithInputHandoffRoot` is set.
+Its absence tells a host the option never reached this adapter, and every
+handoff-form image block is then rejected `invalid_handoff`. A prompt image
+block opts into the form with empty `data`, a `file://` uri under the configured
+root, and exactly this block `_meta`:
+
+```json
+{
+  "acp-go.dev/handoff": {
+    "version": 1,
+    "digest": "<sha256 hex, 64 lowercase characters>",
+    "sizeBytes": 123456
+  }
+}
+```
+
+Exactly those three fields: a missing field, an extra field, and a wrong-typed
+field are each rejected, and the `message` says which happened. `sizeBytes` is
+load-bearing rather than a hint — it bounds how much the adapter reads, so a file
+that turns out to be larger is `handoff_digest_mismatch`. The adapter reads to
+that declaration, verifies the size and digest, and then applies the same gates
+an embedded image passes. See
+[Models and config](/docs/features/models-config).
+
+Every `session/prompt` and every cancellation of an active turn MUST carry
+exactly `_meta["acp-go.dev/route"] = {"version":1,"turnNonce":"..."}`.
+Missing, extra, wrong-typed, unsupported-version, and stale values are rejected.
+The nonce is fresh and unguessable for each turn and is at most 4096 bytes.
+
+Every live-turn `session/update` and `_claude/rawEvent` notification carries the
+same exact `{version, turnNonce}` object in its notification `_meta`; raw-event
+payloads also carry their structural `sessionId`. Lifecycle and load-history
+updates are not turn-scoped and therefore do not carry a turn envelope.
+
+Outbound form and URL elicitation requests preserve their native metadata and
+add a route object containing `version`, `sessionId`, `turnNonce`, and exactly
+one of `toolCallId` or `requestId`. A native request that already owns the
+reserved key is rejected rather than overwritten. Permission requests remain
+correlated by their structural ACP session and tool-call fields.
+
+## Session options
+
+Session-lifecycle requests accept options and raw-event opt-in:
+
+```json
+{
+  "_meta": {
+    "claude": {
+      "options": {
+        "model": "sonnet",
+        "permissionMode": "default",
+        "systemPrompt": "Use concise answers.",
+        "bare": true,
+        "extraPathDirs": ["/run/session-42/bin"],
+        "outputSchema": {"type": "object"}
+      },
+      "rawEvent": {
+        "enabled": true
+      }
+    }
+  }
+}
+```
+
+`extraPathDirs` prepends absolute directories, in the order given, to the PATH
+of that session's Claude process. They precede every inherited entry, so an
+executable placed in one shadows the one PATH would otherwise resolve. A
+relative or empty entry fails the session-lifecycle request. Raw `PATH` stays
+rejected in `env`; this is the supported way to extend the child's search path.
+`CLAUDE_CONFIG_DIR`, `HOME`, and the XDG cache, config, data, runtime, and state
+root variables are also rejected in session `env`. The host-selected
+`WithHome` and trusted process-isolation base environment remain authoritative.
+Every one of those names is matched the way the platform names variables: exact
+case on Unix, where `PATH` and `path` are two variables, and case-insensitively
+on Windows, where they are one.
+
+`outputSchema` must be a non-empty JSON Schema object. An empty object is
+rejected rather than read as "no schema", so a request asking for structured
+output never silently returns an ordinary turn.
+
+## Model metadata
+
+Session-lifecycle response metadata exposes the selected model under
+`_meta.claude.modelId`, its current effort variant under
+`_meta.claude.variant`, and the selectable variants under
+`_meta.claude.availableVariants`. Individual model options in the session
+configuration carry their native facts under
+`_meta.claude.supportedEffortLevels`, `_meta.claude.supportsAutoMode`, and
+`_meta.claude.contextWindow` when those values are known. See
+[Models and config](/docs/features/models-config).
+
+## Update metadata
+
+The terminal main-agent `session/update` notification carries
+`_meta.claude.messageId` on its notification envelope. Its value is Claude's
+durable transcript-entry UUID for that assistant message, not the Anthropic
+API's `msg_*` identifier. The update uses an empty session-info payload so it
+does not fabricate visible assistant content. The successful `session/prompt`
+response repeats the same field. `session/load` replay restores the field on
+the saved assistant update, so a host can use it as the native turn checkpoint
+and compare it with restored state. Intermediate `tool_use` assistant messages
+and subagent updates do not publish a checkpoint identity.
+
+Session updates derived from a Claude subagent frame carry
+`_meta.claude.parentToolUseId`. Its value is the `toolCallId` of the Agent tool
+call that spawned the subagent, and the tagged update is that subagent's output
+flattened into the ordinary update stream. Message, thought, tool-call, and plan
+updates without the key are the main agent's. The tag is set only on live-turn
+updates; replayed transcripts do not re-emit it, and subagent frames are excluded
+from usage counters.
+
+## Result metadata
+
+Successful prompt responses carry the terminal transcript UUID under
+`_meta.claude.messageId`. Structured-output turns emit their result on the
+turn's `usage_update` under `_meta.claude.structuredOutput`; the same update
+reports token details under `_meta.claude.usage`. Prompt responses do not carry
+the structured-output result.

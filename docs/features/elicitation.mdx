@@ -1,0 +1,61 @@
+---
+title: "Elicitation"
+description: "Forward Claude's user-facing questions to clients that opt in during initialize"
+---
+
+When Claude needs to ask the user a free-form question mid-turn, the adapter can
+forward it to the host as an ACP elicitation request. This is how Claude's
+`AskUserQuestion`-style prompts reach the person driving the session.
+
+## Capability gating
+
+Elicitation is only used when the client advertised the matching mode during
+ACP initialize. The adapter checks that capability before sending anything, so a
+client that never opted in is never handed an elicitation request it cannot
+render. A mode is advertised only by an explicit non-null `form` or `url`
+field; a bare elicitation object advertises no modes.
+
+| Client elicitation capability | Adapter behavior |
+| --- | --- |
+| `form: {}` | Claude's form question is forwarded as an ACP elicitation request. |
+| `url: {}` | Claude's URL question is forwarded as an ACP elicitation request. |
+| Both explicit modes | Claude's form and URL questions can both be forwarded. |
+| Absent, `{}`, or both mode fields `null` | No request is sent; Claude receives a bounded failure and the turn continues or stops per Claude's own logic. |
+
+<Note>
+Elicitation is not the permission channel. Tool-access approvals always use
+[permission prompts](/docs/features/permissions); elicitation carries free-form
+questions only.
+</Note>
+
+Because behavior depends on the client's advertised capability, tests cover
+nil, empty, both-null, URL-only, form-only, and both-mode shapes.
+
+## Secrets are refused, not masked
+
+A form that asks for a credential is refused. That covers an `AskUserQuestion`
+question the harness marked secret, and an MCP form whose requested schema
+carries `format: "password"`, `writeOnly: true`, or a secret marker anywhere in
+its properties. The refusal happens before the request is built: no tool call
+publishes the native input, no form reaches the client, and the answer the
+refusal declines to collect is never produced. The refusal names the rule and
+repeats no field name, question text, or value.
+
+Masking in the host is presentation, not permission — a masked answer still
+comes back to the adapter in plaintext — so the adapter declines to broker one
+rather than forwarding the form with a redaction hint.
+
+<Note>
+Provider authentication is a separate surface. Its API-key leg is a namespaced
+`_meta` extension this agent implements itself, not an ACP elicitation, and is
+unaffected by this rule.
+</Note>
+
+## Route correlation
+
+The initialize response advertises
+`_meta["acp-go.dev/route"] = {"versions":[1]}`. Every emitted form or URL
+elicitation carries version 1, the owning `sessionId`, the current
+`turnNonce`, and exactly one callback correlation (`toolCallId` or
+`requestId`) under that reserved key. Existing non-reserved metadata is
+preserved. A pre-existing reserved key fails the callback closed.

@@ -1,0 +1,188 @@
+---
+title: "ACP Methods"
+description: "The implemented ACP methods, extensions, and the turn-failure error contract"
+---
+
+## Methods
+
+Core methods handled through the ACP SDK connection: initialize, session
+create/load/resume/list/delete, prompt, cancel, close, authenticate, logout, and
+the session configuration methods. Unsupported methods return a uniform JSON-RPC
+method-not-found error.
+
+## Extensions
+
+| Method | Direction |
+| --- | --- |
+| `_claude/session/fork` | client to agent |
+| `_claude/rawEvent` | agent to client |
+| `_claude/rateLimits` | client to agent |
+| `_claude/auth/methods` | client to agent |
+| `_claude/auth/authorize` | client to agent |
+| `_claude/auth/callback` | client to agent |
+| `_claude/auth/status` | client to agent |
+| `_claude/auth/cancel` | client to agent |
+| `_claude/auth/inventory` | client to agent |
+| `_claude/auth/credential` | client to agent |
+| `_claude/auth/disconnect` | client to agent |
+
+### `_claude/auth/*`
+
+Session-scoped methods that broker Claude's native login, setup tokens, and
+Anthropic API keys. They exist
+only while `WithProviderAuthRoot` names a usable durable directory, bare mode
+is disabled, and no agent-wide static authentication overrides that directory's login;
+otherwise every one returns method-not-found, and the initialize capability
+lists none. Native-login disconnect requires `WithProviderAuthDirectHome`
+equal to `WithHome`; secret-backed disconnect only ends the recorded lineage.
+See [Authentication](/docs/features/authentication).
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `_claude/auth/methods` | `{sessionId}` | `{providers, generation}` |
+| `_claude/auth/authorize` | `{sessionId, providerId, connectionId, methodsGeneration, method, authorizeRequestId, inputs?}` | `{interaction, url, message, callbackInput, flowId, flowExpiresAt}` |
+| `_claude/auth/callback` | `{sessionId, providerId, method, flowId, input}` | `{flowId}` |
+| `_claude/auth/status` | `{sessionId, providerId, flowId}` | `{flowId, state, reason?}` |
+| `_claude/auth/cancel` | `{sessionId, providerId, flowId}` | `{flowId}` |
+| `_claude/auth/inventory` | `{sessionId}` | `{entries}` |
+| `_claude/auth/credential` | `{sessionId, providerId, flowId}` | `{connectionId, revision, bindingGeneration, credential}` |
+| `_claude/auth/disconnect` | `{sessionId, providerId, connectionId, bindingGeneration}` | `{}` |
+
+Every request and result object is closed: an unknown, duplicate, or misplaced
+field is rejected with `-32602` naming its path, and every time value is Unix
+epoch milliseconds. `state` is one of `pending`, `authenticated`, `saved`, `failed`,
+`cancelled`, or `expired`; `reason` appears only on the three terminal-negative
+states. `connectionId` is caller-minted and bounded to at most 128 bytes of
+`A-Z`, `a-z`, `0-9`, `-`, and `_`; every leg that carries one checks it before
+the value is compared or recorded, and anything outside that shape is `-32602`
+naming `connectionId`. A failure after parameters validate is `-32000` with:
+
+```json
+{
+  "error": "claude_auth_failed",
+  "cause": "native_veto",
+  "providerId": "anthropic",
+  "method": "login",
+  "flowId": "…",
+  "retryable": false
+}
+```
+
+`cause` is one of `native_veto`, `provider_refused`, `transport`, `process`,
+`timeout`, `harvest_failed`, `unsupported_variant`, `flow_expired`,
+`flow_state`, `flow_cancelled`, `policy`, or `binding_conflict`. The shape
+carries no native message, response body, or free-form field: a refusal is
+reported by its `cause` alone.
+
+`binding_conflict` comes only from `_claude/auth/disconnect`, and it means the
+`connectionId` and `bindingGeneration` you sent do not match the binding the
+adapter recorded — no entry, a different connection, or a generation already
+spent. Nothing is mutated: no generation bump and no native logout. Reconnect to
+get a current binding; retrying the same one never succeeds. It is deliberately
+not `policy`, which is the adapter refusing on its own terms and which
+reconnecting does not clear. `_claude/auth/disconnect` answers `policy` when the
+configured config directory no longer names the directory the consent gate
+resolved at startup: the removal is not undoable, so a repointed path is refused
+rather than cleared.
+
+### `_claude/rateLimits`
+
+Returns the account's subscription usage as reported percentage windows. The
+adapter runs `claude /usage` non-interactively and parses the usage panel; every
+value is reported by Claude, never derived from token counts. Params are an
+empty object. The response:
+
+```json
+{
+  "windows": [
+    { "id": "session", "usedPercent": 92, "resetsAt": "2026-07-09T13:40:00+10:00" },
+    { "id": "week-all-models", "usedPercent": 73, "resetsAt": "2026-07-11T06:00:00+10:00" }
+  ]
+}
+```
+
+Window `id` values are stable slugs of the panel's window labels (for example
+`session`, `week-all-models`, plus a per-model week window). `resetsAt` is
+RFC3339 and omitted when no reset time is reported. `windows` is empty when the
+account reports no subscription usage (for example on API billing) — an empty
+result is not an error, and any environment trouble — a failed probe run or an
+unresolvable Claude home — also degrades to empty windows rather than failing
+the request. Only malformed params are rejected; the method never fails for
+home, config, or probe reasons. Each call spawns one short-lived `claude`
+probe process, so hosts polling for routing decisions should cache results and
+use `resetsAt` for expiry.
+
+#### Direct API fallback
+
+The `/usage` panel is only populated for a Claude home logged in through
+`claude login`. A home authenticated by `ANTHROPIC_AUTH_TOKEN` or
+`CLAUDE_CODE_OAUTH_TOKEN` prints no windows, because the CLI reads usage only
+for an OAuth session it recognises. When the panel yields no windows and the
+adapter is permitted to make its own outbound calls, it reads the account's
+usage from the Anthropic API instead, in two steps:
+
+1. `GET /api/oauth/usage`, which reports every window. Tokens minted by
+   `claude setup-token` are inference-only and are refused here.
+2. The unified rate-limit response headers on a one-token `POST /v1/messages`
+   request, which report the session and all-models weekly windows. **This is a
+   billable inference request** against the configured account, using the
+   cheapest model (`ANTHROPIC_SMALL_FAST_MODEL`, else
+   `ANTHROPIC_DEFAULT_HAIKU_MODEL`, else `claude-haiku-4-5`).
+
+Both steps target `ANTHROPIC_BASE_URL`, defaulting to `https://api.anthropic.com`.
+When no base URL is set, a token that is not Anthropic-issued (no `sk-ant-`
+prefix) is never sent, so a gateway credential cannot leak to Anthropic. The
+result is memoized for 60 seconds to bound billable probes, and window `id`
+values match the panel's, so the wire shape does not depend on which source
+answered. A failing probe yields empty windows rather than an error.
+
+Pass [`WithClaudeDirectAPI(false)`](/docs/reference/go-api) to forbid the adapter
+from contacting any network service on its own behalf; the method then reports
+only what the harness prints.
+
+## Turn-failure contract
+
+A native turn failure terminates `session/prompt` with a JSON-RPC error and no
+`PromptResponse`; it is never reported as an ACP stop reason. Every failure uses
+one uniform shape so a host can classify it without vendor parsing. The error is
+JSON-RPC code **`-32603`** with a `data` object:
+
+| Field | Value |
+| --- | --- |
+| `error` | `claude_turn_failed` |
+| `cause` | one of the causes below |
+| `message` | the real native cause text (never a placeholder) |
+
+The `cause` vocabulary:
+
+| Cause | Meaning |
+| --- | --- |
+| `process_exit` | The Claude process died; `message` carries the real exit status and a stderr tail. |
+| `transport` | Stream close, malformed frame, or client-lifecycle break. |
+| `provider` | Claude reported an error in its result frame (including auth failures). |
+| `timeout` | A `WithTurnTimeout` deadline expired; the selected native containment boundary completed before settlement. |
+
+Provider failures additionally include the result `subtype`, and may include an
+`errors` array and an `errorKind`.
+
+An image output the adapter will not ship — `invalid_base64`, `not_a_raster`,
+`media_type_mismatch`, `missing_file`, `path_not_allowed`, or `too_large` — is
+recoverable. It fails that tool call only, carrying fixed guidance as the call's
+own content, and the turn keeps running; an assistant image, which has no tool
+call to attribute to, is replaced by the same guidance as agent text. Only
+`storage_failed` still ends the prompt, using the same `-32603` envelope with
+`cause: "transport"` plus `stage: "image_output"`, and emitting a status-only
+failed update for the tool call first.
+
+<Note>
+This adapter advertises no ACP auth methods, so an authentication failure is a
+`provider` failure under `-32603` — it never emits the `-32000` auth-required
+variant. A user cancel that races a timeout resolves as a successful `cancelled`
+response, not a failure. `session/cancel`, timeout expiry, and caller-context
+cancellation do not settle on a native interrupt acknowledgement alone: every
+authoritatively contained tool descendant must be proved gone. Darwin best
+effort instead requires direct-child reaping and absence of the captured
+original group; a `setsid` descendant may survive. An incomplete selected
+boundary is a `transport` failure, keeps its runtime admission quarantined, and
+cannot be lazily relaunched.
+</Note>

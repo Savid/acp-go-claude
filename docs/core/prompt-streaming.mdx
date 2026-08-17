@@ -1,0 +1,82 @@
+---
+title: "Prompt Streaming"
+description: "How a Claude turn becomes ACP updates, and how commands and failures resolve"
+---
+
+A prompt is one Claude turn. The adapter reads Claude's stream-json output frame
+by frame and translates each frame into an ACP session update, so the host sees
+assistant text, reasoning, and tool activity as it happens rather than after the
+turn finishes.
+
+## From stream frames to updates
+
+Claude stream events map to ACP session updates for assistant text, thoughts,
+tool calls, tool results, plans, usage counters, and session info (title and
+state). The full mapping table lives in [Updates](/docs/reference/updates).
+
+Two interactive flows are layered on top of the stream:
+
+- **Permission requests** are surfaced as ACP permission prompts — see
+  [Permissions](/docs/features/permissions).
+- **User-facing questions** from Claude are forwarded through ACP elicitation,
+  but only when the initialized client advertised elicitation support. Without
+  it, the adapter returns a bounded failure to Claude and the turn proceeds — see
+  [Elicitation](/docs/features/elicitation).
+
+Raw Claude stream frames are not sent by default. A host opts in per session with
+`_meta.claude.rawEvent.enabled`; see [Raw events](/docs/features/raw-events).
+
+## Prompt content validation
+
+Prompt content fails closed before the turn starts. An empty prompt (zero
+content blocks), an unsupported block type (audio or an unknown block), an
+invalid image block, and an embedded resource that is empty or carries an
+unsupported blob mime type are all rejected with an invalid-params (`-32602`)
+error naming the offending field (`prompt`, `prompt.image`, or
+`prompt.resource`). Image blocks require embedded base64 data and pass a
+structural validation pipeline before the turn starts — see
+[image prompts](/docs/features/models-config). Nothing is silently dropped and
+nothing is forwarded to Claude.
+
+## Slash commands
+
+Claude Code advertises its slash commands, and the adapter projects them into ACP
+`available_commands` session updates, refreshing the set whenever it changes. A
+prompt whose first text block begins with `/name` runs that command as its turn.
+Commands sourced from MCP servers are re-emitted as `/server:command (MCP)`.
+
+Two native commands are refused because they would break wrapper invariants. The
+adapter rejects the turn with the uniform invalid-params shape
+`{"error":"unsupported","field":"prompt"}`; each has a supported ACP method that
+does the same job:
+
+| Native command | Use instead |
+| --- | --- |
+| `/clear` | `session/new` |
+| `/config` | `session/set_config_option` |
+
+## Turn resolution
+
+A turn resolves one of three ways:
+
+- **Success** — Claude reports a terminal result and the prompt returns an ACP
+  `StopReason`.
+- **Cancelled** — the host cancels; the turn resolves as a successful
+  `cancelled` response, never an error. A user cancel wins even if a turn timeout
+  fires at the same instant. Settlement waits until the selected native
+  containment boundary completes. The next turn lazily relaunches and resumes
+  the same native session.
+- **Failure** — a process exit, transport break, provider error, or
+  `WithTurnTimeout` expiry ends the prompt with a `claude_turn_failed` JSON-RPC
+  error. Failures are never reported as a stop reason. The
+  [ACP methods](/docs/reference/acp-methods) reference documents the error code
+  and cause vocabulary.
+
+Cancelling the Go context passed to `Prompt` also performs the contained native
+abort before returning `cancelled`. A timeout performs that same abort before
+returning cause `timeout`. Authoritative Linux containment covers the full
+native tree. Windows native launch fails closed because the mandatory Unix
+UID/GID identity boundary is unavailable. Darwin best effort proves only
+direct-child reaping plus absence of the captured original group, so a
+`setsid` descendant may remain. If the selected boundary does not complete,
+either path fails as `transport` instead of claiming settlement.

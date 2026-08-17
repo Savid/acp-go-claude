@@ -1,0 +1,127 @@
+---
+title: "Session Store"
+description: "Configure the authoritative transcript store used for session restore and discovery"
+---
+
+Every agent has a `SessionStore`. By default it is a private in-memory store, so
+sessions remain restorable only for that agent instance. Provide a host store
+when session authority must survive process restarts or move between machines —
+for example a database or object store.
+
+## Wiring a store
+
+Replace the default store with `WithSessionStore`; bound restore and list reads
+with `WithSessionStoreLoadTimeout`. A ready-made in-memory implementation ships
+for tests and small hosts:
+
+```go
+store := claudeacp.NewInMemorySessionStore()
+
+err := claudeacp.Serve(ctx, input, output,
+	claudeacp.WithSessionStore(store),
+	claudeacp.WithSessionStoreLoadTimeout(5*time.Second),
+)
+```
+
+The adapter mirrors Claude transcript rows into the store as the turn streams
+and uses the store as the sole authority for `session/list`, `session/load`,
+`session/resume`, and inactive-session fork. Restore always hydrates the
+authoritative rows into an isolated temporary Claude config directory under the
+scratch directory (default: system temp). The source config directory's
+credential travels into that temporary directory as `.credentials.json`; on
+macOS the login Keychain item the config directory owns is read first, because
+a native login stores the credential only there and the CLI prefers that item
+over any file beside it.
+
+Claude's native transcript is a process cache, not a discovery or restore
+authority. An inactive native transcript whose session id has no main store
+rows is ignored, removed when addressed, and reported as an unknown session.
+If the same id is still actively bound in this Agent, a store-authoritative
+load still reports unknown but leaves that live binding and its native
+transcript untouched; prompts on the already-bound route remain usable.
+
+## The store contract
+
+The format constant and key type are stable public identifiers:
+
+```go
+const SessionStoreFormat = "claude-transcript-jsonl-v1"
+
+type SessionKey struct {
+	SessionID string
+	Subpath   string
+}
+```
+
+A store implements six methods:
+
+| Method | Role |
+| --- | --- |
+| `Append` | Append transcript rows for a key. |
+| `Load` | Read all rows for a key. |
+| `Replace` | Atomically replace a full generation of a session's files. |
+| `Delete` | Remove a key (and its subkeys for the main key). |
+| `ListSessions` | Enumerate sessions for `session/list`. |
+| `ListSubkeys` | Enumerate a session's non-main subpaths. |
+
+The main transcript uses the empty subpath (`SessionStoreMainSubpath`);
+subagent transcripts mirror under safe relative subpaths of the same session id.
+`Replace` MUST include the main key exactly once. Session summaries report
+`UpdatedAtUnixMilli` in Unix milliseconds.
+
+<Note>
+`WithSessionStoreLoadTimeout` bounds store reads used by restore and listing.
+Set it when your store can hang (network round-trips), or a slow backend will
+stall `session/load`, `session/resume`, fork, and `session/list`.
+</Note>
+
+## Typed image output
+
+Native assistant and tool-result images are normalized to standard ACP content
+before emission. Inline base64 and base64 data URLs become an embedded ACP image
+with a truthful sniffed media type; a readable local image file under an allowed
+root — the workspace, the session image scratch directory, or the
+operating-system temporary directory — is bounded, read, and embedded; a remote HTTP(S) URI becomes one ACP
+resource link and is never fetched. Output is not restricted to the prompt
+allowlist — any structurally recognized raster is emitted with its sniffed media
+type, so a BMP is valid output even though BMP prompt input is not. Each
+assistant image travels alone in its agent-message chunk, and a content-bearing
+tool update carries the tool call's complete content array because ACP clients
+replace that array; repeated native lifecycle frames never duplicate an
+artifact.
+
+Each image is validated, bounded, and stored before its update reaches the wire.
+Records live in private `_artifacts/images/<digest>.json` subkeys of the owning
+session, and mirrored transcript rows hold an artifact reference instead of a
+second base64 copy. Artifacts expire 24 hours after creation, are deleted with
+their session, and are copied into the child on fork. Load and replay rehydrate
+the reference and fail the whole request with `reason: "storage_failed"` when the
+required bytes are missing, expired, or invalid rather than silently dropping the
+image.
+
+An image the adapter will not ship fails only its own tool call and carries
+fixed guidance saying what to do next, leaving the turn and its context alive.
+Losing stored bytes is different: it is the adapter's own durability breaking,
+so it is turn-fatal and returns JSON-RPC `-32603` with the Claude turn
+envelope:
+
+```json
+{
+  "error": "claude_turn_failed",
+  "cause": "transport",
+  "message": "image output is no longer available from the artifact store",
+  "stage": "image_output",
+  "reason": "storage_failed"
+}
+```
+
+The stable output `reason` values are `invalid_base64`, `not_a_raster`,
+`media_type_mismatch`, `missing_file`, `path_not_allowed`, `too_large`, and
+`storage_failed`. Only `storage_failed` reaches this envelope; the rest refuse
+the tool call without ending the turn.
+
+<Warning>
+A resource-link record retains its original source URI so replay can reproduce
+the native location result. A signed URI can authorize access to the image, so
+protect a host `SessionStore` as confidential application data.
+</Warning>

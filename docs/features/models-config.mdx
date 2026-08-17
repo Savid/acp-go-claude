@@ -1,0 +1,261 @@
+---
+title: "Models And Config"
+description: "Select the model and mode per session, and point Claude Code at a custom endpoint or settings overlay"
+---
+
+Session-lifecycle responses expose the selected model under
+`_meta.claude.modelId`, its current effort variant under
+`_meta.claude.variant`, and selectable variants under
+`_meta.claude.availableVariants`. Each model option may additionally carry
+`_meta.claude.supportedEffortLevels`, `_meta.claude.supportsAutoMode`, and
+`_meta.claude.contextWindow` when Claude reports or the adapter can identify
+those facts.
+
+## Model and mode options
+
+Session configuration uses typed option categories:
+
+| Category | Examples |
+| --- | --- |
+| `model` | `model` |
+| `mode` | permission mode and planning mode choices |
+| `thought_level` | thinking budget choices |
+| `model_config` | output style and structured output settings |
+
+Use `session/set_config_option` with a selected option value. Boolean mode
+payloads are rejected; clients should send the selected mode value.
+
+## Image prompts
+
+The adapter advertises standard ACP image prompt support
+(`agentCapabilities.promptCapabilities.image`). That advertises transport only:
+it does not claim that every selected model can interpret pixels or that Claude
+has a native image generator. Model listings publish no per-model `capabilities`
+array and no modality or generator fields.
+
+The adapter also advertises the bounds it enforces under
+`agentCapabilities._meta["acp-go.dev/mediaEnvelope"]`, so a host can check an
+image before it sends one. See [Metadata](/docs/reference/meta).
+
+Send a standard ACP image content block with embedded base64 `data` and one of
+these exact media types:
+
+- `image/png`
+- `image/jpeg`
+- `image/gif`
+- `image/webp`
+
+Images must be static. GIFs with multiple image descriptors, WebP with the
+`ANIM` flag, and PNG with an `acTL` chunk are rejected before Claude starts, as
+are missing or invalid base64, noncanonical media types, media-type/byte
+mismatches, invalid dimensions, and configured byte-limit overflow. When a block
+carries both `data` and `uri`, the embedded bytes are authoritative and the URI
+is never fetched.
+
+An embedded blob resource is gated the same way whatever its media type: its
+base64 must decode strictly and its decoded size must fit the per-image byte
+gate, and its bytes count toward the per-prompt total alongside image bytes. The
+payload Claude receives is re-encoded from the bytes that passed the gates, so a
+line-wrapped encoding reaches it in canonical form and an encoding with
+non-canonical trailing bits is rejected `invalid_base64` rather than
+reinterpreted. A text
+resource is charged that same per-prompt total, so declaring bytes as text
+rather than as a blob buys no extra budget. A blob declaring `application/pdf`
+becomes a native document block, and the media type is matched after
+normalization so `APPLICATION/PDF` and `application/pdf; charset=binary` reach
+it too. A blob whose media type names a raster is validated as an image, so a
+noncanonical declaration such as `IMAGE/PNG` is rejected `invalid_media_type`
+rather than taking another path. A rejection names the block the bytes arrived
+on: a resource block reports `prompt.resource` whichever gate chain ran.
+
+## Handed-over prompt images
+
+A host that shares a filesystem with the adapter can hand image bytes over as
+local files instead of embedding base64, which keeps large multi-image turns out
+of the ACP frame. Set the read root:
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+	claudeacp.WithInputHandoffRoot("/srv/handoff"),
+)
+```
+
+Then send an image block with empty `data`, a `file://` uri under that root, and
+the handoff envelope carrying the payload's sha256 digest and byte size (the
+exact `_meta` shape is in [Metadata](/docs/reference/meta)).
+
+Everything decidable from the request alone is decided before the filesystem is
+touched, first failure winning: the block and its envelope (`invalid_handoff`),
+then the declared media type against the four-format allowlist
+(`invalid_media_type`), then the declared `sizeBytes` against the effective
+per-image byte gate (`too_large`). A block the adapter was never going to accept
+therefore costs no filesystem access at all, and a rejected declaration reveals
+nothing about whether the path it named exists.
+
+Only then is the file opened, relative to the root with the operating system
+enforcing containment as part of the open, so a path or symlink that leaves the
+root is refused with no window between the decision and the read. A symlink
+inside the root is followed only when its target is relative; an absolute
+symlink is refused even when it points back inside. Anything that is not a
+regular file — a directory, a FIFO, a device — is refused on the descriptor
+rather than on the path, and the open never blocks waiting for a writer.
+
+The read is bounded at one byte more than the block declared, not at the byte
+gate: the work a block commits the adapter to is charged to the size its own
+envelope stood behind. A file larger than it declares is
+`handoff_digest_mismatch`, because it is not the file the declared digest covers.
+Bytes that match the declared size and digest then pass the identical gate chain
+an embedded image passes. A handed-over image and an embedded image carrying the
+same bytes produce the same native request, and the host's path is never
+forwarded to Claude.
+
+Containment covers paths, not inodes: a process that can already write under the
+root can hardlink a file into it from anywhere the adapter's user can read. The
+declared digest is what makes handed-over bytes trustworthy, because a host that
+cannot predict a file's contents cannot produce a block that will be accepted
+for it.
+
+The read is bounded even when `MaxInputBytesPerImage` is zero: the ACP frame
+clamp becomes the ceiling, and a file past it is rejected `too_large` rather
+than accepted with a digest that could not be verified. One prompt may hand over
+at most 64 image files whatever the per-prompt byte total is set to; the block
+that crosses that count is rejected `too_large` with the count as `sizeBytes`
+and 64 as `maxBytes`, before it is read.
+
+Files under the root belong to the host: the adapter only reads them, and the
+host may delete one as soon as the prompt call returns. Without
+`WithInputHandoffRoot` the form is rejected, so an image block with empty `data`
+and no local uri stays a plain `missing_data` failure.
+
+Claude exposes no authoritative selected-model modality field, so a structurally
+valid image is forwarded and the harness or provider stays authoritative for
+whether the selected model can use those pixels.
+
+Input failures use JSON-RPC `-32602 Invalid params`:
+
+```json
+{
+  "field": "prompt.image",
+  "error": "too_large",
+  "index": 1,
+  "sizeBytes": 6291457,
+  "maxBytes": 6291456
+}
+```
+
+The stable `error` values are `missing_data`, `invalid_base64`,
+`invalid_media_type`, `media_type_mismatch`, `animated_not_supported`,
+`invalid_dimensions`, and `too_large`, plus four for handed-over images:
+`invalid_handoff` (the block itself is malformed, including an unset read root),
+`path_not_allowed` (the path resolves outside the root or is not a regular
+file), `missing_file` (a path inside the root that is gone or unreadable), and
+`handoff_digest_mismatch` (the bytes do not match the declared digest or size).
+The four handoff values carry a fixed `message` naming the cause, never a path,
+a digest, or an observed byte count. A `handoff_digest_mismatch` reports one
+message whether the size or the digest disagreed, so the envelope cannot be
+swept to measure a file, and it always fails the turn rather than falling back
+to another form. A blob-resource rejection reports `field` `prompt.resource`.
+
+`index` counts the blocks the byte gates apply to, in request order: image
+blocks and every gated blob resource whatever its media type. Text, resource
+links, and text resources consume no index. Validation stops at the first
+failing prompt block, and an aggregate overflow is attributed to the block that
+crosses the total.
+
+## Image limits
+
+All four decoded-byte policy limits default to 6 MiB:
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+	claudeacp.WithImageLimits(claudeacp.ImageLimits{
+		MaxInputBytesPerImage:     6 * 1024 * 1024,
+		MaxInputBytesPerPrompt:    6 * 1024 * 1024,
+		MaxOutputBytesPerImage:    6 * 1024 * 1024,
+		MaxOutputBytesPerToolCall: 6 * 1024 * 1024,
+	}),
+)
+```
+
+Supplying `WithImageLimits` replaces the whole struct. A zero field disables
+that specific adapter policy limit; a negative field is a refused construction
+option, so every entry point answers `-32603 Internal error` with
+`{"error": "<reason>"}` — the caller's parameters were valid and the agent the
+host built is what cannot serve them. Zero never bypasses the hard ACP frame
+bound that limits one emitted image. Typed image output and its durable replay
+are covered in [Session store](/docs/features/session-store).
+
+## Custom Anthropic-compatible base URL
+
+To point Claude Code at a custom Anthropic-compatible endpoint, set the base URL
+through the environment. Claude Code reads `ANTHROPIC_BASE_URL` (and related
+`ANTHROPIC_*` variables), so pass it with `WithEnv` or `ProcessIsolation.BaseEnvironment`:
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+	claudeacp.WithEnv(map[string]string{
+		"ANTHROPIC_BASE_URL": "https://anthropic.internal.example",
+	}),
+)
+```
+
+`WithSeedFiles` is not the mechanism for the base URL — it seeds
+`settings.json`-style config files into the resolved Claude config directory
+(for example, a curated `settings.json` `env`, `permissions`, or
+`availableModels` block). Because the seed anchor is the `CLAUDE_CONFIG_DIR`
+root that Claude Code reads directly, seeding **requires an explicit `WithHome`
+(`-home`)**: if `WithHome` is unset, session start fails closed with the uniform
+invalid-parameters error rather than writing into the operator's default
+`~/.claude`. Keep secrets in `WithEnv` and reference them from seeded files by
+environment-variable name.
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+	claudeacp.WithHome("/tmp/claude-home"),
+	claudeacp.WithEnv(map[string]string{
+		"ANTHROPIC_BASE_URL": "https://anthropic.internal.example",
+	}),
+	claudeacp.WithSeedFiles(map[string]string{
+		"settings.json": `{"env":{"ANTHROPIC_BASE_URL":"https://anthropic.internal.example"}}`,
+	}),
+)
+```
+
+### Seed-file provenance guard
+
+Seed writes never overwrite a file the adapter did not create. The adapter
+tracks the files it owns in a per-config-dir manifest (`.seed-manifest.json`,
+a JSON array of managed relative paths). Before writing each seed file:
+
+- If the target does not exist, it is written and recorded in the manifest.
+- If the target exists and is already in the manifest, it is overwritten, keeping
+  a `.seed.bak` copy of the prior bytes when the content changes (identical
+  bytes are left untouched).
+- If the target exists and is **not** in the manifest — an operator-authored
+  file — session start fails closed with the uniform invalid-parameters error
+  naming the offending path, and nothing on disk is changed.
+
+## Native settings overlay
+
+Prefer a namespaced settings overlay over overwriting the base `settings.json`.
+`WithClaudeSettingsFile(relpath)` resolves a path under the effective Claude
+config directory (the same anchor as `WithSeedFiles`, so it also **requires an
+explicit `WithHome`**) and passes it to the Claude CLI as `--settings <abspath>`.
+Claude loads that file as an additional settings layer on top of the base
+`settings.json` rather than replacing it.
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+	claudeacp.WithHome("/tmp/claude-home"),
+	claudeacp.WithSeedFiles(map[string]string{
+		"custom.settings.json": `{"env":{"ANTHROPIC_BASE_URL":"https://anthropic.internal.example"}}`,
+	}),
+	claudeacp.WithClaudeSettingsFile("custom.settings.json"),
+)
+```
+
+Seed the namespaced overlay and point `--settings` at it instead of overwriting
+the base `settings.json`. Setting `WithClaudeSettingsFile` without a resolvable
+`WithHome`, or with an absolute path or a `..` escape, fails closed at session
+start. (Claude's LiteLLM-style routing is normally pure-env; this overlay is for
+`settings.json`-style config.)

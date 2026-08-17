@@ -1,0 +1,65 @@
+---
+title: "Overview"
+description: "What the Claude Code ACP adapter does and where its responsibility ends"
+---
+
+`acp-go-claude` runs Claude Code behind an Agent Client Protocol (ACP)
+JSON-RPC connection. A host either launches the `acp-go-claude` binary and
+speaks ACP over stdio, or embeds the Go package and calls `claudeacp.Serve`.
+Either way the host drives Claude Code through standard ACP methods instead of
+the interactive terminal UI.
+
+## What the adapter owns
+
+The adapter is a thin translation layer between ACP and the local `claude` CLI.
+It owns:
+
+- ACP protocol mapping and the Claude subprocess lifecycle (at most one live
+  Claude Code process per ACP session; MCP-bearing sessions replace one
+  provisional process before their first turn).
+- Streaming Claude stream-json output into ACP session updates.
+- Validation and transport of embedded or handed-over image prompts, plus
+  normalization of native image results into typed ACP content.
+- Permission prompts, elicitation, model and mode configuration, slash-command
+  projection, optional raw events, and optional durable session storage.
+
+## What the adapter does not own
+
+Claude authentication and account state stay with the local Claude Code
+installation selected by `-home` / `WithHome`. The adapter never logs in, logs
+out, or edits Claude account material; ACP `logout` clears only adapter-owned
+session state. Hosts manage credentials through Claude Code itself, not through
+this adapter.
+
+## Extension surface
+
+Public extension methods are intentionally narrow, and all Claude-specific
+metadata lives under the `_meta.claude` namespace:
+
+| Method | Purpose |
+| --- | --- |
+| `_claude/session/fork` | Fork a stored or active session. |
+| `_claude/rawEvent` | Emit opt-in, bounded Claude stream events. |
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" href="/docs/get-started/quickstart">
+    Run your first ACP turn against Claude Code.
+  </Card>
+  <Card title="Run modes" href="/docs/get-started/run-modes">
+    Standalone subprocess versus embedding `Serve` in your Go host.
+  </Card>
+  <Card title="Sessions" href="/docs/core/sessions">
+    The session lifecycle and durable-store model.
+  </Card>
+  <Card title="Permissions" href="/docs/features/permissions">
+    How tool-permission decisions flow through ACP.
+  </Card>
+  <Card title="Images" href="/docs/features/models-config">
+    Send bounded image prompts and consume typed image results.
+  </Card>
+  <Card title="Go API" href="/docs/reference/go-api">
+    Embed the adapter with `Serve` and its options.
+  </Card>
+</CardGroup>

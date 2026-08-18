@@ -681,10 +681,10 @@ func newCloseStateSession(t *testing.T, transport claude.Transport) *agentSessio
 	require.NoError(t, client.Start(t.Context()))
 
 	return &agentSession{
-		agent:         NewAgent(),
-		id:            "session-1",
-		client:        client,
-		turn:          make(chan struct{}, sessionTurnCapacity),
+		agent:  NewAgent(),
+		id:     "session-1",
+		client: client,
+		turn:   make(chan struct{}, sessionTurnCapacity),
 	}
 }
 

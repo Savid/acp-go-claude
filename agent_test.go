@@ -29,10 +29,10 @@ func TestNewAgentDefaultClientAndCloseBranches(t *testing.T) {
 	transport.closeErr = errors.New("close failed")
 
 	session := &agentSession{
-		agent:         agent,
-		id:            "session-1",
-		client:        sessionClient,
-		turn:          make(chan struct{}, 1),
+		agent:  agent,
+		id:     "session-1",
+		client: sessionClient,
+		turn:   make(chan struct{}, 1),
 	}
 	agent.sessions[session.id] = session
 	agent.permissionCache[session.id] = map[string]string{"Read": "allow"}
@@ -59,10 +59,10 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	require.NoError(t, sessionClient.Start(context.Background()))
 	transport.closeErr = errors.Join(errors.New("close failed"), claude.ErrProcessContainmentIncomplete)
 	agent.sessions["session-1"] = &agentSession{
-		agent:         agent,
-		id:            acp.SessionId("session-1"),
-		client:        sessionClient,
-		turn:          make(chan struct{}, 1),
+		agent:  agent,
+		id:     acp.SessionId("session-1"),
+		client: sessionClient,
+		turn:   make(chan struct{}, 1),
 	}
 	newServeAgent = func(...Option) *Agent { return agent }
 

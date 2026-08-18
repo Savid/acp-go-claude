@@ -378,11 +378,11 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 	require.NoError(t, closeClient.Start(ctx))
 	closeTransport.closeErr = errors.New("close failed")
 	activeDelete.sessions[sessionID] = &agentSession{
-		agent:         activeDelete,
-		id:            sessionID,
-		cwd:           cwd,
-		client:        closeClient,
-		turn:          make(chan struct{}, 1),
+		agent:  activeDelete,
+		id:     sessionID,
+		cwd:    cwd,
+		client: closeClient,
+		turn:   make(chan struct{}, 1),
 	}
 	_, err = activeDelete.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
 	require.ErrorContains(t, err, "close failed")
@@ -656,11 +656,11 @@ func newStartedAgentSessionForTest(t *testing.T, agent *Agent, id acp.SessionId)
 	require.NoError(t, client.Start(context.Background()))
 
 	session := &agentSession{
-		agent:         agent,
-		id:            id,
-		cwd:           t.TempDir(),
-		client:        client,
-		turn:          make(chan struct{}, sessionTurnCapacity),
+		agent:  agent,
+		id:     id,
+		cwd:    t.TempDir(),
+		client: client,
+		turn:   make(chan struct{}, sessionTurnCapacity),
 	}
 
 	return session, func() { _ = client.Close() }

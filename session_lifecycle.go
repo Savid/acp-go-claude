@@ -670,4 +670,3 @@ func (s *agentSession) recordContainmentError(err error) {
 		s.agent.recordContainmentError(err)
 	}
 }
-

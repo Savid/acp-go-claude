@@ -1,5 +1,10 @@
 package lifecycle
 
+import (
+	"encoding/json"
+	"reflect"
+)
+
 // applySnapshot opens the stream from a whole-state assertion. A snapshot is
 // taken whole or not at all: the entire assertion is judged before any of it is
 // projected, so a refused snapshot opens nothing and leaves no half-built
@@ -444,7 +449,7 @@ func (r *Reducer) patchActivity(delivery Delivery, update ActivityUpdate) error 
 		return r.fail(delivery, ViolationImmutableIdentityChange, detail)
 	}
 
-	if existing.State.Terminal() && update.State != existing.State {
+	if existing.State.Terminal() && mutatesTerminalActivity(existing, update) {
 		return r.fail(delivery, ViolationPostTerminalMutation, "activity "+existing.ActivityID+" is terminal")
 	}
 
@@ -723,4 +728,30 @@ func (r *Reducer) activityIndex(activityID string) int {
 
 func (r *Reducer) actionIndex(actionID string) int {
 	return indexOf(r.state.Actions, actionID, ActionRecord.identity)
+}
+
+// mutatesTerminalActivity reports whether a patch would change an activity that
+// is already terminal. Terminal is final: it never changes state and never gains
+// progress, so a repeat carrying its own recorded values changes nothing while a
+// newly present or different progress object is a post-terminal mutation.
+func mutatesTerminalActivity(existing ActivityRecord, update ActivityUpdate) bool {
+	return update.State != existing.State || !sameProgress(existing.Progress, update.Progress)
+}
+
+// sameProgress compares two progress objects by decoded value, matching the
+// deep-equality rule the retransmission suppression uses: key order and
+// insignificant whitespace are never differences. An absent patch member
+// restates nothing and is therefore always the same, and a record holding no
+// progress at all is gaining it.
+func sameProgress(existing, patch json.RawMessage) bool {
+	if patch == nil {
+		return true
+	}
+
+	var was, now any
+	if json.Unmarshal(existing, &was) != nil || json.Unmarshal(patch, &now) != nil {
+		return false
+	}
+
+	return reflect.DeepEqual(was, now)
 }

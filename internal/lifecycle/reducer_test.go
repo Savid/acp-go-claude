@@ -3,14 +3,13 @@ package lifecycle
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// deliver builds one delivery on the canonical stream. Reducing a delivery
-// directly is how the emitter validates an event it is about to publish, so these
-// vectors exercise the same entry point Stream.Emit uses.
+// deliver builds one delivery on the canonical stream.
 func deliver(sequence uint64, event Event) Delivery {
 	return Delivery{StreamID: "strm", Sequence: sequence, Carrier: CarrierSessionInfo, Event: event}
 }
@@ -186,11 +185,11 @@ func TestTurnNeverReopens(t *testing.T) {
 
 	for _, event := range []Event{
 		accepted,
-		RunningEvent("cyc-1", "turn-1"),
+		TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"),
 		idle,
 	} {
 		requireReduceRefusal(t, richConfiguration(), ViolationPostTerminalMutation,
-			openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1"), idle, event)
+			openSnapshot(), accepted, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"), idle, event)
 	}
 }
 
@@ -201,7 +200,7 @@ func TestForegroundTransitionsResolveTheirTurn(t *testing.T) {
 	t.Parallel()
 
 	requireReduceRefusal(t, richConfiguration(), ViolationUnknownEntity,
-		openSnapshot(), RunningEvent("cyc-1", "turn-ghost"))
+		openSnapshot(), TransitionEvent(ForegroundRunning, "cyc-1", "turn-ghost"))
 
 	requireReduceRefusal(t, richConfiguration(), ViolationUnknownEntity,
 		openSnapshot(), IdleEvent("cyc-1", "turn-ghost", StopReasonEndTurn, OutcomeSuccess))
@@ -245,7 +244,7 @@ func TestBlockingActionOwesItsForegroundTransition(t *testing.T) {
 	})
 
 	requireReduceRefusal(t, richConfiguration(), ViolationInconsistentForeground,
-		openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1"), blocking,
+		openSnapshot(), accepted, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"), blocking,
 		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 }
 
@@ -269,7 +268,7 @@ func TestEmittedEndingIdleRecordsHowItSettled(t *testing.T) {
 		},
 	} {
 		requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
-			openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1"),
+			openSnapshot(), accepted, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"),
 			Event{Type: EventStateUpdate, State: &ending})
 	}
 }
@@ -352,7 +351,7 @@ func TestActionRules(t *testing.T) {
 	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
 		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
 	}}
-	opening := []Event{openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1")}
+	opening := []Event{openSnapshot(), accepted, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1")}
 	pending := actionEvent(ActionUpdate{
 		ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
 		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, RunID: "run-1", BlocksForeground: stated(false),
@@ -398,7 +397,7 @@ func TestTerminalActionOnFirstSightNeverBlocks(t *testing.T) {
 	})
 
 	reducer, refusal := reduceAll(t, richConfiguration(),
-		openSnapshot(), accepted, RunningEvent("cyc-1", "turn-1"), resolved,
+		openSnapshot(), accepted, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"), resolved,
 		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 	require.Nil(t, refusal)
 	require.True(t, reducer.State().Vacant())
@@ -442,7 +441,7 @@ func TestQuiescenceRefusesAnUnprovenClass(t *testing.T) {
 func TestReducerLatchesOnTheFirstRefusal(t *testing.T) {
 	t.Parallel()
 
-	reducer, refusal := reduceAll(t, richConfiguration(), RunningEvent("cyc-1", "turn-1"))
+	reducer, refusal := reduceAll(t, richConfiguration(), TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"))
 	require.NotNil(t, refusal)
 	require.Equal(t, ViolationDeltaBeforeSnapshot, refusal.Kind)
 	require.Same(t, refusal, reducer.Failed())
@@ -468,7 +467,7 @@ func TestReducerRefusesAnIneligibleCarrier(t *testing.T) {
 	reducer = NewReducer(Options{Negotiated: richConfiguration()})
 	require.NoError(t, reducer.Reduce(deliver(1, openSnapshot())))
 
-	later := deliver(2, RunningEvent("cyc-1", "turn-1"))
+	later := deliver(2, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"))
 	later.Carrier = CarrierIneligible
 
 	require.Error(t, reducer.Reduce(later))
@@ -483,7 +482,7 @@ func TestReducerRefusesADeltaFromAnUnseenStream(t *testing.T) {
 	reducer := NewReducer(Options{Negotiated: richConfiguration()})
 	require.NoError(t, reducer.Reduce(deliver(1, openSnapshot())))
 
-	foreign := Delivery{StreamID: "other", Sequence: 2, Carrier: CarrierSessionInfo, Event: RunningEvent("c", "t")}
+	foreign := Delivery{StreamID: "other", Sequence: 2, Carrier: CarrierSessionInfo, Event: TransitionEvent(ForegroundRunning, "c", "t")}
 	require.Error(t, reducer.Reduce(foreign))
 	require.Equal(t, ViolationStaleStream, reducer.Failed().Kind)
 }
@@ -563,7 +562,7 @@ func TestVacancyIsNotForegroundState(t *testing.T) {
 		Cause: CauseSubmission, OriginTurnID: "turn-1",
 	})
 	working, refusal := reduceAll(t, richConfiguration(), openSnapshot(), accepted,
-		RunningEvent("cyc-1", "turn-1"), live,
+		TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"), live,
 		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 	require.Nil(t, refusal)
 	require.False(t, working.State().Vacant(), "an unfinished activity holds the session open")
@@ -573,7 +572,7 @@ func TestVacancyIsNotForegroundState(t *testing.T) {
 		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
 	})
 	held, refusal := reduceAll(t, richConfiguration(), openSnapshot(), accepted,
-		RunningEvent("cyc-1", "turn-1"), background,
+		TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"), background,
 		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 	require.Nil(t, refusal)
 	require.False(t, held.State().Vacant(), "an unanswered request holds the session open")
@@ -673,7 +672,10 @@ func TestClosedVocabulariesRefuseEverythingElse(t *testing.T) {
 func TestStreamIDNamesTheIncarnation(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "strm-1", NewStream("strm-1", containedConfiguration()).ID())
+	stream := NewStream(provenConfiguration())
+	stream.Incarnate("strm-1")
+
+	require.Equal(t, "strm-1", stream.ID())
 }
 
 // TestFirstSightViaActivityUpdateStatesItsWholeIdentity pins that an activity's
@@ -709,7 +711,7 @@ func fencedStream(t *testing.T) *Reducer {
 		Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
 			SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
 		}},
-		RunningEvent("cyc-1", "turn-1"),
+		TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"),
 		activityEvent(ActivityUpdate{
 			ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning,
 			Cause: CauseSubmission, OriginTurnID: "turn-1",
@@ -802,4 +804,97 @@ func TestActionRestatementKeepsItPending(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, ActionPending, action.State)
 	require.False(t, reducer.State().Quiescence.Certified)
+}
+
+// terminalActivityStream reduces a stream up to a completed activity, in wire
+// form, and returns the reducer positioned to take one more patch at sequence 5.
+func terminalActivityStream(t *testing.T, progress string) *Reducer {
+	t.Helper()
+
+	reducer := NewReducer(Options{Negotiated: richConfiguration()})
+	for index, event := range []string{
+		`{"type":"lifecycle_snapshot","foreground":{"state":"idle","cycleId":"cyc-0"},` +
+			`"activities":[],"actions":[],"quiescence":{"quiescent":false}}`,
+		`{"type":"prompt_accepted","submissionId":"sub-1","clientNonce":"non-1","turnId":"turn-1"}`,
+		`{"type":"activity_update","activity":{"activityId":"a","kind":"task","state":"running",` +
+			`"cause":"submission","originTurnId":"turn-1"}}`,
+		`{"type":"activity_update","activity":{"activityId":"a","state":"completed"` + progress + `}}`,
+	} {
+		params := notification(`{"version":1,"streamId":"strm","sequence":` +
+			strconv.Itoa(index+1) + `,"event":` + event + `}`)
+		require.NoError(t, reducer.ReduceSessionUpdate(json.RawMessage(params)), event)
+	}
+
+	return reducer
+}
+
+// TestTerminalActivityNeverGainsOrChangesProgress pins the terminal-immutability
+// rule the state check alone missed: a patch that repeats a terminal state while
+// carrying new or different progress still mutates a record that is over.
+func TestTerminalActivityNeverGainsOrChangesProgress(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		recorded string
+		patch    string
+		kind     ViolationKind
+	}{
+		{name: "gains progress", recorded: ``, patch: `"progress":{"late":true},`, kind: ViolationPostTerminalMutation},
+		{
+			name:     "changes progress",
+			recorded: `,"progress":{"phase":"one"}`,
+			patch:    `"progress":{"phase":"two"},`,
+			kind:     ViolationPostTerminalMutation,
+		},
+		{name: "changes state", recorded: ``, patch: ``, kind: ViolationPostTerminalMutation},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := "completed"
+			if tc.patch == "" {
+				state = "failed"
+			}
+
+			reducer := terminalActivityStream(t, tc.recorded)
+			params := notification(`{"version":1,"streamId":"strm","sequence":5,"event":` +
+				`{"type":"activity_update","activity":{"activityId":"a",` + tc.patch +
+				`"state":"` + state + `"}}}`)
+
+			err := reducer.ReduceSessionUpdate(json.RawMessage(params))
+
+			var refusal *ViolationError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, tc.kind, refusal.Kind)
+		})
+	}
+}
+
+// TestTerminalActivityAdmitsAnIdempotentPatch pins the other half: a patch that
+// restates the terminal state and the progress already recorded changes nothing,
+// and key order is not a difference.
+func TestTerminalActivityAdmitsAnIdempotentPatch(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		recorded string
+		patch    string
+	}{
+		{name: "reordered progress keys", recorded: `,"progress":{"phase":"one","step":2}`, patch: `"progress":{"step":2,"phase":"one"},`},
+		{name: "restates the state alone", recorded: `,"progress":{"phase":"one"}`, patch: ``},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			reducer := terminalActivityStream(t, tc.recorded)
+			params := notification(`{"version":1,"streamId":"strm","sequence":5,"event":` +
+				`{"type":"activity_update","activity":{"activityId":"a",` + tc.patch +
+				`"state":"completed"}}}`)
+
+			require.NoError(t, reducer.ReduceSessionUpdate(json.RawMessage(params)))
+			require.Equal(t, uint64(5), reducer.State().ReducedThrough)
+		})
+	}
 }

@@ -17,9 +17,10 @@ type Options struct {
 // before reducing, refuses anything it cannot prove, and latches on the first
 // refusal: a stream that failed closed never reduces again.
 //
-// One reducer follows one session across incarnations. A snapshot bearing a new
-// stream identity supersedes the previous incarnation and starts a fresh
-// projection; every other event on a foreign or fenced stream is stale.
+// One reducer follows one session across incarnations. A snapshot bearing a
+// stream identity never seen before supersedes the previous incarnation and
+// starts a fresh projection; every other event on a foreign, retired, or fenced
+// stream is stale.
 //
 // The one advertised fact it cannot check is `updatesOutsidePrompt`: no fact on
 // the ordered stream expresses whether a prompt is in flight, so that obligation
@@ -47,6 +48,11 @@ type Reducer struct {
 	// which is what makes late causal work mechanically detectable.
 	turnSeen     map[string]uint64
 	activitySeen map[string]uint64
+	// retired remembers every incarnation identity a later incarnation replaced.
+	// The memory is session-scoped rather than incarnation-scoped: supersession
+	// fences an incarnation the same way close does, so a snapshot bearing a
+	// retired identity is a resurrection and never the opening of a fresh stream.
+	retired map[string]struct{}
 	// blockedCycle is the cycle owing the accompanying foreground transition a
 	// blocking action requires.
 	blockedCycle string
@@ -58,7 +64,7 @@ type Reducer struct {
 
 // NewReducer builds a reducer for one session.
 func NewReducer(opts Options) *Reducer {
-	reducer := &Reducer{negotiated: opts.Negotiated}
+	reducer := &Reducer{negotiated: opts.Negotiated, retired: make(map[string]struct{})}
 	reducer.reset("")
 
 	return reducer
@@ -151,11 +157,22 @@ func (r *Reducer) Reduce(delivery Delivery) error {
 // on a stream identity this reducer has not seen; a projection is per incarnation
 // and adopts nothing from the one it supersedes. A closed session admits no
 // incarnation at all, which is why the fence is judged before this.
+//
+// An identity a later incarnation already replaced is refused whatever it
+// carries. Supersession ends an incarnation exactly as close does, so a snapshot
+// bearing a retired identity is a resurrection rather than an opening, and the
+// standing projection — the current incarnation's — survives the refusal
+// untouched.
 func (r *Reducer) reduceForeign(delivery Delivery) error {
+	if _, superseded := r.retired[delivery.StreamID]; superseded {
+		return r.fail(delivery, ViolationStaleStream, "the incarnation was superseded by "+r.state.StreamID)
+	}
+
 	if delivery.Event.Type != EventSnapshot {
 		return r.fail(delivery, ViolationStaleStream, "stream is "+r.state.StreamID)
 	}
 
+	r.retired[r.state.StreamID] = struct{}{}
 	r.reset(delivery.StreamID)
 
 	return r.reduceFirst(delivery)

@@ -165,13 +165,30 @@ The `cause` vocabulary:
 Provider failures additionally include the result `subtype`, and may include an
 `errors` array and an `errorKind`.
 
-`session/close` and `session/delete` have one refusal of their own. Both settle
-behind the session's settlement barrier, so a caller whose context expires before
-the in-flight turn releases the session gets `-32603` with
-`{"error":"claude_session_close_unsettled","message":<native cause>}`. Nothing was
-contained, no quiescence was stated, delete wrote no tombstone, and the id still
-names its live session — the next close settles it. It is not a turn failure: the
-containment boundary was never reached.
+`session/close` has one refusal of its own. It settles behind the session's
+settlement barrier, so a caller whose wait for the in-flight turn ends before that
+turn releases the session is told the close settled nothing. Which answer that is
+depends on why the wait ended:
+
+| Wait ended by | Answer |
+| --- | --- |
+| The caller cancelling its own request | `-32800` `Request cancelled` |
+| Any other expiry, such as a deadline | `-32600` `Invalid request` with `{"error":"claude_session_close_unsettled","message":<barrier wait error>}` |
+
+Neither is `-32603`: nothing failed internally, the containment boundary was
+simply never reached. Nothing was contained, no quiescence was stated, and the id
+still names its live session — the next close settles it. The `message` carries
+the barrier-wait error, not anything the native process reported. A same-id load,
+resume, or fork over an instance whose close settled nothing is refused the same
+way.
+
+`session/delete` has no such refusal. It writes its durable tombstone first and
+hides the id with it, and only then cancels, closes, and cleans up. A teardown
+that does not finish is reported as the delete's error, but the tombstone is
+already durable and the session is already hidden from `session/list`,
+`session/load`, `session/resume`, and every other session-scoped method; the
+instance stays held so the next `session/delete` finishes what the first started.
+No write behind a tombstone recreates the row.
 
 An image output the adapter will not ship — `invalid_base64`, `not_a_raster`,
 `media_type_mismatch`, `missing_file`, `path_not_allowed`, or `too_large` — is

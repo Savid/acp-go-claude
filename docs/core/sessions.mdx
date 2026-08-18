@@ -28,16 +28,25 @@ resume, or fork all answer the unknown-session error — and a repeated close
 observes the first result without repeating any teardown.
 
 That wait is the settlement barrier, and everything close reports follows it. If
-the caller's context expires before the in-flight turn releases the session,
-nothing is torn down, no quiescence is stated, and `session/close` answers a
-`claude_session_close_unsettled` error. Such a close is not memoized: the id
+the caller's context ends before the in-flight turn releases the session, nothing
+is torn down and no quiescence is stated: a caller that cancelled its own request
+is answered `-32800`, and any other expiry is answered `-32600` naming
+`claude_session_close_unsettled` (see
+[ACP methods](/docs/reference/acp-methods)). Such a close is not memoized: the id
 keeps its live session so the work still running behind it stays addressable, and
-the next close — with a context of its own — settles it for real. `session/delete`
-answers the same way and writes no tombstone, and a same-id load, resume, or fork
-is refused rather than installed over an instance that has not settled. A session
-leaves the active map only after its own close settled, and only while the map
-still holds that same instance, so a close never evicts a session that a same-id
-load, resume, or fork installed behind it.
+the next close — with a context of its own — settles it for real. A same-id load,
+resume, or fork is refused rather than installed over an instance that has not
+settled. A session leaves the active map only after its own close settled, and
+only while the map still holds that same instance, so a close never evicts a
+session that a same-id load, resume, or fork installed behind it.
+
+`session/delete` runs the other way round, because a deletion a host was told
+succeeded must never come back. The durable tombstone is written first and the id
+is hidden with it; cancel, close, and cleanup follow. A teardown that does not
+finish is reported as the delete's error, and the session is hidden anyway — the
+instance stays held so a later `session/delete` can finish it. Nothing behind a
+tombstone recreates the row, so the settlement commit that teardown runs lands on
+nothing.
 
 Loading, resuming, and forking an inactive session require authoritative main
 rows in the [session store](/docs/features/session-store). The adapter

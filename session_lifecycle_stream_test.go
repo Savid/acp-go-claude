@@ -2,12 +2,15 @@ package claudeacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
@@ -556,6 +559,112 @@ func TestSessionStreamCloseStatesNoFactOnADeadIncarnation(t *testing.T) {
 		require.NoError(t, stream.settleClose(ctx, true, true))
 		require.Equal(t, delivered, lifecycleEventTypes(t, conn))
 	})
+}
+
+// mirroredSessionUUID names the transcript the close-fenced cases mirror.
+const mirroredSessionUUID = "11111111-1111-4111-8111-111111111111"
+
+// closeFencedSession builds the shape a cancel-then-close arrives at: an open
+// incarnation holding a live turn and an outstanding action, and a native pump
+// carrying one transcript frame the store does not hold yet. Losing the
+// incarnation from here is what a cancel does, and everything the close still
+// owes runs after that loss.
+func closeFencedSession(t *testing.T, store SessionStore) (*agentSession, *recordingAgentClient, *sessionStream) {
+	t.Helper()
+
+	session, conn, stream := newLifecycleStreamTestSession(t)
+	projects := filepath.Join(t.TempDir(), "projects")
+	session.mirror = &sessionMirror{log: session.agent.log, store: store, projectsDir: projects}
+
+	ctx := t.Context()
+	require.NoError(t, stream.incarnate(ctx))
+
+	_, err := stream.dispatch(
+		ctx, lifecycle.Submission{SubmissionID: "sub-1", ClientNonce: "non-1"}, "nonce-1", func() error { return nil })
+	require.NoError(t, err)
+
+	_, err = stream.announceAction(ctx, "nonce-1", lifecycle.ActionPermission)
+	require.NoError(t, err)
+
+	session.nativePumpHandle().work <- nativePumpWork{frame: &claude.TranscriptMirrorMessage{
+		FilePath: filepath.Join(projects, "project", mirroredSessionUUID+".jsonl"),
+		Entries:  []json.RawMessage{json.RawMessage(`{"type":"user"}`)},
+	}}
+	t.Cleanup(session.stopNativePump)
+
+	return session, conn, stream
+}
+
+// TestCloseSettlesADeadIncarnationDurablyAndTruthfully pins the non-emission
+// rungs of the close-fenced order, which are the ones a fence does not excuse.
+// The emissions belong to a live incarnation and a fenced one gets none, but the
+// containment proof and the durable commits run unconditionally: a close that
+// skipped the commit because there was nobody left to tell would lose the prefix
+// the store is owed, and a close that swallowed a failed commit would report a
+// boundary the store cannot back. What the loss already terminalized is also
+// final — an entity that failed is never rewritten as cancelled by the close
+// that followed it, because the host was already told how that work ended.
+func TestCloseSettlesADeadIncarnationDurablyAndTruthfully(t *testing.T) {
+	t.Run("the durable commit lands behind a fence", func(t *testing.T) {
+		ctx := t.Context()
+		store := NewInMemorySessionStore()
+		session, conn, stream := closeFencedSession(t, store)
+
+		require.NoError(t, stream.loseIncarnation(ctx))
+
+		fenced := lifecycleEventTypes(t, conn)
+
+		require.NoError(t, session.settleSessionClose(ctx, nil))
+		require.True(t, stream.fenced)
+		require.Equal(t, fenced, lifecycleEventTypes(t, conn), "a fenced incarnation is told nothing more")
+
+		entries, err := store.Load(ctx, SessionKey{SessionID: mirroredSessionUUID})
+		require.NoError(t, err)
+		require.Len(t, entries, 1, "the prefix the close owes the store lands whether or not anyone is left to tell")
+	})
+
+	t.Run("a failed commit still fails the close", func(t *testing.T) {
+		ctx := t.Context()
+		store := &faultSessionStore{SessionStore: NewInMemorySessionStore(), appendErr: errors.New("prefix append failed")}
+		session, _, stream := closeFencedSession(t, store)
+
+		require.NoError(t, stream.loseIncarnation(ctx))
+
+		err := session.settleSessionClose(ctx, nil)
+		require.ErrorContains(t, err, "prefix append failed")
+		require.True(t, stream.fenced, "the session is over even where its last commit was not")
+	})
+
+	t.Run("work the loss failed is never rewritten as cancelled", func(t *testing.T) {
+		ctx := t.Context()
+		session, conn, stream := closeFencedSession(t, NewInMemorySessionStore())
+
+		require.NoError(t, stream.loseIncarnation(ctx))
+		requireFailedIncarnationRecord(t, stream)
+
+		require.NoError(t, session.settleSessionClose(ctx, nil))
+		requireFailedIncarnationRecord(t, stream)
+
+		for _, eventType := range lifecycleEventTypes(t, conn) {
+			require.NotEqual(t, string(lifecycle.EventQuiescenceUpdate), eventType,
+				"a fenced incarnation certifies nothing")
+		}
+	})
+}
+
+// requireFailedIncarnationRecord asserts the record an incarnation loss wrote:
+// its outstanding action and its unsettled turn both ended as failed, which is
+// what tells a host a lost end from a contained one.
+func requireFailedIncarnationRecord(t *testing.T, stream *sessionStream) {
+	t.Helper()
+
+	state := stream.stream.State()
+
+	require.Len(t, state.Actions, 1)
+	require.Equal(t, lifecycle.ActionFailed, state.Actions[0].State)
+	require.Len(t, state.Turns, 1)
+	require.True(t, state.Turns[0].Terminal)
+	require.Equal(t, lifecycle.OutcomeFailed, state.Turns[0].Outcome)
 }
 
 // ctxHonoringBlockingClient is a host whose delivery never returns on its own

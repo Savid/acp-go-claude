@@ -33,8 +33,16 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
 	requireExactUnsupportedField(t, err, jsonFieldCwd)
 
+	// The tombstoned parent still holds a LIVE registered instance — the exact
+	// window where teardown is owed after the tombstone — so only the
+	// tombstone fence, not the missing-store path, can refuse this fork.
 	agent.mu.Lock()
 	agent.deleted["tombstoned-parent"] = struct{}{}
+	agent.sessions["tombstoned-parent"] = &agentSession{
+		agent:           agent,
+		id:              "tombstoned-parent",
+		permissionRules: map[string]string{"Read": claude.BehaviorAllow},
+	}
 	agent.mu.Unlock()
 	raw, err = json.Marshal(ForkSessionRequest("tombstoned-parent", cwd))
 	require.NoError(t, err)

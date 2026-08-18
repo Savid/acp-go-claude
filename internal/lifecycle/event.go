@@ -70,6 +70,17 @@ type Event struct {
 	Quiescence     *QuiescenceFact
 }
 
+// knownEventType reports whether the discriminant is one of the closed six.
+func knownEventType(t EventType) bool {
+	switch t {
+	case EventSnapshot, EventPromptAccepted, EventStateUpdate,
+		EventActivityUpdate, EventActionUpdate, EventQuiescenceUpdate:
+		return true
+	default:
+		return false
+	}
+}
+
 // payloadMatchesType reports whether the event carries exactly the payload its
 // type names.
 func (e Event) payloadMatchesType() bool {

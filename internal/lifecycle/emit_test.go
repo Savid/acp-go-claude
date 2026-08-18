@@ -327,7 +327,6 @@ func TestEmitRefusesAPayloadMismatchedEvent(t *testing.T) {
 		{Type: EventActivityUpdate},
 		{Type: EventActionUpdate},
 		{Type: EventQuiescenceUpdate},
-		{Type: EventType("unknown")},
 	} {
 		_, err := stream.Emit(event)
 		var refusal *ViolationError
@@ -335,8 +334,14 @@ func TestEmitRefusesAPayloadMismatchedEvent(t *testing.T) {
 		require.Equal(t, ViolationMalformedEnvelope, refusal.Kind)
 	}
 
+	// An unknown discriminant reports the decoder's own verdict for it.
+	_, err := stream.Emit(Event{Type: EventType("unknown")})
+	var unknown *ViolationError
+	require.ErrorAs(t, err, &unknown)
+	require.Equal(t, ViolationUnknownEventType, unknown.Kind)
+
 	// No refused emit burned a sequence: the next legal delta still lands.
-	_, err := stream.Emit(Event{Type: EventQuiescenceUpdate, Quiescence: &QuiescenceFact{
+	_, err = stream.Emit(Event{Type: EventQuiescenceUpdate, Quiescence: &QuiescenceFact{
 		Quiescent: true, Source: ProofClassProcessContainment, Watermark: 1,
 	}})
 	require.NoError(t, err)

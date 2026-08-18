@@ -51,7 +51,14 @@ func (s *Stream) Fence() { s.reducer.Close() }
 func (s *Stream) Emit(event Event) (map[string]any, error) {
 	// The payload is judged before the sequence claim, so a caller defect
 	// neither burns a sequence nor dereferences a payload that is not there.
+	// The verdicts mirror the decoder's: an unknown discriminant is the
+	// discriminant's violation, a known one without its payload is shape.
 	if !event.payloadMatchesType() {
+		if !knownEventType(event.Type) {
+			return nil, violation(ViolationUnknownEventType, s.id, s.sequence+1,
+				"event type "+string(event.Type))
+		}
+
 		return nil, violation(ViolationMalformedEnvelope, s.id, s.sequence+1,
 			"event payload does not match type "+string(event.Type))
 	}

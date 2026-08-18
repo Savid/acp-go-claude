@@ -294,8 +294,8 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 	_, finish := a.observe.StartACP(ctx, params.Meta, "initialize")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	if err := a.configurationError(); err != nil {
-		return acp.InitializeResponse{}, err
+	if configurationErr := a.configurationError(); configurationErr != nil {
+		return acp.InitializeResponse{}, configurationErr
 	}
 
 	lifecycleMeta, err := a.negotiateLifecycle(params.Meta)

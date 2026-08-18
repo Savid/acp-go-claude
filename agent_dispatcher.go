@@ -174,7 +174,8 @@ func (c *localAgentConnection) logSessionEstablishedFailure(
 	sessionID acp.SessionId,
 	err error,
 ) {
-	c.agent.log.ErrorContext(ctx, "post-response "+stage+" failed",
+	c.agent.log.ErrorContext(ctx, "post-response session establishment failed",
+		slog.String("stage", stage),
 		slog.String(jsonFieldMethod, method),
 		slog.String(acpFieldSessionID, string(sessionID)),
 		slog.String(jsonFieldError, err.Error()),

@@ -95,14 +95,14 @@ func TestLifecycleKeyOmittedWithoutACommonVersion(t *testing.T) {
 
 	resp, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
 	require.NoError(t, err)
-	require.NotContains(t, map[string]any(resp.Meta), lifecycle.MetaKey)
+	require.NotContains(t, resp.Meta, lifecycle.MetaKey)
 	require.False(t, agent.negotiatedLifecycle().Present())
 
 	resp, err = agent.Initialize(context.Background(), acp.InitializeRequest{
 		Meta: lifecycleOfferMeta(2),
 	})
 	require.NoError(t, err)
-	require.NotContains(t, map[string]any(resp.Meta), lifecycle.MetaKey)
+	require.NotContains(t, resp.Meta, lifecycle.MetaKey)
 	require.False(t, agent.negotiatedLifecycle().Present())
 }
 

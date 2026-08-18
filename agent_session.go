@@ -31,8 +31,8 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/new")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.NewSessionResponse{}, err
+	if lifecycleErr := rejectLifecycleMeta(params.Meta); lifecycleErr != nil {
+		return acp.NewSessionResponse{}, lifecycleErr
 	}
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
@@ -79,8 +79,8 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/resume")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.ResumeSessionResponse{}, err
+	if lifecycleErr := rejectLifecycleMeta(params.Meta); lifecycleErr != nil {
+		return acp.ResumeSessionResponse{}, lifecycleErr
 	}
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
@@ -147,8 +147,8 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/load")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.LoadSessionResponse{}, err
+	if lifecycleErr := rejectLifecycleMeta(params.Meta); lifecycleErr != nil {
+		return acp.LoadSessionResponse{}, lifecycleErr
 	}
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
@@ -219,8 +219,8 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/list")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.ListSessionsResponse{}, err
+	if lifecycleErr := rejectLifecycleMeta(params.Meta); lifecycleErr != nil {
+		return acp.ListSessionsResponse{}, lifecycleErr
 	}
 
 	if validationErr := validateOptionalAbsolutePath("cwd", params.Cwd); validationErr != nil {
@@ -319,8 +319,8 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/close")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.CloseSessionResponse{}, err
+	if lifecycleErr := rejectLifecycleMeta(params.Meta); lifecycleErr != nil {
+		return acp.CloseSessionResponse{}, lifecycleErr
 	}
 
 	session, err := a.session(params.SessionId)

@@ -17,7 +17,7 @@ import (
 var finishPromptResultCall = (*agentSession).finishPromptResult
 
 // Prompt sends one turn to Claude and streams updates.
-func (s *agentSession) Prompt(
+func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single settlement remain visibly paired.
 	ctx context.Context,
 	params acp.PromptRequest,
 ) (response acp.PromptResponse, promptErr error) {
@@ -88,19 +88,19 @@ func (s *agentSession) Prompt(
 		return acp.PromptResponse{}, err
 	}
 
-	if err := s.refreshMCPRegistry(ctx); err != nil {
-		return acp.PromptResponse{}, nativeTurnFailure(err)
+	if refreshErr := s.refreshMCPRegistry(ctx); refreshErr != nil {
+		return acp.PromptResponse{}, nativeTurnFailure(refreshErr)
 	}
 
-	if err := s.ensureClientAlive(ctx); err != nil {
-		return acp.PromptResponse{}, nativeTurnFailure(err)
+	if clientErr := s.ensureClientAlive(ctx); clientErr != nil {
+		return acp.PromptResponse{}, nativeTurnFailure(clientErr)
 	}
 
 	// The MCP relaunch and the lazy relaunch above both replace the native
 	// process, so the reader and the incarnation identity are pointed at the
 	// current one here: after validation and before acceptance.
-	if err := s.serveNativePump(ctx, s.currentClient()); err != nil {
-		return acp.PromptResponse{}, err
+	if pumpErr := s.serveNativePump(ctx, s.currentClient()); pumpErr != nil {
+		return acp.PromptResponse{}, pumpErr
 	}
 
 	stream := s.lifecycleStream()

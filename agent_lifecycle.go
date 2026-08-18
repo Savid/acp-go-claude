@@ -106,14 +106,14 @@ func rejectLifecycleMeta(meta map[string]any) error {
 // owed the exact path of the family key it sent.
 func rejectLifecycleExtensionMeta(params json.RawMessage) error {
 	var envelope struct {
-		Meta map[string]json.RawMessage `json:"_meta"`
+		Meta map[string]json.RawMessage `json:"_meta"` //nolint:tagliatelle // ACP reserves this exact wire member.
 	}
 
 	if err := json.Unmarshal(params, &envelope); err != nil {
 		// A params object this step cannot read is the method's own business: it
 		// carries no readable reserved key, so dispatch continues and the leg
 		// answers with its own refusal.
-		return nil
+		return nil //nolint:nilerr // The method-specific decoder owns malformed params.
 	}
 
 	if _, present := envelope.Meta[lifecycle.MetaKey]; !present {

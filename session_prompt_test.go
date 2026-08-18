@@ -905,7 +905,6 @@ func TestFinishPromptResultEdges(t *testing.T) {
 	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "test-turn", "hello"), &claude.ResultMessage{}, &promptLoopState{}, mapper.ToolUpdateOptions{}, false)
 	require.ErrorContains(t, err, "live info failed")
 	conn.sessionUpdateErr = nil
-
 }
 
 func TestFinishPromptResultEmitErrorBranches(t *testing.T) {

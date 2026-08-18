@@ -334,6 +334,7 @@ func (p *sessionStream) resolveLocked(
 	}
 
 	delete(p.actions, actionID)
+
 	action.turn.blockers--
 
 	update := action.update
@@ -498,18 +499,6 @@ func (p *sessionStream) correlation(update lifecycle.ActionUpdate) map[string]an
 	defer p.mu.Unlock()
 
 	return map[string]any{lifecycle.MetaKey: lifecycle.ActionCorrelationValue(p.stream.ID(), update)}
-}
-
-// incarnationID reports the identity the stream currently speaks for.
-func (p *sessionStream) incarnationID() string {
-	if p == nil {
-		return ""
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	return p.stream.ID()
 }
 
 // mint names the next entity of this incarnation.

@@ -219,6 +219,16 @@ func TestEmittedActionStreamReducesThroughTheSameReducer(t *testing.T) {
 	}
 	accepted := pending
 	accepted.State = ActionAccepted
+	correlation := ActionCorrelationValue("strm-1", pending)
+	require.Equal(t, map[string]any{
+		fieldVersion:  1,
+		fieldStreamID: "strm-1",
+		fieldAction: map[string]any{
+			fieldActionID: "act-1",
+			fieldOwner:    map[string]any{fieldType: string(OwnerTurn), fieldID: "turn-1"},
+			fieldRunID:    "run-1",
+		},
+	}, correlation)
 
 	envelopes := make([]map[string]any, 0, 8)
 

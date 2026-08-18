@@ -21,11 +21,22 @@ var sessionRemoveAll = os.RemoveAll
 // session and a later caller takes the barrier again.
 var errSessionCloseUnsettled = errors.New("await the in-flight Claude turn")
 
-// sessionCloseUnsettledError is the wire answer for that close. It is neither a
-// containment failure nor a native turn failure: the boundary was never reached,
-// so the truthful report is that this close settled nothing.
+// sessionCloseUnsettledError is the wire answer for that close. Nothing failed
+// internally: the boundary was never reached, and the truthful report is that
+// this close settled nothing and may be taken again.
+//
+// Which answer that is depends on why the barrier wait ended. A wait the caller
+// cancelled is the caller's own $/cancel_request coming back, so the raw error
+// travels undressed and the dispatcher answers the one code a withdrawn request
+// has: -32800. Any other expiry is a retryable refusal of a well-formed request,
+// which is the family's invalid-request idiom, and its message carries the
+// barrier-wait error rather than anything the native process said.
 func sessionCloseUnsettledError(err error) error {
-	return acp.NewInternalError(map[string]any{
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
+
+	return acp.NewInvalidRequest(map[string]any{
 		jsonFieldError:   "claude_session_close_unsettled",
 		jsonFieldMessage: err.Error(),
 	})

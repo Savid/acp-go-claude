@@ -10,6 +10,12 @@ import (
 )
 
 func (a *Agent) permissionRulesForSession(ctx context.Context, sessionID acp.SessionId) (map[string]string, error) {
+	// A tombstoned parent is wire-indistinguishable from one that never
+	// existed, even while its teardown still retains a live instance.
+	if a.isDeleted(sessionID) {
+		return nil, unknownSessionError()
+	}
+
 	a.mu.Lock()
 	session := a.sessions[sessionID]
 	a.mu.Unlock()

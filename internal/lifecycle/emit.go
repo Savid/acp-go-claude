@@ -49,6 +49,13 @@ func (s *Stream) Fence() { s.reducer.Close() }
 // Emit claims the next sequence, validates and reduces the notification the
 // envelope will ride, and returns the envelope for that notification's `_meta`.
 func (s *Stream) Emit(event Event) (map[string]any, error) {
+	// The payload is judged before the sequence claim, so a caller defect
+	// neither burns a sequence nor dereferences a payload that is not there.
+	if !event.payloadMatchesType() {
+		return nil, violation(ViolationMalformedEnvelope, s.id, s.sequence+1,
+			"event payload does not match type "+string(event.Type))
+	}
+
 	s.sequence++
 
 	envelope := map[string]any{

@@ -70,6 +70,27 @@ type Event struct {
 	Quiescence     *QuiescenceFact
 }
 
+// payloadMatchesType reports whether the event carries exactly the payload its
+// type names.
+func (e Event) payloadMatchesType() bool {
+	switch e.Type {
+	case EventSnapshot:
+		return e.Snapshot != nil
+	case EventPromptAccepted:
+		return e.PromptAccepted != nil
+	case EventStateUpdate:
+		return e.State != nil
+	case EventActivityUpdate:
+		return e.Activity != nil
+	case EventActionUpdate:
+		return e.Action != nil
+	case EventQuiescenceUpdate:
+		return e.Quiescence != nil
+	default:
+		return false
+	}
+}
+
 // Snapshot opens a stream with the whole truth it can state: the foreground state
 // and cycle, the complete nonterminal activity and action sets, and the current
 // quiescence fact with its proof source.

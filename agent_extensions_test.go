@@ -33,6 +33,14 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
 	requireExactUnsupportedField(t, err, jsonFieldCwd)
 
+	agent.mu.Lock()
+	agent.deleted["tombstoned-parent"] = struct{}{}
+	agent.mu.Unlock()
+	raw, err = json.Marshal(ForkSessionRequest("tombstoned-parent", cwd))
+	require.NoError(t, err)
+	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
+	requireUnknownSession(t, err)
+
 	raw, err = json.Marshal(ForkSessionRequest("parent", cwd, WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}})))
 	require.NoError(t, err)
 	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)

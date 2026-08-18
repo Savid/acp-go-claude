@@ -311,3 +311,33 @@ func TestEmitterRefusesAnEventOnASupersededIncarnation(t *testing.T) {
 	require.ErrorAs(t, err, &refusal)
 	require.Equal(t, ViolationStaleStream, refusal.Kind)
 }
+
+// TestEmitRefusesAPayloadMismatchedEvent pins that a type/payload mismatch is
+// refused as a malformed envelope before any sequence is claimed, for every
+// event form, instead of dereferencing a payload that is not there.
+func TestEmitRefusesAPayloadMismatchedEvent(t *testing.T) {
+	t.Parallel()
+
+	stream := openStream(t, provenConfiguration(), "strm-1")
+
+	for _, event := range []Event{
+		{Type: EventSnapshot},
+		{Type: EventPromptAccepted},
+		{Type: EventStateUpdate},
+		{Type: EventActivityUpdate},
+		{Type: EventActionUpdate},
+		{Type: EventQuiescenceUpdate},
+		{Type: EventType("unknown")},
+	} {
+		_, err := stream.Emit(event)
+		var refusal *ViolationError
+		require.ErrorAs(t, err, &refusal, "event %s", event.Type)
+		require.Equal(t, ViolationMalformedEnvelope, refusal.Kind)
+	}
+
+	// No refused emit burned a sequence: the next legal delta still lands.
+	_, err := stream.Emit(Event{Type: EventQuiescenceUpdate, Quiescence: &QuiescenceFact{
+		Quiescent: true, Source: ProofClassProcessContainment, Watermark: 1,
+	}})
+	require.NoError(t, err)
+}

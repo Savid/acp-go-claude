@@ -168,10 +168,10 @@ func TestSessionStreamRoutingRefusalsAndEmissionFailureLatch(t *testing.T) {
 	conn.sessionUpdateErr = errors.New("host disconnected")
 	_, err = stream.announceAction(ctx, "nonce", lifecycle.ActionPermission)
 	require.ErrorContains(t, err, "host disconnected")
-	latched := stream.failure
+	latched := stream.lost
 	conn.sessionUpdateErr = nil
 	require.ErrorIs(t, stream.loseIncarnation(ctx), latched)
-	require.ErrorIs(t, stream.incarnate(ctx), latched)
+	require.NoError(t, stream.incarnate(ctx), "the lost incarnation never holds the next one")
 }
 
 func TestSessionStreamCloseFenceAndHelpers(t *testing.T) {
@@ -350,7 +350,7 @@ func TestSessionStreamAnnouncementAfterFailureLatch(t *testing.T) {
 	conn.sessionUpdateErr = errors.New("host disconnected")
 	_, err := stream.announceAction(turnCtx, "nonce", lifecycle.ActionPermission)
 	require.ErrorContains(t, err, "host disconnected")
-	latched := stream.failure
+	latched := stream.lost
 
 	conn.sessionUpdateErr = nil
 	_, err = stream.announceAction(turnCtx, "nonce", lifecycle.ActionPermission)
@@ -399,7 +399,7 @@ func TestSessionStreamEmissionFailsClosedOnAnUntruthfulEvent(t *testing.T) {
 		Source:    lifecycle.ProofClassProcessContainment,
 	}))
 	require.Error(t, err)
-	require.ErrorIs(t, stream.failure, err)
+	require.ErrorIs(t, stream.refused, err)
 	require.Len(t, conn.Updates(), delivered, "a refused event is never delivered")
 
 	require.ErrorIs(t, stream.incarnate(ctx), err, "a latched stream never continues its sequence")
@@ -416,5 +416,143 @@ func TestSessionStreamEmissionFailsClosedWithoutAConnection(t *testing.T) {
 	require.Nil(t, stream.turn)
 
 	session.agent.setConnection(conn)
-	require.ErrorContains(t, stream.incarnate(ctx), "the ACP connection is unavailable")
+	require.NoError(t, stream.incarnate(ctx), "a reachable host opens the next incarnation")
+}
+
+// TestSessionStreamSettlementIgnoresACancelledRequestContext proves settlement
+// emissions are detached from the request that asked for them. A host that
+// withdraws its prompt un-happens nothing the turn already did, so the terminal
+// idle and the retirement of the incarnation still reach it; live work asked for
+// under the same withdrawn request is still refused, which is what makes the
+// detachment settlement's and not the whole stream's.
+func TestSessionStreamSettlementIgnoresACancelledRequestContext(t *testing.T) {
+	withdrawnTurn := func(t *testing.T) (*recordingAgentClient, *sessionStream, string, context.Context) {
+		t.Helper()
+
+		ctx := t.Context()
+		_, conn, stream := newLifecycleStreamTestSession(t)
+		require.NoError(t, stream.incarnate(ctx))
+
+		turnID, err := stream.dispatch(
+			ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "nonce", func() error { return nil })
+		require.NoError(t, err)
+
+		withdrawn, cancel := context.WithCancel(ctx)
+		cancel()
+
+		return conn, stream, turnID, withdrawn
+	}
+
+	t.Run("live work still honors its request", func(t *testing.T) {
+		_, stream, _, withdrawn := withdrawnTurn(t)
+
+		_, err := stream.announceAction(withdrawn, "nonce", lifecycle.ActionPermission)
+		require.ErrorContains(t, err, context.Canceled.Error(),
+			"a request the host withdrew announces no new action against it")
+	})
+	t.Run("settlement does not", func(t *testing.T) {
+		conn, stream, turnID, withdrawn := withdrawnTurn(t)
+
+		require.NoError(t, stream.settleTurn(withdrawn, turnID, lifecycleOutcome{
+			stopReason: lifecycle.StopReasonEndTurn,
+			outcome:    lifecycle.OutcomeSuccess,
+		}))
+		require.NoError(t, stream.loseIncarnation(withdrawn))
+		require.NoError(t, stream.settleClose(withdrawn, true, true))
+
+		require.Equal(t, []string{
+			string(lifecycle.EventSnapshot),
+			string(lifecycle.EventPromptAccepted),
+			string(lifecycle.EventStateUpdate),
+			string(lifecycle.EventStateUpdate),
+		}, lifecycleEventTypes(t, conn))
+	})
+}
+
+// TestSessionStreamLostDeliveryNeverHoldsTheNextIncarnation proves the delivery
+// latch ends with the incarnation it holed. The next incarnation opens on its own
+// identity and re-asserts the whole state in its own snapshot, so it owes the host
+// nothing the lost one failed to deliver; a refusal, which is about what this
+// adapter may state at all, still follows the session.
+func TestSessionStreamLostDeliveryNeverHoldsTheNextIncarnation(t *testing.T) {
+	ctx := t.Context()
+	_, conn, stream := newLifecycleStreamTestSession(t)
+	require.NoError(t, stream.incarnate(ctx))
+
+	first := stream.stream.ID()
+
+	conn.sessionUpdateErr = errors.New("host disconnected")
+	_, err := stream.dispatch(ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "nonce", func() error { return nil })
+	require.ErrorContains(t, err, "host disconnected")
+	require.NotNil(t, stream.lost)
+
+	conn.sessionUpdateErr = nil
+	require.NoError(t, stream.incarnate(ctx))
+	require.Nil(t, stream.lost)
+	require.NotEqual(t, first, stream.stream.ID())
+
+	_, err = stream.dispatch(ctx, lifecycle.Submission{SubmissionID: "s2", ClientNonce: "c2"}, "nonce", func() error { return nil })
+	require.NoError(t, err, "the fresh incarnation speaks again")
+}
+
+// TestSessionStreamCloseStatesNoFactOnADeadIncarnation proves settlement facts
+// belong to a live incarnation. A stream that never opened one has no identity to
+// name, and one whose incarnation cancel already retired has only an identity a
+// conforming reducer must refuse as stale, so close emits nothing in either case
+// and succeeds on the containment evidence it already holds.
+func TestSessionStreamCloseStatesNoFactOnADeadIncarnation(t *testing.T) {
+	// The configuration advertises an authoritative quiescence source, so close
+	// has a positive fact to state and a dead incarnation has nowhere to state it.
+	authoritative := func(t *testing.T) (*recordingAgentClient, *sessionStream) {
+		t.Helper()
+
+		agent := NewAgent()
+		agent.containmentMode = RuntimeContainmentAuthoritative
+		conn := newRecordingAgentClient()
+		agent.setConnection(conn)
+		_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
+		require.NoError(t, err)
+		require.True(t, agent.negotiatedLifecycle().AuthoritativeQuiescence)
+
+		session := &agentSession{agent: agent, id: "session-1"}
+		stream := session.lifecycleStream()
+		require.NotNil(t, stream)
+
+		return conn, stream
+	}
+
+	t.Run("never incarnated", func(t *testing.T) {
+		conn, stream := authoritative(t)
+
+		require.NoError(t, stream.settleClose(t.Context(), true, true))
+		require.True(t, stream.fenced)
+		require.Empty(t, lifecycleEventTypes(t, conn), "a stream with no incarnation states nothing")
+	})
+	t.Run("incarnation lost", func(t *testing.T) {
+		ctx := t.Context()
+		conn, stream := authoritative(t)
+		require.NoError(t, stream.incarnate(ctx))
+		_, err := stream.dispatch(
+			ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "nonce", func() error { return nil })
+		require.NoError(t, err)
+		require.NoError(t, stream.loseIncarnation(ctx))
+
+		delivered := lifecycleEventTypes(t, conn)
+
+		require.NoError(t, stream.settleClose(ctx, true, true))
+		require.True(t, stream.fenced)
+		require.Equal(t, delivered, lifecycleEventTypes(t, conn),
+			"a retired identity is never continued by a later settlement")
+	})
+	t.Run("incarnation abandoned", func(t *testing.T) {
+		ctx := t.Context()
+		conn, stream := authoritative(t)
+		require.NoError(t, stream.incarnate(ctx))
+		stream.abandonIncarnation()
+
+		delivered := lifecycleEventTypes(t, conn)
+
+		require.NoError(t, stream.settleClose(ctx, true, true))
+		require.Equal(t, delivered, lifecycleEventTypes(t, conn))
+	})
 }

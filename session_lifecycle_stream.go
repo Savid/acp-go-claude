@@ -76,10 +76,18 @@ type sessionStream struct {
 	// nothing until the next one opens; a fenced session never opens one again.
 	live   bool
 	fenced bool
-	// failure latches the first emission that did not reach the host. A stream
-	// with a hole in it is not a stream, so every later emission fails with the
-	// same error rather than continuing a sequence the host never received.
-	failure error
+	// refused latches an event this adapter could not state truthfully. Fail
+	// closed means fail closed: the refusal belongs to the session, and every
+	// later emission on it — the next incarnation's opening snapshot included —
+	// reports the same refusal.
+	refused error
+	// lost latches the first emission of the current incarnation that never
+	// reached the host. An incarnation with a hole in it is not a stream, so every
+	// later emission on it fails rather than continuing a sequence the host never
+	// received. The latch ends with the incarnation it belongs to: the next one
+	// opens on a fresh identity and re-asserts the whole state in its own
+	// snapshot, so it owes the host nothing the lost one failed to deliver.
+	lost error
 	// cycleID is the foreground cycle the stream currently reports.
 	cycleID string
 	// minted counts the entities this incarnation has named.
@@ -157,6 +165,13 @@ func (p *sessionStream) incarnate(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// The delivery failure that ended the previous incarnation does not follow
+	// this one. It latched a stream that no longer exists, and this snapshot is
+	// the whole state on a fresh identity, so there is no hole left for it to
+	// describe. A refusal is a different thing and does follow: it is about what
+	// this adapter may state at all, not about what one incarnation delivered.
+	p.lost = nil
+
 	if err := p.emittable(); err != nil {
 		return err
 	}
@@ -231,6 +246,8 @@ func (p *sessionStream) settleTurn(ctx context.Context, turnID string, outcome l
 	if p == nil || turnID == "" {
 		return nil
 	}
+
+	ctx = settlementContext(ctx)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -401,6 +418,8 @@ func (p *sessionStream) loseIncarnation(ctx context.Context) error {
 		return nil
 	}
 
+	ctx = settlementContext(ctx)
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -461,10 +480,19 @@ func (p *sessionStream) endIncarnationLocked(
 // declared terminal, because their next real event would be a post-terminal
 // mutation. A resumable snapshot the store does not hold means no quiescence fact
 // at all, never a fact with a missing snapshot behind it.
+//
+// A settlement fact is a fact about a live incarnation, so an incarnation that
+// was lost, abandoned, fenced, or never opened receives none. Continuing a
+// retired identity would state a fact a conforming reducer must refuse as stale,
+// and naming no identity at all would state a malformed one. Close does not need
+// the emission to succeed: the durable containment evidence carries the boundary,
+// and the next incarnation's snapshot asserts the truthful state.
 func (p *sessionStream) settleClose(ctx context.Context, contained bool, committed bool) error {
 	if p == nil {
 		return nil
 	}
+
+	ctx = settlementContext(ctx)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -475,7 +503,7 @@ func (p *sessionStream) settleClose(ctx context.Context, contained bool, committ
 		p.stream.Fence()
 	}()
 
-	if !contained {
+	if !contained || !p.live {
 		return nil
 	}
 
@@ -515,12 +543,15 @@ func (p *sessionStream) mint(kind string) string {
 	return p.stream.ID() + kind + strconv.Itoa(p.minted)
 }
 
-// emittable reports why this stream may not emit. A closed session is over, and a
-// stream that already lost an event never continues its sequence.
+// emittable reports why this stream may not emit. A refused event is refused for
+// the life of the session, an incarnation that already lost an event never
+// continues its sequence, and a closed session is over.
 func (p *sessionStream) emittable() error {
 	switch {
-	case p.failure != nil:
-		return p.failure
+	case p.refused != nil:
+		return p.refused
+	case p.lost != nil:
+		return p.lost
 	case p.fenced:
 		return lifecycleViolationError("the session's close containment completed")
 	default:
@@ -531,8 +562,10 @@ func (p *sessionStream) emittable() error {
 // emitLocked claims the next sequence, validates the event through the reducer
 // the canonical vectors drive, and delivers it on its own identity-only carrier.
 // An event this adapter cannot state truthfully, and one the host never received,
-// both fail the caller here and latch the stream: emission failure is loss, and
-// loss fails closed rather than leaving a hole a consumer cannot see.
+// both fail the caller here and latch: emission failure is loss, and loss fails
+// closed rather than leaving a hole a consumer cannot see. They latch separately
+// because they outlive different things — a refusal outlives the session, a lost
+// delivery only the incarnation whose sequence it holed.
 func (p *sessionStream) emitLocked(ctx context.Context, event lifecycle.Event) error {
 	if err := p.emittable(); err != nil {
 		return err
@@ -540,16 +573,16 @@ func (p *sessionStream) emitLocked(ctx context.Context, event lifecycle.Event) e
 
 	envelope, err := p.stream.Emit(event)
 	if err != nil {
-		p.failure = lifecycleViolationError(err.Error())
+		p.refused = lifecycleViolationError(err.Error())
 
-		return p.failure
+		return p.refused
 	}
 
 	conn := p.session.agent.connection()
 	if conn == nil {
-		p.failure = lifecycleViolationError("the ACP connection is unavailable")
+		p.lost = lifecycleViolationError("the ACP connection is unavailable")
 
-		return p.failure
+		return p.lost
 	}
 
 	// The envelope rides the notification's own `_meta`, beside sessionId and
@@ -560,9 +593,9 @@ func (p *sessionStream) emitLocked(ctx context.Context, event lifecycle.Event) e
 		Meta:      map[string]any{lifecycle.MetaKey: envelope},
 		Update:    acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{}},
 	}); err != nil {
-		p.failure = lifecycleViolationError(err.Error())
+		p.lost = lifecycleViolationError(err.Error())
 
-		return p.failure
+		return p.lost
 	}
 
 	return nil
@@ -588,6 +621,16 @@ func stopReasonForOutcome(outcome lifecycle.Outcome) string {
 	}
 
 	return ""
+}
+
+// settlementContext detaches a settlement's emissions from the request that
+// asked for it. Settlement reports what has already happened — a terminal idle,
+// a retired incarnation, a proven quiescence — and a host that cancels its
+// request un-happens none of it. The request's values are kept, so the emission
+// still carries its trace; only the cancellation is dropped, because a cancelled
+// delivery would hole the stream over work that completed anyway.
+func settlementContext(ctx context.Context) context.Context {
+	return context.WithoutCancel(ctx)
 }
 
 func lifecycleViolationError(message string) error {

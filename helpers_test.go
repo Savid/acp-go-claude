@@ -190,6 +190,13 @@ func (c *recordingAgentClient) RequestPermission(
 }
 
 func (c *recordingAgentClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	// The pinned SDK refuses to send a notification whose context is already done,
+	// so this double refuses too: a test that delivered an update under a cancelled
+	// context would prove nothing about the real transport.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	c.mu.Lock()
 	c.updateCalls++
 	failAfter := c.failUpdateAfter

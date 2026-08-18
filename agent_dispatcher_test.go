@@ -582,7 +582,7 @@ func TestSessionEstablishedHookLatchesALifecycleStreamFailure(t *testing.T) {
 		stream.mu.Lock()
 		defer stream.mu.Unlock()
 
-		return stream.failure != nil
+		return stream.lost != nil
 	}, time.Second, 10*time.Millisecond)
 	require.Empty(t, client.Updates(), "a failed opening snapshot delivers nothing")
 }

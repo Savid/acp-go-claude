@@ -464,6 +464,11 @@ func (s *agentSession) appendSessionMirror(ctx context.Context, frame *claude.Tr
 // commit itself failed, the prompt fails with its own error, no terminal idle is
 // emitted at all, and the incarnation ends unsettled; the next incarnation's
 // snapshot asserts the truthful state.
+//
+// The request context reaches here only for its values. Settlement states what
+// the turn already did, and each emission below detaches from the caller's
+// cancellation itself, so a host that withdraws its prompt cannot hole the stream
+// over work that completed anyway.
 func (s *agentSession) settleTurnLifecycle(
 	ctx context.Context,
 	stream *sessionStream,

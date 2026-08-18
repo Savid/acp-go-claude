@@ -130,6 +130,34 @@ func TestDecodeEnvelopeStructure(t *testing.T) {
 	}
 }
 
+// TestDecodeRefusesANonIntegralIntegerLexeme pins where the number-equality rule
+// stops. Inside an opaque progress object a number is its value, so `1` and `1.0`
+// are one number; the members this contract types as integers are lexically
+// integral instead. A sequence written `2.0` names the value `2` and is still
+// malformed: an ordering identity carrying a fraction or an exponent part has no
+// integral spelling to be contiguous against, and admitting it would make loss
+// detection depend on how a number was written.
+func TestDecodeRefusesANonIntegralIntegerLexeme(t *testing.T) {
+	t.Parallel()
+
+	event := `{"type":"prompt_accepted","submissionId":"a","clientNonce":"b","turnId":"c"}`
+	quiescent := func(watermark string) string {
+		return `{"type":"quiescence_update","quiescent":true,"source":"process-containment","watermark":` +
+			watermark + `}`
+	}
+
+	for _, envelope := range []string{
+		`{"version":1.0,"streamId":"strm","sequence":2,"event":` + event + `}`,
+		`{"version":1e0,"streamId":"strm","sequence":2,"event":` + event + `}`,
+		`{"version":1,"streamId":"strm","sequence":2.0,"event":` + event + `}`,
+		`{"version":1,"streamId":"strm","sequence":2e0,"event":` + event + `}`,
+		`{"version":1,"streamId":"strm","sequence":2,"event":` + quiescent("1.0") + `}`,
+		`{"version":1,"streamId":"strm","sequence":2,"event":` + quiescent("1e0") + `}`,
+	} {
+		requireRefusal(t, notification(envelope), richConfiguration(), ViolationMalformedEnvelope)
+	}
+}
+
 // TestDecodeEventStructure pins every event object's fixed member set and the
 // closed vocabularies inside it.
 func TestDecodeEventStructure(t *testing.T) {

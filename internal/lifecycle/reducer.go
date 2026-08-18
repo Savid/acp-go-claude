@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"encoding/json"
 	"errors"
-	"reflect"
 )
 
 // Options configures a reducer.
@@ -34,9 +33,12 @@ type Reducer struct {
 	base       uint64
 	started    bool
 	failed     *ViolationError
-	// frames holds every decoded notification this incarnation reduced. Wholesale
+	// frames holds every decoded notification this incarnation reduced, in the
+	// lossless decoded form lifecycle value equality compares. Wholesale
 	// idempotence has no window: an exact retransmission is suppressed however far
 	// back its identity was reduced, and the retention ends with the incarnation.
+	// A suppressed terminal restatement records its own frame too, so a later
+	// delivery at that sequence is judged against the content that arrived there.
 	frames map[uint64]any
 	// lastTransition is the highest sequence carrying a transition a quiescence
 	// proof must cover before it can certify a boundary.
@@ -213,7 +215,7 @@ func (r *Reducer) reduceFirst(delivery Delivery) error {
 }
 
 func (r *Reducer) reduceDuplicate(delivery Delivery) error {
-	if recorded, known := r.frames[delivery.Sequence]; known && reflect.DeepEqual(recorded, delivery.Frame) {
+	if recorded, known := r.frames[delivery.Sequence]; known && valueEqual(recorded, delivery.Frame) {
 		r.state.SuppressedRetransmissions++
 
 		return nil

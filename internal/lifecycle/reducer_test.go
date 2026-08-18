@@ -949,3 +949,109 @@ func TestTerminalActivityProgressEqualityPreservesJSONIntegerPrecision(t *testin
 		})
 	}
 }
+
+// resolvedActionStream reduces a stream up to an action resolved at sequence 4
+// and returns the reducer positioned to take one more patch at sequence 5.
+func resolvedActionStream(t *testing.T) *Reducer {
+	t.Helper()
+
+	reducer, refusal := reduceAll(t, richConfiguration(),
+		openSnapshot(),
+		Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
+			SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
+		}},
+		actionEvent(ActionUpdate{
+			ActionID:         "req-1",
+			Kind:             ActionPermission,
+			State:            ActionPending,
+			Owner:            Owner{Type: OwnerTurn, ID: "turn-1"},
+			RunID:            "run-1",
+			BlocksForeground: stated(false),
+		}),
+		actionEvent(ActionUpdate{ActionID: "req-1", State: ActionAccepted}),
+	)
+	require.Nil(t, refusal)
+
+	return reducer
+}
+
+// TestTerminalActionAdmitsOnlyNoOpRestatement pins the action half of the
+// terminal rule. A resolved action is judged member-wise under patch semantics:
+// every member the patch states must equal the record, an omitted one states
+// nothing, and any carried difference — a rewritten immutable included — is a
+// post-terminal mutation rather than an identity change, because a token naming
+// a terminal entity outranks one naming a live identity.
+func TestTerminalActionAdmitsOnlyNoOpRestatement(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		patch ActionUpdate
+		kind  ViolationKind
+	}{
+		{name: "restates nothing but its state", patch: ActionUpdate{ActionID: "req-1", State: ActionAccepted}},
+		{
+			name: "restates every member at its first-sight value",
+			patch: ActionUpdate{
+				ActionID:         "req-1",
+				Kind:             ActionPermission,
+				State:            ActionAccepted,
+				Owner:            Owner{Type: OwnerTurn, ID: "turn-1"},
+				RunID:            "run-1",
+				BlocksForeground: stated(false),
+			},
+		},
+		{
+			name:  "changes state",
+			patch: ActionUpdate{ActionID: "req-1", State: ActionDeclined},
+			kind:  ViolationPostTerminalMutation,
+		},
+		{
+			name:  "changes kind",
+			patch: ActionUpdate{ActionID: "req-1", Kind: ActionElicitation, State: ActionAccepted},
+			kind:  ViolationPostTerminalMutation,
+		},
+		{
+			name: "changes owner",
+			patch: ActionUpdate{
+				ActionID: "req-1", State: ActionAccepted, Owner: Owner{Type: OwnerTurn, ID: "turn-2"},
+			},
+			kind: ViolationPostTerminalMutation,
+		},
+		{
+			name:  "changes ownership root",
+			patch: ActionUpdate{ActionID: "req-1", State: ActionAccepted, RunID: "run-2"},
+			kind:  ViolationPostTerminalMutation,
+		},
+		{
+			name:  "changes what it blocks",
+			patch: ActionUpdate{ActionID: "req-1", State: ActionAccepted, BlocksForeground: stated(true)},
+			kind:  ViolationPostTerminalMutation,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			reducer := resolvedActionStream(t)
+			err := reducer.Reduce(deliver(5, actionEvent(tc.patch)))
+
+			if tc.kind == "" {
+				require.NoError(t, err)
+				require.Equal(t, uint64(5), reducer.State().ReducedThrough,
+					"a suppressed restatement still consumes its sequence")
+				require.Zero(t, reducer.State().SuppressedRetransmissions,
+					"suppression of a no-op patch is not a reused-identity retransmission")
+
+				action, found := reducer.State().Action("req-1")
+				require.True(t, found)
+				require.Equal(t, ActionAccepted, action.State)
+
+				return
+			}
+
+			var refusal *ViolationError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, tc.kind, refusal.Kind)
+		})
+	}
+}

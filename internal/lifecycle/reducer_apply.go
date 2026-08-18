@@ -1,10 +1,6 @@
 package lifecycle
 
-import (
-	"bytes"
-	"encoding/json"
-	"reflect"
-)
+import "encoding/json"
 
 // applySnapshot opens the stream from a whole-state assertion. A snapshot is
 // taken whole or not at all: the entire assertion is judged before any of it is
@@ -63,10 +59,22 @@ func (r *Reducer) checkSnapshot(delivery Delivery, snapshot Snapshot) error {
 
 // checkSnapshotActivities validates the asserted activity set. The set is the
 // complete nonterminal one, so an entry that is already terminal asserts as
-// current a state that is over.
+// current a state that is over, and an id listed twice asserts two current
+// states for one entity — there is no reading that recovers which was meant, not
+// even when the two entries agree, because a whole-state assertion is judged
+// whole rather than repaired by deduplication.
 func (r *Reducer) checkSnapshotActivities(delivery Delivery, snapshot Snapshot, introduced introductions) error {
+	listed := make(map[string]struct{}, len(snapshot.Activities))
+
 	for index := range snapshot.Activities {
 		activity := &snapshot.Activities[index]
+
+		if _, twice := listed[activity.ActivityID]; twice {
+			return r.fail(delivery, ViolationMalformedEnvelope,
+				"activity "+activity.ActivityID+" is listed twice")
+		}
+
+		listed[activity.ActivityID] = struct{}{}
 
 		if err := r.checkActivityIdentity(delivery, *activity); err != nil {
 			return err
@@ -84,8 +92,20 @@ func (r *Reducer) checkSnapshotActivities(delivery Delivery, snapshot Snapshot, 
 	return nil
 }
 
+// checkSnapshotActions validates the asserted action set under the same rules.
+// Uniqueness is judged per set because activities and actions are distinct id
+// spaces: the same opaque string naming an activity in one and an action in the
+// other is two entities, not a collision.
 func (r *Reducer) checkSnapshotActions(delivery Delivery, snapshot Snapshot, introduced introductions) error {
+	listed := make(map[string]struct{}, len(snapshot.Actions))
+
 	for _, action := range snapshot.Actions {
+		if _, twice := listed[action.ActionID]; twice {
+			return r.fail(delivery, ViolationMalformedEnvelope, "action "+action.ActionID+" is listed twice")
+		}
+
+		listed[action.ActionID] = struct{}{}
+
 		if err := r.checkActionIdentity(delivery, action); err != nil {
 			return err
 		}
@@ -348,11 +368,11 @@ func (r *Reducer) applyActivityUpdate(delivery Delivery) error {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the activity payload is missing")
 	}
 
-	r.lastTransition = delivery.Sequence
-
 	if r.activityIndex(update.ActivityID) >= 0 {
 		return r.patchActivity(delivery, *update)
 	}
+
+	r.lastTransition = delivery.Sequence
 
 	if err := r.checkActivityIdentity(delivery, *update); err != nil {
 		return err
@@ -451,16 +471,30 @@ func (r *Reducer) checkActivityParent(delivery Delivery, activityID, parentID st
 // patchActivity applies a later update, which may change only state and progress.
 // A restated immutable field is permitted only with its first-sight value, and
 // changes nothing.
+//
+// A terminal activity is judged first and judged whole: the record is over, so
+// every member the patch carries — its immutables included — must equal what the
+// record holds, and a token naming a terminal entity outranks one naming a live
+// identity. A patch carrying no difference at all restates a state that is
+// already true and is suppressed rather than refused; it still consumes its
+// sequence, but it records no work, so it neither invalidates a standing
+// certification nor raises the floor a later quiescence fact must clear.
 func (r *Reducer) patchActivity(delivery Delivery, update ActivityUpdate) error {
 	index := r.activityIndex(update.ActivityID)
 
 	existing := r.state.Activities[index]
-	if detail := immutableActivityConflict(existing, update); detail != "" {
-		return r.fail(delivery, ViolationImmutableIdentityChange, detail)
+	if existing.State.Terminal() {
+		if detail := terminalActivityDifference(existing, update); detail != "" {
+			return r.fail(delivery, ViolationPostTerminalMutation, detail)
+		}
+
+		return nil
 	}
 
-	if existing.State.Terminal() && mutatesTerminalActivity(existing, update) {
-		return r.fail(delivery, ViolationPostTerminalMutation, "activity "+existing.ActivityID+" is terminal")
+	r.lastTransition = delivery.Sequence
+
+	if detail := immutableActivityConflict(existing, update); detail != "" {
+		return r.fail(delivery, ViolationImmutableIdentityChange, detail)
 	}
 
 	if update.State.Terminal() {
@@ -525,11 +559,11 @@ func (r *Reducer) applyActionUpdate(delivery Delivery) error {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the action payload is missing")
 	}
 
-	r.lastTransition = delivery.Sequence
-
 	if r.actionIndex(update.ActionID) >= 0 {
 		return r.patchAction(delivery, *update)
 	}
+
+	r.lastTransition = delivery.Sequence
 
 	if err := r.checkActionIdentity(delivery, *update); err != nil {
 		return err
@@ -613,10 +647,24 @@ func (r *Reducer) blockForeground(update ActionUpdate) {
 	}
 }
 
+// patchAction applies a later update to an action the stream already introduced.
+// A terminal action is judged first and judged whole, exactly as a terminal
+// activity is: every member the patch states must equal the reduced record, an
+// omitted one is not a difference, and a patch carrying no difference is
+// suppressed rather than refused — it consumes its sequence and records no work.
 func (r *Reducer) patchAction(delivery Delivery, update ActionUpdate) error {
 	index := r.actionIndex(update.ActionID)
 
 	existing := r.state.Actions[index]
+	if existing.State.Terminal() {
+		if detail := terminalActionDifference(existing, update); detail != "" {
+			return r.fail(delivery, ViolationPostTerminalMutation, detail)
+		}
+
+		return nil
+	}
+
+	r.lastTransition = delivery.Sequence
 
 	switch {
 	case update.Kind != "" && update.Kind != existing.Kind:
@@ -627,8 +675,6 @@ func (r *Reducer) patchAction(delivery Delivery, update ActionUpdate) error {
 		return r.fail(delivery, ViolationImmutableIdentityChange, "action "+update.ActionID+" changed ownership root")
 	case update.BlocksForeground != nil && *update.BlocksForeground != existing.BlocksForeground:
 		return r.fail(delivery, ViolationImmutableIdentityChange, "action "+update.ActionID+" changed what it blocks")
-	case existing.State.Terminal() && update.State != existing.State:
-		return r.fail(delivery, ViolationPostTerminalMutation, "action "+update.ActionID+" is terminal")
 	}
 
 	r.state.Actions[index].State = update.State
@@ -638,6 +684,27 @@ func (r *Reducer) patchAction(delivery Delivery, update ActionUpdate) error {
 	}
 
 	return nil
+}
+
+// terminalActionDifference names the first difference a patch carries from the
+// reduced terminal record of an action, or reports none at all. An action's
+// members are its identity and its state, and a terminal record admits every one
+// of them only at the value it already holds.
+func terminalActionDifference(existing ActionRecord, update ActionUpdate) string {
+	switch {
+	case update.Kind != "" && update.Kind != existing.Kind:
+		return "action " + update.ActionID + " is terminal and changed kind"
+	case update.Owner.ID != "" && update.Owner != existing.Owner:
+		return "action " + update.ActionID + " is terminal and changed owner"
+	case update.RunID != "" && update.RunID != existing.RunID:
+		return "action " + update.ActionID + " is terminal and changed ownership root"
+	case update.BlocksForeground != nil && *update.BlocksForeground != existing.BlocksForeground:
+		return "action " + update.ActionID + " is terminal and changed what it blocks"
+	case update.State != existing.State:
+		return "action " + update.ActionID + " is terminal and changed state"
+	default:
+		return ""
+	}
 }
 
 // applyQuiescence reduces a standalone quiescence fact. The event asserts the
@@ -740,35 +807,40 @@ func (r *Reducer) actionIndex(actionID string) int {
 	return indexOf(r.state.Actions, actionID, ActionRecord.identity)
 }
 
-// mutatesTerminalActivity reports whether a patch would change an activity that
-// is already terminal. Terminal is final: it never changes state and never gains
-// progress, so a repeat carrying its own recorded values changes nothing while a
-// newly present or different progress object is a post-terminal mutation.
-func mutatesTerminalActivity(existing ActivityRecord, update ActivityUpdate) bool {
-	return update.State != existing.State || !sameProgress(existing.Progress, update.Progress)
+// terminalActivityDifference names the first difference a patch carries from the
+// reduced terminal record, or reports none at all. The basis is the patch rather
+// than the record: only the members the event states are compared, so an omitted
+// member is not an erasure and a minimal redelivery of a minimal terminal patch
+// says nothing new. Terminal is final, so every stated member — the immutable
+// identity, the state, and the rendered progress alike — is legal only at the
+// value the record already holds.
+func terminalActivityDifference(existing ActivityRecord, update ActivityUpdate) string {
+	if detail := immutableActivityConflict(existing, update); detail != "" {
+		return detail
+	}
+
+	switch {
+	case update.State != existing.State:
+		return "activity " + update.ActivityID + " is terminal and changed state"
+	case !sameProgress(existing.Progress, update.Progress):
+		return "activity " + update.ActivityID + " is terminal and changed progress"
+	default:
+		return ""
+	}
 }
 
-// sameProgress compares two progress objects by decoded value, matching the
-// deep-equality rule the retransmission suppression uses: key order and
-// insignificant whitespace are never differences. An absent patch member
-// restates nothing and is therefore always the same, and a record holding no
-// progress at all is gaining it.
+// sameProgress compares two progress objects under lifecycle value equality: key
+// order and insignificant whitespace are never differences, and a number is its
+// value rather than its spelling. An absent patch member restates nothing and is
+// therefore always the same, and a record holding no progress at all is gaining
+// it.
 func sameProgress(existing, patch json.RawMessage) bool {
 	if patch == nil {
 		return true
 	}
 
-	var was, now any
+	was, hadValue := decodeValue(existing)
+	now, hasValue := decodeValue(patch)
 
-	wasDecoder := json.NewDecoder(bytes.NewReader(existing))
-	wasDecoder.UseNumber()
-
-	nowDecoder := json.NewDecoder(bytes.NewReader(patch))
-	nowDecoder.UseNumber()
-
-	if wasDecoder.Decode(&was) != nil || nowDecoder.Decode(&now) != nil {
-		return false
-	}
-
-	return reflect.DeepEqual(was, now)
+	return hadValue && hasValue && valueEqual(was, now)
 }

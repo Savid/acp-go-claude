@@ -1051,3 +1051,58 @@ func TestDeleteSessionRemovesOnlyItsOwnInstance(t *testing.T) {
 	require.Same(t, replacement, agent.sessions[response.SessionId])
 	agent.mu.Unlock()
 }
+
+// TestSessionCloseSettlesUnderAWithdrawnRequestContext proves close settlement is
+// detached from the request that asked for it. A close whose barrier was free
+// contains the process and settles the stream even when the host has already
+// withdrawn the request: what the boundary proved does not become unproven
+// because nobody is waiting for the answer, and a settlement that silently
+// stopped there would leave the host's projection permanently wrong.
+func TestSessionCloseSettlesUnderAWithdrawnRequestContext(t *testing.T) {
+	session, transport, conn, stream := newSettlementBarrierSession(t)
+
+	withdrawn, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, session.Close(withdrawn))
+	require.Equal(t, 1, transport.CloseCalls())
+	require.True(t, stream.fenced)
+
+	types := lifecycleEventTypes(t, conn)
+	require.Contains(t, types, string(lifecycle.EventQuiescenceUpdate),
+		"the completed boundary still states its fact")
+	require.Equal(t, string(lifecycle.EventQuiescenceUpdate), types[len(types)-1],
+		"the fact is stated last, after the cycle it covers ended")
+}
+
+// TestSessionCloseUnsettledRefusalDependsOnWhyTheWaitEnded pins both wire answers
+// the barrier can give. A caller that withdrew its request gets the one code a
+// withdrawn request has; a wait that merely ran out gets a retryable refusal that
+// names itself. Neither is an internal failure: nothing failed internally, the
+// boundary was simply never reached.
+func TestSessionCloseUnsettledRefusalDependsOnWhyTheWaitEnded(t *testing.T) {
+	t.Run("withdrawn", func(t *testing.T) {
+		transport := newFakeClaudeTransport()
+		session := newCloseStateSession(t, transport)
+		session.turn <- struct{}{}
+
+		withdrawn, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		requireCancelledCloseRefusal(t, withdrawn, session.Close(withdrawn))
+		require.Zero(t, transport.CloseCalls())
+	})
+	t.Run("expired", func(t *testing.T) {
+		transport := newFakeClaudeTransport()
+		session := newCloseStateSession(t, transport)
+		session.turn <- struct{}{}
+
+		expiring, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer cancel()
+
+		err := session.Close(expiring)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		requireExpiredCloseRefusal(t, expiring, sessionCloseUnsettledError(err))
+		require.Zero(t, transport.CloseCalls())
+	})
+}

@@ -59,6 +59,17 @@ func TestInMemorySessionStoreBranches(t *testing.T) {
 	require.Len(t, summaries, 2)
 	require.Equal(t, "other", summaries[0].SessionID)
 
+	// Two sessions stamped in the same millisecond fall back to their ids, so the
+	// listing is stable however close together the writes landed.
+	store.mu.Lock()
+	store.updatedAt[SessionKey{SessionID: "s"}] = 7
+	store.updatedAt[SessionKey{SessionID: "other"}] = 7
+	store.mu.Unlock()
+
+	summaries, err = store.ListSessions(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{"other", "s"}, []string{summaries[0].SessionID, summaries[1].SessionID})
+
 	require.EqualError(t, store.Replace(ctx, SessionKey{}, nil), "session id is required")
 	require.Error(t, store.Replace(ctx, SessionKey{SessionID: "s", Subpath: "sub"}, nil))
 	require.Error(t, store.Replace(ctx, SessionKey{SessionID: "s"}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "other"}}}))

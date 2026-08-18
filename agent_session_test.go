@@ -430,18 +430,43 @@ func newBusySessionAgent(
 	return agent, session, transport
 }
 
-func requireUnsettledCloseError(t *testing.T, err error) {
+// requireCancelledCloseRefusal pins the wire answer for a barrier wait the caller
+// itself withdrew. Nothing failed internally and the caller no longer wants an
+// answer, so the raw error travels undressed and the dispatcher answers the one
+// code a withdrawn request has: -32800.
+func requireCancelledCloseRefusal(t *testing.T, ctx context.Context, err error) {
+	t.Helper()
+
+	require.ErrorIs(t, err, errSessionCloseUnsettled)
+	require.ErrorIs(t, err, context.Canceled)
+
+	var reqErr *acp.RequestError
+
+	require.NotErrorAs(t, err, &reqErr, "a withdrawn request is not a typed refusal")
+
+	mapped := requestError(ctx, err)
+	require.Equal(t, -32800, mapped.Code)
+	require.Equal(t, "Request cancelled", mapped.Message)
+}
+
+// requireExpiredCloseRefusal pins the wire answer for a barrier wait that ran out
+// without a cancel. The request was well formed and nothing failed internally: it
+// is a retryable refusal that names itself, and its message carries the
+// barrier-wait error rather than anything the native process said.
+func requireExpiredCloseRefusal(t *testing.T, ctx context.Context, err error) {
 	t.Helper()
 
 	var reqErr *acp.RequestError
 
 	require.ErrorAs(t, err, &reqErr)
-	require.Equal(t, -32603, reqErr.Code)
+	require.Equal(t, -32600, reqErr.Code)
+	require.Equal(t, "Invalid request", reqErr.Message)
 
 	data, ok := reqErr.Data.(map[string]any)
 	require.True(t, ok, "the refusal names itself")
 	require.Equal(t, "claude_session_close_unsettled", data[jsonFieldError])
 	require.Contains(t, data[jsonFieldMessage], "await the in-flight Claude turn")
+	require.Equal(t, reqErr, requestError(ctx, err), "the dispatcher forwards it unchanged")
 }
 
 // TestCloseSessionKeepsAnUnsettledSessionAddressable proves removal follows the
@@ -455,7 +480,7 @@ func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
 	cancel()
 
 	_, err := agent.CloseSession(expired, acp.CloseSessionRequest{SessionId: sessionID})
-	requireUnsettledCloseError(t, err)
+	requireCancelledCloseRefusal(t, expired, err)
 	require.Zero(t, transport.CloseCalls(), "an unsettled close contains nothing")
 
 	held, lookupErr := agent.session(sessionID)
@@ -471,18 +496,40 @@ func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
 	require.Error(t, lookupErr, "a settled close removes the id")
 }
 
-// TestDeleteSessionKeepsTheRowUntilItsCloseSettles proves the tombstone follows
-// the same barrier: the store row is the only durable record of a turn that is
-// still running, so an unsettled close stops the delete before it.
-func TestDeleteSessionKeepsTheRowUntilItsCloseSettles(t *testing.T) {
+// cancelAfterDeleteStore withdraws the delete request the instant its tombstone is
+// durable. It reproduces the crash window the ordering exists for: everything
+// after the tombstone fails, and the test can then ask what a host still sees.
+type cancelAfterDeleteStore struct {
+	SessionStore
+
+	cancel context.CancelFunc
+}
+
+func (s *cancelAfterDeleteStore) Delete(ctx context.Context, key SessionKey) error {
+	err := s.SessionStore.Delete(ctx, key)
+	s.cancel()
+
+	return err
+}
+
+// TestDeleteSessionTombstonesBeforeItTearsAnythingDown proves delete writes its
+// durable tombstone first and hides the id with it. Everything after that is
+// teardown: when it fails the id is already deleted everywhere a host can look,
+// the error is reported rather than swallowed, and the instance stays behind the
+// tombstone so the next delete finishes what this one started.
+func TestDeleteSessionTombstonesBeforeItTearsAnythingDown(t *testing.T) {
 	ctx := context.Background()
 	sessionID := acp.SessionId("session-busy")
-	store := NewInMemorySessionStore()
 	key := SessionKey{SessionID: string(sessionID)}
-	require.NoError(t, store.Append(ctx, key, []SessionStoreEntry{
+	backing := NewInMemorySessionStore()
+	require.NoError(t, backing.Append(ctx, key, []SessionStoreEntry{
 		[]byte(`{"type":"user","message":{"content":"live"}}`),
 	}))
 
+	withdrawn, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	store := &cancelAfterDeleteStore{SessionStore: backing, cancel: cancel}
 	agent, session, transport := newBusySessionAgent(t, sessionID, WithSessionStore(store))
 
 	previousDelete := deleteNativeTranscript
@@ -495,32 +542,48 @@ func TestDeleteSessionKeepsTheRowUntilItsCloseSettles(t *testing.T) {
 		return nil
 	}
 
-	expired, cancel := context.WithCancel(ctx)
-	cancel()
+	_, err := agent.UnstableDeleteSession(withdrawn, DeleteSessionRequest(sessionID))
+	require.ErrorIs(t, err, errSessionCloseUnsettled, "a teardown that did not finish is reported")
+	require.Zero(t, transport.CloseCalls(), "the barrier admitted no teardown")
 
-	_, err := agent.UnstableDeleteSession(expired, DeleteSessionRequest(sessionID))
-	requireUnsettledCloseError(t, err)
-	require.Zero(t, transport.CloseCalls())
-	require.Zero(t, transcriptDeletes)
-
-	entries, err := store.Load(ctx, key)
+	// The tombstone landed before any of that, and the id is hidden everywhere a
+	// host can address it.
+	entries, err := backing.Load(ctx, key)
 	require.NoError(t, err)
-	require.Len(t, entries, 1, "an unsettled close writes no tombstone")
+	require.Empty(t, entries, "the tombstone is durable before teardown runs")
 
 	agent.mu.Lock()
 	_, tombstoned := agent.deleted[sessionID]
 	agent.mu.Unlock()
-	require.False(t, tombstoned)
+	require.True(t, tombstoned)
+
+	_, lookupErr := agent.session(sessionID)
+	requireUnknownSession(t, lookupErr)
+
+	listResp, err := agent.ListSessions(ctx, ListSessionsRequest())
+	require.NoError(t, err)
+	require.Empty(t, listResp.Sessions)
+
+	// The instance is still held, so the delete that follows can finish the
+	// teardown this one abandoned.
+	agent.mu.Lock()
+	require.Same(t, session, agent.sessions[sessionID])
+	agent.mu.Unlock()
 
 	<-session.turn
 
 	_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
 	require.NoError(t, err)
 	require.Equal(t, 1, transport.CloseCalls())
-	require.Equal(t, 1, transcriptDeletes)
-	entries, err = store.Load(ctx, key)
+	require.Equal(t, 2, transcriptDeletes)
+
+	agent.mu.Lock()
+	require.NotContains(t, agent.sessions, sessionID, "the settled teardown evicts the instance")
+	agent.mu.Unlock()
+
+	entries, err = backing.Load(ctx, key)
 	require.NoError(t, err)
-	require.Empty(t, entries, "the settled delete tombstoned the row")
+	require.Empty(t, entries, "no write behind the tombstone recreates the row")
 }
 
 // TestRemoveSessionEvictsOnlyASettledSession proves the internal cleanup path
@@ -558,7 +621,7 @@ func TestStoreStartedSessionRefusesAnInstallOverAnUnsettledSession(t *testing.T)
 	cancel()
 
 	err := agent.storeStartedSession(expired, replacement)
-	requireUnsettledCloseError(t, err)
+	requireCancelledCloseRefusal(t, expired, err)
 	require.Same(t, previous, agent.sessions[sessionID], "the replaced instance keeps its id")
 	require.Zero(t, previousTransport.CloseCalls(), "the replaced instance settled nothing")
 	require.Equal(t, 1, replacementTransport.CloseCalls(), "the refused replacement is contained")

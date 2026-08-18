@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 )
@@ -749,7 +750,11 @@ func sameProgress(existing, patch json.RawMessage) bool {
 	}
 
 	var was, now any
-	if json.Unmarshal(existing, &was) != nil || json.Unmarshal(patch, &now) != nil {
+	wasDecoder := json.NewDecoder(bytes.NewReader(existing))
+	wasDecoder.UseNumber()
+	nowDecoder := json.NewDecoder(bytes.NewReader(patch))
+	nowDecoder.UseNumber()
+	if wasDecoder.Decode(&was) != nil || nowDecoder.Decode(&now) != nil {
 		return false
 	}
 

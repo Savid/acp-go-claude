@@ -898,3 +898,36 @@ func TestTerminalActivityAdmitsAnIdempotentPatch(t *testing.T) {
 		})
 	}
 }
+
+func TestTerminalActivityProgressEqualityPreservesJSONIntegerPrecision(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		patch string
+		kind  ViolationKind
+	}{
+		{name: "same integer", patch: `"progress":{"count":9007199254740993},`},
+		{name: "adjacent integer", patch: `"progress":{"count":9007199254740992},`, kind: ViolationPostTerminalMutation},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			reducer := terminalActivityStream(t, `,"progress":{"count":9007199254740993}`)
+			params := notification(`{"version":1,"streamId":"strm","sequence":5,"event":` +
+				`{"type":"activity_update","activity":{"activityId":"a",` + tc.patch +
+				`"state":"completed"}}}`)
+
+			err := reducer.ReduceSessionUpdate(json.RawMessage(params))
+			if tc.kind == "" {
+				require.NoError(t, err)
+
+				return
+			}
+
+			var refusal *ViolationError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, tc.kind, refusal.Kind)
+		})
+	}
+}

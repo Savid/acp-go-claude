@@ -204,6 +204,10 @@ func (s *agentSession) emitOptionalUpdates(ctx context.Context, updates []acp.Se
 	return err
 }
 
+// emitAvailableCommandsUpdate advertises the harness's command catalog. A forced
+// update always states one, an empty catalog included: silence and "no commands"
+// are different facts, and a host that never receives the empty snapshot cannot
+// tell a harness with no commands from one whose catalog has not arrived yet.
 func (s *agentSession) emitAvailableCommandsUpdate(ctx context.Context, force bool) error {
 	updates := mapper.AvailableCommandsUpdate(s.commands())
 	current := availableCommandsFromUpdates(updates)
@@ -221,7 +225,7 @@ func (s *agentSession) emitAvailableCommandsUpdate(ctx context.Context, force bo
 		}
 
 		emit = updates
-	case len(previous) > 0:
+	case len(previous) > 0 || force:
 		emit = emptyAvailableCommandsUpdate()
 	default:
 		return nil

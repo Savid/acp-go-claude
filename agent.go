@@ -418,6 +418,14 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 		return nil, err
 	}
 
+	// The reserved lifecycle key is refused here, at the dispatch boundary and
+	// before any leg's own closed-member validation, so every extension surface
+	// names the exact family path rather than the `_meta` object its own decoder
+	// happens to reject first. No side effect of any leg runs behind it.
+	if err := rejectLifecycleExtensionMeta(params); err != nil {
+		return nil, err
+	}
+
 	switch method {
 	case ForkSessionMethod:
 		return a.handleForkSession(ctx, params)

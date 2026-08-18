@@ -13,7 +13,14 @@ import (
 // SetSessionMode exists only because github.com/coder/acp-go-sdk's generated
 // Agent interface still requires it. Remove this when the upstream SDK drops
 // session/set_mode; the local ACP dispatcher intentionally does not route it.
-func (a *Agent) SetSessionMode(context.Context, acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+// The reserved lifecycle key is still refused by its own path first: a family
+// literal is never foreign, so it is answered as the invalid parameter it is
+// rather than swallowed by the method's absence.
+func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.SetSessionModeResponse{}, err
+	}
+
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 

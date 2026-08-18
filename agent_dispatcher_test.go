@@ -417,7 +417,7 @@ func TestLifecycleCommandUpdatePostResponseHook(t *testing.T) {
 
 			hooks := &postResponseHooks{log: agent.log}
 			conn := &localAgentConnection{agent: agent, hooks: hooks}
-			conn.enqueueLifecycleCommandHook(ctx, tc.method, tc.params, tc.result)
+			conn.enqueueSessionEstablishedHook(ctx, tc.method, tc.params, tc.result)
 
 			resultJSON, err := json.Marshal(tc.result)
 			require.NoError(t, err)
@@ -458,13 +458,13 @@ func TestLifecycleCommandPostResponseHookUsesResponseIDForIdenticalResults(t *te
 
 	hooks := &postResponseHooks{log: agent.log}
 	conn := &localAgentConnection{agent: agent, hooks: hooks}
-	conn.enqueueLifecycleCommandHook(
+	conn.enqueueSessionEstablishedHook(
 		ctx,
 		acp.AgentMethodSessionResume,
 		postResponseHookParams(map[string]string{"sessionId": string(sessionOne.id)}, "1"),
 		acp.ResumeSessionResponse{},
 	)
-	conn.enqueueLifecycleCommandHook(
+	conn.enqueueSessionEstablishedHook(
 		ctx,
 		acp.AgentMethodSessionResume,
 		postResponseHookParams(map[string]string{"sessionId": string(sessionTwo.id)}, "2"),
@@ -495,17 +495,17 @@ func TestLifecycleCommandPostResponseHookBranches(t *testing.T) {
 	agent.setConnection(client)
 
 	connWithoutHooks := &localAgentConnection{agent: agent}
-	connWithoutHooks.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionNew, nil, acp.NewSessionResponse{SessionId: "session-1"})
+	connWithoutHooks.enqueueSessionEstablishedHook(ctx, acp.AgentMethodSessionNew, nil, acp.NewSessionResponse{SessionId: "session-1"})
 
 	hooks := &postResponseHooks{log: agent.log}
 	conn := &localAgentConnection{agent: agent, hooks: hooks}
-	conn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionList, nil, acp.ListSessionsResponse{})
-	conn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionLoad, json.RawMessage(`{bad`), acp.LoadSessionResponse{})
-	conn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionNew, nil, acp.NewSessionResponse{SessionId: "session-1"})
+	conn.enqueueSessionEstablishedHook(ctx, acp.AgentMethodSessionList, nil, acp.ListSessionsResponse{})
+	conn.enqueueSessionEstablishedHook(ctx, acp.AgentMethodSessionLoad, json.RawMessage(`{bad`), acp.LoadSessionResponse{})
+	conn.enqueueSessionEstablishedHook(ctx, acp.AgentMethodSessionNew, nil, acp.NewSessionResponse{SessionId: "session-1"})
 	require.Empty(t, postResponseHookRequestID(json.RawMessage(`{bad`)))
 
 	result := acp.NewSessionResponse{SessionId: "missing"}
-	conn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionNew, postResponseHookParams(nil, "1"), result)
+	conn.enqueueSessionEstablishedHook(ctx, acp.AgentMethodSessionNew, postResponseHookParams(nil, "1"), result)
 	resultJSON, err := json.Marshal(result)
 	require.NoError(t, err)
 	hooks.runAfterResponseWrite([]byte(`{"jsonrpc":"2.0","id":1,"result":` + string(resultJSON) + `}`))
@@ -527,7 +527,7 @@ func TestLifecycleCommandPostResponseHookBranches(t *testing.T) {
 	failHooks := &postResponseHooks{log: failAgent.log}
 	failConn := &localAgentConnection{agent: failAgent, hooks: failHooks}
 	failResult := acp.NewSessionResponse{SessionId: failSession.id}
-	failConn.enqueueLifecycleCommandHook(ctx, acp.AgentMethodSessionNew, postResponseHookParams(nil, "1"), failResult)
+	failConn.enqueueSessionEstablishedHook(ctx, acp.AgentMethodSessionNew, postResponseHookParams(nil, "1"), failResult)
 	failResultJSON, err := json.Marshal(failResult)
 	require.NoError(t, err)
 	failHooks.runAfterResponseWrite([]byte(`{"jsonrpc":"2.0","id":1,"result":` + string(failResultJSON) + `}`))
@@ -542,9 +542,9 @@ func TestLifecycleCommandPostResponseHookBranches(t *testing.T) {
 	hooks.enqueue("1", func() {})
 	hooks.runAfterResponseWrite([]byte(`{"jsonrpc":"2.0","id":1,"result":{"other":true}}`))
 
-	_, ok := lifecycleCommandSessionID("unknown", nil, nil)
+	_, ok := establishedSessionID("unknown", nil, nil)
 	require.False(t, ok)
-	_, ok = lifecycleCommandSessionID(acp.AgentMethodSessionResume, json.RawMessage(`{bad`), acp.ResumeSessionResponse{})
+	_, ok = establishedSessionID(acp.AgentMethodSessionResume, json.RawMessage(`{bad`), acp.ResumeSessionResponse{})
 	require.False(t, ok)
 }
 

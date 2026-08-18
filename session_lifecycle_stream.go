@@ -600,3 +600,94 @@ func lifecycleViolationError(message string) error {
 		jsonFieldMessage: message,
 	})
 }
+
+// beginLifecycleAction announces one outbound permission or elicitation on the
+// ordered stream and returns the correlation value to stamp on the request beside
+// whatever reserved envelopes that surface already carries, plus the resolution
+// that terminalizes the action exactly once.
+//
+// The announcement precedes the request, so the host never sees an action id the
+// adapter cannot yet resolve, and the owner is the turn whose route admitted this
+// callback rather than whichever prompt happens to be running.
+func (s *agentSession) beginLifecycleAction(
+	ctx context.Context,
+	kind lifecycle.ActionKind,
+) (map[string]any, func(context.Context, lifecycle.ActionState) error, error) {
+	stream := s.lifecycleStream()
+
+	update, err := stream.announceAction(ctx, turnNonceFromContext(ctx), kind)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	resolve := func(resolveCtx context.Context, state lifecycle.ActionState) error {
+		return stream.resolveAction(resolveCtx, update, state)
+	}
+
+	return stream.correlation(update), resolve, nil
+}
+
+// withLifecycleMeta merges the action correlation into a request's own `_meta`,
+// leaving the vendor annotations and the reserved route object beside it.
+func withLifecycleMeta(meta map[string]any, lifecycleMeta map[string]any) map[string]any {
+	if len(lifecycleMeta) == 0 {
+		return meta
+	}
+
+	merged := cloneAnyMap(meta)
+	if merged == nil {
+		merged = map[string]any{}
+	}
+
+	for key, value := range lifecycleMeta {
+		merged[key] = value
+	}
+
+	return merged
+}
+
+// permissionActionState reports the terminal state one permission answer records.
+// The outcome is read from the structural option union only: `_meta` on the
+// response is read by nobody, and a host cannot change an outcome by annotating
+// it.
+func permissionActionState(
+	resp acp.RequestPermissionResponse,
+	err error,
+	allows func(acp.PermissionOptionId) bool,
+) lifecycle.ActionState {
+	switch {
+	case err != nil && permissionRequestCancelled(err):
+		return lifecycle.ActionCancelled
+	case err != nil:
+		return lifecycle.ActionFailed
+	case resp.Outcome.Selected == nil:
+		return lifecycle.ActionCancelled
+	case allows(resp.Outcome.Selected.OptionId):
+		return lifecycle.ActionAccepted
+	default:
+		return lifecycle.ActionDeclined
+	}
+}
+
+// permissionAllowsTool reports whether a selected option is one of the two that
+// allow the tool call.
+func permissionAllowsTool(option acp.PermissionOptionId) bool {
+	return option == permissionAllowOnce || option == permissionAllowAlways
+}
+
+// elicitationActionState reports the terminal state one elicitation answer
+// records, read from the structural action union alone.
+func elicitationActionState(resp acp.UnstableCreateElicitationResponse, err error) lifecycle.ActionState {
+	switch {
+	case err != nil && permissionRequestCancelled(err):
+		return lifecycle.ActionCancelled
+	case err != nil:
+		return lifecycle.ActionFailed
+	case resp.Accept != nil:
+		return lifecycle.ActionAccepted
+	case resp.Decline != nil:
+		return lifecycle.ActionDeclined
+	default:
+		return lifecycle.ActionCancelled
+	}
+}

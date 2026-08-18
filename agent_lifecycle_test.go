@@ -211,7 +211,7 @@ func TestLifecycleKeyRejectedOnNonCarryingSurfaces(t *testing.T) {
 		t.Parallel()
 
 		agent := NewAgent()
-		_, err := agent.handleForkSession(ctx, []byte(
+		_, err := agent.HandleExtensionMethod(ctx, ForkSessionMethod, []byte(
 			`{"sessionId":"s","cwd":"`+t.TempDir()+`","_meta":{"acp-go.dev/lifecycle":{"versions":[1]}}}`,
 		))
 		requireRequestError(t, err, -32602, lifecycle.MetaPath)

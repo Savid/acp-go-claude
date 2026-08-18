@@ -9,6 +9,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/savid/acp-go-claude/internal/observer"
 )
@@ -146,7 +147,23 @@ func (s *agentSession) handlePermission(ctx context.Context, request claude.Perm
 	status := acp.ToolCallStatusPending
 	kind := info.Kind
 
+	actionMeta, resolveAction, err := s.beginLifecycleAction(ctx, lifecycle.ActionPermission)
+	if err != nil {
+		return claude.PermissionDecision{}, err
+	}
+
+	actionState := lifecycle.ActionFailed
+
+	defer func() {
+		// The state is read when the deferred resolution runs, not when it is
+		// registered: an action resolves once, with the answer it actually got.
+		if resolveErr := resolveAction(ctx, actionState); resolveErr != nil && err == nil {
+			decision, err = claude.PermissionDecision{}, resolveErr
+		}
+	}()
+
 	resp, err := conn.RequestPermission(permissionCtx, acp.RequestPermissionRequest{
+		Meta:      actionMeta,
 		SessionId: s.id,
 		ToolCall: acp.ToolCallUpdate{
 			ToolCallId: acp.ToolCallId(toolCallID),
@@ -165,6 +182,8 @@ func (s *agentSession) handlePermission(ctx context.Context, request claude.Perm
 			{OptionId: permissionRejectAlways, Name: "Reject always", Kind: acp.PermissionOptionKindRejectAlways},
 		},
 	})
+	actionState = permissionActionState(resp, err, permissionAllowsTool)
+
 	if err != nil {
 		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
 			return claude.PermissionDecision{
@@ -261,7 +280,7 @@ type permissionRequestCancel struct {
 func (s *agentSession) handleExitPlanMode(
 	ctx context.Context,
 	request claude.PermissionRequest,
-) (claude.PermissionDecision, error) {
+) (decision claude.PermissionDecision, planErr error) {
 	conn := s.agent.connection()
 	if conn == nil {
 		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: "ACP client is unavailable"}, nil
@@ -302,7 +321,21 @@ func (s *agentSession) handleExitPlanMode(
 		return claude.PermissionDecision{}, err
 	}
 
+	actionMeta, resolveAction, err := s.beginLifecycleAction(ctx, lifecycle.ActionPermission)
+	if err != nil {
+		return claude.PermissionDecision{}, err
+	}
+
+	actionState := lifecycle.ActionFailed
+
+	defer func() {
+		if resolveErr := resolveAction(ctx, actionState); resolveErr != nil && planErr == nil {
+			decision, planErr = claude.PermissionDecision{}, resolveErr
+		}
+	}()
+
 	resp, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{
+		Meta:      actionMeta,
 		SessionId: s.id,
 		ToolCall: acp.ToolCallUpdate{
 			ToolCallId: acp.ToolCallId(toolCallID),
@@ -316,6 +349,10 @@ func (s *agentSession) handleExitPlanMode(
 		},
 		Options: options,
 	})
+	actionState = permissionActionState(resp, err, func(option acp.PermissionOptionId) bool {
+		return exitPlanModeSelectionAllows(acp.SessionModeId(option), options)
+	})
+
 	if err != nil {
 		return claude.PermissionDecision{}, err
 	}

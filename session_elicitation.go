@@ -8,6 +8,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/savid/acp-go-claude/internal/observer"
 )
@@ -179,19 +180,34 @@ func (s *agentSession) handleAskUserQuestion(
 	elicitationCtx, finishElicitation := s.registerElicitation(ctx)
 	defer finishElicitation()
 
+	actionMeta, resolveAction, err := s.beginLifecycleAction(ctx, lifecycle.ActionElicitation)
+	if err != nil {
+		return claude.PermissionDecision{}, err
+	}
+
+	actionState := lifecycle.ActionFailed
+
+	defer func() {
+		if resolveErr := resolveAction(ctx, actionState); resolveErr != nil && err == nil {
+			decision, err = claude.PermissionDecision{}, resolveErr
+		}
+	}()
+
 	resp, err := conn.CreateElicitation(elicitationCtx, acp.UnstableCreateElicitationRequest{
 		Form: &acp.UnstableCreateElicitationForm{
 			Message:         askUserQuestionMessage(questions),
 			Mode:            claude.ElicitationModeForm,
 			RequestedSchema: askUserQuestionSchema(questions),
-			Meta: map[string]any{
+			Meta: withLifecycleMeta(map[string]any{
 				claudeMetaKey: map[string]any{
 					"toolName":  askUserQuestionTool,
 					acpFieldRaw: request.Raw,
 				},
-			},
+			}, actionMeta),
 		},
 	}, scope)
+	actionState = elicitationActionState(resp, err)
+
 	if err != nil {
 		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
 			return claude.PermissionDecision{
@@ -489,7 +505,7 @@ func (s *agentSession) createFormElicitation(
 	ctx context.Context,
 	conn agentClient,
 	request claude.ElicitationRequest,
-) (claude.ElicitationResponse, error) {
+) (response claude.ElicitationResponse, formErr error) {
 	// The schema is inspected before the pending tool call publishes the native
 	// input and before the form is built, so a credential-soliciting form is
 	// declined without ever reaching the client.
@@ -506,14 +522,29 @@ func (s *agentSession) createFormElicitation(
 	elicitationCtx, finishElicitation := s.registerElicitation(ctx)
 	defer finishElicitation()
 
+	actionMeta, resolveAction, err := s.beginLifecycleAction(ctx, lifecycle.ActionElicitation)
+	if err != nil {
+		return claude.ElicitationResponse{}, err
+	}
+
+	actionState := lifecycle.ActionFailed
+
+	defer func() {
+		if resolveErr := resolveAction(ctx, actionState); resolveErr != nil && formErr == nil {
+			response, formErr = claude.ElicitationResponse{}, resolveErr
+		}
+	}()
+
 	resp, err := conn.CreateElicitation(elicitationCtx, acp.UnstableCreateElicitationRequest{
 		Form: &acp.UnstableCreateElicitationForm{
 			Message:         request.Message,
 			Mode:            claude.ElicitationModeForm,
 			RequestedSchema: elicitationSchema(request.RequestedSchema),
-			Meta:            s.elicitationMeta(request),
+			Meta:            withLifecycleMeta(s.elicitationMeta(request), actionMeta),
 		},
 	}, s.elicitationScope(request))
+	actionState = elicitationActionState(resp, err)
+
 	if err != nil {
 		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
 			return claude.ElicitationResponse{Action: claude.ElicitationActionCancel}, nil
@@ -529,7 +560,7 @@ func (s *agentSession) createURLElicitation(
 	ctx context.Context,
 	conn agentClient,
 	request claude.ElicitationRequest,
-) (claude.ElicitationResponse, error) {
+) (response claude.ElicitationResponse, urlErr error) {
 	elicitationID := request.ElicitationID
 	if elicitationID == "" {
 		id, err := newUUID()
@@ -549,15 +580,30 @@ func (s *agentSession) createURLElicitation(
 	elicitationCtx, finishElicitation := s.registerElicitation(ctx)
 	defer finishElicitation()
 
+	actionMeta, resolveAction, err := s.beginLifecycleAction(ctx, lifecycle.ActionElicitation)
+	if err != nil {
+		return claude.ElicitationResponse{}, err
+	}
+
+	actionState := lifecycle.ActionFailed
+
+	defer func() {
+		if resolveErr := resolveAction(ctx, actionState); resolveErr != nil && urlErr == nil {
+			response, urlErr = claude.ElicitationResponse{}, resolveErr
+		}
+	}()
+
 	resp, err := conn.CreateElicitation(elicitationCtx, acp.UnstableCreateElicitationRequest{
 		Url: &acp.UnstableCreateElicitationUrl{
 			ElicitationId: acp.UnstableElicitationId(elicitationID),
 			Message:       request.Message,
 			Mode:          claude.ElicitationModeURL,
 			Url:           request.URL,
-			Meta:          s.elicitationMeta(request),
+			Meta:          withLifecycleMeta(s.elicitationMeta(request), actionMeta),
 		},
 	}, s.elicitationScope(request))
+	actionState = elicitationActionState(resp, err)
+
 	if err != nil {
 		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
 			return claude.ElicitationResponse{Action: claude.ElicitationActionCancel}, nil

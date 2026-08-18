@@ -109,7 +109,7 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 
 		reqErr := requestError(ctx, err)
 		if reqErr == nil {
-			c.enqueueLifecycleCommandHook(ctx, method, params, result)
+			c.enqueueSessionEstablishedHook(ctx, method, params, result)
 		}
 
 		return result, reqErr
@@ -126,14 +126,18 @@ func (c *localAgentConnection) handle(ctx context.Context, method string, params
 	}
 
 	if reqErr == nil {
-		c.enqueueLifecycleCommandHook(ctx, method, params, result)
+		c.enqueueSessionEstablishedHook(ctx, method, params, result)
 	}
 
 	return result, reqErr
 }
 
-func (c *localAgentConnection) enqueueLifecycleCommandHook(ctx context.Context, method string, params json.RawMessage, result any) {
-	sessionID, ok := lifecycleCommandSessionID(method, params, result)
+// enqueueSessionEstablishedHook runs the work a newly established session owes
+// its host once the establishing response has been written to the transport: the
+// lifecycle incarnation's opening snapshot, which must be that session's first
+// lifecycle-bearing notification, and then its command catalog.
+func (c *localAgentConnection) enqueueSessionEstablishedHook(ctx context.Context, method string, params json.RawMessage, result any) {
+	sessionID, ok := establishedSessionID(method, params, result)
 	if !ok || c.hooks == nil {
 		return
 	}
@@ -148,26 +152,36 @@ func (c *localAgentConnection) enqueueLifecycleCommandHook(ctx context.Context, 
 
 		session, err := c.agent.session(sessionID)
 		if err != nil {
-			c.agent.log.ErrorContext(hookCtx, "post-response command update session lookup failed",
-				slog.String(jsonFieldMethod, method),
-				slog.String(acpFieldSessionID, string(sessionID)),
-				slog.String(jsonFieldError, err.Error()),
-			)
+			c.logSessionEstablishedFailure(hookCtx, "session lookup", method, sessionID, err)
 
 			return
 		}
 
+		if err := session.serveNativePump(hookCtx, session.currentClient()); err != nil {
+			c.logSessionEstablishedFailure(hookCtx, "lifecycle stream open", method, sessionID, err)
+		}
+
 		if err := session.emitAvailableCommandsUpdate(hookCtx, true); err != nil {
-			c.agent.log.ErrorContext(hookCtx, "post-response command update failed",
-				slog.String(jsonFieldMethod, method),
-				slog.String(acpFieldSessionID, string(sessionID)),
-				slog.String(jsonFieldError, err.Error()),
-			)
+			c.logSessionEstablishedFailure(hookCtx, "command update", method, sessionID, err)
 		}
 	})
 }
 
-func lifecycleCommandSessionID(method string, params json.RawMessage, result any) (acp.SessionId, bool) {
+func (c *localAgentConnection) logSessionEstablishedFailure(
+	ctx context.Context,
+	stage string,
+	method string,
+	sessionID acp.SessionId,
+	err error,
+) {
+	c.agent.log.ErrorContext(ctx, "post-response "+stage+" failed",
+		slog.String(jsonFieldMethod, method),
+		slog.String(acpFieldSessionID, string(sessionID)),
+		slog.String(jsonFieldError, err.Error()),
+	)
+}
+
+func establishedSessionID(method string, params json.RawMessage, result any) (acp.SessionId, bool) {
 	switch method {
 	case acp.AgentMethodSessionNew:
 		resp, ok := result.(acp.NewSessionResponse)

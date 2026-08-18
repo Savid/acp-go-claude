@@ -208,10 +208,6 @@ func (a *Agent) handleForkSession(
 		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.UnstableForkSessionResponse{}, err
-	}
-
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err

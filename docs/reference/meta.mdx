@@ -26,10 +26,14 @@ Initialize also advertises reserved envelopes separately from the Claude
 namespace:
 
 The fourth reserved envelope, `acp-go.dev/lifecycle`, is negotiated from an
-`initialize` offer containing `versions`. When version 1 intersects, the answer
-appears in the response's top-level `_meta` and reports the active containment
-proof classes, `updatesOutsidePrompt: true`, and an empty `activityKinds` set.
-No offer or no intersection omits the answer. Whole-tree quiescence is available
+`initialize` offer containing `versions` rather than advertised
+unconditionally, and its placement is the exact inverse of the envelopes below.
+When version 1 intersects, the negotiated `acp-go.dev/lifecycle` answer is
+placed on `InitializeResponse._meta` — the response's own top-level `_meta` —
+and never on `agentCapabilities._meta`, where the reserved envelopes below ride,
+nor under `_meta.claude`. The answer reports the active containment proof
+classes, `updatesOutsidePrompt: true`, and an empty `activityKinds` set. No
+offer or no intersection omits the answer. Whole-tree quiescence is available
 only with authoritative Linux process isolation; other configurations advertise
 no quiescence proof class.
 

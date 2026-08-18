@@ -443,16 +443,19 @@ func (s *agentSession) Cancel(ctx context.Context) (err error) {
 
 // cancelRouted validates the active turn and keeps its native interrupt fenced
 // from turn completion and admission of the next turn. The lifecycle key never
-// rides session/cancel: it fails the cancel closed before the nonce check and
-// before any native interrupt, and the cancel is never applied. Being a
-// notification, the refusal is wire-silent.
+// rides session/cancel: it fails the cancel closed before any native interrupt,
+// and the cancel is never applied. Being a notification, the refusal is
+// wire-silent.
+//
+// The route is validated first. This surface carries both reserved objects, and
+// the route is the authenticator: it decides whether the caller is addressing
+// the turn that is actually running, which precedes the placement rule about
+// where a family literal may ride. A cancel carrying both an invalid route and
+// the lifecycle key therefore reports the route, and never one of two verdicts
+// chosen by whichever check an implementation happened to run first.
 func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) error {
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
-
-	if err := rejectLifecycleMeta(meta); err != nil {
-		return err
-	}
 
 	s.mu.Lock()
 	activeNonce := s.turnNonce
@@ -468,6 +471,10 @@ func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) er
 		if route.turnNonce != activeNonce {
 			return unsupportedField(routeMetaKey)
 		}
+	}
+
+	if err := rejectLifecycleMeta(meta); err != nil {
+		return err
 	}
 
 	return s.cancelNative(ctx)

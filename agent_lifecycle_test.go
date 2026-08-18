@@ -255,44 +255,76 @@ func TestLifecycleKeyRejectedOnNonCarryingSurfaces(t *testing.T) {
 }
 
 // TestLifecycleKeyOnCancelFailsClosedWireSilently pins that a cancel carrying
-// the family literal is never applied: the refusal lands before the nonce gate
-// and before any native interrupt, so the active turn keeps running.
+// the family literal is never applied: the refusal lands before any native
+// interrupt, so the active turn keeps running.
+//
+// It also pins which of the two reserved objects decides the verdict. The route
+// is the authenticator and is judged first, so a cancel that reaches the
+// lifecycle refusal is one whose route already named the running turn, and a
+// cancel carrying an invalid or absent route beside the same key reports the
+// route instead. There is one verdict per frame, never a choice between two.
 func TestLifecycleKeyOnCancelFailsClosedWireSilently(t *testing.T) {
 	t.Parallel()
 
-	transport := newFakeClaudeTransport()
-	agent := NewAgent()
-	installFakeClaudeClient(agent, transport)
-	agent.setConnection(newRecordingAgentClient())
+	for _, tc := range []struct {
+		name  string
+		meta  map[string]any
+		field string
+	}{
+		{
+			name:  "the current route reaches the reserved-key refusal",
+			meta:  withLifecycleMeta(turnRouteMeta("nonce-1"), lifecycleKeyMeta()),
+			field: lifecycle.MetaPath,
+		},
+		{
+			name:  "a stale route outranks the reserved key",
+			meta:  withLifecycleMeta(turnRouteMeta("nonce-0"), lifecycleKeyMeta()),
+			field: routeMetaKey,
+		},
+		{
+			name:  "an absent route outranks the reserved key",
+			meta:  lifecycleKeyMeta(),
+			field: routeMetaKey,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	session := &agentSession{
-		agent:  agent,
-		id:     "session-1",
-		client: claude.NewClient(nil, claude.Options{}, transport),
-		turn:   make(chan struct{}, 1),
+			transport := newFakeClaudeTransport()
+			agent := NewAgent()
+			installFakeClaudeClient(agent, transport)
+			agent.setConnection(newRecordingAgentClient())
+
+			session := &agentSession{
+				agent:  agent,
+				id:     "session-1",
+				client: claude.NewClient(nil, claude.Options{}, transport),
+				turn:   make(chan struct{}, 1),
+			}
+			require.NoError(t, session.client.Start(context.Background()))
+			agent.sessions[session.id] = session
+
+			turnCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			session.mu.Lock()
+			session.cancel = cancel
+			session.turnNonce = "nonce-1"
+			session.mu.Unlock()
+
+			err := agent.Cancel(context.Background(), acp.CancelNotification{
+				SessionId: session.id,
+				Meta:      tc.meta,
+			})
+			requireRequestError(t, err, -32602, tc.field)
+			require.NoError(t, turnCtx.Err(), "a refused cancel never reaches the turn")
+			require.Zero(t, transport.CloseCalls(), "a refused cancel never interrupts the native process")
+
+			session.mu.Lock()
+			session.cancel = nil
+			session.mu.Unlock()
+		})
 	}
-	require.NoError(t, session.client.Start(context.Background()))
-	agent.sessions[session.id] = session
-
-	turnCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	session.mu.Lock()
-	session.cancel = cancel
-	session.turnNonce = "nonce-1"
-	session.mu.Unlock()
-
-	err := agent.Cancel(context.Background(), acp.CancelNotification{
-		SessionId: session.id,
-		Meta:      lifecycleKeyMeta(),
-	})
-	requireRequestError(t, err, -32602, lifecycle.MetaPath)
-	require.NoError(t, turnCtx.Err(), "a refused cancel never reaches the turn")
-	require.Zero(t, transport.CloseCalls(), "a refused cancel never interrupts the native process")
-
-	session.mu.Lock()
-	session.cancel = nil
-	session.mu.Unlock()
 }
 
 // requireRequestError asserts a JSON-RPC error with the code and the offending

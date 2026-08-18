@@ -179,6 +179,13 @@ func (p *sessionStream) incarnate(ctx context.Context) error {
 // callback racing the frame it caused can never announce an action against a turn
 // this stream has not opened. A native dispatcher that refused the frame creates
 // neither submission nor turn.
+//
+// The stream is asked whether it can still speak before the frame is written. A
+// stream that already lost an event, and a session whose close containment
+// completed, can announce no acceptance at all, and a frame written under either
+// would be native work no lifecycle event can ever describe. The caller contains
+// the frame it did manage to write when a later emission fails; nothing this
+// adapter can foresee is left to that path.
 func (p *sessionStream) dispatch(
 	ctx context.Context,
 	submission lifecycle.Submission,
@@ -192,11 +199,11 @@ func (p *sessionStream) dispatch(
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if err := send(); err != nil {
+	if err := p.emittable(); err != nil {
 		return "", err
 	}
 
-	if err := p.emittable(); err != nil {
+	if err := send(); err != nil {
 		return "", err
 	}
 

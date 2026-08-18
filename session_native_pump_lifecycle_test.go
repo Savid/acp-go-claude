@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -109,4 +110,98 @@ func TestServeNativePumpPropagatesIncarnationEndFailure(t *testing.T) {
 	pump.mu.Unlock()
 
 	session.stopNativePump()
+}
+
+// TestServeNativePumpContainsAnIncarnationItCannotAnnounce proves the opening
+// snapshot precedes the reader: a snapshot the host never received leaves no
+// reader running, no pump state published, and no live process the host was never
+// told about.
+func TestServeNativePumpContainsAnIncarnationItCannotAnnounce(t *testing.T) {
+	ctx := t.Context()
+	session, conn, _ := newLifecycleStreamTestSession(t)
+
+	transport := newFakeClaudeTransport()
+	client := claude.NewClient(nil, claude.Options{}, transport)
+	require.NoError(t, client.Start(ctx))
+	session.client = client
+
+	conn.sessionUpdateErr = errors.New("snapshot delivery")
+	require.ErrorContains(t, session.serveNativePump(ctx, client), "snapshot delivery")
+	require.Equal(t, 1, transport.CloseCalls(), "the process the snapshot could not name is contained")
+
+	pump := session.nativePumpHandle()
+	pump.mu.Lock()
+	defer pump.mu.Unlock()
+	require.Nil(t, pump.client)
+	require.Nil(t, pump.stop)
+	require.Nil(t, pump.done, "no reader was ever started")
+}
+
+// TestServeNativePumpAdmitsOneIncarnationUnderConcurrentCallers proves the whole
+// transition is one step. Session establishment and a prompt both point the pump
+// at the same process, and exactly one incarnation is announced and one reader
+// serves it — never two identities for one process lifetime.
+func TestServeNativePumpAdmitsOneIncarnationUnderConcurrentCallers(t *testing.T) {
+	ctx := t.Context()
+	session, conn, _ := newLifecycleStreamTestSession(t)
+	client := claude.NewClient(nil, claude.Options{}, newFakeClaudeTransport())
+
+	const callers = 8
+
+	var (
+		serves  sync.WaitGroup
+		results = make([]error, callers)
+	)
+
+	serves.Add(callers)
+
+	for index := range callers {
+		go func() {
+			defer serves.Done()
+
+			results[index] = session.serveNativePump(ctx, client)
+		}()
+	}
+
+	serves.Wait()
+
+	for _, err := range results {
+		require.NoError(t, err)
+	}
+
+	snapshots := 0
+
+	for _, eventType := range lifecycleEventTypes(t, conn) {
+		if eventType == string(lifecycle.EventSnapshot) {
+			snapshots++
+		}
+	}
+
+	require.Equal(t, 1, snapshots, "one process lifetime is one incarnation")
+
+	pump := session.nativePumpHandle()
+	pump.mu.Lock()
+	require.Same(t, client, pump.client)
+	pump.mu.Unlock()
+
+	session.stopNativePump()
+}
+
+// TestServeNativePumpRefusesAClosingSession proves close is terminal for the pump
+// too: the post-response establishment hook can land while a close is tearing the
+// session down, and it starts no reader and opens no incarnation behind it.
+func TestServeNativePumpRefusesAClosingSession(t *testing.T) {
+	ctx := t.Context()
+	session, conn, _ := newLifecycleStreamTestSession(t)
+	session.beginClose()
+
+	err := session.serveNativePump(ctx, claude.NewClient(nil, claude.Options{}, newFakeClaudeTransport()))
+	require.Error(t, err)
+
+	pump := session.nativePumpHandle()
+	pump.mu.Lock()
+	require.Nil(t, pump.client)
+	pump.mu.Unlock()
+
+	require.Empty(t, lifecycleEventTypes(t, conn), "a closing session announces no incarnation")
 }

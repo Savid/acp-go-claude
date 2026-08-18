@@ -2,6 +2,7 @@ package claudeacp
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -94,27 +95,48 @@ func newNativePump(session *agentSession) *nativePump {
 
 // serve points the pump at the current native incarnation, ending the previous
 // one first. It is idempotent for a client already being served, so a prompt can
-// call it without knowing whether session start or a relaunch got there first.
+// call it without knowing whether session start or a relaunch got there first,
+// and the whole step is serialized: the idempotence check, the retirement of the
+// previous identity, the new one, and the reader that serves it are one
+// transition, not four a second caller can interleave with.
 func (s *agentSession) serveNativePump(ctx context.Context, client *claude.Client) error {
 	if client == nil {
 		return nil
 	}
 
+	s.pumpServeMu.Lock()
+	defer s.pumpServeMu.Unlock()
+
 	pump := s.nativePumpHandle()
 
 	pump.mu.Lock()
-	if pump.client == client {
-		pump.mu.Unlock()
+	served := pump.client == client
+	pump.mu.Unlock()
 
+	if served {
 		return nil
 	}
-	pump.mu.Unlock()
+
+	// A session that has begun closing opens no further incarnation. The close is
+	// already retiring the reader and fencing the stream, so a reader started
+	// behind it would serve a process that is being contained.
+	if s.isClosing() {
+		return closedSessionError()
+	}
 
 	if err := s.endNativeIncarnation(ctx); err != nil {
 		return err
 	}
 
-	stream := s.lifecycleStream()
+	// The identity names this process lifetime and the opening snapshot is what
+	// tells the host that lifetime exists, so both land before the reader that
+	// serves it is published: a process drained under no announced incarnation is
+	// native work the host was never told about. A snapshot that does not reach the
+	// host therefore contains the process it could not name, and leaves the pump
+	// serving nothing.
+	if err := s.lifecycleStream().incarnate(ctx); err != nil {
+		return errors.Join(err, s.closeNativeClient(client))
+	}
 
 	receiveCtx, stop := context.WithCancel(context.WithoutCancel(ctx))
 
@@ -129,9 +151,7 @@ func (s *agentSession) serveNativePump(ctx context.Context, client *claude.Clien
 
 	go pump.receive(receiveCtx, client, done, lost)
 
-	// The identity names this process lifetime, so it is minted with the reader
-	// that serves it and retired with the process it names.
-	return stream.incarnate(ctx)
+	return nil
 }
 
 // endNativeIncarnation retires the current incarnation: the reader stops, the

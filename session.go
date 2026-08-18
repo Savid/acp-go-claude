@@ -45,6 +45,7 @@ const (
 	jsonFieldValue                = "value"
 	jsonFieldParams               = "params"
 	jsonFieldPrompt               = "prompt"
+	jsonFieldReason               = "reason"
 	jsonFieldURI                  = "uri"
 	jsonFieldURL                  = "url"
 	jsonFieldSubtype              = "subtype"
@@ -211,8 +212,18 @@ type agentSession struct {
 	handledHooks     map[string]struct{}
 	handledHookOrder []string
 	turnAcquiredHook func(int)
-	closeOnce        sync.Once
-	closeErr         error
+	// closeMu serializes close and guards the memoized terminal result.
+	// closeSettled is set only for a close its settlement barrier admitted, so an
+	// abandoned barrier leaves the session closable rather than latching a
+	// terminal result no teardown stands behind.
+	closeMu      sync.Mutex
+	closeSettled bool
+	closeErr     error
+	// pumpServeMu serializes pointing the session's pump at a native incarnation.
+	// Retiring the previous identity, minting the new one and publishing the
+	// reader that serves it are one step: two callers interleaving them would open
+	// two incarnations of one process and leave two readers racing for its frames.
+	pumpServeMu sync.Mutex
 	// closing is the terminal close state, guarded by mu. It is latched once,
 	// before any teardown runs, and never cleared. Every door that would start
 	// new native work for this session reads it inside the same critical section

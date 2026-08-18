@@ -182,10 +182,14 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 	sink, releaseSink := s.nativePumpHandle().attachTurn()
 	defer releaseSink()
 
-	var sendErr error
+	var (
+		sendErr    error
+		dispatched bool
+	)
 
 	turnID, err = stream.dispatch(ctx, submission, route.turnNonce, func() error {
 		sendErr = s.client.Query(turnCtx, route.turnNonce, content)
+		dispatched = sendErr == nil
 
 		return sendErr
 	})
@@ -195,6 +199,14 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 	}
 
 	if err != nil {
+		if dispatched {
+			// The harness took the frame and the stream then failed to announce it, so
+			// the host has no lifecycle event covering the turn that is now running.
+			// It is contained before the failure returns: native work this adapter
+			// cannot describe does not outlive the call that started it.
+			return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
+		}
+
 		return acp.PromptResponse{}, err
 	}
 

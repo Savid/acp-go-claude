@@ -21,6 +21,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
 
@@ -732,11 +733,125 @@ func TestSessionCloseWaitIsBoundedOnlyByItsCaller(t *testing.T) {
 
 	err := session.Close(ctx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.ErrorContains(t, err, "await the in-flight Claude turn")
+	require.ErrorIs(t, err, errSessionCloseUnsettled)
 
 	var reqErr *acp.RequestError
 
 	require.NotErrorAs(t, err, &reqErr, "an abandoned close wait is not prompt backpressure")
+}
+
+// newSettlementBarrierSession builds a session whose close settlement is fully
+// observable: an authoritative negotiated stream with a live incarnation and an
+// open turn, a native transport that records its own containment, and the
+// session's single turn slot free.
+func newSettlementBarrierSession(t *testing.T) (*agentSession, *fakeClaudeTransport, *recordingAgentClient, *sessionStream) {
+	t.Helper()
+
+	agent := NewAgent()
+	agent.containmentMode = RuntimeContainmentAuthoritative
+	conn := newRecordingAgentClient()
+	agent.setConnection(conn)
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
+	require.NoError(t, err)
+	require.True(t, agent.negotiatedLifecycle().AuthoritativeQuiescence)
+
+	transport := newFakeClaudeTransport()
+	client := claude.NewClient(nil, claude.Options{}, transport)
+	require.NoError(t, client.Start(t.Context()))
+
+	session := &agentSession{
+		agent:  agent,
+		id:     "session-1",
+		client: client,
+		turn:   make(chan struct{}, sessionTurnCapacity),
+	}
+
+	stream := session.lifecycleStream()
+	require.NoError(t, stream.incarnate(t.Context()))
+	_, err = stream.dispatch(
+		t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "nonce", func() error { return nil })
+	require.NoError(t, err)
+
+	return session, transport, conn, stream
+}
+
+// TestSessionCloseAbandonedBarrierSettlesNothingAndStaysClosable proves an
+// expired close context cannot reach the settlement it never earned: the process
+// is not contained, the stream is not fenced, no quiescence is stated, and the
+// refusal is not memoized, so the caller that does take the barrier settles the
+// session for real.
+func TestSessionCloseAbandonedBarrierSettlesNothingAndStaysClosable(t *testing.T) {
+	session, transport, conn, stream := newSettlementBarrierSession(t)
+
+	// A turn holds the session's only slot, so the barrier cannot admit this close.
+	session.turn <- struct{}{}
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := session.Close(expired)
+	require.ErrorIs(t, err, errSessionCloseUnsettled)
+	require.ErrorIs(t, err, context.Canceled)
+
+	require.Zero(t, transport.CloseCalls(), "an unsettled close contains nothing")
+	require.False(t, stream.fenced, "an unsettled close fences nothing")
+	require.NotContains(t, lifecycleEventTypes(t, conn), string(lifecycle.EventQuiescenceUpdate),
+		"an unsettled close states no quiescence fact")
+
+	// The turn settles and releases the slot, so the close that follows is the one
+	// the barrier admits.
+	<-session.turn
+
+	require.NoError(t, session.Close(context.Background()))
+	require.Equal(t, 1, transport.CloseCalls())
+	require.True(t, stream.fenced)
+	require.Contains(t, lifecycleEventTypes(t, conn), string(lifecycle.EventQuiescenceUpdate))
+
+	// That settlement is the memoized one: a third caller re-runs no teardown.
+	require.NoError(t, session.Close(context.Background()))
+	require.Equal(t, 1, transport.CloseCalls())
+}
+
+// TestSessionCloseExpiryNeverRacesSettlement runs the caller's expiry against the
+// turn's release. Whichever wins, the answer and the settlement stay paired: an
+// unsettled close has contained and fenced nothing, and a close that reports
+// success has done both.
+func TestSessionCloseExpiryNeverRacesSettlement(t *testing.T) {
+	for range 20 {
+		session, transport, _, stream := newSettlementBarrierSession(t)
+		session.turn <- struct{}{}
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		var racers sync.WaitGroup
+
+		racers.Add(2)
+
+		go func() {
+			defer racers.Done()
+			cancel()
+		}()
+
+		go func() {
+			defer racers.Done()
+			<-session.turn
+		}()
+
+		err := session.Close(ctx)
+		racers.Wait()
+
+		if err != nil {
+			require.ErrorIs(t, err, errSessionCloseUnsettled)
+			require.Zero(t, transport.CloseCalls())
+			require.False(t, stream.fenced)
+			require.NoError(t, session.Close(context.Background()))
+
+			continue
+		}
+
+		require.Equal(t, 1, transport.CloseCalls())
+		require.True(t, stream.fenced)
+	}
 }
 
 // TestClosedSessionRefusesEveryDoor proves close is terminal: once it has begun,
@@ -790,12 +905,17 @@ func TestClosedSessionRefusesEveryDoor(t *testing.T) {
 }
 
 // TestPromptRefusesACloseThatBeganDuringAdmission drives the check that lives
-// in the section publishing the turn. The close begins after prompt admission
-// has already passed its own check, so only the section that installs the turn
-// can still refuse it.
+// in the section publishing the turn. The pump already serves this process, so
+// pointing it at the current incarnation is the no-op it is meant to be and
+// refuses nothing; the close then begins after prompt admission has passed its
+// own check, leaving only the section that installs the turn to refuse it.
 func TestPromptRefusesACloseThatBeganDuringAdmission(t *testing.T) {
 	session, _, cleanup := newPromptFlowSession(t)
 	defer cleanup()
+
+	require.NoError(t, session.serveNativePump(t.Context(), session.currentClient()))
+
+	defer session.stopNativePump()
 
 	session.turnAcquiredHook = func(int) { session.beginClose() }
 

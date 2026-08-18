@@ -25,6 +25,28 @@ func newLifecycleStreamTestSession(t *testing.T) (*agentSession, *recordingAgent
 	return session, conn, stream
 }
 
+// lifecycleEventTypes reports, in delivery order, the event type of every
+// lifecycle-bearing notification the host received.
+func lifecycleEventTypes(t *testing.T, conn *recordingAgentClient) []string {
+	t.Helper()
+
+	types := []string{}
+
+	for _, update := range conn.Updates() {
+		envelope, ok := update.Meta[lifecycle.MetaKey].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		eventType, ok := requireAnyMap(t, envelope["event"])["type"].(string)
+		require.True(t, ok, "every envelope names its event type")
+
+		types = append(types, eventType)
+	}
+
+	return types
+}
+
 func newLifecycleActionSession(t *testing.T, nonce string) (*agentSession, *recordingAgentClient, *sessionStream, context.Context) {
 	t.Helper()
 	session, conn, stream := newLifecycleStreamTestSession(t)
@@ -248,6 +270,9 @@ func TestSessionStreamPropagatesIdentityAndProtocolFailures(t *testing.T) {
 	_, err := stream.dispatch(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "n", func() error { return nil })
 	require.ErrorContains(t, err, "acceptance delivery")
 
+	// A fenced stream can announce no acceptance, so the frame is never written:
+	// the refusal is preflighted rather than discovered after the harness has the
+	// work.
 	_, _, fenced := newLifecycleStreamTestSession(t)
 	require.NoError(t, fenced.settleClose(t.Context(), false, false))
 	called := false
@@ -256,7 +281,7 @@ func TestSessionStreamPropagatesIdentityAndProtocolFailures(t *testing.T) {
 
 		return nil
 	})
-	require.True(t, called)
+	require.False(t, called)
 	require.Error(t, err)
 }
 

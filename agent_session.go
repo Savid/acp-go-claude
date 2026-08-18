@@ -315,6 +315,11 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 }
 
 // CloseSession closes a Claude session process and removes it from the active map.
+//
+// Removal follows the settlement barrier rather than the request: a close the
+// barrier never admitted contained nothing and settled nothing, so its id keeps
+// the live session it names and the work still running behind it stays
+// addressable for the close that does take the barrier.
 func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (resp acp.CloseSessionResponse, err error) {
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/close")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
@@ -332,6 +337,10 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	closeErr := session.Close(ctx)
 	a.recordContainmentError(closeErr)
 
+	if errors.Is(closeErr, errSessionCloseUnsettled) {
+		return acp.CloseSessionResponse{}, sessionCloseUnsettledError(closeErr)
+	}
+
 	a.dropSession(ctx, params.SessionId, session)
 
 	if closeErr != nil {
@@ -346,6 +355,10 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 // mirror commit lands before the tombstone and no write in flight can land
 // after it. The store contract then forbids any write from recreating the row
 // once delete has succeeded.
+//
+// A close its settlement barrier never admitted stops the delete before the
+// tombstone: the row is the only durable record of a turn that is still running,
+// so it is not removed until that turn has settled.
 func (a *Agent) UnstableDeleteSession(
 	ctx context.Context,
 	params acp.UnstableDeleteSessionRequest,
@@ -362,8 +375,14 @@ func (a *Agent) UnstableDeleteSession(
 
 	if session != nil {
 		_ = session.Cancel(ctx)
-		if err := session.Close(ctx); err != nil {
-			cleanupErr = errors.Join(cleanupErr, err)
+
+		closeErr := session.Close(ctx)
+		if errors.Is(closeErr, errSessionCloseUnsettled) {
+			return acp.UnstableDeleteSessionResponse{}, sessionCloseUnsettledError(closeErr)
+		}
+
+		if closeErr != nil {
+			cleanupErr = errors.Join(cleanupErr, closeErr)
 		}
 
 		a.dropSession(ctx, params.SessionId, session)
@@ -459,15 +478,25 @@ func (a *Agent) dropSession(ctx context.Context, sessionID acp.SessionId, sessio
 	}
 }
 
+// removeSession closes one session and then evicts it. The close runs first
+// because it is what proves there is nothing left behind the id: a close its
+// settlement barrier never admitted leaves the session in the map, still
+// addressable, rather than dropping the handle to work that is still running.
+// Close latches the session's terminal state before its own teardown, so every
+// door is already refused while the eviction is pending.
 func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) {
-	a.dropSession(ctx, sessionID, session)
-
 	if session != nil {
 		if err := session.Close(ctx); err != nil {
 			a.recordContainmentError(err)
 			a.log.DebugContext(ctx, "close removed Claude session failed", slog.String(jsonFieldError, err.Error()))
+
+			if errors.Is(err, errSessionCloseUnsettled) {
+				return
+			}
 		}
 	}
+
+	a.dropSession(ctx, sessionID, session)
 }
 
 // ensureOpen answers the admission check every entry point runs, and answers it
@@ -509,35 +538,45 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) 
 		a.deleteCachedPermissionRulesLocked(session.id)
 		a.mu.Unlock()
 
-		if err := session.Close(ctx); err != nil {
-			a.recordContainmentError(err)
-			a.log.DebugContext(ctx, "close rejected Claude session failed", slog.String(jsonFieldError, err.Error()))
-		}
-
-		return errAgentClosed
+		return a.closeRejectedSession(ctx, session, "agent_closed", errAgentClosed)
 	}
 
 	previous := a.sessions[session.id]
 	if previous == nil && len(a.sessions) >= a.maxActiveSessions() {
 		a.mu.Unlock()
 
-		if err := session.Close(ctx); err != nil {
-			a.recordContainmentError(err)
-			a.log.DebugContext(ctx, "close backpressured Claude session failed", slog.String(jsonFieldError, err.Error()))
+		return a.closeRejectedSession(ctx, session, "active_sessions", backpressureError("active_sessions"))
+	}
+
+	if previous != nil {
+		a.mu.Unlock()
+
+		// The replaced instance settles before its id names the replacement. An
+		// instance the map no longer holds is one nothing can ever close, so a close
+		// the settlement barrier did not admit refuses the install rather than
+		// orphaning a live incarnation, and the durable commit of the instance on its
+		// way out lands before the one taking its place can write the same row.
+		if err := a.closeReplacedSession(ctx, session, previous); err != nil {
+			return err
 		}
 
-		return backpressureError("active_sessions")
+		a.mu.Lock()
+
+		if a.closed {
+			a.deleteCachedPermissionRulesLocked(session.id)
+			a.mu.Unlock()
+
+			// The agent closed while the replaced instance was settling, so this id
+			// names nothing: the settled instance leaves the map and the replacement
+			// that would have taken its place is torn down.
+			a.dropSession(ctx, session.id, previous)
+
+			return a.closeRejectedSession(ctx, session, "agent_closed", errAgentClosed)
+		}
 	}
 
 	a.sessions[session.id] = session
 	a.mu.Unlock()
-
-	if previous != nil {
-		if err := previous.Close(ctx); err != nil {
-			a.recordContainmentError(err)
-			a.log.WarnContext(ctx, "close replaced Claude session failed", slog.String(jsonFieldError, err.Error()))
-		}
-	}
 
 	// This is the one place an id becomes live, so it is where the provider-auth
 	// close mark is cleared: session/close drops an id without tombstoning it and
@@ -553,6 +592,55 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) 
 	a.observe.AddActiveSession(ctx, 1)
 
 	return nil
+}
+
+// closeRejectedSession tears down a session the map refused and answers with the
+// refusal itself. The session never became addressable, so its close failure is
+// recorded and logged rather than reported: the caller asked for admission, and
+// admission is what was denied.
+//
+// That teardown is detached from the caller's cancellation. No id names this
+// session, so no later close can reach it — a caller that has already given up
+// must not be what decides whether the process it launched is contained. No turn
+// can hold a session that was never published, so the barrier is free.
+func (a *Agent) closeRejectedSession(
+	ctx context.Context,
+	session *agentSession,
+	reason string,
+	refusal error,
+) error {
+	ctx = context.WithoutCancel(ctx)
+
+	if err := session.Close(ctx); err != nil {
+		a.recordContainmentError(err)
+		a.log.DebugContext(ctx, "close unadmitted Claude session failed",
+			slog.String(jsonFieldReason, reason),
+			slog.String(jsonFieldError, err.Error()),
+		)
+	}
+
+	return refusal
+}
+
+// closeReplacedSession settles the instance a same-id install is replacing. A
+// close its settlement barrier did not admit leaves live native work behind an id
+// that is about to name something else, so that install is refused and the
+// replacement is torn down instead: the replaced instance keeps the id, stays
+// addressable, and can still be closed.
+func (a *Agent) closeReplacedSession(ctx context.Context, session *agentSession, previous *agentSession) error {
+	closeErr := previous.Close(ctx)
+	if closeErr == nil {
+		return nil
+	}
+
+	a.recordContainmentError(closeErr)
+	a.log.WarnContext(ctx, "close replaced Claude session failed", slog.String(jsonFieldError, closeErr.Error()))
+
+	if !errors.Is(closeErr, errSessionCloseUnsettled) {
+		return nil
+	}
+
+	return a.closeRejectedSession(ctx, session, "replaced_session_unsettled", sessionCloseUnsettledError(closeErr))
 }
 
 func (a *Agent) startAndStoreSession(

@@ -1055,6 +1055,9 @@ func TestPromptRefusesAMissingCorrelationValue(t *testing.T) {
 	require.Zero(t, sentUserFrames(transport), "a refused correlation value never reaches the harness")
 }
 
+// TestPromptFailsWhenTheOpeningSnapshotCannotBeDelivered proves an incarnation
+// the host was never told about does not stay live: the frame is never written
+// and the process the snapshot could not name is contained.
 func TestPromptFailsWhenTheOpeningSnapshotCannotBeDelivered(t *testing.T) {
 	session, transport, conn, cleanup := newNegotiatedPromptFlowSession(t)
 	defer cleanup()
@@ -1063,8 +1066,19 @@ func TestPromptFailsWhenTheOpeningSnapshotCannotBeDelivered(t *testing.T) {
 	_, err := session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "test-turn", "hello"))
 	require.ErrorContains(t, err, "snapshot delivery")
 	require.Zero(t, sentUserFrames(transport))
+	require.Equal(t, 1, transport.CloseCalls(), "an unannounced incarnation is contained, not left running")
+
+	pump := session.nativePumpHandle()
+	pump.mu.Lock()
+	defer pump.mu.Unlock()
+	require.Nil(t, pump.client, "the pump serves nothing behind a failed opening snapshot")
+	require.Nil(t, pump.stop)
 }
 
+// TestPromptFailsWhenAcceptanceCannotBeDelivered proves the one lifecycle failure
+// this adapter cannot foresee is contained rather than abandoned: the harness has
+// the frame, no event covers the turn it opened, so the turn is contained before
+// the failure returns.
 func TestPromptFailsWhenAcceptanceCannotBeDelivered(t *testing.T) {
 	session, transport, conn, cleanup := newNegotiatedPromptFlowSession(t)
 	defer cleanup()
@@ -1077,6 +1091,39 @@ func TestPromptFailsWhenAcceptanceCannotBeDelivered(t *testing.T) {
 	_, err := session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "test-turn", "hello"))
 	require.ErrorContains(t, err, "acceptance delivery")
 	require.Equal(t, 1, sentUserFrames(transport), "the native dispatcher accepted the frame first")
+	require.Positive(t, transport.CloseCalls(), "native work no lifecycle event covers is contained")
+}
+
+// TestPromptWritesNoFrameBehindALatchedLifecycleStream proves the acceptance
+// linearization point preflights the stream: a stream that already lost an event
+// can announce nothing, so the harness is never given work the host will never
+// hear about.
+func TestPromptWritesNoFrameBehindALatchedLifecycleStream(t *testing.T) {
+	session, transport, conn, cleanup := newNegotiatedPromptFlowSession(t)
+	defer cleanup()
+
+	ctx := t.Context()
+
+	// The incarnation opens and is served, so the refusal below can only come from
+	// the dispatch preflight rather than from the pump.
+	require.NoError(t, session.serveNativePump(ctx, session.currentClient()))
+
+	// One emission the host never received latches the stream. It carries no
+	// native frame of its own, so the only work the harness can be given below is
+	// the prompt's.
+	stream := session.lifecycleStream()
+	conn.sessionUpdateErr = errors.New("host disconnected")
+	_, err := stream.dispatch(
+		ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "latch", func() error { return nil })
+	require.ErrorContains(t, err, "host disconnected")
+
+	conn.sessionUpdateErr = nil
+	closeCalls := transport.CloseCalls()
+
+	_, err = session.Prompt(ctx, lifecyclePromptRequest(session.id, "test-turn", "hello"))
+	require.ErrorContains(t, err, "host disconnected", "the latched stream refuses the turn")
+	require.Zero(t, sentUserFrames(transport), "no frame is written behind a stream that cannot announce it")
+	require.Equal(t, closeCalls, transport.CloseCalls(), "a refusal before dispatch contains nothing")
 }
 
 type lifecycleEventFailingClient struct {

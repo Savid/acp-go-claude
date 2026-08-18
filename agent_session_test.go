@@ -388,6 +388,220 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 	require.ErrorContains(t, err, "close failed")
 }
 
+// newSessionForTransport builds one started session over transport, so a test can
+// observe that session's own native containment.
+func newSessionForTransport(
+	t *testing.T,
+	agent *Agent,
+	sessionID acp.SessionId,
+	transport claude.Transport,
+) *agentSession {
+	t.Helper()
+
+	client := claude.NewClient(nil, claude.Options{}, transport)
+	require.NoError(t, client.Start(context.Background()))
+	t.Cleanup(func() { _ = client.Close() })
+
+	return &agentSession{
+		agent:  agent,
+		id:     sessionID,
+		cwd:    t.TempDir(),
+		client: client,
+		turn:   make(chan struct{}, sessionTurnCapacity),
+	}
+}
+
+// newBusySessionAgent registers one session whose single turn slot is already
+// held, so every close of it must wait at the settlement barrier.
+func newBusySessionAgent(
+	t *testing.T,
+	sessionID acp.SessionId,
+	options ...Option,
+) (*Agent, *agentSession, *fakeClaudeTransport) {
+	t.Helper()
+
+	agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), options...)
+
+	transport := newFakeClaudeTransport()
+	session := newSessionForTransport(t, agent, sessionID, transport)
+	agent.sessions[sessionID] = session
+	session.turn <- struct{}{}
+
+	return agent, session, transport
+}
+
+func requireUnsettledCloseError(t *testing.T, err error) {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32603, reqErr.Code)
+
+	data, ok := reqErr.Data.(map[string]any)
+	require.True(t, ok, "the refusal names itself")
+	require.Equal(t, "claude_session_close_unsettled", data[jsonFieldError])
+	require.Contains(t, data[jsonFieldMessage], "await the in-flight Claude turn")
+}
+
+// TestCloseSessionKeepsAnUnsettledSessionAddressable proves removal follows the
+// settlement barrier and not the request: a close whose caller expired contained
+// nothing, so the id keeps the live session and the next close settles it.
+func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
+	sessionID := acp.SessionId("session-busy")
+	agent, session, transport := newBusySessionAgent(t, sessionID)
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := agent.CloseSession(expired, acp.CloseSessionRequest{SessionId: sessionID})
+	requireUnsettledCloseError(t, err)
+	require.Zero(t, transport.CloseCalls(), "an unsettled close contains nothing")
+
+	held, lookupErr := agent.session(sessionID)
+	require.NoError(t, lookupErr, "the work still running behind the id stays addressable")
+	require.Same(t, session, held)
+
+	<-session.turn
+
+	_, err = agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: sessionID})
+	require.NoError(t, err)
+	require.Equal(t, 1, transport.CloseCalls())
+	_, lookupErr = agent.session(sessionID)
+	require.Error(t, lookupErr, "a settled close removes the id")
+}
+
+// TestDeleteSessionKeepsTheRowUntilItsCloseSettles proves the tombstone follows
+// the same barrier: the store row is the only durable record of a turn that is
+// still running, so an unsettled close stops the delete before it.
+func TestDeleteSessionKeepsTheRowUntilItsCloseSettles(t *testing.T) {
+	ctx := context.Background()
+	sessionID := acp.SessionId("session-busy")
+	store := NewInMemorySessionStore()
+	key := SessionKey{SessionID: string(sessionID)}
+	require.NoError(t, store.Append(ctx, key, []SessionStoreEntry{
+		[]byte(`{"type":"user","message":{"content":"live"}}`),
+	}))
+
+	agent, session, transport := newBusySessionAgent(t, sessionID, WithSessionStore(store))
+
+	previousDelete := deleteNativeTranscript
+	t.Cleanup(func() { deleteNativeTranscript = previousDelete })
+
+	transcriptDeletes := 0
+	deleteNativeTranscript = func(context.Context, string, string) error {
+		transcriptDeletes++
+
+		return nil
+	}
+
+	expired, cancel := context.WithCancel(ctx)
+	cancel()
+
+	_, err := agent.UnstableDeleteSession(expired, DeleteSessionRequest(sessionID))
+	requireUnsettledCloseError(t, err)
+	require.Zero(t, transport.CloseCalls())
+	require.Zero(t, transcriptDeletes)
+
+	entries, err := store.Load(ctx, key)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "an unsettled close writes no tombstone")
+
+	agent.mu.Lock()
+	_, tombstoned := agent.deleted[sessionID]
+	agent.mu.Unlock()
+	require.False(t, tombstoned)
+
+	<-session.turn
+
+	_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+	require.NoError(t, err)
+	require.Equal(t, 1, transport.CloseCalls())
+	require.Equal(t, 1, transcriptDeletes)
+	entries, err = store.Load(ctx, key)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the settled delete tombstoned the row")
+}
+
+// TestRemoveSessionEvictsOnlyASettledSession proves the internal cleanup path
+// obeys the same rule: it closes first and evicts only once that close settled.
+func TestRemoveSessionEvictsOnlyASettledSession(t *testing.T) {
+	sessionID := acp.SessionId("session-busy")
+	agent, session, transport := newBusySessionAgent(t, sessionID)
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	agent.removeSession(expired, sessionID, session)
+	require.Contains(t, agent.sessions, sessionID)
+	require.Zero(t, transport.CloseCalls())
+
+	<-session.turn
+
+	agent.removeSession(context.Background(), sessionID, session)
+	require.NotContains(t, agent.sessions, sessionID)
+	require.Equal(t, 1, transport.CloseCalls())
+}
+
+// TestStoreStartedSessionRefusesAnInstallOverAnUnsettledSession proves a same-id
+// install cannot orphan the instance it replaces: while the replaced session is
+// still running a turn its id keeps naming it, and the replacement that could not
+// take the id is torn down instead of being left running beside it.
+func TestStoreStartedSessionRefusesAnInstallOverAnUnsettledSession(t *testing.T) {
+	sessionID := acp.SessionId("session-busy")
+	agent, previous, previousTransport := newBusySessionAgent(t, sessionID)
+
+	replacementTransport := newFakeClaudeTransport()
+	replacement := newSessionForTransport(t, agent, sessionID, replacementTransport)
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := agent.storeStartedSession(expired, replacement)
+	requireUnsettledCloseError(t, err)
+	require.Same(t, previous, agent.sessions[sessionID], "the replaced instance keeps its id")
+	require.Zero(t, previousTransport.CloseCalls(), "the replaced instance settled nothing")
+	require.Equal(t, 1, replacementTransport.CloseCalls(), "the refused replacement is contained")
+
+	// Once the turn settles, the install lands: the replaced instance is contained
+	// first and the id then names the session taking its place.
+	<-previous.turn
+
+	admitted := newSessionForTransport(t, agent, sessionID, newFakeClaudeTransport())
+	require.NoError(t, agent.storeStartedSession(context.Background(), admitted))
+	require.Equal(t, 1, previousTransport.CloseCalls())
+	require.Same(t, admitted, agent.sessions[sessionID])
+}
+
+// TestStoreStartedSessionRefusesAnInstallIntoAnAgentClosedMidReplacement proves
+// the settled replaced instance leaves the map and the replacement is contained
+// when the agent closes during that settlement.
+func TestStoreStartedSessionRefusesAnInstallIntoAnAgentClosedMidReplacement(t *testing.T) {
+	sessionID := acp.SessionId("session-1")
+	agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+
+	hooked := &closeHookTransport{Transport: newFakeClaudeTransport()}
+	previous := newSessionForTransport(t, agent, sessionID, hooked)
+	agent.sessions[sessionID] = previous
+
+	hooked.onClose = func() {
+		agent.mu.Lock()
+		agent.closed = true
+		agent.mu.Unlock()
+	}
+
+	replacementTransport := newFakeClaudeTransport()
+	replacement := newSessionForTransport(t, agent, sessionID, replacementTransport)
+
+	require.ErrorIs(t, agent.storeStartedSession(context.Background(), replacement), errAgentClosed)
+	require.Equal(t, 1, replacementTransport.CloseCalls(), "the refused replacement is contained")
+
+	agent.mu.Lock()
+	_, present := agent.sessions[sessionID]
+	agent.mu.Unlock()
+	require.False(t, present, "a settled instance no closed agent can serve leaves the map")
+}
+
 func TestSessionMapCleanupCloseErrors(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))

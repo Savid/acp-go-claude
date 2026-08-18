@@ -110,6 +110,15 @@ permission and elicitation requests carry action correlation under
 `_meta["acp-go.dev/lifecycle"]`. Lifecycle events use only identity-only
 `session_info_update` notifications as carriers.
 
+While that key is negotiated, no native work exists that the stream cannot
+describe. A native process is announced by its incarnation's opening snapshot
+before the adapter starts reading it, and a snapshot the host never received
+contains that process instead of leaving it running. A prompt frame is written
+only once the stream can announce its acceptance, so a stream that already lost
+an event refuses the turn before the harness sees it; if a lifecycle event fails
+after the harness has taken the frame, the turn it opened is contained before the
+prompt's error returns.
+
 The lifecycle key is refused on `session/new`, `session/load`, `session/resume`,
 `session/cancel`, `session/close`, `session/delete`, `session/list`, both
 `session/set_config_option` variants, `session/set_mode`, `authenticate`,

@@ -165,6 +165,14 @@ The `cause` vocabulary:
 Provider failures additionally include the result `subtype`, and may include an
 `errors` array and an `errorKind`.
 
+`session/close` and `session/delete` have one refusal of their own. Both settle
+behind the session's settlement barrier, so a caller whose context expires before
+the in-flight turn releases the session gets `-32603` with
+`{"error":"claude_session_close_unsettled","message":<native cause>}`. Nothing was
+contained, no quiescence was stated, delete wrote no tombstone, and the id still
+names its live session — the next close settles it. It is not a turn failure: the
+containment boundary was never reached.
+
 An image output the adapter will not ship — `invalid_base64`, `not_a_raster`,
 `media_type_mismatch`, `missing_file`, `path_not_allowed`, or `too_large` — is
 recoverable. It fails that tool call only, carrying fixed guidance as the call's

@@ -16,6 +16,21 @@ import (
 var sessionInterruptTimeout = 5 * time.Second
 var sessionRemoveAll = os.RemoveAll
 
+// errSessionCloseUnsettled marks a close its settlement barrier never admitted.
+// Such a close tore nothing down and settled nothing, so the id keeps its live
+// session and a later caller takes the barrier again.
+var errSessionCloseUnsettled = errors.New("await the in-flight Claude turn")
+
+// sessionCloseUnsettledError is the wire answer for that close. It is neither a
+// containment failure nor a native turn failure: the boundary was never reached,
+// so the truthful report is that this close settled nothing.
+func sessionCloseUnsettledError(err error) error {
+	return acp.NewInternalError(map[string]any{
+		jsonFieldError:   "claude_session_close_unsettled",
+		jsonFieldMessage: err.Error(),
+	})
+}
+
 // finalizeSessionRuntimeResources returns admissions only after the selected
 // containment boundary completes. An incomplete boundary retains both the
 // native admission and every adapter-owned scratch root because escaped work
@@ -78,8 +93,21 @@ func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
 // answered with backpressure and retried, while close is about to tear the
 // native process out from under whatever holds the slot and therefore has to
 // wait for it. The caller's context bounds the wait.
+//
+// A free slot is taken before the caller's context is consulted at all, so an
+// expired caller loses the barrier only to a turn that really holds it. Offering
+// both to one select would let an already-cancelled close of a quiescent session
+// report an in-flight turn that does not exist.
 func (s *agentSession) acquireClosingTurn(ctx context.Context) (func(), error) {
 	turn := s.turnQueue()
+
+	select {
+	case turn <- struct{}{}:
+		s.afterTurnSlotAcquired(1)
+
+		return func() { <-turn }, nil
+	default:
+	}
 
 	select {
 	case turn <- struct{}{}:
@@ -536,14 +564,30 @@ func (s *agentSession) cancelElicitationRequestsLocked() []context.CancelFunc {
 
 // Close closes the underlying Claude process and memoizes the terminal result.
 // A second caller blocks until the first finishes and observes that same
-// result; teardown, native signalling and the active-session accounting all run
-// exactly once.
-func (s *agentSession) Close(ctx context.Context) (err error) {
-	s.closeOnce.Do(func() {
-		s.closeErr = s.close(ctx)
-	})
+// result; the teardown, the native signalling and the active-session accounting
+// behind that result all run exactly once.
+//
+// A close its settlement barrier never admitted is the one result that is not
+// memoized. Nothing was torn down and nothing was settled, so there is no
+// terminal result to hand a later caller, and that caller takes the barrier
+// again under a context of its own.
+func (s *agentSession) Close(ctx context.Context) error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
 
-	return s.closeErr
+	if s.closeSettled {
+		return s.closeErr
+	}
+
+	err := s.close(ctx)
+	if errors.Is(err, errSessionCloseUnsettled) {
+		return err
+	}
+
+	s.closeSettled = true
+	s.closeErr = err
+
+	return err
 }
 
 // beginClose latches the terminal close state before any teardown runs, so a
@@ -580,7 +624,7 @@ func closedSessionError() error {
 func (s *agentSession) awaitSettledTurn(ctx context.Context) (func(), error) {
 	releaseTurn, err := s.acquireClosingTurn(ctx)
 	if err != nil {
-		return func() {}, fmt.Errorf("await the in-flight Claude turn: %w", err)
+		return func() {}, fmt.Errorf("%w: %w", errSessionCloseUnsettled, err)
 	}
 
 	return releaseTurn, nil
@@ -617,7 +661,16 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 	// the process under a turn that is still settling is the very thing waiting
 	// for that turn prevents. The wait is real, so a busy session is waited for
 	// instead of being answered with backpressure.
+	//
+	// An abandoned wait ends the close right here. A turn is still holding the
+	// slot, so nothing below may run: the teardown would tear the process out from
+	// under a commit that is still landing, and the settlement below states
+	// quiescence, which is the one fact a session with a live turn cannot state.
 	releaseTurn, err := s.awaitSettledTurn(ctx)
+	if err != nil {
+		return err
+	}
+
 	defer releaseTurn()
 
 	closeErr := s.client.Close()

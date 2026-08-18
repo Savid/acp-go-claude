@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/stretchr/testify/require"
 )
@@ -286,6 +287,65 @@ func TestExitPlanModePermission(t *testing.T) {
 	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-rejected"})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorDeny, decision.Behavior)
+}
+
+func TestPermissionLifecycleActionFailures(t *testing.T) {
+	t.Run("announcement failure", func(t *testing.T) {
+		session, conn, _, turnCtx := newLifecycleActionSession(t, permissionControlTurnNonce)
+		failLifecycleAction(session, conn, lifecycle.ActionPending,
+			errors.New("action announcement delivery"))
+
+		_, err := session.handlePermission(turnCtx, claude.PermissionRequest{
+			ToolName: "Bash", ToolUseID: "bash-announce", Input: map[string]any{jsonFieldCommand: "true"},
+		})
+		require.ErrorContains(t, err, "action announcement delivery")
+	})
+
+	t.Run("resolution failure fails after the answer", func(t *testing.T) {
+		session, conn, _, turnCtx := newLifecycleActionSession(t, permissionControlTurnNonce)
+		conn.permission = permissionAllowOnce
+		failLifecycleAction(session, conn, lifecycle.ActionAccepted,
+			errors.New("action resolution delivery"))
+
+		decision, err := session.handlePermission(turnCtx, claude.PermissionRequest{
+			ToolName: "Bash", ToolUseID: "bash-resolve", Input: map[string]any{jsonFieldCommand: "true"},
+		})
+		require.ErrorContains(t, err, "action resolution delivery")
+		require.Equal(t, claude.PermissionDecision{}, decision)
+	})
+}
+
+func TestExitPlanModeLifecycleActionFailures(t *testing.T) {
+	newSession := func(t *testing.T) (*agentSession, *recordingAgentClient, context.Context) {
+		t.Helper()
+		session, conn, _, _ := newLifecycleActionSession(t, permissionControlTurnNonce)
+		session.mode = modePlan
+		session.model = "sonnet"
+
+		return session, conn, activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+	}
+
+	t.Run("announcement failure", func(t *testing.T) {
+		session, conn, turnCtx := newSession(t)
+		failLifecycleAction(session, conn, lifecycle.ActionPending,
+			errors.New("action announcement delivery"))
+
+		_, err := session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-announce"})
+		require.ErrorContains(t, err, "action announcement delivery")
+	})
+
+	t.Run("resolution failure fails after the answer", func(t *testing.T) {
+		session, conn, turnCtx := newSession(t)
+		conn.permission = acp.PermissionOptionId(modeDefault)
+		failLifecycleAction(session, conn, lifecycle.ActionAccepted,
+			errors.New("action resolution delivery"))
+
+		decision, err := session.handleExitPlanMode(turnCtx, claude.PermissionRequest{
+			ToolName: exitPlanModeTool, ToolUseID: "exit-resolve", Input: map[string]any{"plan": "done"},
+		})
+		require.ErrorContains(t, err, "action resolution delivery")
+		require.Equal(t, claude.PermissionDecision{}, decision)
+	})
 }
 
 func TestExitPlanModeControlCallbackRequiresExactActiveRoute(t *testing.T) {

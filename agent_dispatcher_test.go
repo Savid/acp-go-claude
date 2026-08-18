@@ -548,6 +548,45 @@ func TestLifecycleCommandPostResponseHookBranches(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestSessionEstablishedHookLatchesALifecycleStreamFailure(t *testing.T) {
+	ctx := context.Background()
+	agent := NewAgent()
+	client := newRecordingAgentClient()
+	agent.setConnection(client)
+	_, err := agent.Initialize(ctx, acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
+	require.NoError(t, err)
+
+	session := &agentSession{
+		agent:             agent,
+		id:                "session-1",
+		client:            claude.NewClient(nil, claude.Options{}, newFakeClaudeTransport()),
+		availableCommands: []claude.SlashCommand{{Name: "help"}},
+	}
+	agent.mu.Lock()
+	agent.sessions[session.id] = session
+	agent.mu.Unlock()
+
+	client.sessionUpdateErr = errors.New("snapshot delivery")
+
+	hooks := &postResponseHooks{log: agent.log}
+	conn := &localAgentConnection{agent: agent, hooks: hooks}
+	result := acp.NewSessionResponse{SessionId: session.id}
+	conn.enqueueSessionEstablishedHook(ctx, acp.AgentMethodSessionNew, postResponseHookParams(nil, "1"), result)
+	resultJSON, err := json.Marshal(result)
+	require.NoError(t, err)
+	hooks.runAfterResponseWrite([]byte(`{"jsonrpc":"2.0","id":1,"result":` + string(resultJSON) + `}`))
+
+	stream := session.lifecycleStream()
+	require.NotNil(t, stream)
+	require.Eventually(t, func() bool {
+		stream.mu.Lock()
+		defer stream.mu.Unlock()
+
+		return stream.failure != nil
+	}, time.Second, 10*time.Millisecond)
+	require.Empty(t, client.Updates(), "a failed opening snapshot delivers nothing")
+}
+
 func TestPostResponseHookRecoversPanic(t *testing.T) {
 	t.Parallel()
 

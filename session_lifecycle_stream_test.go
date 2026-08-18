@@ -1,7 +1,9 @@
 package claudeacp
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -21,6 +23,49 @@ func newLifecycleStreamTestSession(t *testing.T) (*agentSession, *recordingAgent
 	require.NotNil(t, stream)
 
 	return session, conn, stream
+}
+
+func newLifecycleActionSession(t *testing.T, nonce string) (*agentSession, *recordingAgentClient, *sessionStream, context.Context) {
+	t.Helper()
+	session, conn, stream := newLifecycleStreamTestSession(t)
+	ctx := t.Context()
+	require.NoError(t, stream.incarnate(ctx))
+	_, err := stream.dispatch(ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, nonce, func() error { return nil })
+	require.NoError(t, err)
+
+	return session, conn, stream, withTurnRoute(ctx, nonce)
+}
+
+type lifecycleActionFailingClient struct {
+	*recordingAgentClient
+	state lifecycle.ActionState
+	err   error
+}
+
+func (c *lifecycleActionFailingClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	envelope, ok := notification.Meta[lifecycle.MetaKey].(map[string]any)
+	if ok {
+		event, eventOK := envelope["event"].(map[string]any)
+		action, actionOK := event["action"].(map[string]any)
+		if eventOK && actionOK && event["type"] == string(lifecycle.EventActionUpdate) && action["state"] == string(c.state) {
+			return c.err
+		}
+	}
+
+	return c.recordingAgentClient.SessionUpdate(ctx, notification)
+}
+
+func failLifecycleAction(
+	session *agentSession,
+	conn *recordingAgentClient,
+	state lifecycle.ActionState,
+	err error,
+) {
+	session.agent.setConnection(&lifecycleActionFailingClient{
+		recordingAgentClient: conn,
+		state:                state,
+		err:                  err,
+	})
 }
 
 // TestSessionStreamRoutesActionsAndSettlesOnce exercises the public lifecycle
@@ -261,4 +306,90 @@ func TestSessionStreamFailureAtEachSettlementBoundary(t *testing.T) {
 		require.ErrorContains(t, stream.settleClose(ctx, true, true), "close delivery")
 		require.True(t, stream.fenced)
 	})
+}
+
+func TestSessionStreamIncarnateFailsWithoutEntropy(t *testing.T) {
+	previous := uuidRandom
+	uuidRandom = strings.NewReader("")
+	t.Cleanup(func() { uuidRandom = previous })
+
+	_, conn, stream := newLifecycleStreamTestSession(t)
+	require.ErrorContains(t, stream.incarnate(t.Context()), "read random uuid")
+	require.False(t, stream.live)
+	require.Empty(t, conn.Updates())
+}
+
+func TestSessionStreamAnnouncementAfterFailureLatch(t *testing.T) {
+	_, conn, stream, turnCtx := newLifecycleActionSession(t, "nonce")
+
+	conn.sessionUpdateErr = errors.New("host disconnected")
+	_, err := stream.announceAction(turnCtx, "nonce", lifecycle.ActionPermission)
+	require.ErrorContains(t, err, "host disconnected")
+	latched := stream.failure
+
+	conn.sessionUpdateErr = nil
+	_, err = stream.announceAction(turnCtx, "nonce", lifecycle.ActionPermission)
+	require.ErrorIs(t, err, latched)
+}
+
+func TestSessionStreamCloseSettlesAuthoritativeQuiescence(t *testing.T) {
+	ctx := t.Context()
+	agent := NewAgent()
+	agent.containmentMode = RuntimeContainmentAuthoritative
+	conn := newRecordingAgentClient()
+	agent.setConnection(conn)
+	_, err := agent.Initialize(ctx, acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
+	require.NoError(t, err)
+	require.True(t, agent.negotiatedLifecycle().AuthoritativeQuiescence)
+
+	session := &agentSession{agent: agent, id: "session-quiescent"}
+	stream := session.lifecycleStream()
+	require.NoError(t, stream.incarnate(ctx))
+	_, err = stream.dispatch(ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c", RunID: "r"}, "nonce", func() error { return nil })
+	require.NoError(t, err)
+
+	require.NoError(t, stream.settleClose(ctx, true, true))
+	require.True(t, stream.fenced)
+
+	updates := conn.Updates()
+	require.NotEmpty(t, updates)
+	envelope := requireAnyMap(t, updates[len(updates)-1].Meta[lifecycle.MetaKey])
+	event := requireAnyMap(t, envelope["event"])
+	require.Equal(t, string(lifecycle.EventQuiescenceUpdate), event["type"])
+	require.Equal(t, true, event["quiescent"])
+	require.Equal(t, string(lifecycle.ProofClassProcessContainment), event["source"])
+	watermark, ok := event["watermark"].(uint64)
+	require.True(t, ok)
+	require.Equal(t, envelope["sequence"], watermark+1)
+}
+
+func TestSessionStreamEmissionFailsClosedOnAnUntruthfulEvent(t *testing.T) {
+	ctx := t.Context()
+	_, conn, stream := newLifecycleStreamTestSession(t)
+	require.NoError(t, stream.incarnate(ctx))
+	delivered := len(conn.Updates())
+
+	err := stream.emitLocked(ctx, lifecycle.QuiescenceEvent(lifecycle.QuiescenceFact{
+		Quiescent: true,
+		Source:    lifecycle.ProofClassProcessContainment,
+	}))
+	require.Error(t, err)
+	require.ErrorIs(t, stream.failure, err)
+	require.Len(t, conn.Updates(), delivered, "a refused event is never delivered")
+
+	require.ErrorIs(t, stream.incarnate(ctx), err, "a latched stream never continues its sequence")
+}
+
+func TestSessionStreamEmissionFailsClosedWithoutAConnection(t *testing.T) {
+	ctx := t.Context()
+	session, conn, stream := newLifecycleStreamTestSession(t)
+	require.NoError(t, stream.incarnate(ctx))
+
+	session.agent.setConnection(nil)
+	_, err := stream.dispatch(ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "nonce", func() error { return nil })
+	require.ErrorContains(t, err, "the ACP connection is unavailable")
+	require.Nil(t, stream.turn)
+
+	session.agent.setConnection(conn)
+	require.ErrorContains(t, stream.incarnate(ctx), "the ACP connection is unavailable")
 }

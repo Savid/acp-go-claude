@@ -9,6 +9,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
 
@@ -178,6 +179,86 @@ func TestHandleAskUserQuestion(t *testing.T) {
 		Input:     map[string]any{askFieldQuestions: []any{map[string]any{askFieldID: "q"}}},
 	})
 	require.ErrorContains(t, err, "pending update failed")
+}
+
+func TestElicitationLifecycleActionFailures(t *testing.T) {
+	askRequest := claude.PermissionRequest{
+		ToolName:  askUserQuestionTool,
+		ToolUseID: "ask-lifecycle",
+		Input: map[string]any{askFieldQuestions: []any{
+			map[string]any{askFieldID: "q", askFieldQuestion: "Question?"},
+		}},
+	}
+
+	t.Run("ask announcement failure", func(t *testing.T) {
+		session, conn, _, turnCtx := newLifecycleActionSession(t, "elicit-turn")
+		session.agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+		failLifecycleAction(session, conn, lifecycle.ActionPending,
+			errors.New("action announcement delivery"))
+
+		_, err := session.handleAskUserQuestion(turnCtx, askRequest)
+		require.ErrorContains(t, err, "action announcement delivery")
+		require.Empty(t, conn.Elicitations())
+	})
+
+	t.Run("ask resolution failure", func(t *testing.T) {
+		session, conn, _, turnCtx := newLifecycleActionSession(t, "elicit-turn")
+		session.agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+		failLifecycleAction(session, conn, lifecycle.ActionAccepted,
+			errors.New("action resolution delivery"))
+
+		decision, err := session.handleAskUserQuestion(turnCtx, askRequest)
+		require.ErrorContains(t, err, "action resolution delivery")
+		require.Equal(t, claude.PermissionDecision{}, decision)
+	})
+
+	t.Run("form announcement failure", func(t *testing.T) {
+		session, conn, _, turnCtx := newLifecycleActionSession(t, "elicit-turn")
+		failLifecycleAction(session, conn, lifecycle.ActionPending,
+			errors.New("action announcement delivery"))
+
+		_, err := session.createFormElicitation(turnCtx, conn, claude.ElicitationRequest{
+			Mode: claude.ElicitationModeForm, ToolUseID: "form-announce",
+		})
+		require.ErrorContains(t, err, "action announcement delivery")
+		require.Empty(t, conn.Elicitations())
+	})
+
+	t.Run("form resolution failure", func(t *testing.T) {
+		session, conn, _, turnCtx := newLifecycleActionSession(t, "elicit-turn")
+		failLifecycleAction(session, conn, lifecycle.ActionAccepted,
+			errors.New("action resolution delivery"))
+
+		response, err := session.createFormElicitation(turnCtx, conn, claude.ElicitationRequest{
+			Mode: claude.ElicitationModeForm, ToolUseID: "form-resolve",
+		})
+		require.ErrorContains(t, err, "action resolution delivery")
+		require.Equal(t, claude.ElicitationResponse{}, response)
+	})
+
+	t.Run("url announcement failure", func(t *testing.T) {
+		session, conn, _, turnCtx := newLifecycleActionSession(t, "elicit-turn")
+		failLifecycleAction(session, conn, lifecycle.ActionPending,
+			errors.New("action announcement delivery"))
+
+		_, err := session.createURLElicitation(turnCtx, conn, claude.ElicitationRequest{
+			Mode: claude.ElicitationModeURL, ToolUseID: "url-announce", URL: "https://example.test", ElicitationID: "e1",
+		})
+		require.ErrorContains(t, err, "action announcement delivery")
+		require.Empty(t, conn.Elicitations())
+	})
+
+	t.Run("url resolution failure", func(t *testing.T) {
+		session, conn, _, turnCtx := newLifecycleActionSession(t, "elicit-turn")
+		failLifecycleAction(session, conn, lifecycle.ActionAccepted,
+			errors.New("action resolution delivery"))
+
+		response, err := session.createURLElicitation(turnCtx, conn, claude.ElicitationRequest{
+			Mode: claude.ElicitationModeURL, ToolUseID: "url-resolve", URL: "https://example.test", ElicitationID: "e1",
+		})
+		require.ErrorContains(t, err, "action resolution delivery")
+		require.Equal(t, claude.ElicitationResponse{}, response)
+	})
 }
 
 func TestNativeElicitationPendingToolUpdateFailure(t *testing.T) {
@@ -445,6 +526,7 @@ func TestElicitationHelpersAndHandlers(t *testing.T) {
 	cancel := acp.NewUnstableCreateElicitationResponseCancel()
 	require.Equal(t, claude.ElicitationActionCancel, claudeElicitationResponse(cancel).Action)
 	require.Equal(t, claude.ElicitationActionDecline, claudeElicitationResponse(acp.UnstableCreateElicitationResponse{}).Action)
+	require.Equal(t, lifecycle.ActionCancelled, elicitationActionState(cancel, nil))
 	require.Equal(t, acp.UnstableElicitationSchemaTypeObject, elicitationSchema(nil).Type)
 	require.Equal(t, []string{"a"}, stringSliceValue([]string{"a"}))
 	require.Equal(t, []string{"a"}, stringSliceValue([]any{"a", 1, ""}))

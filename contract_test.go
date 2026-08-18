@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
 
@@ -462,6 +463,9 @@ func TestSetSessionModeUnsupported(t *testing.T) {
 	var reqErr *acp.RequestError
 	require.ErrorAs(t, err, &reqErr)
 	require.Equal(t, -32601, reqErr.Code)
+
+	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{Meta: lifecycleKeyMeta()})
+	requireRequestError(t, err, -32602, lifecycle.MetaPath)
 }
 
 func TestValidateMCPServersRejectsSSEAndACP(t *testing.T) {

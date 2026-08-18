@@ -16,14 +16,18 @@ import (
 
 const (
 	defaultSessionMirrorAppendTimeout = 60 * time.Second
-	defaultSessionMirrorDrainTimeout  = 150 * time.Millisecond
+	// defaultSessionMirrorCommitTimeout bounds one commit boundary. It bounds the
+	// wait for a queued prefix to land, never how long the adapter listens for
+	// more frames: what a boundary covers is decided by arrival order, not by a
+	// clock.
+	defaultSessionMirrorCommitTimeout = 90 * time.Second
 )
 
 var errSessionMirrorAppend = errors.New("append transcript mirror entries")
 
 var (
 	sessionMirrorAppendTimeout = defaultSessionMirrorAppendTimeout
-	sessionMirrorDrainTimeout  = defaultSessionMirrorDrainTimeout
+	sessionMirrorCommitTimeout = defaultSessionMirrorCommitTimeout
 )
 
 type sessionMirror struct {

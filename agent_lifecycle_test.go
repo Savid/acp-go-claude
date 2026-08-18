@@ -34,7 +34,7 @@ func TestLifecycleAnswerLandsOnTheResponseMeta(t *testing.T) {
 
 	answer := requireAnyMap(t, resp.Meta[lifecycle.MetaKey])
 	require.Equal(t, []int{1}, answer["versions"])
-	require.Equal(t, false, answer["updatesOutsidePrompt"])
+	require.Equal(t, true, answer["updatesOutsidePrompt"])
 	require.Equal(t, []string{}, answer["activityKinds"])
 
 	capMeta := requireAnyMap(t, resp.AgentCapabilities.Meta)
@@ -77,7 +77,7 @@ func TestLifecycleAnswerIsPerConfiguration(t *testing.T) {
 			} else {
 				require.NotContains(t, answer, "quiescenceSource")
 			}
-			require.Equal(t, false, answer["updatesOutsidePrompt"])
+			require.Equal(t, true, answer["updatesOutsidePrompt"])
 			require.Equal(t, []string{}, answer["activityKinds"])
 
 			require.Equal(t, tc.authoritative, agent.negotiatedLifecycle().AuthoritativeQuiescence)

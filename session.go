@@ -3,7 +3,6 @@ package claudeacp
 import (
 	"context"
 	"sync"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -126,8 +125,7 @@ const (
 	commandReloadSkills    = "reload-skills"
 	commandReloadPlugins   = "reload-plugins"
 
-	defaultSessionCloseTurnWait = 5 * time.Second
-	maxHandledHooks             = 1024
+	maxHandledHooks = 1024
 )
 
 var savePermissionRules = func(ctx context.Context, claudeHome string, sessionID acp.SessionId, rules map[string]string) error {
@@ -201,12 +199,17 @@ type agentSession struct {
 	scratchRootRelease func()
 	// Started sessions always mirror transcript rows into the agent's
 	// authoritative session store.
-	mirror           *sessionMirror
+	mirror *sessionMirror
+	// pump is the session-owned native event loop: one continuous reader for the
+	// current native incarnation and one ordered durable outbox.
+	pump *nativePump
+	// lifecycle is the session's ordered lifecycle stream, present only on a
+	// connection whose negotiated answer carries the key.
+	lifecycle        *sessionStream
 	rawMessages      rawMessageConfig
 	rawEventSequence int64
 	handledHooks     map[string]struct{}
 	handledHookOrder []string
-	closeTurnWait    time.Duration
 	turnAcquiredHook func(int)
 	closeOnce        sync.Once
 	closeErr         error

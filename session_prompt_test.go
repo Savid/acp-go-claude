@@ -596,7 +596,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			"entries":  []any{map[string]any{"type": "user"}},
 		}}
 		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
-		require.ErrorIs(t, err, errSessionMirrorAppend)
+		requireStoreCommitFailure(t, err, errSessionMirrorAppend.Error())
 	})
 
 	t.Run("stream usage update error interrupts", func(t *testing.T) {
@@ -770,7 +770,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		require.ErrorContains(t, err, "idle update failed")
 	})
 
-	t.Run("system idle drain error", func(t *testing.T) {
+	t.Run("trailing mirror frame fails the commit boundary", func(t *testing.T) {
 		session, transport, cleanup := newPromptFlowSession(t)
 		defer cleanup()
 		home := t.TempDir()
@@ -793,7 +793,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			},
 		}
 		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
-		require.ErrorIs(t, err, errSessionMirrorAppend)
+		requireStoreCommitFailure(t, err, errSessionMirrorAppend.Error())
 	})
 
 	t.Run("local command emits result text", func(t *testing.T) {
@@ -816,7 +816,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 	})
 }
 
-func TestFinishPromptResultAndDrainEdges(t *testing.T) {
+func TestFinishPromptResultEdges(t *testing.T) {
 	ctx := context.Background()
 	session, transport, cleanup := newPromptFlowSession(t)
 	defer cleanup()
@@ -866,7 +866,6 @@ func TestFinishPromptResultAndDrainEdges(t *testing.T) {
 		ctx,
 		TextPromptRequest(session.id, "test-turn", "hello"),
 		&promptLoopState{lastAssistantMessageID: "33333333-3333-4333-8333-333333333333"},
-		mapper.ToolUpdateOptions{},
 		"",
 	)
 	require.ErrorContains(t, err, "native identity failed")
@@ -907,75 +906,6 @@ func TestFinishPromptResultAndDrainEdges(t *testing.T) {
 	require.ErrorContains(t, err, "live info failed")
 	conn.sessionUpdateErr = nil
 
-	home := t.TempDir()
-	projects := filepath.Join(home, "projects")
-	session.mirror = &sessionMirror{
-		log:         session.agent.log,
-		store:       &faultSessionStore{SessionStore: NewInMemorySessionStore(), appendErr: errors.New("finish drain failed")},
-		projectsDir: projects,
-	}
-	transport.messages <- map[string]any{
-		"type":     "transcript_mirror",
-		"filePath": filepath.Join(projects, "project", "11111111-1111-4111-8111-111111111111.jsonl"),
-		"entries":  []any{map[string]any{"type": "user"}},
-	}
-	_, _, err = session.finishPromptResult(ctx, ctx, TextPromptRequest(session.id, "test-turn", "hello"), &claude.ResultMessage{}, &promptLoopState{}, mapper.ToolUpdateOptions{}, false)
-	require.ErrorIs(t, err, errSessionMirrorAppend)
-
-	transport.messages <- map[string]any{"type": "assistant", "message": map[string]any{"content": []any{
-		map[string]any{"type": "text", "text": "drained"},
-	}}}
-	conn.sessionUpdateErr = errors.New("drain failed")
-	err = session.drainSessionMirror(ctx, mapper.ToolUpdateOptions{Workflow: mapper.NewWorkflowTracker()})
-	require.ErrorContains(t, err, "drain failed")
-
-	transport.errs <- errors.New("receive failed")
-	err = session.drainSessionMirror(ctx)
-	require.Error(t, err)
-
-	timeoutSession, _, timeoutCleanup := newPromptFlowSession(t)
-	defer timeoutCleanup()
-	previousDrain := sessionMirrorDrainTimeout
-	sessionMirrorDrainTimeout = time.Nanosecond
-	t.Cleanup(func() { sessionMirrorDrainTimeout = previousDrain })
-	require.NoError(t, timeoutSession.drainSessionMirror(ctx))
-
-	sessionMirrorDrainTimeout = previousDrain
-	rawDrain, rawTransport, rawCleanup := newPromptFlowSession(t)
-	defer rawCleanup()
-	rawDrain.rawMessages = rawMessageConfig{All: true}
-	rawConn, ok := rawDrain.agent.connection().(*recordingAgentClient)
-	require.True(t, ok)
-	rawConn.extensionErr = errors.New("raw drain failed")
-	rawTransport.messages <- map[string]any{"type": "assistant", "message": map[string]any{"content": []any{
-		map[string]any{"type": "text", "text": "raw"},
-	}}}
-	// A raw-event emit failure never aborts the drain: it is recorded internally
-	// and the drain continues.
-	require.NoError(t, rawDrain.drainSessionMirror(ctx))
-
-	noWorkflow, noWorkflowTransport, noWorkflowCleanup := newPromptFlowSession(t)
-	defer noWorkflowCleanup()
-	sessionMirrorDrainTimeout = previousDrain
-	noWorkflowTransport.messages <- map[string]any{"type": "assistant", "message": map[string]any{"content": []any{
-		map[string]any{"type": "text", "text": "ignored"},
-	}}}
-	require.NoError(t, noWorkflow.drainSessionMirror(ctx))
-
-	poisonMirror, _, poisonCleanup := newPromptFlowSession(t)
-	defer poisonCleanup()
-	poisonMirror.mu.Lock()
-	poisonMirror.poisonCause = "mirror poisoned"
-	poisonMirror.mu.Unlock()
-	handled, err := poisonMirror.handleSessionMirror(ctx, &claude.AssistantMessage{})
-	require.False(t, handled)
-	require.ErrorContains(t, err, "mirror poisoned")
-
-	resetDrain, resetTransport, resetCleanup := newPromptFlowSession(t)
-	defer resetCleanup()
-	resetTransport.messages <- map[string]any{"type": "conversation_reset"}
-	err = resetDrain.drainSessionMirror(ctx)
-	require.ErrorContains(t, err, "conversation_reset")
 }
 
 func TestFinishPromptResultEmitErrorBranches(t *testing.T) {
@@ -1073,7 +1003,6 @@ func newPromptFlowSession(t *testing.T) (*agentSession, *fakeClaudeTransport, fu
 		turn:              make(chan struct{}, sessionTurnCapacity),
 		contextWindowSize: 200000,
 		mirror:            newSessionMirror(agent.log, nil, t.TempDir(), nil),
-		closeTurnWait:     defaultSessionCloseTurnWait,
 	}
 
 	return session, transport, func() { _ = client.Close() }
@@ -1192,12 +1121,8 @@ func TestPromptMirrorAndObservationBranches(t *testing.T) {
 	session, cleanup := newStartedAgentSessionForTest(t, agent, "session-1")
 	defer cleanup()
 	session.mirror = newSessionMirror(agent.log, nil, t.TempDir(), nil)
-	handled, err := session.handleSessionMirror(ctx, &claude.AssistantMessage{})
-	require.NoError(t, err)
-	require.False(t, handled)
-	handled, err = session.handleSessionMirror(ctx, &claude.TranscriptMirrorMessage{})
-	require.NoError(t, err)
-	require.True(t, handled)
+	require.NoError(t, session.appendSessionMirror(ctx, &claude.TranscriptMirrorMessage{}))
+	require.NoError(t, (&agentSession{agent: agent}).appendSessionMirror(ctx, &claude.TranscriptMirrorMessage{}))
 
 	state := &promptLoopState{}
 	require.NoError(t, session.observePromptMessage(ctx, &claude.StreamEventMessage{ParentToolUseID: "parent"}, state))
@@ -1209,13 +1134,13 @@ func TestPromptMirrorAndObservationBranches(t *testing.T) {
 	session.recordWorkflowFrameErrors(ctx, nil)
 	(&agentSession{}).recordWorkflowFrameErrors(ctx, mapper.NewWorkflowTracker())
 
-	transport := newFakeClaudeTransport()
-	client := claude.NewClient(nil, claude.Options{}, transport)
-	require.NoError(t, client.Start(ctx))
-	defer func() { _ = client.Close() }()
-	drainSession := &agentSession{agent: agent, id: "drain", client: client, mirror: newSessionMirror(agent.log, nil, t.TempDir(), nil)}
-	transport.messages <- map[string]any{"type": "transcript_mirror", "filePath": "/tmp/outside.jsonl", "entries": []any{map[string]any{"type": "user"}}}
-	require.NoError(t, drainSession.drainSessionMirror(ctx, mapper.ToolUpdateOptions{Workflow: mapper.NewWorkflowTracker()}))
+	// A frame whose path falls outside the Claude projects dir is logged and
+	// dropped rather than written to a key it does not name.
+	outside := &agentSession{agent: agent, id: "outside", mirror: newSessionMirror(agent.log, NewInMemorySessionStore(), t.TempDir(), nil)}
+	require.NoError(t, outside.appendSessionMirror(ctx, &claude.TranscriptMirrorMessage{
+		FilePath: "/tmp/outside.jsonl",
+		Entries:  []SessionStoreEntry{[]byte(`{"type":"user"}`)},
+	}))
 }
 
 func TestResultUsageHelpers(t *testing.T) {
@@ -1259,4 +1184,20 @@ func TestResultUsageHelpers(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, 2, usage.InputTokens)
 	require.Equal(t, 2, commonPrefixLength("abc", "abd"))
+}
+
+// requireStoreCommitFailure asserts a turn failed at its own durability boundary
+// rather than reporting a native failure it did not have.
+func requireStoreCommitFailure(t *testing.T, err error, message string) {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32603, reqErr.Code)
+
+	data, ok := reqErr.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "claude_store_commit_failed", data[jsonFieldError])
+	require.Contains(t, data[jsonFieldMessage], message)
 }

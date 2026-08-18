@@ -26,6 +26,17 @@ func (s *agentSession) Prompt(
 		return acp.PromptResponse{}, err
 	}
 
+	// Route validation runs first, so a prompt never reports two rejections and
+	// the order of two failures is never implementation-defined. The submission
+	// identity is read next and before every native side effect: a correlation
+	// value this adapter refuses writes no frame to the harness, and the turn the
+	// route authenticated is the turn the acceptance names because the acceptance
+	// is minted from that same validated route.
+	submission, err := s.agent.readPromptCorrelation(params.Meta)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+
 	if poisonErr := s.poisonedError(); poisonErr != nil {
 		return acp.PromptResponse{}, poisonErr
 	}
@@ -85,6 +96,16 @@ func (s *agentSession) Prompt(
 		return acp.PromptResponse{}, nativeTurnFailure(err)
 	}
 
+	// The MCP relaunch and the lazy relaunch above both replace the native
+	// process, so the reader and the incarnation identity are pointed at the
+	// current one here: after validation and before acceptance.
+	if err := s.serveNativePump(ctx, s.currentClient()); err != nil {
+		return acp.PromptResponse{}, err
+	}
+
+	stream := s.lifecycleStream()
+	turnID := ""
+
 	var timedOut atomic.Bool
 
 	s.cancelMu.Lock()
@@ -113,6 +134,10 @@ func (s *agentSession) Prompt(
 		s.cancelMu.Lock()
 		defer s.cancelMu.Unlock()
 
+		// One settlement runs on every exit, in the one order the contract fixes:
+		// the native terminal, then the containment boundary this configuration
+		// selects, then the durable foreground-prefix commit, then the terminal
+		// idle, then the response.
 		response, promptErr = s.settlePromptTurn(
 			ctx,
 			turnCtx,
@@ -121,6 +146,7 @@ func (s *agentSession) Prompt(
 			response,
 			promptErr,
 		)
+		response, promptErr = s.settleTurnLifecycle(ctx, stream, turnID, response, promptErr)
 
 		s.mu.Lock()
 		s.cancel = nil
@@ -150,34 +176,45 @@ func (s *agentSession) Prompt(
 
 	defer s.client.EndQuery(route.turnNonce)
 
-	if err := s.client.Query(turnCtx, route.turnNonce, content); err != nil {
-		return acp.PromptResponse{}, nativeTurnFailure(err)
+	// The turn is attached to the session's reader before the frame is dispatched,
+	// so no frame this turn caused can arrive before there is somewhere for it to
+	// go.
+	sink, releaseSink := s.nativePumpHandle().attachTurn()
+	defer releaseSink()
+
+	var sendErr error
+
+	turnID, err = stream.dispatch(ctx, submission, route.turnNonce, func() error {
+		sendErr = s.client.Query(turnCtx, route.turnNonce, content)
+
+		return sendErr
+	})
+
+	if sendErr != nil {
+		return acp.PromptResponse{}, nativeTurnFailure(sendErr)
+	}
+
+	if err != nil {
+		return acp.PromptResponse{}, err
 	}
 
 	toolUpdateOptions := mapper.ToolUpdateOptions{
 		Cwd:                    s.cwd,
 		SupportsTerminalOutput: s.agent.clientSupportsTerminalOutput(),
 		ToolUses:               make(map[string]claude.ToolUseBlock),
+		Workflow:               mapper.NewWorkflowTracker(),
 	}
 
 	state := &promptLoopState{}
 
 	for {
-		msg, err := s.client.Receive(turnCtx)
+		msg, err := s.nativePumpHandle().next(turnCtx, sink)
 		if err != nil {
+			if poisonErr := s.poisonedError(); poisonErr != nil {
+				return acp.PromptResponse{}, poisonErr
+			}
+
 			return s.receiveTurnFailure(ctx, turnCtx, params.MessageId, err, timedOut.Load())
-		}
-
-		s.emitRawClaudeMessage(turnCtx, msg)
-
-		if err := s.checkNativeSessionInvariant(turnCtx, msg); err != nil {
-			return acp.PromptResponse{}, err
-		}
-
-		if handled, err := s.handleSessionMirror(turnCtx, msg); err != nil {
-			return acp.PromptResponse{}, s.interruptAfterEmitError(ctx, err)
-		} else if handled {
-			continue
 		}
 
 		if err := s.observePromptMessage(turnCtx, msg, state); err != nil {
@@ -219,7 +256,7 @@ func (s *agentSession) Prompt(
 		}
 
 		if promptFinishedBySystemIdle(msg) {
-			return s.finishPromptSystemIdle(turnCtx, ctx, params, state, toolUpdateOptions, commandName)
+			return s.finishPromptSystemIdle(turnCtx, ctx, params, state, commandName)
 		}
 
 		updates := mapper.MessageToUpdatesWithOptions(msg, toolUpdateOptions)
@@ -231,12 +268,16 @@ func (s *agentSession) Prompt(
 	}
 }
 
+// finishPromptSystemIdle ends a turn the harness closed with a state frame rather
+// than a result frame. There is no result to read, so there is no native stop
+// reason, no usage beyond what the turn already streamed, and no provider error
+// to classify: end_turn is what the harness actually reported, and the lifecycle
+// outcome is derived from this same response so the two can never disagree.
 func (s *agentSession) finishPromptSystemIdle(
 	turnCtx context.Context,
 	interruptCtx context.Context,
 	params acp.PromptRequest,
 	state *promptLoopState,
-	toolUpdateOptions mapper.ToolUpdateOptions,
 	commandName string,
 ) (acp.PromptResponse, error) {
 	stopReason := acp.StopReasonEndTurn
@@ -251,10 +292,6 @@ func (s *agentSession) finishPromptSystemIdle(
 	}
 
 	if err := s.emitLiveSessionInfoUpdate(turnCtx, params.Prompt); err != nil {
-		return acp.PromptResponse{}, s.interruptAfterEmitError(interruptCtx, err)
-	}
-
-	if err := s.drainSessionMirror(turnCtx, toolUpdateOptions); err != nil {
 		return acp.PromptResponse{}, s.interruptAfterEmitError(interruptCtx, err)
 	}
 
@@ -365,10 +402,6 @@ func (s *agentSession) finishPromptResult(
 		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
 	}
 
-	if err := s.drainSessionMirror(turnCtx, toolUpdateOptions); err != nil {
-		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
-	}
-
 	s.logUnknownStopReason(turnCtx, result)
 
 	return acp.PromptResponse{
@@ -393,67 +426,98 @@ func (s *agentSession) logUnknownStopReason(ctx context.Context, result *claude.
 	}
 }
 
-func (s *agentSession) handleSessionMirror(ctx context.Context, msg claude.Message) (bool, error) {
-	if err := s.poisonedError(); err != nil {
-		return false, err
-	}
-
-	frame, isMirror := msg.(*claude.TranscriptMirrorMessage)
-	if !isMirror {
-		return false, nil
-	}
-
-	if s.mirror.store == nil || len(frame.Entries) == 0 {
-		return true, nil
+// appendSessionMirror writes one transcript mirror frame to the store. It runs on
+// the session's ordered outbox, under a context detached from every turn and
+// every request, so a cancel can never abort a write that is already in flight or
+// leave a retry half done.
+func (s *agentSession) appendSessionMirror(ctx context.Context, frame *claude.TranscriptMirrorMessage) error {
+	if s.mirror == nil || s.mirror.store == nil || len(frame.Entries) == 0 {
+		return nil
 	}
 
 	ctx, finishAppend := s.agent.observe.StartSessionStore(ctx, "append")
 	err := s.mirror.appendFrame(ctx, frame)
 	finishAppend(err)
 
-	return true, err
+	return err
 }
 
-func (s *agentSession) drainSessionMirror(ctx context.Context, options ...mapper.ToolUpdateOptions) error {
-	drainCtx, cancel := context.WithTimeout(ctx, sessionMirrorDrainTimeout)
-	defer cancel()
+// settleTurnLifecycle is the turn's one durability and lifecycle boundary, and it
+// runs on every exit. The containment boundary this configuration selects has
+// already completed when it starts, so it commits the native-safe foreground
+// prefix, and only once that prefix is durable does the terminal idle report the
+// outcome the response carries.
+//
+// Durability outranks the terminal event. Where the containment boundary or the
+// commit itself failed, the prompt fails with its own error, no terminal idle is
+// emitted at all, and the incarnation ends unsettled; the next incarnation's
+// snapshot asserts the truthful state.
+func (s *agentSession) settleTurnLifecycle(
+	ctx context.Context,
+	stream *sessionStream,
+	turnID string,
+	response acp.PromptResponse,
+	promptErr error,
+) (acp.PromptResponse, error) {
+	if s.turnContainmentError() != nil {
+		stream.abandonIncarnation()
 
-	toolUpdateOptions := mapper.ToolUpdateOptions{}
-	if len(options) > 0 {
-		toolUpdateOptions = options[0]
+		return response, promptErr
 	}
 
-	for {
-		msg, err := s.client.Receive(drainCtx)
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-				return nil
-			}
+	if commitErr := s.commitSessionMirror(); commitErr != nil {
+		stream.abandonIncarnation()
 
-			return err
+		if promptErr != nil {
+			return response, promptErr
 		}
 
-		s.emitRawClaudeMessage(ctx, msg)
-
-		if err := s.checkNativeSessionInvariant(ctx, msg); err != nil {
-			return err
-		}
-
-		if _, err := s.handleSessionMirror(ctx, msg); err != nil {
-			return err
-		}
-
-		if toolUpdateOptions.Workflow == nil {
-			continue
-		}
-
-		updates := mapper.MessageToUpdatesWithOptions(msg, toolUpdateOptions)
-		s.recordWorkflowFrameErrors(ctx, toolUpdateOptions.Workflow)
-
-		if err := s.emitUpdates(ctx, updates); err != nil {
-			return err
-		}
+		return acp.PromptResponse{}, storeCommitError(commitErr)
 	}
+
+	if err := stream.settleTurn(ctx, turnID, lifecycleOutcomeFor(response, promptErr)); err != nil {
+		return acp.PromptResponse{}, err
+	}
+
+	if !s.nativePumpHandle().incarnationEnded() {
+		return response, promptErr
+	}
+
+	// The turn ended with no process behind it — a cancel that closed the client,
+	// a native exit, or a timeout that contained it. That is the end of the
+	// incarnation, and the next prompt's relaunch opens a new one.
+	if err := stream.loseIncarnation(ctx); err != nil {
+		return acp.PromptResponse{}, err
+	}
+
+	return response, promptErr
+}
+
+// storeCommitError is what a turn returns when the store does not hold what that
+// turn streamed. It is not a native turn failure: the harness produced the turn
+// correctly and the durability boundary that failed is the adapter's own.
+func storeCommitError(err error) error {
+	return acp.NewInternalError(map[string]any{
+		jsonFieldError:   "claude_store_commit_failed",
+		jsonFieldMessage: err.Error(),
+	})
+}
+
+// turnContainmentError reports the selected containment boundary's failure for
+// the turn that just settled.
+func (s *agentSession) turnContainmentError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.turnContainmentErr
+}
+
+// currentClient reports the session's native client.
+func (s *agentSession) currentClient() *claude.Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.client
 }
 
 func (s *agentSession) wasTurnCancelled() bool {

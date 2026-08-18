@@ -33,7 +33,6 @@ func TestNewAgentDefaultClientAndCloseBranches(t *testing.T) {
 		id:            "session-1",
 		client:        sessionClient,
 		turn:          make(chan struct{}, 1),
-		closeTurnWait: defaultSessionCloseTurnWait,
 	}
 	agent.sessions[session.id] = session
 	agent.permissionCache[session.id] = map[string]string{"Read": "allow"}
@@ -64,7 +63,6 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 		id:            acp.SessionId("session-1"),
 		client:        sessionClient,
 		turn:          make(chan struct{}, 1),
-		closeTurnWait: defaultSessionCloseTurnWait,
 	}
 	newServeAgent = func(...Option) *Agent { return agent }
 

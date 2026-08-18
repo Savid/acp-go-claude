@@ -383,7 +383,6 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 		cwd:           cwd,
 		client:        closeClient,
 		turn:          make(chan struct{}, 1),
-		closeTurnWait: defaultSessionCloseTurnWait,
 	}
 	_, err = activeDelete.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
 	require.ErrorContains(t, err, "close failed")
@@ -662,7 +661,6 @@ func newStartedAgentSessionForTest(t *testing.T, agent *Agent, id acp.SessionId)
 		cwd:           t.TempDir(),
 		client:        client,
 		turn:          make(chan struct{}, sessionTurnCapacity),
-		closeTurnWait: defaultSessionCloseTurnWait,
 	}
 
 	return session, func() { _ = client.Close() }

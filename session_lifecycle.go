@@ -570,13 +570,15 @@ func closedSessionError() error {
 	return unknownSessionError()
 }
 
-// awaitQuietTurn is the bounded close barrier. Close holds the returned release
-// until it finishes, so the teardown runs with no turn in flight.
-func (s *agentSession) awaitQuietTurn(ctx context.Context) (func(), error) {
-	waitCtx, stopWaiting := context.WithTimeout(ctx, s.closeTurnTimeout())
-	defer stopWaiting()
-
-	releaseTurn, err := s.acquireClosingTurn(waitCtx)
+// awaitSettledTurn is the close barrier, and it is the full-settlement latch. A
+// turn releases the session's turn slot only after its own settlement has
+// finished — its containment boundary, its durable commit, and its terminal
+// lifecycle event — so acquiring that slot is what proves there is nothing left
+// to settle. The caller's context is the only bound: a deadline here would tear
+// the process out from under a commit that is still landing, which is the exact
+// thing waiting for the turn prevents.
+func (s *agentSession) awaitSettledTurn(ctx context.Context) (func(), error) {
+	releaseTurn, err := s.acquireClosingTurn(ctx)
 	if err != nil {
 		return func() {}, fmt.Errorf("await the in-flight Claude turn: %w", err)
 	}
@@ -612,13 +614,16 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 	}
 
 	// The barrier runs before the native teardown rather than after it: closing
-	// the process under a turn that is still reading from it is the very thing
-	// waiting for that turn prevents. The wait is real and bounded, so a busy
-	// session is waited for instead of being answered with backpressure.
-	releaseTurn, err := s.awaitQuietTurn(ctx)
+	// the process under a turn that is still settling is the very thing waiting
+	// for that turn prevents. The wait is real, so a busy session is waited for
+	// instead of being answered with backpressure.
+	releaseTurn, err := s.awaitSettledTurn(ctx)
 	defer releaseTurn()
 
-	err = errors.Join(err, s.client.Close())
+	closeErr := s.client.Close()
+	err = errors.Join(err, closeErr, s.settleSessionClose(ctx, closeErr))
+
+	s.stopNativePump()
 
 	err = finalizeSessionRuntimeResources(
 		err,
@@ -637,16 +642,32 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 	return err
 }
 
+// settleSessionClose runs the close-fenced settlement in the order the contract
+// fixes. The containment boundary has just completed, so: stop the reader that
+// served the contained process, commit the resumable snapshot, terminalize what
+// the session still owns and state the quiescence fact that completed proof
+// produced, and fence the session.
+//
+// A boundary that did not complete terminalizes nothing, commits nothing new, and
+// states no fact — a set of activities the adapter has just proved it cannot
+// contain must not be declared terminal — and a snapshot the store does not hold
+// means no quiescence fact at all.
+func (s *agentSession) settleSessionClose(ctx context.Context, closeErr error) error {
+	s.nativePumpHandle().stopReceiving()
+
+	contained := !errors.Is(closeErr, claude.ErrProcessContainmentIncomplete)
+
+	var commitErr error
+	if contained {
+		commitErr = s.commitSessionMirror()
+	}
+
+	return errors.Join(commitErr, s.lifecycleStream().settleClose(ctx, contained, commitErr == nil))
+}
+
 func (s *agentSession) recordContainmentError(err error) {
 	if s.agent != nil {
 		s.agent.recordContainmentError(err)
 	}
 }
 
-func (s *agentSession) closeTurnTimeout() time.Duration {
-	if s.closeTurnWait > 0 {
-		return s.closeTurnWait
-	}
-
-	return defaultSessionCloseTurnWait
-}

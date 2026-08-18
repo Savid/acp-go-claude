@@ -1,6 +1,8 @@
 package claudeacp
 
 import (
+	"encoding/json"
+
 	"github.com/savid/acp-go-claude/internal/lifecycle"
 )
 
@@ -33,15 +35,22 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) 
 // from the same code path that enforces containment rather than from a
 // compiled-in constant.
 //
-// Nobody consumes the native stream between prompts, so there is no channel
-// outside a prompt and no proven activity kind: `updatesOutsidePrompt` is false
-// and `activityKinds` is empty on every configuration. Only the authoritative
-// containment mode enumerates the whole descendant tree, so only it proves
-// vacancy and names the `process-containment` class; ordinary same-identity
-// execution and opted-in Darwin containment prove a weaker boundary and a
-// weaker boundary is never promoted.
+// The session owns the native reader and drains it from session start until the
+// process ends, so notifications are delivered with no prompt in flight and none
+// is dropped: `updatesOutsidePrompt` is true on every configuration. No activity
+// kind has a proven native source — the `task_*` frames the mapper decodes are
+// tool-call presentation, and their identity, parentage, and terminality are not
+// established by any captured frame — so `activityKinds` is empty and stays
+// empty until one is. Only the authoritative containment mode enumerates the
+// whole descendant tree, so only it proves vacancy and names the
+// `process-containment` class; ordinary same-identity execution and opted-in
+// Darwin containment prove a weaker boundary, and a weaker boundary is never
+// promoted.
 func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
-	proven := lifecycle.Negotiated{ActivityKinds: []lifecycle.ActivityKind{}}
+	proven := lifecycle.Negotiated{
+		UpdatesOutsidePrompt: true,
+		ActivityKinds:        []lifecycle.ActivityKind{},
+	}
 	if a.containmentMode.provesWholeTreeLifecycle() {
 		proven.AuthoritativeQuiescence = true
 		proven.QuiescenceSource = lifecycle.ProofClassProcessContainment
@@ -65,12 +74,49 @@ func (a *Agent) negotiatedLifecycle() lifecycle.Negotiated {
 	return a.lifecycle
 }
 
+// readPromptCorrelation reads the submission identity a `session/prompt` carries.
+// The value is required while version 1 is negotiated and forbidden otherwise, so
+// both an absent one and a present one are refusals in the configuration that
+// does not expect them, and both are answered before the prompt is dispatched.
+func (a *Agent) readPromptCorrelation(meta map[string]any) (lifecycle.Submission, error) {
+	submission, refusal := lifecycle.DecodePromptCorrelation(meta, a.negotiatedLifecycle())
+	if refusal != nil {
+		return lifecycle.Submission{}, unsupportedField(refusal.Field)
+	}
+
+	return submission, nil
+}
+
 // rejectLifecycleMeta refuses the lifecycle key on a surface that never carries
 // it. A family literal is never foreign and never a no-op: an inbound surface
 // outside `initialize`, `session/prompt`, and the lifecycle-bearing outbound
 // surfaces rejects it rather than ignoring it as another namespace's business.
 func rejectLifecycleMeta(meta map[string]any) error {
 	if _, present := meta[lifecycle.MetaKey]; !present {
+		return nil
+	}
+
+	return unsupportedField(lifecycle.MetaPath)
+}
+
+// rejectLifecycleExtensionMeta refuses the lifecycle key on an extension method's
+// raw params, at the dispatch boundary and ahead of every leg's own closed-member
+// validation. The legs reject an unknown `_meta` by that member's name, which
+// names the object rather than the reserved literal inside it, and a caller is
+// owed the exact path of the family key it sent.
+func rejectLifecycleExtensionMeta(params json.RawMessage) error {
+	var envelope struct {
+		Meta map[string]json.RawMessage `json:"_meta"`
+	}
+
+	if err := json.Unmarshal(params, &envelope); err != nil {
+		// A params object this step cannot read is the method's own business: it
+		// carries no readable reserved key, so dispatch continues and the leg
+		// answers with its own refusal.
+		return nil
+	}
+
+	if _, present := envelope.Meta[lifecycle.MetaKey]; !present {
 		return nil
 	}
 

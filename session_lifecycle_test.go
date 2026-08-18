@@ -107,8 +107,11 @@ func TestSessionLifecycleBranches(t *testing.T) {
 	defer closeCleanup()
 	closeSession.turn = make(chan struct{}, 1)
 	closeSession.turn <- struct{}{}
-	closeSession.closeTurnWait = time.Millisecond
-	err = closeSession.Close(ctx)
+
+	waitCtx, stopWaiting := context.WithTimeout(ctx, time.Millisecond)
+	defer stopWaiting()
+
+	err = closeSession.Close(waitCtx)
 	require.Error(t, err)
 }
 
@@ -464,7 +467,6 @@ func newActualProcessFixture(t *testing.T, agentOptions ...Option) actualProcess
 		canRelaunch:       true,
 		turn:              make(chan struct{}, sessionTurnCapacity),
 		mirror:            newSessionMirror(agent.log, nil, dir, nil),
-		closeTurnWait:     defaultSessionCloseTurnWait,
 		contextWindowSize: 200000,
 	}
 	agent.mu.Lock()
@@ -683,7 +685,6 @@ func newCloseStateSession(t *testing.T, transport claude.Transport) *agentSessio
 		id:            "session-1",
 		client:        client,
 		turn:          make(chan struct{}, sessionTurnCapacity),
-		closeTurnWait: defaultSessionCloseTurnWait,
 	}
 }
 
@@ -715,24 +716,27 @@ func TestSessionCloseWaitsForTheInFlightTurnBeforeTeardown(t *testing.T) {
 	require.Equal(t, 1, transport.CloseCalls())
 }
 
-// TestSessionCloseBoundReportsTheWaitRatherThanBackpressure proves a busy
-// session's close is no longer answered with the spurious prompt-admission
-// backpressure error that the old non-blocking barrier produced.
-func TestSessionCloseBoundReportsTheWaitRatherThanBackpressure(t *testing.T) {
+// TestSessionCloseWaitIsBoundedOnlyByItsCaller proves the settlement latch has no
+// deadline of its own: a busy session's close waits for that turn to settle and
+// reports the caller's own bound rather than the spurious prompt-admission
+// backpressure error a non-blocking barrier produced.
+func TestSessionCloseWaitIsBoundedOnlyByItsCaller(t *testing.T) {
 	transport := newFakeClaudeTransport()
 	session := newCloseStateSession(t, transport)
-	session.closeTurnWait = time.Millisecond
 
-	// The turn never finishes, so only the bound can end the wait.
+	// The turn never finishes, so only the caller's bound can end the wait.
 	session.turn <- struct{}{}
 
-	err := session.Close(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+
+	err := session.Close(ctx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorContains(t, err, "await the in-flight Claude turn")
 
 	var reqErr *acp.RequestError
 
-	require.NotErrorAs(t, err, &reqErr, "a bounded close wait is not prompt backpressure")
+	require.NotErrorAs(t, err, &reqErr, "an abandoned close wait is not prompt backpressure")
 }
 
 // TestClosedSessionRefusesEveryDoor proves close is terminal: once it has begun,

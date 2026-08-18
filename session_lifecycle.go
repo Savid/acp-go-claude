@@ -42,6 +42,37 @@ func sessionCloseUnsettledError(err error) error {
 	})
 }
 
+// sessionDeleteUnsettledError is the wire answer for a delete whose teardown
+// never took the session's settlement barrier. That is the same unreached
+// boundary session/close reports, so it is answered the same way and for the
+// same reason: nothing failed internally, the teardown simply never ran, and the
+// next delete takes the barrier again. A caller that withdrew its own request
+// gets the raw error and the -32800 that goes with it; any other expiry is the
+// family's invalid-request idiom, naming itself.
+//
+// It names itself apart from close because the two refusals do not report the
+// same state. A refused close settled nothing at all and its id still names a
+// live session; a refused delete already wrote its durable tombstone and already
+// hid the id, so the deletion the host asked for has happened and only the
+// teardown behind it is still owed.
+//
+// Anything else the teardown reports travels unchanged. A containment or cleanup
+// failure is a real internal failure and keeps the answer it earned.
+func sessionDeleteUnsettledError(err error) error {
+	if !errors.Is(err, errSessionCloseUnsettled) {
+		return err
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
+
+	return acp.NewInvalidRequest(map[string]any{
+		jsonFieldError:   "claude_session_delete_unsettled",
+		jsonFieldMessage: err.Error(),
+	})
+}
+
 // finalizeSessionRuntimeResources returns admissions only after the selected
 // containment boundary completes. An incomplete boundary retains both the
 // native admission and every adapter-owned scratch root because escaped work

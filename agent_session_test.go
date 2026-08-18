@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -1266,4 +1269,282 @@ func TestSessionCloseReportsMCPConfigRemovalError(t *testing.T) {
 	require.NoError(t, os.WriteFile(parentFile, []byte("x"), 0o600))
 	session.mcpConfigDir = filepath.Join(parentFile, "mcp")
 	require.Error(t, session.Close(t.Context()))
+}
+
+// gatedLoadStore holds one store read open, so a test can land a delete in the
+// exact window a load has already passed its tombstone check and has not yet
+// installed anything.
+type gatedLoadStore struct {
+	SessionStore
+
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *gatedLoadStore) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error) {
+	entries, err := s.SessionStore.Load(ctx, key)
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+
+	return entries, err
+}
+
+// TestLoadSessionRacingDeleteInstallsNothingBehindTheTombstone proves the
+// tombstone is re-read where an id becomes live, not only where a load begins.
+// The load passes its tombstone check, the delete lands while the native process
+// is starting, and the instance that start produced is refused rather than
+// registered: an install behind a tombstone is a live native session no host
+// could ever address again, because session, load, resume, fork and close all
+// answer unknown-session for that id.
+func TestLoadSessionRacingDeleteInstallsNothingBehindTheTombstone(t *testing.T) {
+	ctx := context.Background()
+	sessionID := acp.SessionId("22222222-2222-4222-8222-222222222222")
+	key := SessionKey{SessionID: string(sessionID)}
+	cwd := t.TempDir()
+
+	backing := NewInMemorySessionStore()
+	require.NoError(t, backing.Append(ctx, key, []SessionStoreEntry{
+		[]byte(`{"type":"user","message":{"content":"live"}}`),
+	}))
+
+	gate := &gatedLoadStore{SessionStore: backing, entered: make(chan struct{}), release: make(chan struct{})}
+	transport := newFakeClaudeTransport()
+	agent, _, _ := newFakeLifecycleAgent(t, transport, WithSessionStore(gate))
+
+	var startedMu sync.Mutex
+	started := []*claude.Client{}
+
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		client := claude.NewClient(log, options, transport)
+
+		startedMu.Lock()
+		started = append(started, client)
+		startedMu.Unlock()
+
+		return client
+	}
+
+	previousDelete := deleteNativeTranscript
+	t.Cleanup(func() { deleteNativeTranscript = previousDelete })
+	deleteNativeTranscript = func(context.Context, string, string) error { return nil }
+
+	loadDone := make(chan error, 1)
+
+	go func() {
+		_, loadErr := agent.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
+		loadDone <- loadErr
+	}()
+
+	<-gate.entered
+
+	_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+	require.NoError(t, err, "the delete of an id the map does not hold succeeds")
+
+	close(gate.release)
+
+	requireUnknownSession(t, <-loadDone)
+
+	// The native start really did happen — this is the window, not a load that
+	// failed early — and what it produced is contained rather than published.
+	startedMu.Lock()
+	require.Len(t, started, 1, "the load started exactly one native process")
+	require.False(t, started[0].Alive(), "the process the refused install started is not left running")
+	startedMu.Unlock()
+
+	require.Equal(t, 1, transport.CloseCalls(), "the refused install is torn down exactly once")
+
+	agent.mu.Lock()
+	require.NotContains(t, agent.sessions, sessionID, "nothing is registered behind the tombstone")
+	require.True(t, agent.isDeletedLocked(sessionID), "the tombstone is intact")
+	agent.mu.Unlock()
+
+	entries, err := backing.Load(ctx, key)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the racing load recreated no row")
+}
+
+// tombstoningTransport writes the agent's tombstone for an id while that id's
+// current instance is being closed, which is the window a same-id install opens
+// when it steps aside to settle the instance it is replacing.
+type tombstoningTransport struct {
+	claude.Transport
+
+	agent     *Agent
+	sessionID acp.SessionId
+}
+
+func (t *tombstoningTransport) Close() error {
+	t.agent.mu.Lock()
+	t.agent.deleted[t.sessionID] = struct{}{}
+	t.agent.mu.Unlock()
+
+	return t.Transport.Close()
+}
+
+// TestStoreStartedSessionRefusesAReplacementBehindALateTombstone covers the
+// other side of the same fence. A same-id install leaves the lock to settle the
+// instance it replaces, so a delete can land in that gap too; the replacement is
+// torn down rather than installed, and the settled instance leaves the map.
+func TestStoreStartedSessionRefusesAReplacementBehindALateTombstone(t *testing.T) {
+	ctx := context.Background()
+	sessionID := acp.SessionId("session-replaced")
+	agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+
+	previousTransport := newFakeClaudeTransport()
+	previous := newSessionForTransport(t, agent, sessionID, &tombstoningTransport{
+		Transport: previousTransport,
+		agent:     agent,
+		sessionID: sessionID,
+	})
+	agent.sessions[sessionID] = previous
+
+	replacementTransport := newFakeClaudeTransport()
+	replacement := newSessionForTransport(t, agent, sessionID, replacementTransport)
+
+	requireUnknownSession(t, agent.storeStartedSession(ctx, replacement))
+
+	require.Equal(t, 1, previousTransport.CloseCalls(), "the replaced instance settled")
+	require.Equal(t, 1, replacementTransport.CloseCalls(), "the replacement is contained, not published")
+
+	agent.mu.Lock()
+	require.NotContains(t, agent.sessions, sessionID, "the id names nothing behind its tombstone")
+	agent.mu.Unlock()
+}
+
+// TestResumeSessionNeverReusesAnInstanceBehindItsTombstone proves the reuse path
+// reads the tombstone rather than the map. Delete writes its tombstone before it
+// touches the instance behind it, so there is a real window in which the map
+// still holds a session whose close has not even begun; handing that instance to
+// a load, resume or fork would un-delete a session the host was told is gone.
+// The probe runs from inside the delete's own cancel, which is the window.
+func TestResumeSessionNeverReusesAnInstanceBehindItsTombstone(t *testing.T) {
+	ctx := context.Background()
+	sessionID := acp.SessionId("session-busy")
+	cwd := t.TempDir()
+
+	withdrawn, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	store := &cancelAfterDeleteStore{SessionStore: NewInMemorySessionStore(), cancel: cancel}
+	agent, session, _ := newBusySessionAgent(t, sessionID, WithSessionStore(store))
+
+	previousDelete := deleteNativeTranscript
+	t.Cleanup(func() { deleteNativeTranscript = previousDelete })
+	deleteNativeTranscript = func(context.Context, string, string) error { return nil }
+
+	start := sessionStart{Cwd: cwd, ResumeID: string(sessionID)}
+	session.fingerprint = sessionStartFingerprint(start)
+	require.Same(t, session, agent.activeSessionForStart(sessionID, start), "the instance is reusable before the delete")
+
+	// The delete's cancel runs after the tombstone is durable and before the
+	// close that would latch the instance's terminal state, so this is the whole
+	// window the fence exists for.
+	reused := make(chan *agentSession, 1)
+
+	var probeOnce sync.Once
+
+	session.mu.Lock()
+	session.cancel = func() {
+		probeOnce.Do(func() { reused <- agent.activeSessionForStart(sessionID, start) })
+	}
+	session.mu.Unlock()
+
+	_, err := agent.UnstableDeleteSession(withdrawn, DeleteSessionRequest(sessionID))
+	require.ErrorIs(t, err, errSessionCloseUnsettled, "the barrier refused the teardown, so the instance is held")
+
+	require.Nil(t, <-reused, "a tombstoned id names nothing the map still holds")
+
+	agent.mu.Lock()
+	require.Same(t, session, agent.sessions[sessionID], "the instance stays for the next delete to retry")
+	agent.mu.Unlock()
+
+	require.Nil(t, agent.activeSessionForStart(sessionID, start))
+
+	_, resumeErr := agent.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
+	requireUnknownSession(t, resumeErr)
+}
+
+// expireAfterDeleteStore holds the delete until its caller's deadline has passed,
+// so the teardown behind a durable tombstone meets a barrier wait that expires on
+// a clock rather than on a cancel.
+type expireAfterDeleteStore struct {
+	SessionStore
+
+	once sync.Once
+}
+
+func (s *expireAfterDeleteStore) Delete(ctx context.Context, key SessionKey) error {
+	err := s.SessionStore.Delete(ctx, key)
+	s.once.Do(func() { <-ctx.Done() })
+
+	return err
+}
+
+// TestDeleteSessionNamesItsUnreachedTeardownBoundary pins the wire answer for a
+// delete whose teardown never took the settlement barrier. It is the same
+// unreached boundary session/close reports, so it is not an internal failure: a
+// deadline gets the family's named invalid-request refusal, under a name of its
+// own because the deletion itself already happened.
+func TestDeleteSessionNamesItsUnreachedTeardownBoundary(t *testing.T) {
+	ctx := context.Background()
+	sessionID := acp.SessionId("session-busy")
+	key := SessionKey{SessionID: string(sessionID)}
+	backing := NewInMemorySessionStore()
+	require.NoError(t, backing.Append(ctx, key, []SessionStoreEntry{
+		[]byte(`{"type":"user","message":{"content":"live"}}`),
+	}))
+
+	agent, session, transport := newBusySessionAgent(t, sessionID,
+		WithSessionStore(&expireAfterDeleteStore{SessionStore: backing}))
+
+	previousDelete := deleteNativeTranscript
+	t.Cleanup(func() { deleteNativeTranscript = previousDelete })
+	deleteNativeTranscript = func(context.Context, string, string) error { return nil }
+
+	expiring, cancel := context.WithTimeout(ctx, time.Millisecond)
+	defer cancel()
+
+	_, err := agent.UnstableDeleteSession(expiring, DeleteSessionRequest(sessionID))
+	requireExpiredDeleteRefusal(t, expiring, err)
+	require.Zero(t, transport.CloseCalls(), "the barrier admitted no teardown")
+
+	// The refusal is a refusal of the teardown alone: the deletion the host asked
+	// for is durable, the id is hidden, and the instance stays for the retry.
+	entries, err := backing.Load(ctx, key)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+
+	agent.mu.Lock()
+	require.Same(t, session, agent.sessions[sessionID])
+	agent.mu.Unlock()
+
+	_, lookupErr := agent.session(sessionID)
+	requireUnknownSession(t, lookupErr)
+
+	<-session.turn
+
+	_, err = agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+	require.NoError(t, err, "the next delete finishes the teardown this one refused")
+	require.Equal(t, 1, transport.CloseCalls())
+}
+
+// requireExpiredDeleteRefusal pins delete's answer for a barrier wait that ran
+// out without a cancel: the request was well formed and nothing failed
+// internally, so it is a retryable refusal that names itself and carries the
+// barrier-wait error as its message.
+func requireExpiredDeleteRefusal(t *testing.T, ctx context.Context, err error) {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32600, reqErr.Code)
+	require.Equal(t, "Invalid request", reqErr.Message)
+
+	data, ok := reqErr.Data.(map[string]any)
+	require.True(t, ok, "the refusal names itself")
+	require.Equal(t, "claude_session_delete_unsettled", data[jsonFieldError])
+	require.Contains(t, data[jsonFieldMessage], "await the in-flight Claude turn")
+	require.Equal(t, reqErr, requestError(ctx, err), "the dispatcher forwards it unchanged")
 }

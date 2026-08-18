@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/lifecycle"
@@ -555,4 +556,83 @@ func TestSessionStreamCloseStatesNoFactOnADeadIncarnation(t *testing.T) {
 		require.NoError(t, stream.settleClose(ctx, true, true))
 		require.Equal(t, delivered, lifecycleEventTypes(t, conn))
 	})
+}
+
+// ctxHonoringBlockingClient is a host whose delivery never returns on its own
+// and only ends when its context does — a wedged connection, which is the one
+// thing a detached settlement has no other way out of.
+type ctxHonoringBlockingClient struct {
+	*recordingAgentClient
+
+	gate chan struct{}
+}
+
+func (c *ctxHonoringBlockingClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	select {
+	case <-c.gate:
+		return c.recordingAgentClient.SessionUpdate(ctx, notification)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *ctxHonoringBlockingClient) release() { close(c.gate) }
+
+// TestSettlementEmissionsAreBoundedNotMerelyDetached proves the settlement
+// context keeps its detachment and gains a bound. The request is withdrawn, so a
+// cancellation-following emission would abandon work that already completed; the
+// budget is what stops a wedged host from holding the stream, the turn slot
+// behind it, and the close waiting on that slot forever. The expiry is a lost
+// delivery like any other, so it fails the caller, latches this incarnation, and
+// does not follow the next one.
+func TestSettlementEmissionsAreBoundedNotMerelyDetached(t *testing.T) {
+	previousTimeout := sessionSettlementTimeout
+	t.Cleanup(func() { sessionSettlementTimeout = previousTimeout })
+	sessionSettlementTimeout = 50 * time.Millisecond
+
+	_, conn, stream := newLifecycleStreamTestSession(t)
+	require.NoError(t, stream.incarnate(t.Context()))
+
+	turnID, err := stream.dispatch(
+		t.Context(),
+		lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"},
+		"nonce",
+		func() error { return nil },
+	)
+	require.NoError(t, err)
+
+	blocked := &ctxHonoringBlockingClient{recordingAgentClient: conn, gate: make(chan struct{})}
+	stream.session.agent.setConnection(blocked)
+
+	withdrawn, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	settled := make(chan error, 1)
+
+	go func() {
+		settled <- stream.settleTurn(withdrawn, turnID,
+			lifecycleOutcomeFor(acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil))
+	}()
+
+	var settleErr error
+
+	select {
+	case settleErr = <-settled:
+	case <-time.After(30 * time.Second):
+		blocked.release()
+		t.Fatal("settlement never returned: the detached context carries no bound")
+	}
+
+	require.ErrorContains(t, settleErr, "claude_lifecycle_violation")
+	require.ErrorContains(t, settleErr, context.DeadlineExceeded.Error())
+
+	stream.mu.Lock()
+	require.Error(t, stream.lost, "an emission the host never received is loss")
+	require.NoError(t, stream.refused, "a wedged host is not something this adapter may not state")
+	stream.mu.Unlock()
+
+	// The loss latched the incarnation it holed, not the session: the next
+	// incarnation opens on a fresh identity and re-asserts the whole state.
+	blocked.release()
+	require.NoError(t, stream.incarnate(t.Context()))
 }

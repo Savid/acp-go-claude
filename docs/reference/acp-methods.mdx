@@ -182,13 +182,32 @@ the barrier-wait error, not anything the native process reported. A same-id load
 resume, or fork over an instance whose close settled nothing is refused the same
 way.
 
-`session/delete` has no such refusal. It writes its durable tombstone first and
-hides the id with it, and only then cancels, closes, and cleans up. A teardown
-that does not finish is reported as the delete's error, but the tombstone is
-already durable and the session is already hidden from `session/list`,
-`session/load`, `session/resume`, and every other session-scoped method; the
-instance stays held so the next `session/delete` finishes what the first started.
-No write behind a tombstone recreates the row.
+`session/delete` runs the other way round. It writes its durable tombstone first
+and hides the id with it, and only then cancels, closes, and cleans up. A
+teardown that does not finish is reported as the delete's error, but the
+tombstone is already durable and the session is already hidden from
+`session/list`, `session/load`, `session/resume`, and every other session-scoped
+method; the instance stays held so the next `session/delete` finishes what the
+first started. No write behind a tombstone recreates the row, and nothing is
+installed behind one either: a `session/load` or `session/resume` whose native
+process finished starting after the tombstone landed is refused with the
+unknown-session error and torn down, rather than registered under an id no host
+could address again.
+
+Delete's teardown meets the same settlement barrier, so it has the same refusal
+under a name of its own:
+
+| Wait ended by | Answer |
+| --- | --- |
+| The caller cancelling its own request | `-32800` `Request cancelled` |
+| Any other expiry, such as a deadline | `-32600` `Invalid request` with `{"error":"claude_session_delete_unsettled","message":<barrier wait error>}` |
+
+It is named apart from `claude_session_close_unsettled` because it reports a
+different state. A refused close settled nothing and its id still names a live
+session; a refused delete already deleted the session — the tombstone is durable
+and the id is hidden — and owes only the teardown, which the next
+`session/delete` takes. Any other teardown failure, such as a containment or
+cleanup error, is a real internal failure and is still answered `-32603`.
 
 An image output the adapter will not ship — `invalid_base64`, `not_a_raster`,
 `media_type_mismatch`, `missing_file`, `path_not_allowed`, or `too_large` — is

@@ -234,7 +234,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		// A tombstoned id is hidden from the moment its tombstone is durable,
 		// whatever teardown that delete still owes. A deleted session is
 		// wire-indistinguishable from one that never existed.
-		if _, deleted := a.deleted[id]; deleted {
+		if a.isDeletedLocked(id) {
 			continue
 		}
 
@@ -368,6 +368,11 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 // its errors are reported only from here: the tombstone is already durable and
 // the id already hidden, so a partial cleanup is a retry the next list, load,
 // resume, or delete takes, not a reason to keep naming a deleted session.
+//
+// A teardown the barrier never admitted is that same unreached boundary
+// session/close reports, and it is answered the same way rather than as an
+// internal failure — under its own name, because a refused delete has already
+// deleted the session and only owes the teardown.
 func (a *Agent) UnstableDeleteSession(
 	ctx context.Context,
 	params acp.UnstableDeleteSessionRequest,
@@ -415,7 +420,7 @@ func (a *Agent) UnstableDeleteSession(
 	if cleanupErr != nil {
 		a.recordContainmentError(cleanupErr)
 
-		return acp.UnstableDeleteSessionResponse{}, cleanupErr
+		return acp.UnstableDeleteSessionResponse{}, sessionDeleteUnsettledError(cleanupErr)
 	}
 
 	return acp.UnstableDeleteSessionResponse{}, nil
@@ -431,7 +436,7 @@ func (a *Agent) session(sessionID acp.SessionId) (*agentSession, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if _, deleted := a.deleted[sessionID]; deleted {
+	if a.isDeletedLocked(sessionID) {
 		return nil, unknownSessionError()
 	}
 
@@ -553,6 +558,20 @@ func (a *Agent) configurationError() error {
 	return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
 }
 
+// storeStartedSession publishes one freshly started instance under its id, and
+// it is the only place an id becomes live. Every reason the id may not be
+// published is re-read here, under the lock, after the slow native start: the
+// admission checks the entry points ran happen before a process launch that
+// takes as long as it takes, so a decision made there is only a guess by the
+// time there is something to install.
+//
+// A tombstone is the reason that guess is load-bearing. Delete writes it and
+// hides the id, then tears down whatever the map held; an install that read the
+// tombstone before it landed would register a live native session behind it,
+// where session, load, resume, and close all answer unknown-session and nothing
+// the host can send would ever reach it again. Registration is refused
+// instead, the instance nothing will ever name is torn down here, and the caller
+// is told what every other door tells it.
 func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) error {
 	a.mu.Lock()
 	if a.closed {
@@ -560,6 +579,13 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) 
 		a.mu.Unlock()
 
 		return a.closeRejectedSession(ctx, session, "agent_closed", errAgentClosed)
+	}
+
+	if a.isDeletedLocked(session.id) {
+		a.deleteCachedPermissionRulesLocked(session.id)
+		a.mu.Unlock()
+
+		return a.closeRejectedSession(ctx, session, "session_deleted", unknownSessionError())
 	}
 
 	previous := a.sessions[session.id]
@@ -593,6 +619,18 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) 
 			a.dropSession(ctx, session.id, previous)
 
 			return a.closeRejectedSession(ctx, session, "agent_closed", errAgentClosed)
+		}
+
+		if a.isDeletedLocked(session.id) {
+			a.deleteCachedPermissionRulesLocked(session.id)
+			a.mu.Unlock()
+
+			// A delete landed while the replaced instance was settling. The tombstone
+			// is durable, so the settled instance leaves the map and the replacement
+			// is torn down rather than installed behind it.
+			a.dropSession(ctx, session.id, previous)
+
+			return a.closeRejectedSession(ctx, session, "session_deleted", unknownSessionError())
 		}
 	}
 
@@ -731,7 +769,16 @@ func (a *Agent) activeSessionForStart(id acp.SessionId, start sessionStart) *age
 
 	a.mu.Lock()
 	session := a.sessions[id]
+	deleted := a.isDeletedLocked(id)
 	a.mu.Unlock()
+
+	// A tombstoned id names nothing whatever the map still holds. Delete leaves an
+	// instance behind its tombstone when the teardown it owes has not finished, so
+	// reuse reads the tombstone rather than the map and never hands a deleted
+	// session back to a host that asked to load or resume it.
+	if deleted {
+		return nil
+	}
 
 	if session == nil || session.fingerprint != fingerprint {
 		return nil
@@ -1269,6 +1316,14 @@ func (a *Agent) isDeleted(sessionID acp.SessionId) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	return a.isDeletedLocked(sessionID)
+}
+
+// isDeletedLocked reports the durable tombstone every path that hands out, or
+// installs, an instance for this id has to consult. Delete writes the tombstone
+// and hides the id in one critical section, so reading it under the same lock is
+// what makes "this id names nothing" a fact rather than a stale observation.
+func (a *Agent) isDeletedLocked(sessionID acp.SessionId) bool {
 	_, ok := a.deleted[sessionID]
 
 	return ok

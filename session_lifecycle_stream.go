@@ -10,6 +10,16 @@ import (
 	"github.com/savid/acp-go-claude/internal/lifecycle"
 )
 
+// defaultSessionSettlementTimeout bounds one settlement's emissions. It is the
+// commit boundary's budget, because a settlement's emissions state what that
+// commit made durable and the two are the same close: a settlement that outran
+// the budget its own durable prefix was given is not slow, it is wedged.
+const defaultSessionSettlementTimeout = defaultSessionMirrorCommitTimeout
+
+// sessionSettlementTimeout is the live bound. It is a var so a test can prove
+// the bound exists without waiting out the real budget.
+var sessionSettlementTimeout = defaultSessionSettlementTimeout
+
 // The entities one incarnation mints are named from the incarnation identity, so
 // a reader can see at a glance which stream a cycle, a turn, or an action
 // belongs to.
@@ -247,7 +257,8 @@ func (p *sessionStream) settleTurn(ctx context.Context, turnID string, outcome l
 		return nil
 	}
 
-	ctx = settlementContext(ctx)
+	ctx, cancelSettlement := settlementContext(ctx)
+	defer cancelSettlement()
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -418,7 +429,8 @@ func (p *sessionStream) loseIncarnation(ctx context.Context) error {
 		return nil
 	}
 
-	ctx = settlementContext(ctx)
+	ctx, cancelSettlement := settlementContext(ctx)
+	defer cancelSettlement()
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -492,7 +504,8 @@ func (p *sessionStream) settleClose(ctx context.Context, contained bool, committ
 		return nil
 	}
 
-	ctx = settlementContext(ctx)
+	ctx, cancelSettlement := settlementContext(ctx)
+	defer cancelSettlement()
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -624,13 +637,21 @@ func stopReasonForOutcome(outcome lifecycle.Outcome) string {
 }
 
 // settlementContext detaches a settlement's emissions from the request that
-// asked for it. Settlement reports what has already happened — a terminal idle,
-// a retired incarnation, a proven quiescence — and a host that cancels its
-// request un-happens none of it. The request's values are kept, so the emission
-// still carries its trace; only the cancellation is dropped, because a cancelled
-// delivery would hole the stream over work that completed anyway.
-func settlementContext(ctx context.Context) context.Context {
-	return context.WithoutCancel(ctx)
+// asked for it, and bounds them. Settlement reports what has already happened —
+// a terminal idle, a retired incarnation, a proven quiescence — and a host that
+// cancels its request un-happens none of it. The request's values are kept, so
+// the emission still carries its trace; only the cancellation is dropped,
+// because a cancelled delivery would hole the stream over work that completed
+// anyway.
+//
+// Dropping the cancellation drops the request's deadline with it, so the bound
+// is restated here. Detached is not unbounded: a host whose write never returns
+// would otherwise hold the stream lock, the turn slot behind it, and the close
+// waiting on that slot forever. The budget expiring is an emission that did not
+// reach the host, which is loss, and loss already fails closed down the same
+// path every other undelivered event takes.
+func settlementContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), sessionSettlementTimeout)
 }
 
 func lifecycleViolationError(message string) error {

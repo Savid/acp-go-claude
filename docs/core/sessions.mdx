@@ -48,6 +48,21 @@ instance stays held so a later `session/delete` can finish it. Nothing behind a
 tombstone recreates the row, so the settlement commit that teardown runs lands on
 nothing.
 
+That teardown waits at the same settlement barrier close does, so it is refused
+the same way when the wait ends first: a caller that cancelled its own request is
+answered `-32800`, and any other expiry is answered `-32600` naming
+`claude_session_delete_unsettled` (see
+[ACP methods](/docs/reference/acp-methods)). It is named apart from close's
+refusal because the deletion itself already happened — only the teardown is owed.
+
+Nothing is installed behind a tombstone either. A `session/load` or
+`session/resume` re-reads the tombstone at the moment it would publish the id,
+not only when it starts, so a native process that finished launching after a
+delete landed is torn down and the caller is told the id is unknown rather than
+leaving a live session under an id every method now refuses. Reuse of an
+already-active session reads the tombstone the same way, so a `session/delete`
+whose teardown is still owed never hands its instance back.
+
 Loading, resuming, and forking an inactive session require authoritative main
 rows in the [session store](/docs/features/session-store). The adapter
 materializes those rows into an isolated temporary Claude config directory

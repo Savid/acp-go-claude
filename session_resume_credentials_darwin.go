@@ -14,22 +14,18 @@ var readAuthKeychainCredential = claude.ReadAuthKeychainCredential
 // stores the OAuth credential only in the Keychain, keyed by a hash of the
 // config dir path; a materialized temp dir hashes to an item name nothing
 // ever wrote, so the blob must travel as the plaintext credential file the
-// CLI accepts in its place. The context is fresh because the copy runs on
-// the session-load path without one, and every keystore call underneath
+// CLI accepts in its place. That premise keys on the resume destination
+// differing from the login home — which a materialized temp dir always
+// does — so the read runs under every launch mode, ordinary same-identity
+// execution included. A home nothing natively logged into owns no item and
+// answers absence, which keeps file- and env-authenticated homes on the
+// plaintext leg. The context is fresh because the copy runs on the
+// session-load path without one, and every keystore call underneath
 // carries its own bound.
 func readClaudeResumeKeychainCredential(source string, provided ...claude.Options) ([]byte, error) {
 	var options claude.Options
 	if len(provided) > 0 {
 		options = provided[0]
-	}
-
-	// The Keychain travel exists for the explicit isolation deployments whose
-	// materialized homes the native identity cannot re-derive an item name for.
-	// Ordinary same-identity execution keeps the CLI's own Keychain behavior
-	// instead of demanding the containment generation machinery the read runs
-	// under.
-	if options.ProcessIsolation == nil {
-		return nil, nil
 	}
 
 	data, err := readAuthKeychainCredential(context.Background(), source, authNativeUser(options), options)

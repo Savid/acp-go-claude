@@ -39,18 +39,9 @@ func runContainedAuthKeychainTool(ctx context.Context, args []string, options Op
 		return nil, 0, err
 	}
 
-	if options.PrepareKeychainGeneration == nil || options.AcquireKeychainDiscovery == nil {
-		return nil, 0, fmt.Errorf("%w: keychain native admission is unavailable", ErrProcessContainmentIncomplete)
-	}
-
-	generation, err := options.PrepareKeychainGeneration(ctx)
+	generation, release, err := admitAuthKeychainNative(ctx, options)
 	if err != nil {
 		return nil, 0, err
-	}
-
-	release, err := options.AcquireKeychainDiscovery(ctx)
-	if err != nil {
-		return nil, 0, errors.Join(err, generation.finish(true))
 	}
 
 	containedOptions := options
@@ -79,6 +70,43 @@ func runContainedAuthKeychainTool(ctx context.Context, args []string, options Op
 	}
 
 	return nil, 0, runErr
+}
+
+// admitAuthKeychainNative admits one platform keystore call under the boundary
+// the options select. Best-effort containment cannot launch without its
+// generation and native-root permit, so their absence there is an incomplete
+// boundary; every other mode launches the platform tool as ordinary
+// same-identity execution, which consumes neither, so it runs with whichever
+// admission hooks the caller wired — the same optionality the version probe
+// gives its discovery hooks.
+func admitAuthKeychainNative(ctx context.Context, options Options) (*DarwinGeneration, func(), error) {
+	if options.DarwinBestEffort && (options.PrepareKeychainGeneration == nil || options.AcquireKeychainDiscovery == nil) {
+		return nil, nil, fmt.Errorf("%w: keychain native admission is unavailable", ErrProcessContainmentIncomplete)
+	}
+
+	var generation *DarwinGeneration
+
+	if options.PrepareKeychainGeneration != nil {
+		var err error
+
+		generation, err = options.PrepareKeychainGeneration(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	release := func() {}
+
+	if options.AcquireKeychainDiscovery != nil {
+		acquired, err := options.AcquireKeychainDiscovery(ctx)
+		if err != nil {
+			return nil, nil, errors.Join(err, generation.finish(true))
+		}
+
+		release = acquired
+	}
+
+	return generation, release, nil
 }
 
 func authKeychainExitCode(err error) (int, error) {

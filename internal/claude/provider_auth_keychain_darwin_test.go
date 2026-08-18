@@ -200,6 +200,15 @@ func TestAuthKeychainToolsRequireContainmentAndNativeAdmission(t *testing.T) {
 	_, _, err = runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, options)
 	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
 
+	// Best-effort containment consumes the generation and the native-root
+	// permit, so hooks that are not wired are an incomplete boundary there.
+	_, _, err = runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, Options{
+		DarwinBestEffort:    true,
+		OrdinaryEnvironment: map[string]string{envSearchPath: "/usr/bin:/bin"},
+	})
+	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.ErrorContains(t, err, "keychain native admission is unavailable")
+
 	useAuthDirectContainment(t)
 	prepared := 0
 	acquired := 0
@@ -221,6 +230,23 @@ func TestAuthKeychainToolsRequireContainmentAndNativeAdmission(t *testing.T) {
 	require.Equal(t, 1, prepared)
 	require.Equal(t, 1, acquired)
 	require.Equal(t, 1, released)
+}
+
+// TestAuthKeychainToolsRunOrdinarilyWithoutAdmissionHooks pins the ordinary
+// same-identity mode: the platform tool launches directly, consuming neither a
+// containment generation nor a native-root permit, so absent hooks are not an
+// incomplete boundary. This is the mode a plain darwin host resumes sessions
+// in, and the read leg it uses to carry a native login's Keychain credential
+// into a materialized temp home.
+func TestAuthKeychainToolsRunOrdinarilyWithoutAdmissionHooks(t *testing.T) {
+	t.Parallel()
+
+	output, code, err := runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, Options{
+		OrdinaryEnvironment: map[string]string{envSearchPath: "/usr/bin:/bin"},
+	})
+	require.NoError(t, err)
+	require.Zero(t, code)
+	require.NotEmpty(t, output)
 }
 
 func TestContainedAuthKeychainToolFailureBranches(t *testing.T) {

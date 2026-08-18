@@ -31,6 +31,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/new")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
@@ -74,6 +78,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (resp acp.ResumeSessionResponse, err error) {
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/resume")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
+
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
@@ -138,6 +146,10 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (resp acp.LoadSessionResponse, err error) {
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/load")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
+
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
@@ -206,6 +218,10 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest) (resp acp.ListSessionsResponse, err error) {
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/list")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
+
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
 
 	if validationErr := validateOptionalAbsolutePath("cwd", params.Cwd); validationErr != nil {
 		return acp.ListSessionsResponse{}, validationErr
@@ -303,6 +319,10 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/close")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.CloseSessionResponse{}, err
+	}
+
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
@@ -321,19 +341,21 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	return acp.CloseSessionResponse{}, nil
 }
 
-// UnstableDeleteSession implements ACP session/delete.
+// UnstableDeleteSession implements ACP session/delete. Delete serializes after
+// settlement: an active session is cancelled and closed first, so its final
+// mirror commit lands before the tombstone and no write in flight can land
+// after it. The store contract then forbids any write from recreating the row
+// once delete has succeeded.
 func (a *Agent) UnstableDeleteSession(
 	ctx context.Context,
 	params acp.UnstableDeleteSessionRequest,
 ) (acp.UnstableDeleteSessionResponse, error) {
-	if err := a.sessionStore().Delete(ctx, SessionKey{SessionID: string(params.SessionId)}); err != nil {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
 
 	a.mu.Lock()
 	session := a.sessions[params.SessionId]
-	a.deleted[params.SessionId] = struct{}{}
-	a.deleteCachedPermissionRulesLocked(params.SessionId)
 	a.mu.Unlock()
 
 	var cleanupErr error
@@ -346,6 +368,15 @@ func (a *Agent) UnstableDeleteSession(
 
 		a.dropSession(ctx, params.SessionId, session)
 	}
+
+	if err := a.sessionStore().Delete(ctx, SessionKey{SessionID: string(params.SessionId)}); err != nil {
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
+
+	a.mu.Lock()
+	a.deleted[params.SessionId] = struct{}{}
+	a.deleteCachedPermissionRulesLocked(params.SessionId)
+	a.mu.Unlock()
 
 	if err := deleteNativeTranscript(ctx, a.options.Home, string(params.SessionId)); err != nil {
 		cleanupErr = errors.Join(cleanupErr, err)

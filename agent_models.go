@@ -27,11 +27,19 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	// at all is unreachable from JSON; an in-process caller can still build it,
 	// and there "value" is the member it left out.
 	if params.Boolean != nil {
+		if err := rejectLifecycleMeta(params.Boolean.Meta); err != nil {
+			return acp.SetSessionConfigOptionResponse{}, err
+		}
+
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldType)
 	}
 
 	if params.ValueId == nil {
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
+	}
+
+	if err := rejectLifecycleMeta(params.ValueId.Meta); err != nil {
+		return acp.SetSessionConfigOptionResponse{}, err
 	}
 
 	return a.setSessionConfigValue(ctx, params.ValueId)

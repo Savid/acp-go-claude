@@ -187,7 +187,11 @@ func validateEmptyParams(raw json.RawMessage) error {
 }
 
 // Logout clears auth state owned by this adapter.
-func (a *Agent) Logout(_ context.Context, _ acp.LogoutRequest) (acp.LogoutResponse, error) {
+func (a *Agent) Logout(_ context.Context, params acp.LogoutRequest) (acp.LogoutResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.LogoutResponse{}, err
+	}
+
 	return acp.LogoutResponse{}, nil
 }
 
@@ -202,6 +206,10 @@ func (a *Agent) handleForkSession(
 
 	if err := params.Validate(); err != nil {
 		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+	}
+
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.UnstableForkSessionResponse{}, err
 	}
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)

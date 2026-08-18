@@ -372,10 +372,17 @@ func (s *agentSession) Cancel(ctx context.Context) (err error) {
 }
 
 // cancelRouted validates the active turn and keeps its native interrupt fenced
-// from turn completion and admission of the next turn.
+// from turn completion and admission of the next turn. The lifecycle key never
+// rides session/cancel: it fails the cancel closed before the nonce check and
+// before any native interrupt, and the cancel is never applied. Being a
+// notification, the refusal is wire-silent.
 func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) error {
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
+
+	if err := rejectLifecycleMeta(meta); err != nil {
+		return err
+	}
 
 	s.mu.Lock()
 	activeNonce := s.turnNonce

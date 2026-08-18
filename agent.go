@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/savid/acp-go-claude/internal/observer"
 )
 
@@ -80,6 +81,7 @@ type Agent struct {
 	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
+	lifecycle          lifecycle.Negotiated
 	permissionCache    map[acp.SessionId]map[string]string
 	activeLimitErr     error
 	configurationErr   error
@@ -296,6 +298,11 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 		return acp.InitializeResponse{}, err
 	}
 
+	lifecycleMeta, err := a.negotiateLifecycle(params.Meta)
+	if err != nil {
+		return acp.InitializeResponse{}, err
+	}
+
 	title := a.options.AgentTitle
 	positionEncoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
 
@@ -306,6 +313,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 
 	resp = acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
+		Meta:            lifecycleMeta,
 		AgentInfo: &acp.Implementation{
 			Name:    a.options.AgentName,
 			Title:   &title,
@@ -394,6 +402,10 @@ func (a *Agent) capabilityMeta() map[string]any {
 func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest) (resp acp.AuthenticateResponse, err error) {
 	_, finish := a.observe.StartACP(ctx, params.Meta, "authenticate")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
+
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.AuthenticateResponse{}, err
+	}
 
 	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 }

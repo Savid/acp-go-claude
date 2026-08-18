@@ -28,8 +28,10 @@ The helper `WithSessionRawEvents(true)` sets the same metadata.
 
 Notifications arrive on `_claude/rawEvent` and carry `sessionId`, `sequence`,
 `source` (always `claude`), and `event`. The `sequence` is per session and
-strictly contiguous — every event consumes exactly one number, so a host can
-detect a dropped or replaced frame by watching for a gap.
+strictly contiguous across successful deliveries. A failed delivery does not
+consume a number; the next successful delivery receives the next number. This
+counter is independent of the lifecycle stream, whose sequence is claimed
+before delivery.
 
 ## Bounding and truncation
 

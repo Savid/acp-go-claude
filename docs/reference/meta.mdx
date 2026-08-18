@@ -25,6 +25,14 @@ Initialize advertises capability descriptors under `_meta.claude`:
 Initialize also advertises reserved envelopes separately from the Claude
 namespace:
 
+The fourth reserved envelope, `acp-go.dev/lifecycle`, is negotiated from an
+`initialize` offer containing `versions`. When version 1 intersects, the answer
+appears in the response's top-level `_meta` and reports the active containment
+proof classes, `updatesOutsidePrompt: true`, and an empty `activityKinds` set.
+No offer or no intersection omits the answer. Whole-tree quiescence is available
+only with authoritative Linux process isolation; other configurations advertise
+no quiescence proof class.
+
 ```json
 {"acp-go.dev/route":{"versions":[1]}}
 ```
@@ -96,7 +104,20 @@ Outbound form and URL elicitation requests preserve their native metadata and
 add a route object containing `version`, `sessionId`, `turnNonce`, and exactly
 one of `toolCallId` or `requestId`. A native request that already owns the
 reserved key is rejected rather than overwritten. Permission requests remain
-correlated by their structural ACP session and tool-call fields.
+correlated by their structural ACP session and tool-call fields. While lifecycle
+version 1 is negotiated, prompts additionally carry submission correlation and
+permission and elicitation requests carry action correlation under
+`_meta["acp-go.dev/lifecycle"]`. Lifecycle events use only identity-only
+`session_info_update` notifications as carriers.
+
+The lifecycle key is refused on `session/new`, `session/load`, `session/resume`,
+`session/cancel`, `session/close`, `session/delete`, `session/list`, both
+`session/set_config_option` variants, `session/set_mode`, `authenticate`,
+`logout`, `_claude/session/fork`, `_claude/rateLimits`, and every
+`_claude/auth/*` method. Refusals name
+`_meta["acp-go.dev/lifecycle"]`; cancel refuses before interrupting Claude. Its
+route nonce authenticates admission to the current session turn, while the
+lifecycle value supplies submission and action identity.
 
 ## Session options
 

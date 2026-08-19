@@ -167,13 +167,34 @@ func checkCorrelationVersion(fields map[string]any, negotiated Negotiated) *Para
 	return nil
 }
 
+// minIntFloat and overMaxIntFloat bound the float64 values that are this
+// platform's integers. MinInt is a power of two and therefore exact, and its
+// negation is the first value one past MaxInt, so the half-open range holds
+// exactly the float64 values an int can carry — MaxInt itself is not
+// representable as a float64 on a 64-bit platform, and no bound may be spelled
+// as a value the conversion would have to round.
+const (
+	minIntFloat     = float64(math.MinInt)
+	overMaxIntFloat = -minIntFloat
+)
+
 // integerValue reads one JSON integer. A decoded wire value arrives as a float64
 // and an embedding Go host writes an int, so both are the same integer; a
 // fractional value is neither.
+//
+// The pinned SDK pre-decodes `_meta` to map[string]any, so no lexeme survives
+// for this surface to apply the lexical rule to: integrality is judged on the
+// value. A float64 is this integer only when it is integral and exactly
+// representable as one — a magnitude past the int range, an infinity, and a NaN
+// each name no integer at all, whatever the truncation says about them.
 func integerValue(raw any) (int, bool) {
 	switch value := raw.(type) {
 	case float64:
-		return int(value), value == math.Trunc(value)
+		if value != math.Trunc(value) || value < minIntFloat || value >= overMaxIntFloat {
+			return 0, false
+		}
+
+		return int(value), true
 	case int:
 		return value, true
 	case json.Number:

@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -41,6 +42,7 @@ func TestDecodeOfferStrictness(t *testing.T) {
 		{"empty versions", offerMeta([]any{}), MetaPath + ".versions"},
 		{"non-array versions", offerMeta(1.0), MetaPath + ".versions"},
 		{"fractional version", offerMeta([]any{1.5}), MetaPath + ".versions"},
+		{"unrepresentable version", offerMeta([]any{1e300}), MetaPath + ".versions"},
 		{"string version", offerMeta([]any{"1"}), MetaPath + ".versions"},
 		{"unparsable number", offerMeta([]any{json.Number("one")}), MetaPath + ".versions"},
 	} {
@@ -89,6 +91,47 @@ func TestDecodeOfferReadsEveryIntegerSpelling(t *testing.T) {
 	}
 }
 
+// TestDecodeOfferJudgesIntegralityOnTheValue pins the rule this surface can
+// actually enforce. The pinned SDK pre-decodes _meta to map[string]any, so no
+// lexeme survives for the lexical rule to read and integrality is judged on the
+// value: an integral float64 is an offered version only where it is also exactly
+// representable as one. A magnitude past the int range, an infinity, and a NaN
+// each truncate to themselves and name no integer at all.
+func TestDecodeOfferJudgesIntegralityOnTheValue(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		value float64
+	}{
+		{"past the range", 1e300},
+		{"past the range negated", -1e300},
+		{"one past the maximum", -float64(math.MinInt)},
+		{"infinite", math.Inf(1)},
+		{"not a number", math.NaN()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, offered, refusal := DecodeOffer(offerMeta([]any{tc.value}))
+			require.False(t, offered)
+			require.NotNil(t, refusal)
+			require.Equal(t, MetaPath+".versions", refusal.Field)
+		})
+	}
+
+	t.Run("exactly representable", func(t *testing.T) {
+		t.Parallel()
+
+		// A large integer a float64 still carries exactly is an integer like any
+		// other: the guard refuses what was lost, not what is merely large.
+		offer, offered, refusal := DecodeOffer(offerMeta([]any{1.0, float64(math.MinInt)}))
+		require.Nil(t, refusal)
+		require.True(t, offered)
+		require.Equal(t, []int{1, math.MinInt}, offer.Versions)
+	})
+}
+
 func correlationMeta(value any) map[string]any {
 	return map[string]any{MetaKey: value}
 }
@@ -130,6 +173,7 @@ func TestDecodePromptCorrelationStrictness(t *testing.T) {
 		{"unknown member", map[string]any{"version": 1.0, "submission": submission, "streamId": "x"}, MetaPath + ".streamId"},
 		{"missing version", map[string]any{"submission": submission}, MetaPath + ".version"},
 		{"fractional version", map[string]any{"version": 1.5, "submission": submission}, MetaPath + ".version"},
+		{"unrepresentable version", map[string]any{"version": 1e300, "submission": submission}, MetaPath + ".version"},
 		{"unsupported version", map[string]any{"version": 2.0, "submission": submission}, MetaPath + ".version"},
 		{"missing submission", map[string]any{"version": 1.0}, MetaPath + ".submission"},
 		{"unknown submission member", map[string]any{"version": 1.0, "submission": map[string]any{

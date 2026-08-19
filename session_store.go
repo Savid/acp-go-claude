@@ -142,6 +142,14 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 			return fmt.Errorf("replacement session id %q does not match main session id %q", replacement.Key.SessionID, main.SessionID)
 		}
 
+		// Two replacements naming one key are refused before anything is written.
+		// A generation states what each key holds, so a set that states two things
+		// about the same key states neither, and resolving it by keeping whichever
+		// arrived last would durably commit an order the caller never expressed.
+		if _, duplicate := next[replacement.Key]; duplicate {
+			return fmt.Errorf("duplicate replacement key %+v", replacement.Key)
+		}
+
 		if replacement.Key == main {
 			mainCount++
 		}

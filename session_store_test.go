@@ -142,6 +142,44 @@ func TestInMemorySessionStoreReplaceNeverResurrectsATombstone(t *testing.T) {
 	require.Empty(t, summaries, "a deleted session is never listable again")
 }
 
+// TestInMemorySessionStoreReplaceRefusesDuplicateKeys pins the one answer a
+// generation that names a key twice gets. A generation states what each key
+// holds, so a set stating two things about one key states neither; resolving it
+// by keeping whichever replacement arrived last would durably commit an order
+// the caller never expressed. The refusal names the duplicate and lands before
+// anything is written, so the previous generation is still exactly what the
+// store holds.
+func TestInMemorySessionStoreReplaceRefusesDuplicateKeys(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &InMemorySessionStore{}
+	main := SessionKey{SessionID: "s"}
+	sub := SessionKey{SessionID: "s", Subpath: "sub/a.jsonl"}
+
+	require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{[]byte(`{"a":1}`)}))
+
+	require.EqualError(t, store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
+		{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
+		{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"d":4}`)}},
+	}), `duplicate replacement key {SessionID:s Subpath:sub/a.jsonl}`)
+
+	require.EqualError(t, store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
+		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
+	}), `duplicate replacement key {SessionID:s Subpath:}`)
+
+	entries, err := store.Load(ctx, main)
+	require.NoError(t, err)
+	require.Equal(t, []SessionStoreEntry{[]byte(`{"a":1}`)}, entries,
+		"a refused generation writes nothing, so the committed one still stands")
+
+	subkeys, err := store.ListSubkeys(ctx, main)
+	require.NoError(t, err)
+	require.Empty(t, subkeys, "the key named twice is not created by the call that named it twice")
+}
+
 func TestInMemorySessionStoreReplaceEmptyEntrySurvives(t *testing.T) {
 	t.Parallel()
 

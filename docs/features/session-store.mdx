@@ -66,7 +66,9 @@ A store implements six methods:
 
 The main transcript uses the empty subpath (`SessionStoreMainSubpath`);
 subagent transcripts mirror under safe relative subpaths of the same session id.
-`Replace` MUST include the main key exactly once. Session summaries report
+`Replace` MUST include the main key exactly once, and MUST refuse a set that
+names any key twice — naming the duplicate, before any key is written — rather
+than resolving the collision by last write. Session summaries report
 `UpdatedAtUnixMilli` in Unix milliseconds.
 
 One session-owned native pump drains and orders transcript mirror frames even

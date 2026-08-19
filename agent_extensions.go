@@ -38,8 +38,7 @@ type rateLimitsCacheEntry struct {
 // empty when the harness reports no subscription usage; values are only ever
 // harness-reported.
 type RateLimitsResponse struct {
-	Windows  []RateLimitWindow `json:"windows"`
-	PlanType string            `json:"planType,omitempty"`
+	Windows []RateLimitWindow `json:"windows"`
 }
 
 // RateLimitWindow is one harness-reported subscription usage window.

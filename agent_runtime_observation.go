@@ -44,14 +44,6 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 	hooks.AcquireNativeRoot = wrapAcquire("managed_native_root", hooks.AcquireNativeRoot)
 	hooks.ReserveScratchRoot = wrapAcquire("adapter_scratch_root", hooks.ReserveScratchRoot)
 
-	externalProcess := hooks.ObserveProcess
-	hooks.ObserveProcess = func(ctx context.Context, kind RuntimeProcessKind, delta int64) {
-		observe.AddRuntimeProcess(ctx, string(kind), delta)
-
-		if externalProcess != nil {
-			externalProcess(ctx, kind, delta)
-		}
-	}
 	externalSnapshot := hooks.ObserveProcessSnapshot
 	hooks.ObserveProcessSnapshot = func(ctx context.Context, kind RuntimeProcessKind, count int) {
 		observe.SetRuntimeProcess(ctx, string(kind), count)
@@ -80,12 +72,11 @@ func instrumentRuntimeResourceHooks(hooks RuntimeResourceHooks, observe *observe
 	return hooks
 }
 
-func observeRuntimeProcess(ctx context.Context, hooks RuntimeResourceHooks, kind RuntimeProcessKind, delta int64) {
-	if hooks.ObserveProcess != nil && delta != 0 {
-		hooks.ObserveProcess(ctx, kind, delta)
-	}
-}
-
+// observeRuntimeProcessSnapshot publishes the provider-descendant inventory,
+// which is the only process accounting this adapter reports. Start/exit deltas
+// name lock-supervisor processes a lockless home never has, so the
+// ObserveProcess hook stands unbid: an embedding host wiring it is never
+// called, and this adapter infers no supervisor it does not run.
 func observeRuntimeProcessSnapshot(ctx context.Context, hooks RuntimeResourceHooks, kind RuntimeProcessKind, count int) {
 	if hooks.ObserveProcessSnapshot != nil && count >= 0 {
 		hooks.ObserveProcessSnapshot(ctx, kind, count)

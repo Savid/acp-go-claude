@@ -104,6 +104,44 @@ func TestInMemorySessionStoreBranches(t *testing.T) {
 	require.Nil(t, cloneStoreEntry(nil))
 }
 
+// TestInMemorySessionStoreReplaceNeverResurrectsATombstone pins that a delete is
+// final against the one writer that rewrites a whole session. The teardown a
+// delete runs behind its own tombstone still commits the session mirror, and that
+// commit is a Replace: were it to clear the tombstone it never wrote, the id the
+// host was told is gone would be listable and loadable again.
+func TestInMemorySessionStoreReplaceNeverResurrectsATombstone(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &InMemorySessionStore{}
+	main := SessionKey{SessionID: "s"}
+	sub := SessionKey{SessionID: "s", Subpath: "sub/a.jsonl"}
+
+	require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{[]byte(`{"a":1}`)}))
+	require.NoError(t, store.Delete(ctx, main))
+
+	require.NoError(t, store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
+		{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"d":4}`)}},
+	}))
+
+	entries, err := store.Load(ctx, main)
+	require.NoError(t, err)
+	require.Empty(t, entries, "a tombstoned key holds nothing a later replace wrote")
+
+	subEntries, err := store.Load(ctx, sub)
+	require.NoError(t, err)
+	require.Empty(t, subEntries, "the tombstone cascades to every subpath of the deleted session")
+
+	subkeys, err := store.ListSubkeys(ctx, main)
+	require.NoError(t, err)
+	require.Empty(t, subkeys)
+
+	summaries, err := store.ListSessions(ctx)
+	require.NoError(t, err)
+	require.Empty(t, summaries, "a deleted session is never listable again")
+}
+
 func TestInMemorySessionStoreReplaceEmptyEntrySurvives(t *testing.T) {
 	t.Parallel()
 

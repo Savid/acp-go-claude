@@ -158,6 +158,14 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 
 	s.ensure()
 
+	// A tombstone is final. Replace rewrites the whole session, so it would
+	// otherwise clear a tombstone it never wrote and resurrect a row the host was
+	// already told is gone — including from the final mirror commit a delete's own
+	// teardown runs behind it.
+	if s.isTombstonedLocked(main) {
+		return nil
+	}
+
 	for key := range s.entries {
 		if key.SessionID == main.SessionID {
 			delete(s.entries, key)

@@ -2,9 +2,8 @@ package claudeacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -218,21 +217,19 @@ func TestSessionUpdateEdgeBranches(t *testing.T) {
 	*cloned.ThoughtTokens = 4
 	require.Equal(t, 1, *cloneUsage(&acp.Usage{CachedWriteTokens: acp.Ptr(1)}).CachedWriteTokens)
 
-	transcript := filepath.Join(t.TempDir(), "transcript.jsonl")
-	require.NoError(t, os.WriteFile(transcript, []byte(`{"type":"assistant","message":{"content":"done"}}`+"\n"), 0o600))
 	conn := newRecordingAgentClient()
 	agent.setConnection(conn)
-	require.NoError(t, session.replayTranscript(ctx, transcript))
+	require.NoError(t, session.replayTranscriptEntries(ctx, []SessionStoreEntry{
+		json.RawMessage(`{"type":"assistant","message":{"content":"done"}}`),
+	}))
 	require.NotEmpty(t, conn.Updates())
-	require.Error(t, session.replayTranscript(ctx, filepath.Join(t.TempDir(), "missing.jsonl")))
 
-	truncatedTranscript := filepath.Join(t.TempDir(), "truncated.jsonl")
-	var lines strings.Builder
-	for range 10001 {
-		lines.WriteString(`{"type":"user","message":{"content":"hello"}}` + "\n")
+	overCap := make([]SessionStoreEntry, 10001)
+	for index := range overCap {
+		overCap[index] = json.RawMessage(`{"type":"user","message":{"content":"hello"}}`)
 	}
-	require.NoError(t, os.WriteFile(truncatedTranscript, []byte(lines.String()), 0o600))
-	require.NoError(t, session.replayTranscript(ctx, truncatedTranscript))
+
+	require.NoError(t, session.replayTranscriptEntries(ctx, overCap))
 
 	agent.clientCapabilities.Elicitation = nil
 	require.NoError(t, session.emitElicitationComplete(ctx, &claude.SystemMessage{Raw: map[string]any{"elicitation_id": "e1"}}))

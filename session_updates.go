@@ -584,32 +584,16 @@ func optionalIntSum(left *int, right *int) *int {
 	return &value
 }
 
-func (s *agentSession) replayTranscript(ctx context.Context, path string) error {
-	updates, truncated, err := transcript.ReplayUpdates(path)
-
-	return s.emitReplayUpdates(ctx, updates, truncated, err)
-}
-
+// replayTranscriptEntries replays the session store's own rows. The store is
+// the only transcript this adapter replays: Claude's local cache is discovery
+// metadata, never a source of updates a resumed session emits.
 func (s *agentSession) replayTranscriptEntries(ctx context.Context, entries []SessionStoreEntry) error {
 	rehydrated, err := rehydrateTranscriptImageEntries(entries, s.snapshotImageArtifacts())
 	if err != nil {
 		return err
 	}
 
-	updates, truncated, err := transcript.ReplayEntries(rehydrated)
-
-	return s.emitReplayUpdates(ctx, updates, truncated, err)
-}
-
-func (s *agentSession) emitReplayUpdates(
-	ctx context.Context,
-	updates []acp.SessionUpdate,
-	truncated bool,
-	err error,
-) error {
-	if err != nil {
-		return err
-	}
+	updates, truncated := transcript.ReplayEntries(rehydrated)
 
 	if truncated {
 		updates = append([]acp.SessionUpdate{

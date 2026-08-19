@@ -327,6 +327,15 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 // barrier never admitted contained nothing and settled nothing, so its id keeps
 // the live session it names and the work still running behind it stays
 // addressable for the close that does take the barrier.
+//
+// The whole close is session.Close and nothing before it. A native interrupt
+// hoisted ahead of it would run rung 5 of the shutdown ladder before rungs 1
+// through 4 — the pending input the ladder resolves first, and the provider-auth
+// flows it cancels before any teardown, would both be answered by a process that
+// was already torn down — and it would tear that process down before the session
+// stopped accepting prompts, leaving a window in which a racing prompt relaunches
+// exactly what the close just contained. Close already cancels the turn context
+// itself, and the turn it wakes runs its own containment on the way out.
 func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (resp acp.CloseSessionResponse, err error) {
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/close")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
@@ -340,7 +349,6 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, err
 	}
 
-	_ = session.Cancel(ctx)
 	closeErr := session.Close(ctx)
 	a.recordContainmentError(closeErr)
 
@@ -397,8 +405,10 @@ func (a *Agent) UnstableDeleteSession(
 	var cleanupErr error
 
 	if session != nil {
-		_ = session.Cancel(ctx)
-
+		// The teardown is the session's own close ladder and nothing hoisted ahead
+		// of it, for the reason CloseSession states: rung 5 never runs before rungs
+		// 1 through 4, and nothing tears the native process down before the session
+		// has stopped admitting the prompt that would relaunch it.
 		closeErr := session.Close(ctx)
 		if closeErr != nil {
 			cleanupErr = errors.Join(cleanupErr, closeErr)

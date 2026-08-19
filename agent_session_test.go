@@ -475,9 +475,22 @@ func requireExpiredCloseRefusal(t *testing.T, ctx context.Context, err error) {
 // TestCloseSessionKeepsAnUnsettledSessionAddressable proves removal follows the
 // settlement barrier and not the request: a close whose caller expired contained
 // nothing, so the id keeps the live session and the next close settles it.
+//
+// The session it refuses is a real one: a turn is running and its cancel is
+// registered, which is the only shape under which a native teardown hoisted ahead
+// of the barrier would actually fire. "Contained nothing" has to be asserted on
+// the session that could have been contained, or it asserts nothing at all.
 func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
 	sessionID := acp.SessionId("session-busy")
 	agent, session, transport := newBusySessionAgent(t, sessionID)
+
+	turnCtx, cancelTurn := context.WithCancel(context.Background())
+	defer cancelTurn()
+
+	session.mu.Lock()
+	session.cancel = cancelTurn
+	session.turnNonce = "nonce-1"
+	session.mu.Unlock()
 
 	expired, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -485,6 +498,10 @@ func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
 	_, err := agent.CloseSession(expired, acp.CloseSessionRequest{SessionId: sessionID})
 	requireCancelledCloseRefusal(t, expired, err)
 	require.Zero(t, transport.CloseCalls(), "an unsettled close contains nothing")
+	require.True(t, session.client.Alive(), "a refused close leaves the native process it never contained")
+	require.NotContains(t, sentControlSubtypes(transport), "interrupt",
+		"a refused close reaches no rung of the native teardown")
+	require.Error(t, turnCtx.Err(), "the turn the close is waiting on is still asked to wind down")
 
 	held, lookupErr := agent.session(sessionID)
 	require.NoError(t, lookupErr, "the work still running behind the id stays addressable")
@@ -1547,4 +1564,112 @@ func requireExpiredDeleteRefusal(t *testing.T, ctx context.Context, err error) {
 	require.Equal(t, "claude_session_delete_unsettled", data[jsonFieldError])
 	require.Contains(t, data[jsonFieldMessage], "await the in-flight Claude turn")
 	require.Equal(t, reqErr, requestError(ctx, err), "the dispatcher forwards it unchanged")
+}
+
+// sentControlSubtypes lists, in order, the control subtypes the adapter wrote to
+// one native transport.
+func sentControlSubtypes(transport *fakeClaudeTransport) []string {
+	subtypes := []string{}
+
+	for _, payload := range transport.Sent() {
+		request, ok := payload.(claude.ControlRequest)
+		if !ok {
+			continue
+		}
+
+		subtype, _ := request.Request["subtype"].(string)
+		subtypes = append(subtypes, subtype)
+	}
+
+	return subtypes
+}
+
+// ladderProbeTransport reports the state of the shutdown ladder at the moment a
+// native teardown rung actually reaches the process.
+type ladderProbeTransport struct {
+	claude.Transport
+
+	observe func(rung string)
+}
+
+func (t *ladderProbeTransport) Send(ctx context.Context, payload any) error {
+	if request, ok := payload.(claude.ControlRequest); ok {
+		if subtype, _ := request.Request["subtype"].(string); subtype == "interrupt" {
+			t.observe("interrupt")
+		}
+	}
+
+	return t.Transport.Send(ctx, payload)
+}
+
+func (t *ladderProbeTransport) Close() error {
+	t.observe("close")
+
+	return t.Transport.Close()
+}
+
+// ladderObservation records what the earlier rungs had done by the time one
+// native teardown rung fired.
+type ladderObservation struct {
+	rung             string
+	admissionClosed  bool
+	providerAuthDone bool
+}
+
+// TestCloseSessionRunsTheEarlyLadderBeforeAnyNativeTeardown pins the fixed
+// positions in the shutdown ladder. Nothing native is touched until the session
+// has stopped accepting prompts and the pending provider-auth flows have been
+// cancelled: an interrupt hoisted ahead of those rungs answers a pending flow
+// from a process that is already being torn down, and it tears that process down
+// while the session is still admitting the prompt that would relaunch it.
+func TestCloseSessionRunsTheEarlyLadderBeforeAnyNativeTeardown(t *testing.T) {
+	sessionID := acp.SessionId("session-ladder")
+	agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithProviderAuthRoot(t.TempDir()))
+	require.NotNil(t, agent.providerAuth, "the provider-auth rung exists on this fixture, so its position can be asserted")
+
+	probe := &ladderProbeTransport{Transport: newFakeClaudeTransport()}
+	session := newSessionForTransport(t, agent, sessionID, probe)
+	agent.sessions[sessionID] = session
+
+	var (
+		mu       sync.Mutex
+		observed []ladderObservation
+	)
+
+	probe.observe = func(rung string) {
+		agent.providerAuth.mu.Lock()
+		_, providerAuthDone := agent.providerAuth.closedSessions[sessionID]
+		agent.providerAuth.mu.Unlock()
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		observed = append(observed, ladderObservation{
+			rung:             rung,
+			admissionClosed:  session.isClosing(),
+			providerAuthDone: providerAuthDone,
+		})
+	}
+
+	// A registered turn cancel is what makes a hoisted native abort fire at all,
+	// so the session this close is asked to contain is one that could be.
+	_, cancelTurn := context.WithCancel(context.Background())
+	defer cancelTurn()
+
+	session.mu.Lock()
+	session.cancel = cancelTurn
+	session.turnNonce = "nonce-1"
+	session.mu.Unlock()
+
+	_, err := agent.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: sessionID})
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Equal(t, []ladderObservation{{
+		rung:             "close",
+		admissionClosed:  true,
+		providerAuthDone: true,
+	}}, observed, "the containment boundary is the only rung that reaches the process, and it runs last")
 }

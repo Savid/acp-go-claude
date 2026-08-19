@@ -180,16 +180,7 @@ func ActionCorrelationValue(streamID string, action ActionUpdate) map[string]any
 func encodeEvent(event Event) map[string]any {
 	switch event.Type {
 	case EventSnapshot:
-		return map[string]any{
-			fieldType: string(EventSnapshot),
-			fieldForeground: map[string]any{
-				fieldState:   string(event.Snapshot.Foreground.State),
-				fieldCycleID: event.Snapshot.Foreground.CycleID,
-			},
-			fieldActivities: []any{},
-			fieldActions:    []any{},
-			fieldQuiescence: encodeQuiescence(event.Snapshot.Quiescence),
-		}
+		return encodeSnapshot(*event.Snapshot)
 	case EventPromptAccepted:
 		return withOptional(map[string]any{
 			fieldType:         string(EventPromptAccepted),
@@ -203,12 +194,75 @@ func encodeEvent(event Event) map[string]any {
 
 		return fact
 	case EventActionUpdate:
-		return encodeAction(*event.Action)
+		return map[string]any{
+			fieldType:   string(EventActionUpdate),
+			fieldAction: encodeAction(*event.Action),
+		}
 	default:
 		return encodeTransition(*event.State)
 	}
 }
 
+// encodeSnapshot renders the whole state the assertion carries. The turn holding
+// the foreground and that turn's origin are rendered exactly while one holds it,
+// and the nonterminal sets are rendered member for member through the same
+// encoders the delta events use. Fidelity here is what arms the reader: a member
+// this step drops is a member the decode below never sees, so an assertion the
+// adapter could not state truthfully would leave the emitter and pass every rule
+// the foreground, the activity set, and the action set are held to.
+func encodeSnapshot(snapshot Snapshot) map[string]any {
+	foreground := map[string]any{
+		fieldState:   string(snapshot.Foreground.State),
+		fieldCycleID: snapshot.Foreground.CycleID,
+	}
+	withOptional(foreground, fieldTurnID, snapshot.Foreground.TurnID)
+	withOptional(foreground, fieldOrigin, string(snapshot.Foreground.Origin))
+
+	activities := make([]any, 0, len(snapshot.Activities))
+	for index := range snapshot.Activities {
+		activities = append(activities, encodeActivity(snapshot.Activities[index]))
+	}
+
+	actions := make([]any, 0, len(snapshot.Actions))
+	for index := range snapshot.Actions {
+		actions = append(actions, encodeAction(snapshot.Actions[index]))
+	}
+
+	return map[string]any{
+		fieldType:       string(EventSnapshot),
+		fieldForeground: foreground,
+		fieldActivities: activities,
+		fieldActions:    actions,
+		fieldQuiescence: encodeQuiescence(snapshot.Quiescence),
+	}
+}
+
+// encodeActivity renders one activity member. Every member a first sight owes is
+// stated outright rather than omitted when empty, so an identity this adapter
+// could not state completely is refused at the point of emission instead of
+// rendering as a patch that states nothing.
+func encodeActivity(activity ActivityUpdate) map[string]any {
+	members := map[string]any{
+		fieldActivityID:   activity.ActivityID,
+		fieldKind:         string(activity.Kind),
+		fieldState:        string(activity.State),
+		fieldCause:        string(activity.Cause),
+		fieldOriginTurnID: activity.OriginTurnID,
+	}
+	withOptional(members, fieldParentID, activity.ParentID)
+	withOptional(members, fieldToolCallID, activity.ToolCallID)
+	withOptional(members, fieldRunID, activity.RunID)
+
+	if activity.Progress != nil {
+		members[fieldProgress] = activity.Progress
+	}
+
+	return members
+}
+
+// encodeAction renders one action member under the same rule: the identity, the
+// state, the owner, and the blocking claim are always stated, because every
+// action this adapter emits is a complete sight of one.
 func encodeAction(action ActionUpdate) map[string]any {
 	members := map[string]any{
 		fieldActionID: action.ActionID,
@@ -221,10 +275,7 @@ func encodeAction(action ActionUpdate) map[string]any {
 		fieldBlocksForeground: action.BlocksForeground != nil && *action.BlocksForeground,
 	}
 
-	return map[string]any{
-		fieldType:   string(EventActionUpdate),
-		fieldAction: withOptional(members, fieldRunID, action.RunID),
-	}
+	return withOptional(members, fieldRunID, action.RunID)
 }
 
 func encodeTransition(transition StateTransition) map[string]any {

@@ -265,6 +265,139 @@ func TestEmittedActionStreamReducesThroughTheSameReducer(t *testing.T) {
 	require.Equal(t, ForegroundIdle, state.Foreground.State)
 }
 
+// TestEmitterRefusesAMisshapenSnapshotForeground proves the emitter is held to
+// every rule the decoder states about a snapshot's foreground. The rendering is
+// what is validated, so a foreground member the encoder dropped would be a rule
+// the emit gate could never enforce: each case below is legal only to an emitter
+// that never states the turn and the origin it is refused for.
+func TestEmitterRefusesAMisshapenSnapshotForeground(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name       string
+		foreground Foreground
+		detail     string
+	}{
+		{
+			name:       "an idle foreground naming a turn",
+			foreground: Foreground{State: ForegroundIdle, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSubmission},
+			detail:     "an idle foreground reports no turn",
+		},
+		{
+			name:       "a turn without its origin",
+			foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1"},
+			detail:     "foreground origin is present exactly while a turn is",
+		},
+		{
+			name:       "an origin without its turn",
+			foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", Origin: CauseSubmission},
+			detail:     "foreground origin is present exactly while a turn is",
+		},
+		{
+			name:       "a session-caused origin",
+			foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSession},
+			detail:     "foreground origin session",
+		},
+		{
+			name:       "an out-of-vocabulary origin",
+			foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: Cause("resumed")},
+			detail:     "foreground origin resumed",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			stream := NewStream(provenConfiguration())
+			stream.Incarnate("strm-1")
+
+			_, err := stream.Emit(Event{Type: EventSnapshot, Snapshot: &Snapshot{Foreground: testCase.foreground}})
+
+			var refusal *ViolationError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, ViolationMalformedEnvelope, refusal.Kind)
+			require.Equal(t, testCase.detail, refusal.Detail)
+		})
+	}
+}
+
+// TestEmittedMidTurnSnapshotRoundTripsWholly proves the opening assertion carries
+// the whole state it claims: an independent reducer reading the emitted envelope
+// through this package's own decoder reaches exactly the projection the emitter
+// proved, with the held turn, the live activity, and the pending blocking action
+// all present rather than silently dropped by the rendering.
+func TestEmittedMidTurnSnapshotRoundTripsWholly(t *testing.T) {
+	t.Parallel()
+
+	negotiated := provenConfiguration()
+	negotiated.ActivityKinds = []ActivityKind{ActivityTask}
+
+	stream := NewStream(negotiated)
+	stream.Incarnate("strm-1")
+
+	blocks := true
+	progress := json.RawMessage(`{"phase":"resumed"}`)
+	foreground := Foreground{
+		State:   ForegroundRunning,
+		CycleID: "cyc-1",
+		TurnID:  "turn-1",
+		Origin:  CauseSubmission,
+	}
+
+	envelope, err := stream.Emit(Event{Type: EventSnapshot, Snapshot: &Snapshot{
+		Foreground: foreground,
+		Activities: []ActivityUpdate{{
+			ActivityID:   "acv-1",
+			Kind:         ActivityTask,
+			State:        ActivityRunning,
+			ToolCallID:   "tool-1",
+			Cause:        CauseSubmission,
+			OriginTurnID: "turn-1",
+			RunID:        "run-1",
+			Progress:     progress,
+		}},
+		Actions: []ActionUpdate{{
+			ActionID:         "act-1",
+			Kind:             ActionPermission,
+			State:            ActionPending,
+			Owner:            Owner{Type: OwnerTurn, ID: "turn-1"},
+			RunID:            "run-1",
+			BlocksForeground: &blocks,
+		}},
+	}})
+	require.NoError(t, err)
+
+	reducer := NewReducer(Options{Negotiated: negotiated})
+	require.NoError(t, reducer.ReduceSessionUpdate(notificationFor(t, envelope)))
+
+	read := reducer.State()
+	require.Equal(t, stream.State(), read)
+	require.Equal(t, &foreground, read.Foreground)
+	require.Equal(t, []TurnRecord{{
+		TurnID:  "turn-1",
+		Origin:  CauseSubmission,
+		CycleID: "cyc-1",
+	}}, read.Turns)
+	require.Equal(t, []ActivityRecord{{
+		ActivityID:   "acv-1",
+		Kind:         ActivityTask,
+		State:        ActivityRunning,
+		ToolCallID:   "tool-1",
+		Cause:        CauseSubmission,
+		OriginTurnID: "turn-1",
+		RunID:        "run-1",
+		Progress:     progress,
+	}}, read.Activities)
+	require.Equal(t, []ActionRecord{{
+		ActionID:         "act-1",
+		Kind:             ActionPermission,
+		State:            ActionPending,
+		Owner:            Owner{Type: OwnerTurn, ID: "turn-1"},
+		RunID:            "run-1",
+		BlocksForeground: true,
+	}}, read.Actions)
+	require.False(t, read.Quiescence.Certified)
+}
+
 // TestFenceEndsTheSessionForEveryIncarnation proves close fences the session
 // rather than the stream identity it fenced: the next incarnation's own opening
 // snapshot is stale.

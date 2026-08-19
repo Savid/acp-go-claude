@@ -1722,3 +1722,150 @@ func TestDeleteWhoseTombstoneNeverLandedIsToldApartFromAnUnsettledTeardown(t *te
 		require.Equal(t, "tombstone write failed", data[jsonFieldMessage])
 	})
 }
+
+// TestConcurrentInstallAndDeleteNeverResurrectTheSession drives the race the
+// install-lock re-check exists for. A load or resume decides its id is
+// addressable, then spends a native process launch getting there; a delete
+// landing inside that window writes a durable tombstone and hides the id, so the
+// instance about to be published would be one nothing could ever name again —
+// unclosable, unlistable, and holding a live native process.
+//
+// The verdict of the race is legitimately either way: a load that finishes first
+// is a session the delete then deletes, and a delete that lands first refuses the
+// install. What is never either way is the end state. However the two interleave,
+// the tombstone is final: the id resolves to nothing, nothing is listable under
+// it, the store holds no row for it, and no instance is left in the active map.
+func TestConcurrentInstallAndDeleteNeverResurrectTheSession(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
+
+	for _, testCase := range []struct {
+		name    string
+		install func(*Agent, acp.SessionId) error
+	}{
+		{
+			name: "session/load",
+			install: func(agent *Agent, sessionID acp.SessionId) error {
+				_, err := agent.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
+
+				return err
+			},
+		},
+		{
+			name: "session/resume",
+			install: func(agent *Agent, sessionID acp.SessionId) error {
+				_, err := agent.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
+
+				return err
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
+			key := SessionKey{SessionID: string(sessionID)}
+
+			store := NewInMemorySessionStore()
+			require.NoError(t, store.Append(ctx, key, []SessionStoreEntry{
+				[]byte(`{"type":"user","cwd":"` + filepath.ToSlash(cwd) + `","message":{"content":"hello"}}`),
+			}))
+
+			agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(store))
+			t.Cleanup(func() { _ = agent.Close() })
+
+			start := make(chan struct{})
+			done := make(chan error, 2)
+
+			go func() {
+				<-start
+				done <- testCase.install(agent, sessionID)
+			}()
+
+			go func() {
+				<-start
+
+				_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+				done <- err
+			}()
+
+			close(start)
+			require.NoError(t, <-done)
+			installErr := <-done
+
+			if installErr != nil {
+				requireUnknownSession(t, installErr)
+			}
+
+			// The tombstone outranks whichever order the two actually took.
+			_, lookupErr := agent.session(sessionID)
+			requireUnknownSession(t, lookupErr)
+
+			agent.mu.Lock()
+			_, resident := agent.sessions[sessionID]
+			agent.mu.Unlock()
+			require.False(t, resident, "no instance survives behind the tombstone")
+
+			entries, loadErr := store.Load(ctx, key)
+			require.NoError(t, loadErr)
+			require.Empty(t, entries, "no durable row survives behind the tombstone")
+
+			summaries, listErr := store.ListSessions(ctx)
+			require.NoError(t, listErr)
+			require.Empty(t, summaries, "a deleted session is never listable again")
+
+			listed, err := agent.ListSessions(ctx, ListSessionsRequest())
+			require.NoError(t, err)
+			require.Empty(t, listed.Sessions)
+		})
+	}
+}
+
+// TestDeleteLandingInsideANativeStartRefusesTheInstall drives the same race with
+// the window held open deliberately. The delete lands after the install decided
+// its id was addressable and before it has anything to publish, which is the one
+// interleaving a scheduler is unlikely to produce on its own and the exact one
+// the re-check under the install lock exists for.
+func TestDeleteLandingInsideANativeStartRefusesTheInstall(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
+	sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
+	key := SessionKey{SessionID: string(sessionID)}
+
+	store := NewInMemorySessionStore()
+	require.NoError(t, store.Append(ctx, key, []SessionStoreEntry{
+		[]byte(`{"type":"user","cwd":"` + filepath.ToSlash(cwd) + `","message":{"content":"hello"}}`),
+	}))
+
+	transport := newFakeClaudeTransport()
+	agent, _, _ := newFakeLifecycleAgent(t, transport, WithSessionStore(store))
+	t.Cleanup(func() { _ = agent.Close() })
+
+	deletes := 0
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		if deletes == 0 {
+			deletes++
+
+			_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+			require.NoError(t, err)
+		}
+
+		return claude.NewClient(log, options, transport)
+	}
+
+	_, err := agent.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
+	requireUnknownSession(t, err)
+	require.Equal(t, 1, deletes, "the delete really landed inside the native start")
+
+	agent.mu.Lock()
+	_, resident := agent.sessions[sessionID]
+	agent.mu.Unlock()
+	require.False(t, resident, "the instance nothing could ever name is torn down, not installed")
+
+	require.Positive(t, transport.CloseCalls(), "and its native process is contained")
+
+	_, lookupErr := agent.session(sessionID)
+	requireUnknownSession(t, lookupErr)
+
+	entries, loadErr := store.Load(ctx, key)
+	require.NoError(t, loadErr)
+	require.Empty(t, entries, "nothing the refused install did reaches the store")
+}

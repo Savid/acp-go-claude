@@ -486,27 +486,28 @@ func (p *sessionStream) endIncarnationLocked(
 
 // settleClose runs the close-fenced settlement in the one order the contract
 // fixes. The containment boundary has already completed when this runs, so it
-// terminalizes what the session still owns as cancelled, states the quiescence
-// fact the completed proof produced, and fences the session.
+// terminalizes what the session still owns as cancelled — the terminal idle a
+// still-open turn receives included — commits the resumable snapshot behind those
+// transitions, states the quiescence fact the completed proof produced, and
+// fences the session.
 //
-// A boundary that did not complete terminalizes nothing and states no fact: a set
-// of activities the adapter has just proved it cannot contain must not be
-// declared terminal, because their next real event would be a post-terminal
-// mutation. A failed durable commit is the same refusal one rung lower:
-// durability outranks the terminal event, so a close whose resumable snapshot the
-// store does not hold terminalizes nothing, states no quiescence fact, and ends
-// the incarnation unsettled — never a terminal idle, and never a fact, with a
-// missing snapshot behind it.
+// The commit runs here rather than ahead of the caller's settlement because its
+// position in that order is the boundary's own rung. The transitions report how
+// work the proof already contained ended, so they precede the durable write and
+// stand whatever it does; the quiescence fact certifies the boundary itself, so it
+// follows that write and a store that refused it leaves the fact unstated and
+// fails the close. Every rung runs under one lock, so nothing announced against
+// this session can land between a terminal transition and the fence behind it.
 //
-// A settlement fact is a fact about a live incarnation, so an incarnation that
-// was lost, abandoned, fenced, or never opened receives none. Continuing a
-// retired identity would state a fact a conforming reducer must refuse as stale,
-// and naming no identity at all would state a malformed one. Close does not need
-// the emission to succeed: the durable containment evidence carries the boundary,
-// and the next incarnation's snapshot asserts the truthful state.
-func (p *sessionStream) settleClose(ctx context.Context, contained bool, committed bool) error {
+// The durable rung is owed whatever the emissions do. A settlement fact is a fact
+// about a live incarnation, so an incarnation that was lost, abandoned, fenced, or
+// never opened receives none — continuing a retired identity would state a fact a
+// conforming reducer must refuse as stale, and naming no identity at all would
+// state a malformed one — and the commit still lands underneath, because the
+// prefix the store is owed is not a message to a host.
+func (p *sessionStream) settleClose(ctx context.Context, commit func() error) error {
 	if p == nil {
-		return nil
+		return commit()
 	}
 
 	ctx, cancelSettlement := settlementContext(ctx)
@@ -515,29 +516,65 @@ func (p *sessionStream) settleClose(ctx context.Context, contained bool, committ
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	defer func() {
-		p.fenced = true
-		p.live = false
-		p.stream.Fence()
-	}()
+	defer p.fenceLocked()
 
-	if !contained || !committed || !p.live {
+	live := p.live
+	terminalErr := settlementEmission(p.endIncarnationLocked(ctx, lifecycle.ActionCancelled, lifecycle.OutcomeCancelled))
+	commitErr := commit()
+
+	switch {
+	case terminalErr != nil || commitErr != nil:
+		return errors.Join(terminalErr, commitErr)
+	case !live || !p.negotiated.AuthoritativeQuiescence:
 		return nil
 	}
 
-	if err := p.endIncarnationLocked(ctx, lifecycle.ActionCancelled, lifecycle.OutcomeCancelled); err != nil {
-		return err
-	}
-
-	if !p.negotiated.AuthoritativeQuiescence {
-		return nil
-	}
-
-	return p.emitLocked(ctx, lifecycle.QuiescenceEvent(lifecycle.QuiescenceFact{
+	return settlementEmission(p.emitLocked(ctx, lifecycle.QuiescenceEvent(lifecycle.QuiescenceFact{
 		Quiescent: true,
 		Source:    p.negotiated.QuiescenceSource,
 		Watermark: p.stream.State().ReducedThrough,
-	}))
+	})))
+}
+
+// fenceClose is the whole settlement a close whose containment boundary did not
+// complete leaves behind. It terminalizes nothing and states no fact: a set of
+// activities the adapter has just proved it cannot contain must not be declared
+// terminal, because their next real event would be a post-terminal mutation. The
+// stream is fenced all the same — the session is over either way, and the caller
+// reports the containment failure itself.
+func (p *sessionStream) fenceClose() {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.fenceLocked()
+}
+
+// fenceLocked ends the session's stream. A closed handle never reopens: later
+// conversation reuse resumes stored state into a new incarnation of a new logical
+// session, never into this one.
+func (p *sessionStream) fenceLocked() {
+	p.fenced = true
+	p.live = false
+	p.stream.Fence()
+}
+
+// settlementEmission reports what a settlement's emission failure says about this
+// adapter. A settlement the peer was no longer there to receive is not a failed
+// close: the stream still fences and the durable commit still lands, which is
+// what actually carries the boundary; the only thing missing is a host to tell,
+// and a hang-up on the far end is not a fault of this adapter's to report. A
+// delivery that failed while the peer was still reading stays a failure, because
+// that one really did leave a host holding a projection with a gap in it.
+func settlementEmission(err error) error {
+	if errors.Is(err, errLifecyclePeerGone) {
+		return nil
+	}
+
+	return err
 }
 
 // correlation renders the action correlation value stamped on the outbound

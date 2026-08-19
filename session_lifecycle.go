@@ -806,37 +806,31 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 
 // settleSessionClose runs the close-fenced settlement in the order the contract
 // fixes. The containment boundary has just completed, so: stop the reader that
-// served the contained process, commit the resumable snapshot, terminalize what
-// the session still owns and state the quiescence fact that completed proof
-// produced, and fence the session.
+// served the contained process, terminalize what the session still owns —
+// including the terminal idle a still-open turn receives — commit the resumable
+// snapshot behind those transitions, state the quiescence fact that completed
+// proof produced, and fence the session.
+//
+// The terminal transitions precede the commit because they report how work the
+// proof already contained ended, which is true whatever the store then does with
+// it; a host told nothing would be left projecting live actions behind a session
+// that is over. The commit failing is still a failed close, and it leaves the
+// quiescence fact unstated: that fact certifies the boundary, and a boundary whose
+// snapshot the store does not hold is exactly the one nothing may certify.
 //
 // A boundary that did not complete terminalizes nothing, commits nothing new, and
 // states no fact — a set of activities the adapter has just proved it cannot
-// contain must not be declared terminal — and a snapshot the store does not hold
-// means no quiescence fact at all.
-//
-// A settlement the peer was no longer there to receive is not a failed close. The
-// stream still fences and both durable commits still land, which is what actually
-// carries the boundary; the only thing missing is a host to tell, and a hang-up on
-// the far end is not a fault of this adapter's to report. A delivery that failed
-// while the peer was still reading stays a failure, because that one really did
-// leave a host holding a projection with a gap in it.
+// contain must not be declared terminal — and the stream is fenced regardless.
 func (s *agentSession) settleSessionClose(ctx context.Context, closeErr error) error {
 	s.nativePumpHandle().stopReceiving()
 
-	contained := !errors.Is(closeErr, claude.ErrProcessContainmentIncomplete)
+	if errors.Is(closeErr, claude.ErrProcessContainmentIncomplete) {
+		s.lifecycleStream().fenceClose()
 
-	var commitErr error
-	if contained {
-		commitErr = s.commitSessionMirror()
+		return nil
 	}
 
-	settleErr := s.lifecycleStream().settleClose(ctx, contained, commitErr == nil)
-	if errors.Is(settleErr, errLifecyclePeerGone) {
-		settleErr = nil
-	}
-
-	return errors.Join(commitErr, settleErr)
+	return s.lifecycleStream().settleClose(ctx, s.commitSessionMirror)
 }
 
 func (s *agentSession) recordContainmentError(err error) {

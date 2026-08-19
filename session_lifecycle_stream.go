@@ -490,8 +490,11 @@ func (p *sessionStream) endIncarnationLocked(
 // A boundary that did not complete terminalizes nothing and states no fact: a set
 // of activities the adapter has just proved it cannot contain must not be
 // declared terminal, because their next real event would be a post-terminal
-// mutation. A resumable snapshot the store does not hold means no quiescence fact
-// at all, never a fact with a missing snapshot behind it.
+// mutation. A failed durable commit is the same refusal one rung lower:
+// durability outranks the terminal event, so a close whose resumable snapshot the
+// store does not hold terminalizes nothing, states no quiescence fact, and ends
+// the incarnation unsettled — never a terminal idle, and never a fact, with a
+// missing snapshot behind it.
 //
 // A settlement fact is a fact about a live incarnation, so an incarnation that
 // was lost, abandoned, fenced, or never opened receives none. Continuing a
@@ -516,7 +519,7 @@ func (p *sessionStream) settleClose(ctx context.Context, contained bool, committ
 		p.stream.Fence()
 	}()
 
-	if !contained || !p.live {
+	if !contained || !committed || !p.live {
 		return nil
 	}
 
@@ -524,7 +527,7 @@ func (p *sessionStream) settleClose(ctx context.Context, contained bool, committ
 		return err
 	}
 
-	if !committed || !p.negotiated.AuthoritativeQuiescence {
+	if !p.negotiated.AuthoritativeQuiescence {
 		return nil
 	}
 

@@ -51,6 +51,30 @@ func lifecycleEventTypes(t *testing.T, conn *recordingAgentClient) []string {
 	return types
 }
 
+// newAuthoritativeLifecycleStreamTestSession builds the stream on a
+// configuration whose containment boundary proves an authoritative quiescence
+// source, so the settlement fact is one this session could actually state. A
+// test that asserts no fact was stated is only a test on this fixture: on a
+// session that negotiated no authoritative quiescence, no fact could ever emit
+// and the assertion could never fail.
+func newAuthoritativeLifecycleStreamTestSession(t *testing.T) (*agentSession, *recordingAgentClient, *sessionStream) {
+	t.Helper()
+
+	agent := NewAgent()
+	agent.containmentMode = RuntimeContainmentAuthoritative
+	conn := newRecordingAgentClient()
+	agent.setConnection(conn)
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
+	require.NoError(t, err)
+	require.True(t, agent.negotiatedLifecycle().AuthoritativeQuiescence)
+
+	session := &agentSession{agent: agent, id: "session-1"}
+	stream := session.lifecycleStream()
+	require.NotNil(t, stream)
+
+	return session, conn, stream
+}
+
 func newLifecycleActionSession(t *testing.T, nonce string) (*agentSession, *recordingAgentClient, *sessionStream, context.Context) {
 	t.Helper()
 	session, conn, stream := newLifecycleStreamTestSession(t)
@@ -510,17 +534,7 @@ func TestSessionStreamCloseStatesNoFactOnADeadIncarnation(t *testing.T) {
 	authoritative := func(t *testing.T) (*recordingAgentClient, *sessionStream) {
 		t.Helper()
 
-		agent := NewAgent()
-		agent.containmentMode = RuntimeContainmentAuthoritative
-		conn := newRecordingAgentClient()
-		agent.setConnection(conn)
-		_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
-		require.NoError(t, err)
-		require.True(t, agent.negotiatedLifecycle().AuthoritativeQuiescence)
-
-		session := &agentSession{agent: agent, id: "session-1"}
-		stream := session.lifecycleStream()
-		require.NotNil(t, stream)
+		_, conn, stream := newAuthoritativeLifecycleStreamTestSession(t)
 
 		return conn, stream
 	}
@@ -558,6 +572,82 @@ func TestSessionStreamCloseStatesNoFactOnADeadIncarnation(t *testing.T) {
 
 		require.NoError(t, stream.settleClose(ctx, true, true))
 		require.Equal(t, delivered, lifecycleEventTypes(t, conn))
+	})
+}
+
+// TestSessionStreamCloseSettlesNothingBehindAFailedCommit pins the rung
+// durability outranks. The containment boundary completed, so the session is over
+// and the fence is unconditional; the durable commit did not, so the close states
+// nothing at all — no action ends as cancelled, no terminal idle reports the
+// cycle, and no quiescence fact certifies a boundary the store cannot back. The
+// incarnation ends unsettled and the next one's snapshot asserts the truthful
+// state.
+//
+// The stream is driven directly because the production close cannot reach this
+// combination: the close barrier admits the settlement only once the session's
+// turn slot is free, and a turn releases that slot with its actions terminalized
+// and its turn ended — and where the turn's own commit failed, with its
+// incarnation already abandoned. The guard is therefore hardening, and this is the
+// only place that can hold it.
+func TestSessionStreamCloseSettlesNothingBehindAFailedCommit(t *testing.T) {
+	// liveIncarnation opens the shape the settlement acts on: a live incarnation
+	// holding an open turn and one outstanding action.
+	liveIncarnation := func(t *testing.T) (*recordingAgentClient, *sessionStream) {
+		t.Helper()
+
+		ctx := t.Context()
+		_, conn, stream := newAuthoritativeLifecycleStreamTestSession(t)
+		require.NoError(t, stream.incarnate(ctx))
+
+		_, err := stream.dispatch(
+			ctx, lifecycle.Submission{SubmissionID: "sub-1", ClientNonce: "non-1"}, "nonce-1", func() error { return nil })
+		require.NoError(t, err)
+
+		_, err = stream.announceAction(ctx, "nonce-1", lifecycle.ActionPermission)
+		require.NoError(t, err)
+
+		return conn, stream
+	}
+
+	t.Run("a failed commit settles nothing", func(t *testing.T) {
+		ctx := t.Context()
+		conn, stream := liveIncarnation(t)
+
+		delivered := lifecycleEventTypes(t, conn)
+
+		require.NoError(t, stream.settleClose(ctx, true, false))
+		require.True(t, stream.fenced, "the containment boundary completed, so the session is over either way")
+		require.Equal(t, delivered, lifecycleEventTypes(t, conn),
+			"a close whose durable prefix the store does not hold terminalizes nothing and certifies nothing")
+
+		state := stream.stream.State()
+		require.Len(t, state.Actions, 1)
+		require.False(t, state.Actions[0].State.Terminal(), "the action the close could not settle stays live")
+		require.Len(t, state.Turns, 1)
+		require.False(t, state.Turns[0].Terminal, "the incarnation ends unsettled rather than idle")
+		require.False(t, state.Quiescence.Certified)
+	})
+
+	t.Run("a landed commit settles everything", func(t *testing.T) {
+		ctx := t.Context()
+		conn, stream := liveIncarnation(t)
+
+		before := len(lifecycleEventTypes(t, conn))
+
+		require.NoError(t, stream.settleClose(ctx, true, true))
+		require.True(t, stream.fenced)
+		require.Equal(t, []string{
+			string(lifecycle.EventActionUpdate),
+			string(lifecycle.EventStateUpdate),
+			string(lifecycle.EventQuiescenceUpdate),
+		}, lifecycleEventTypes(t, conn)[before:],
+			"a durable close cancels what it held, reports the terminal idle, and states the fact")
+
+		state := stream.stream.State()
+		require.True(t, state.Actions[0].State.Terminal())
+		require.True(t, state.Turns[0].Terminal)
+		require.Equal(t, lifecycle.OutcomeCancelled, state.Turns[0].Outcome)
+		require.True(t, state.Quiescence.Certified)
 	})
 }
 

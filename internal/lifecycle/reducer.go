@@ -165,6 +165,13 @@ func (r *Reducer) Reduce(delivery Delivery) error {
 // bearing a retired identity is a resurrection rather than an opening, and the
 // standing projection — the current incarnation's — survives the refusal
 // untouched.
+//
+// The replacement is judged whole before anything is swapped: it opens a
+// candidate projection of its own, and only a candidate that reduced becomes
+// this reducer's. A refused replacement therefore latches the stream over the
+// projection exactly as it stood, never over an emptied one — fail-closed
+// handling terminalizes what the consumer holds, and an emptied projection holds
+// nothing to terminalize.
 func (r *Reducer) reduceForeign(delivery Delivery) error {
 	if _, superseded := r.retired[delivery.StreamID]; superseded {
 		return r.fail(delivery, ViolationStaleStream, "the incarnation was superseded by "+r.state.StreamID)
@@ -174,10 +181,19 @@ func (r *Reducer) reduceForeign(delivery Delivery) error {
 		return r.fail(delivery, ViolationStaleStream, "stream is "+r.state.StreamID)
 	}
 
-	r.retired[r.state.StreamID] = struct{}{}
-	r.reset(delivery.StreamID)
+	candidate := &Reducer{negotiated: r.negotiated, retired: r.retired}
+	candidate.reset(delivery.StreamID)
 
-	return r.reduceFirst(delivery)
+	if err := candidate.reduceFirst(delivery); err != nil {
+		r.failed = candidate.failed
+
+		return err
+	}
+
+	candidate.retired[r.state.StreamID] = struct{}{}
+	*r = *candidate
+
+	return nil
 }
 
 func (r *Reducer) reset(streamID string) {

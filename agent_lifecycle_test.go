@@ -340,3 +340,75 @@ func requireRequestError(t *testing.T, err error, code int, field string) {
 	require.True(t, ok, "error data names the offending field")
 	require.Equal(t, field, data["field"])
 }
+
+// TestLifecycleKeyOnPromptYieldsToTheRouteVerdict pins the route-precedence rule
+// on the other inbound surface that carries both reserved objects. One frame
+// gets one verdict, and which of the two checks an implementation happens to run
+// first must never decide it: the route is the authenticator, it is judged
+// first, and a prompt carrying an invalid route beside the family key reports
+// the route on every configuration.
+//
+// Both configurations are covered because the key means opposite things on them.
+// On a connection that negotiated nothing the key is forbidden outright; on one
+// that negotiated version 1 it is required and a malformed one is refused. The
+// route outranks either refusal, and neither prompt reaches the harness.
+func TestLifecycleKeyOnPromptYieldsToTheRouteVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		negotiated bool
+		meta       map[string]any
+		field      string
+	}{
+		{
+			name:  "an unnegotiated connection refuses the key on its own",
+			meta:  withLifecycleMeta(turnRouteMeta("nonce-1"), lifecycleKeyMeta()),
+			field: lifecycle.MetaPath,
+		},
+		{
+			name:  "an invalid route outranks the forbidden key",
+			meta:  withLifecycleMeta(map[string]any{routeMetaKey: "bad"}, lifecycleKeyMeta()),
+			field: routeMetaKey,
+		},
+		{
+			name:       "a negotiated connection refuses a malformed correlation on its own",
+			negotiated: true,
+			meta: withLifecycleMeta(turnRouteMeta("nonce-1"), map[string]any{
+				lifecycle.MetaKey: map[string]any{"version": 1, "unknown": true},
+			}),
+			field: lifecycle.MetaPath + ".unknown",
+		},
+		{
+			name:       "an invalid route outranks the malformed correlation",
+			negotiated: true,
+			meta: withLifecycleMeta(map[string]any{routeMetaKey: "bad"}, map[string]any{
+				lifecycle.MetaKey: map[string]any{"version": 1, "unknown": true},
+			}),
+			field: routeMetaKey,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			session, transport, cleanup := newPromptFlowSession(t)
+			defer cleanup()
+
+			if tc.negotiated {
+				_, err := session.agent.Initialize(ctx, acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
+				require.NoError(t, err)
+			}
+
+			session.agent.sessions[session.id] = session
+
+			_, err := session.agent.Prompt(ctx, acp.PromptRequest{
+				SessionId: session.id,
+				Meta:      tc.meta,
+				Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+			})
+			requireRequestError(t, err, -32602, tc.field)
+			for _, payload := range transport.Sent() {
+				frame, isFrame := payload.(map[string]any)
+				require.False(t, isFrame && frame["type"] == claude.MessageTypeUser,
+					"a refused prompt writes no native frame")
+			}
+		})
+	}
+}

@@ -1009,3 +1009,54 @@ func TestAgentShutdownSettlesCleanlyAfterTheHostHungUp(t *testing.T) {
 		require.True(t, stream.fenced)
 	})
 }
+
+// TestCloseThatCouldNotContainStatesNothingAboutALiveIncarnation pins the branch
+// the fenced-close tests cannot reach. Those settle a stream a loss already
+// ended, where every emission rung is skipped because the incarnation is gone;
+// this one is live, holding an unsettled turn and a blocking action, and the
+// boundary still terminalizes nothing and states no fact.
+//
+// It is not a fenced stream's silence — it is a refusal. The adapter has just
+// proved it cannot contain this session's descendants, so declaring their work
+// terminal would make their next real event a post-terminal mutation, and a
+// quiescence fact would certify a vacancy nothing established. The store is left
+// out of it for the same reason: nothing new is committed, which is why a store
+// that would fail a commit does not fail this close. What does happen is the
+// fence, and the error the caller gets is the containment failure itself.
+func TestCloseThatCouldNotContainStatesNothingAboutALiveIncarnation(t *testing.T) {
+	ctx := t.Context()
+
+	// A store that fails every append is how "commits nothing new" is asserted:
+	// the pump's own outbox is asynchronous, so an empty store proves nothing,
+	// while a commit barrier this close never took cannot report the failure.
+	store := &faultSessionStore{SessionStore: NewInMemorySessionStore(), appendErr: errors.New("prefix append failed")}
+	session, conn, stream := closeFencedSession(t, store)
+
+	session.client = claude.NewClient(nil, claude.Options{},
+		&closeErrTransport{Transport: newFakeClaudeTransport(), err: claude.ErrProcessContainmentIncomplete})
+	require.NoError(t, session.client.Start(ctx))
+
+	before := lifecycleEventTypes(t, conn)
+	live := stream.stream.State()
+	require.Len(t, live.Actions, 1)
+	require.False(t, live.Actions[0].State.Terminal(), "the action is nonterminal when the boundary fails")
+	require.Len(t, live.Turns, 1)
+	require.False(t, live.Turns[0].Terminal)
+
+	err := session.Close(ctx)
+	require.ErrorIs(t, err, claude.ErrProcessContainmentIncomplete,
+		"the close returns the containment failure and invents nothing beside it")
+	require.NotContains(t, err.Error(), "prefix append failed",
+		"a boundary that did not complete commits nothing new")
+
+	require.Equal(t, before, lifecycleEventTypes(t, conn),
+		"nothing is terminalized and no quiescence fact is stated")
+	require.Equal(t, live.Actions, stream.stream.State().Actions,
+		"work the adapter cannot contain is never declared terminal")
+	require.Equal(t, live.Turns, stream.stream.State().Turns)
+
+	stream.mu.Lock()
+	require.True(t, stream.fenced, "the stream is fenced whether or not the boundary completed")
+	require.False(t, stream.live)
+	stream.mu.Unlock()
+}

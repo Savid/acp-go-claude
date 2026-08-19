@@ -219,7 +219,6 @@ func (a *Agent) close() error {
 	a.sessions = make(map[acp.SessionId]*agentSession)
 	a.permissionCache = make(map[acp.SessionId]map[string]string)
 	a.deleted = make(map[acp.SessionId]struct{})
-	a.conn = nil
 	a.mu.Unlock()
 
 	if len(sessions) > 0 {
@@ -246,7 +245,14 @@ func (a *Agent) close() error {
 
 	closes.Wait()
 
+	// The connection outlives the close ladders that run on it. Each session's
+	// close is the containment-proving boundary, and the terminal actions, the
+	// terminal idle and the quiescence fact it proves are the last thing this
+	// agent owes the host: discarding the carrier first would leave every one of
+	// them undeliverable, and a shutdown that closed cleanly would report the
+	// adapter's own missing connection as a lifecycle violation.
 	a.mu.Lock()
+	a.conn = nil
 	containmentErr := a.containmentErr
 	a.mu.Unlock()
 

@@ -2,6 +2,8 @@ package claudeacp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"sync"
@@ -609,12 +611,34 @@ func (p *sessionStream) emitLocked(ctx context.Context, event lifecycle.Event) e
 		Meta:      map[string]any{lifecycle.MetaKey: envelope},
 		Update:    acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{}},
 	}); err != nil {
-		p.lost = lifecycleViolationError(err.Error())
+		p.lost = emissionLoss(conn, err)
 
 		return p.lost
 	}
 
 	return nil
+}
+
+// errLifecyclePeerGone marks an emission that could not be delivered because the
+// peer had already hung up. It is still loss — the incarnation latches and emits
+// nothing further on a stream the host stopped reading — but it is not this
+// adapter's failure, so a boundary whose only fault was that nobody was left to
+// tell reports it under its own name rather than as a lifecycle violation.
+var errLifecyclePeerGone = errors.New("the ACP peer connection has ended")
+
+// emissionLoss names an emission the host never received. A delivery that failed
+// while the peer was still there is this adapter holing its own stream and fails
+// closed as a violation. A delivery that failed after the peer's reader loop
+// ended is a different fact: the connection is over, every later emission on it
+// is equally undeliverable, and there is no host left holding a projection with a
+// gap in it.
+func emissionLoss(conn agentClient, err error) error {
+	select {
+	case <-conn.Done():
+		return fmt.Errorf("%w: %w", errLifecyclePeerGone, err)
+	default:
+		return lifecycleViolationError(err.Error())
+	}
 }
 
 // actionEndFor reports the terminal action state a settling cycle gives the

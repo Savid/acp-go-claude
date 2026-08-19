@@ -758,6 +758,13 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 // states no fact — a set of activities the adapter has just proved it cannot
 // contain must not be declared terminal — and a snapshot the store does not hold
 // means no quiescence fact at all.
+//
+// A settlement the peer was no longer there to receive is not a failed close. The
+// stream still fences and both durable commits still land, which is what actually
+// carries the boundary; the only thing missing is a host to tell, and a hang-up on
+// the far end is not a fault of this adapter's to report. A delivery that failed
+// while the peer was still reading stays a failure, because that one really did
+// leave a host holding a projection with a gap in it.
 func (s *agentSession) settleSessionClose(ctx context.Context, closeErr error) error {
 	s.nativePumpHandle().stopReceiving()
 
@@ -768,7 +775,12 @@ func (s *agentSession) settleSessionClose(ctx context.Context, closeErr error) e
 		commitErr = s.commitSessionMirror()
 	}
 
-	return errors.Join(commitErr, s.lifecycleStream().settleClose(ctx, contained, commitErr == nil))
+	settleErr := s.lifecycleStream().settleClose(ctx, contained, commitErr == nil)
+	if errors.Is(settleErr, errLifecyclePeerGone) {
+		settleErr = nil
+	}
+
+	return errors.Join(commitErr, settleErr)
 }
 
 func (s *agentSession) recordContainmentError(err error) {

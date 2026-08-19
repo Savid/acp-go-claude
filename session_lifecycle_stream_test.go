@@ -1,9 +1,11 @@
 package claudeacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -888,4 +890,122 @@ func TestSettlementEmissionsAreBoundedNotMerelyDetached(t *testing.T) {
 	// incarnation opens on a fresh identity and re-asserts the whole state.
 	blocked.release()
 	require.NoError(t, stream.incarnate(t.Context()))
+}
+
+// agentHoldingALiveIncarnation builds an agent whose one session holds an open
+// incarnation with an unsettled turn and a blocking action, on a configuration
+// whose containment boundary proves quiescence — so the shutdown below has a
+// terminal action, a terminal idle, and a positive fact left to state, and a
+// shutdown that stated none of them can fail.
+func agentHoldingALiveIncarnation(t *testing.T, conn agentClient) (*Agent, *sessionStream) {
+	t.Helper()
+
+	ctx := t.Context()
+	agent := NewAgent()
+	agent.containmentMode = RuntimeContainmentAuthoritative
+	agent.setConnection(conn)
+
+	_, err := agent.Initialize(ctx, acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
+	require.NoError(t, err)
+	require.True(t, agent.negotiatedLifecycle().AuthoritativeQuiescence)
+
+	client := claude.NewClient(nil, claude.Options{}, newFakeClaudeTransport())
+	require.NoError(t, client.Start(ctx))
+
+	session := &agentSession{
+		agent:  agent,
+		id:     "session-1",
+		client: client,
+		turn:   make(chan struct{}, sessionTurnCapacity),
+	}
+	agent.sessions[session.id] = session
+	t.Cleanup(session.stopNativePump)
+
+	stream := session.lifecycleStream()
+	require.NotNil(t, stream)
+	require.NoError(t, stream.incarnate(ctx))
+
+	_, err = stream.dispatch(
+		ctx, lifecycle.Submission{SubmissionID: "sub-1", ClientNonce: "non-1"}, "nonce-1", func() error { return nil })
+	require.NoError(t, err)
+
+	_, err = stream.announceAction(ctx, "nonce-1", lifecycle.ActionPermission)
+	require.NoError(t, err)
+
+	return agent, stream
+}
+
+// TestAgentShutdownDeliversItsFinalLifecycleEmissions pins that the connection
+// outlives the close ladders that run on it. Agent shutdown is a real close
+// boundary: it terminalizes the actions the session still owns, reports the
+// cancelled cycle's terminal idle, and states the quiescence its completed
+// containment proved. Discarding the carrier before those ladders run would make
+// every one of them undeliverable and turn a clean shutdown into a lifecycle
+// violation nobody committed.
+func TestAgentShutdownDeliversItsFinalLifecycleEmissions(t *testing.T) {
+	conn := newRecordingAgentClient()
+	agent, stream := agentHoldingALiveIncarnation(t, conn)
+
+	before := len(lifecycleEventTypes(t, conn))
+
+	require.NoError(t, agent.Close(), "a shutdown that delivered everything it owed reports no failure")
+	require.True(t, stream.fenced)
+
+	require.Equal(t, []string{
+		string(lifecycle.EventActionUpdate),
+		string(lifecycle.EventStateUpdate),
+		string(lifecycle.EventQuiescenceUpdate),
+	}, lifecycleEventTypes(t, conn)[before:], "the close ladder's own emissions reached the host")
+}
+
+// TestServeReturnsNilOnANormalPeerClose drives the same shutdown through Serve,
+// which is where the discarded connection actually surfaced: the peer hangs up,
+// the loop returns nil, and the deferred agent close overwrites that nil with
+// whatever it reports. A clean peer close owes the caller no error.
+func TestServeReturnsNilOnANormalPeerClose(t *testing.T) {
+	previous := newServeAgent
+	t.Cleanup(func() { newServeAgent = previous })
+
+	agent, stream := agentHoldingALiveIncarnation(t, newRecordingAgentClient())
+	newServeAgent = func(...Option) *Agent { return agent }
+
+	require.NoError(t, Serve(t.Context(), bytes.NewBuffer(nil), io.Discard))
+	require.True(t, stream.fenced, "the peer's hang-up still ran the close boundary")
+}
+
+// TestAgentShutdownSettlesCleanlyAfterTheHostHungUp pins the other side of that
+// same reordering. Keeping the connection installed means the close ladder now
+// really tries to deliver, and on a peer that already went away that delivery
+// fails. It is still loss — the stream latches and fences — but it is the peer's
+// hang-up, not this adapter holing its own stream, so the close reports no
+// failure. A delivery that failed while the peer was still reading is the
+// opposite fact and keeps the violation it earned.
+func TestAgentShutdownSettlesCleanlyAfterTheHostHungUp(t *testing.T) {
+	t.Run("the peer is already gone", func(t *testing.T) {
+		conn := newRecordingAgentClient()
+		agent, stream := agentHoldingALiveIncarnation(t, conn)
+
+		// The host hangs up with the incarnation open: its reader loop ends, and
+		// every write this adapter still owes it fails from here on.
+		conn.sessionUpdateErr = errors.New("write: broken pipe")
+		close(conn.done)
+
+		require.NoError(t, agent.Close(), "a hang-up on the far end is not this adapter's failure")
+		require.True(t, stream.fenced, "the boundary still fenced the session it contained")
+
+		stream.mu.Lock()
+		require.ErrorIs(t, stream.lost, errLifecyclePeerGone, "the incarnation still latched")
+		stream.mu.Unlock()
+	})
+
+	t.Run("the peer is still reading", func(t *testing.T) {
+		conn := newRecordingAgentClient()
+		agent, stream := agentHoldingALiveIncarnation(t, conn)
+		conn.sessionUpdateErr = errors.New("host disconnected")
+
+		err := agent.Close()
+		require.ErrorContains(t, err, "claude_lifecycle_violation")
+		require.ErrorContains(t, err, "host disconnected")
+		require.True(t, stream.fenced)
+	})
 }

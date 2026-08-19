@@ -182,6 +182,11 @@ the barrier-wait error, not anything the native process reported. A same-id load
 resume, or fork over an instance whose close settled nothing is refused the same
 way.
 
+A close that reached the boundary and failed a rung of it keeps the id too, and
+returns the failure it earned. The id stops resolving only behind a close that
+completed every rung it owed, so the next `session/close` retakes the boundary
+rather than repeating an answer.
+
 `session/delete` runs the other way round. It writes its durable tombstone first
 and hides the id with it, and only then cancels, closes, and cleans up. A
 teardown that does not finish is reported as the delete's error, but the

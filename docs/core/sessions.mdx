@@ -24,8 +24,8 @@ finish before it tears the native process down, so the process is never closed
 under a turn still reading from it; a busy session is waited for rather than
 answered with backpressure. Once close has begun the session admits nothing
 further — a prompt, a relaunch, an MCP registry refresh, and reuse by load,
-resume, or fork all answer the unknown-session error — and a repeated close
-observes the first result without repeating any teardown.
+resume, or fork all answer the unknown-session error — and a close repeated
+behind one that completed observes that result without repeating any teardown.
 
 That wait is the settlement barrier, and everything close reports follows it. If
 the caller's context ends before the in-flight turn releases the session, nothing
@@ -36,9 +36,17 @@ is answered `-32800`, and any other expiry is answered `-32600` naming
 keeps its live session so the work still running behind it stays addressable, and
 the next close — with a context of its own — settles it for real. A same-id load,
 resume, or fork is refused rather than installed over an instance that has not
-settled. A session leaves the active map only after its own close settled, and
-only while the map still holds that same instance, so a close never evicts a
-session that a same-id load, resume, or fork installed behind it.
+settled.
+
+A close that reached the boundary and failed a rung of it — the durable commit,
+a deletion it owed — is not memoized either. It reports that failure and keeps
+the id, because what is still running behind it is exactly what the close did not
+finish, and the next close retakes the boundary and completes what is still
+owed; each admission and each rung behind it is guarded, so nothing that already
+happened happens twice. A session therefore leaves the active map only behind a
+close that completed, and only while the map still holds that same instance, so a
+close never evicts a session that a same-id load, resume, or fork installed
+behind it.
 
 `session/delete` runs the other way round, because a deletion a host was told
 succeeded must never come back. The durable tombstone is written first and the id

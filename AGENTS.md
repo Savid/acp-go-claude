@@ -87,7 +87,10 @@ home.
   packages such as `utils`, `helpers`, or `common`.
 - Follow existing package patterns before introducing new abstractions.
 - Advertise lifecycle facts only when the configured boundary proves them.
-- Settle in native-terminal, containment, durable-commit, terminal-event order.
+- Settle a prompt in native-terminal, containment, durable-commit,
+  terminal-event order. At the close boundary the terminal events come first
+  instead: terminalize what the session still owns, then commit, then state the
+  quiescence fact, then fence.
 
 ## Ask Before
 

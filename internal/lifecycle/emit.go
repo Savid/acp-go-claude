@@ -198,6 +198,11 @@ func encodeEvent(event Event) map[string]any {
 			fieldType:   string(EventActionUpdate),
 			fieldAction: encodeAction(*event.Action),
 		}
+	case EventActivityUpdate:
+		return map[string]any{
+			fieldType:     string(EventActivityUpdate),
+			fieldActivity: encodeActivity(*event.Activity),
+		}
 	default:
 		return encodeTransition(*event.State)
 	}

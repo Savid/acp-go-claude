@@ -479,3 +479,28 @@ func TestEmitRefusesAPayloadMismatchedEvent(t *testing.T) {
 	}})
 	require.NoError(t, err)
 }
+
+// TestEmittedActivityRendersWholeAndAnswersToTheNegotiatedFacts proves an
+// activity event is encoded member for member rather than falling into the
+// transition arm, and that this configuration's reducer still refuses the fact
+// it never advertised.
+func TestEmittedActivityRendersWholeAndAnswersToTheNegotiatedFacts(t *testing.T) {
+	t.Parallel()
+
+	activity := ActivityUpdate{
+		ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning,
+		Cause: CauseSubmission, OriginTurnID: "turn-1", RunID: "run-1",
+	}
+
+	rendered := encodeEvent(Event{Type: EventActivityUpdate, Activity: &activity})
+	require.Equal(t, string(EventActivityUpdate), rendered[fieldType])
+	member, ok := rendered[fieldActivity].(map[string]any)
+	require.True(t, ok, "the activity event carries its member, not a transition")
+	require.Equal(t, "act-1", member[fieldActivityID])
+
+	stream := openStream(t, provenConfiguration(), "strm-1")
+	_, err := stream.Emit(Event{Type: EventActivityUpdate, Activity: &activity})
+	var refusal *ViolationError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, ViolationUnnegotiatedFact, refusal.Kind)
+}

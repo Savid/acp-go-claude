@@ -453,24 +453,28 @@ func (s *agentSession) Cancel(ctx context.Context) (err error) {
 // where a family literal may ride. A cancel carrying both an invalid route and
 // the lifecycle key therefore reports the route, and never one of two verdicts
 // chosen by whichever check an implementation happened to run first.
+//
+// Authentication is unconditional. There is no turn state under which a cancel
+// skips the route: an idle session has no active nonce for a caller to name, so
+// nothing authorizes native interrupt and the request fails closed with no
+// native side effect at all — no interrupt, no pending-interaction resolution,
+// and no native client close.
 func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) error {
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
+
+	route, err := parseInboundTurnRoute(meta)
+	if err != nil {
+		return err
+	}
 
 	s.mu.Lock()
 	activeNonce := s.turnNonce
 	active := s.cancel != nil && activeNonce != ""
 	s.mu.Unlock()
 
-	if active {
-		route, err := parseInboundTurnRoute(meta)
-		if err != nil {
-			return err
-		}
-
-		if route.turnNonce != activeNonce {
-			return unsupportedField(routeMetaKey)
-		}
+	if !active || route.turnNonce != activeNonce {
+		return unsupportedField(routeMetaKey)
 	}
 
 	if err := rejectLifecycleMeta(meta); err != nil {

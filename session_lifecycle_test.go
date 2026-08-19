@@ -208,6 +208,119 @@ func TestSessionCancelCancelsPendingElicitations(t *testing.T) {
 	require.Empty(t, session.elicitationCancel)
 }
 
+// TestCancelRouteAuthenticatesOnEveryTurnState pins that session/cancel is
+// route-authenticated unconditionally rather than only while a turn is running.
+// An idle session has no active nonce for a caller to name, so nothing
+// authorizes the native interrupt: the refusal lands with no native effect at
+// all — no interrupt, no pending-interaction resolution, no native client
+// close — and the session's own turn state is left exactly where it was.
+func TestCancelRouteAuthenticatesOnEveryTurnState(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		meta   map[string]any
+		active bool
+	}{
+		{name: "no route envelope on the active turn", active: true},
+		{name: "a stale nonce on the active turn", meta: turnRouteMeta("nonce-0"), active: true},
+		{name: "the current nonce with no active turn", meta: turnRouteMeta("nonce-1")},
+		{name: "neither a route envelope nor an active turn"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			session, transport := newRoutedCancelSessionForTest(t)
+			permissionCancelled, elicitationCancelled, turnCancelled := false, false, false
+			session.permissionCancel = map[string]*permissionRequestCancel{
+				"tool": {cancel: func() { permissionCancelled = true }},
+			}
+			session.elicitationCancel = map[int64]*elicitationRequestCancel{
+				1: {cancel: func() { elicitationCancelled = true }},
+			}
+
+			if tc.active {
+				session.cancel = func() { turnCancelled = true }
+				session.turnNonce = "nonce-1"
+			}
+
+			err := session.agent.Cancel(t.Context(), acp.CancelNotification{SessionId: session.id, Meta: tc.meta})
+			requireExactUnsupportedField(t, err, routeMetaKey)
+
+			require.Zero(t, interruptCalls(transport), "an unauthenticated cancel never interrupts the native process")
+			require.Zero(t, transport.CloseCalls(), "an unauthenticated cancel never closes the native client")
+			require.True(t, session.client.Alive(), "an unauthenticated cancel leaves the native client untouched")
+			require.False(t, permissionCancelled, "an unauthenticated cancel never resolves a pending permission")
+			require.False(t, elicitationCancelled, "an unauthenticated cancel never resolves a pending elicitation")
+			require.Len(t, session.permissionCancel, 1)
+			require.Len(t, session.elicitationCancel, 1)
+			require.False(t, turnCancelled, "an unauthenticated cancel never reaches the turn")
+			require.False(t, session.turnCancelled, "an unauthenticated cancel leaves turn state unmoved")
+		})
+	}
+}
+
+// TestCancelWithCurrentRouteInterruptsOnce pins the authorized side of the same
+// gate: the nonce naming the running turn still cancels it, interrupts the
+// native process exactly once, and resolves every pending interaction.
+func TestCancelWithCurrentRouteInterruptsOnce(t *testing.T) {
+	t.Parallel()
+
+	session, transport := newRoutedCancelSessionForTest(t)
+	permissionCancelled, elicitationCancelled, turnCancelled := false, false, false
+	session.permissionCancel = map[string]*permissionRequestCancel{
+		"tool": {cancel: func() { permissionCancelled = true }},
+	}
+	session.elicitationCancel = map[int64]*elicitationRequestCancel{
+		1: {cancel: func() { elicitationCancelled = true }},
+	}
+	session.cancel = func() { turnCancelled = true }
+	session.turnNonce = "nonce-1"
+
+	require.NoError(t, session.agent.Cancel(t.Context(), CancelRequest(session.id, "nonce-1")))
+	require.Equal(t, 1, interruptCalls(transport))
+	require.True(t, turnCancelled)
+	require.True(t, permissionCancelled)
+	require.True(t, elicitationCancelled)
+	require.True(t, session.turnCancelled)
+	require.Empty(t, session.permissionCancel)
+	require.Empty(t, session.elicitationCancel)
+}
+
+func newRoutedCancelSessionForTest(t *testing.T) (*agentSession, *fakeClaudeTransport) {
+	t.Helper()
+
+	agent := NewAgent()
+	transport := newFakeClaudeTransport()
+	client := claude.NewClient(nil, claude.Options{}, transport)
+	require.NoError(t, client.Start(t.Context()))
+	t.Cleanup(func() { _ = client.Close() })
+
+	session := &agentSession{
+		agent:  agent,
+		id:     "session-1",
+		client: client,
+		turn:   make(chan struct{}, sessionTurnCapacity),
+	}
+	agent.sessions[session.id] = session
+
+	return session, transport
+}
+
+// interruptCalls counts the native interrupt control requests the session sent.
+func interruptCalls(transport *fakeClaudeTransport) int {
+	calls := 0
+
+	for _, sent := range transport.Sent() {
+		request, ok := sent.(claude.ControlRequest)
+		if ok && request.Request["subtype"] == "interrupt" {
+			calls++
+		}
+	}
+
+	return calls
+}
+
 func TestSessionCloseResolvesPendingInteractionsFirst(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()

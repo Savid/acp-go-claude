@@ -94,10 +94,15 @@ that declaration, verifies the size and digest, and then applies the same gates
 an embedded image passes. See
 [Models and config](/docs/features/models-config).
 
-Every `session/prompt` and every cancellation of an active turn MUST carry
-exactly `_meta["acp-go.dev/route"] = {"version":1,"turnNonce":"..."}`.
+Every `session/prompt` and every `session/cancel` MUST carry exactly
+`_meta["acp-go.dev/route"] = {"version":1,"turnNonce":"..."}`.
 Missing, extra, wrong-typed, unsupported-version, and stale values are rejected.
 The nonce is fresh and unguessable for each turn and is at most 4096 bytes.
+A cancel is authenticated on every turn state, never only while a turn runs: a
+session with no active turn holds no nonce that can authorize one, so its cancel
+is refused with no native effect at all — Claude is not interrupted, pending
+permission and elicitation requests are untouched, and the native process stays
+open.
 
 Every live-turn `session/update` and `_claude/rawEvent` notification carries the
 same exact `{version, turnNonce}` object in its notification `_meta`; raw-event

@@ -377,11 +377,16 @@ func TestCancelDuringPromptBypassesClientCallLimit(t *testing.T) {
 	require.NoError(t, client.Start(ctx))
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
 
+	_, cancelTurn := context.WithCancel(ctx)
+	defer cancelTurn()
+
 	agent.mu.Lock()
 	agent.sessions["session-1"] = &agentSession{
-		agent:  agent,
-		id:     "session-1",
-		client: client,
+		agent:     agent,
+		id:        "session-1",
+		client:    client,
+		cancel:    cancelTurn,
+		turnNonce: "turn-1",
 	}
 	agent.mu.Unlock()
 
@@ -389,7 +394,7 @@ func TestCancelDuringPromptBypassesClientCallLimit(t *testing.T) {
 	require.NoError(t, err)
 	defer release()
 
-	raw, err := json.Marshal(acp.CancelNotification{SessionId: "session-1"})
+	raw, err := json.Marshal(CancelRequest("session-1", "turn-1"))
 	require.NoError(t, err)
 
 	conn := &localAgentConnection{agent: agent}

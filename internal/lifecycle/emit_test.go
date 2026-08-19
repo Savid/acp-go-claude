@@ -338,7 +338,9 @@ func TestEmittedActionPatchesStateOnlyWhatTheCallerStated(t *testing.T) {
 
 			patched, err := stream.Emit(ActionEvent(testCase.patch))
 			require.NoError(t, err, "a legal patch is emittable")
-			require.Equal(t, testCase.want, patched[fieldEvent].(map[string]any)[fieldAction])
+			event, ok := patched[fieldEvent].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, testCase.want, event[fieldAction])
 
 			envelopes = append(envelopes, patched)
 

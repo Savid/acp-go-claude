@@ -1345,8 +1345,10 @@ func TestRelaunchRefetchesAndReemitsTheCommandCatalog(t *testing.T) {
 			require.False(t, session.client.Alive())
 			require.NoError(t, session.ensureClientAlive(ctx))
 
-			names := []string{}
-			for _, command := range session.commands() {
+			commands := session.commands()
+			names := make([]string, 0, len(commands))
+
+			for _, command := range commands {
 				names = append(names, command.Name)
 			}
 
@@ -1355,4 +1357,31 @@ func TestRelaunchRefetchesAndReemitsTheCommandCatalog(t *testing.T) {
 				"the relaunch restates the whole catalog to the host")
 		})
 	}
+}
+
+// TestRelaunchReportsAFailedCatalogEmission pins what a relaunch owes when the
+// host does not receive the restated snapshot. The replacement process is live
+// and installed — only the notification failed — so the failure travels to the
+// caller rather than being swallowed, and the catalog this adapter still owes the
+// host stays unadvertised until an emission succeeds.
+func TestRelaunchReportsAFailedCatalogEmission(t *testing.T) {
+	ctx := t.Context()
+	session, _, cleanup := newPromptFlowSession(t)
+	defer cleanup()
+
+	conn, ok := session.agent.connection().(*recordingAgentClient)
+	require.True(t, ok)
+
+	replacement := newFakeClaudeTransport()
+	session.canRelaunch = true
+	session.agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		return claude.NewClient(log, options, replacement)
+	}
+
+	require.NoError(t, session.client.Close())
+	conn.sessionUpdateErr = errors.New("host disconnected")
+
+	require.ErrorContains(t, session.ensureClientAlive(ctx), "host disconnected")
+	require.True(t, session.client.Alive(), "the replacement is installed; only the notification failed")
+	require.Empty(t, session.advertisedCommands, "an unreceived snapshot advertises nothing")
 }

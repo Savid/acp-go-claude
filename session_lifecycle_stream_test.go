@@ -157,6 +157,57 @@ func TestSessionStreamRoutesActionsAndSettlesOnce(t *testing.T) {
 	require.Len(t, conn.Updates(), settled, "final settlement latch must emit exactly once")
 }
 
+// TestSessionStreamActionEventsRestateTheWholeStoredRecord pins what this
+// adapter's own action call sites state. The render is patch-faithful, so an
+// omitted member is now a member the host is never told about; every action this
+// adapter emits is a complete sight of one, on the resolution as much as on the
+// first, and a call site that started restating less would silently narrow the
+// stream rather than fail anywhere.
+func TestSessionStreamActionEventsRestateTheWholeStoredRecord(t *testing.T) {
+	ctx := t.Context()
+	_, conn, stream := newLifecycleStreamTestSession(t)
+	require.NoError(t, stream.incarnate(ctx))
+
+	_, err := stream.dispatch(
+		ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c", RunID: "run-1"}, "nonce", func() error { return nil })
+	require.NoError(t, err)
+
+	action, err := stream.announceAction(ctx, "nonce", lifecycle.ActionPermission)
+	require.NoError(t, err)
+	require.NoError(t, stream.resolveAction(ctx, action, lifecycle.ActionAccepted))
+
+	states := []string{}
+
+	for _, update := range conn.Updates() {
+		envelope, ok := update.Meta[lifecycle.MetaKey].(map[string]any)
+		require.True(t, ok)
+
+		event := requireAnyMap(t, envelope["event"])
+		if event["type"] != string(lifecycle.EventActionUpdate) {
+			continue
+		}
+
+		emitted := requireAnyMap(t, event["action"])
+		state, ok := emitted["state"].(string)
+		require.True(t, ok)
+
+		states = append(states, state)
+
+		require.Equal(t, map[string]any{
+			"actionId":         action.ActionID,
+			"kind":             string(lifecycle.ActionPermission),
+			"state":            state,
+			"owner":            map[string]any{"type": string(lifecycle.OwnerTurn), "id": stream.stream.State().Turns[0].TurnID},
+			"runId":            "run-1",
+			"blocksForeground": true,
+		}, emitted)
+	}
+
+	require.Equal(t,
+		[]string{string(lifecycle.ActionPending), string(lifecycle.ActionAccepted)}, states,
+		"both sights of the action reached the host")
+}
+
 // TestSessionStreamIncarnationLossTerminalizesOwnedWork proves a process loss
 // fails its outstanding action and active turn before a fresh incarnation opens.
 func TestSessionStreamIncarnationLossTerminalizesOwnedWork(t *testing.T) {

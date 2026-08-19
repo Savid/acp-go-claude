@@ -242,18 +242,21 @@ func encodeSnapshot(snapshot Snapshot) map[string]any {
 	}
 }
 
-// encodeActivity renders one activity member. Every member a first sight owes is
-// stated outright rather than omitted when empty, so an identity this adapter
-// could not state completely is refused at the point of emission instead of
-// rendering as a patch that states nothing.
+// encodeActivity renders exactly the members the caller stated. The identity and
+// the state are what every sight of an activity carries, and everything else is
+// rendered if and only if it has a value: a member the caller left unstated is
+// omitted rather than rendered empty, because a rendered empty member is a
+// statement, and the first sight that owes a complete identity is held to that by
+// the reducer this render is read back through rather than by a render that
+// fabricates the members it lacks.
 func encodeActivity(activity ActivityUpdate) map[string]any {
 	members := map[string]any{
-		fieldActivityID:   activity.ActivityID,
-		fieldKind:         string(activity.Kind),
-		fieldState:        string(activity.State),
-		fieldCause:        string(activity.Cause),
-		fieldOriginTurnID: activity.OriginTurnID,
+		fieldActivityID: activity.ActivityID,
+		fieldState:      string(activity.State),
 	}
+	withOptional(members, fieldKind, string(activity.Kind))
+	withOptional(members, fieldCause, string(activity.Cause))
+	withOptional(members, fieldOriginTurnID, activity.OriginTurnID)
 	withOptional(members, fieldParentID, activity.ParentID)
 	withOptional(members, fieldToolCallID, activity.ToolCallID)
 	withOptional(members, fieldRunID, activity.RunID)
@@ -265,19 +268,28 @@ func encodeActivity(activity ActivityUpdate) map[string]any {
 	return members
 }
 
-// encodeAction renders one action member under the same rule: the identity, the
-// state, the owner, and the blocking claim are always stated, because every
-// action this adapter emits is a complete sight of one.
+// encodeAction renders one action under the same rule. The blocking claim is the
+// member that makes the rule load-bearing rather than tidy: it is a pointer
+// precisely because an omitted claim and a stated false are different facts, so
+// rendering an unstated one as false would fabricate a claim the caller never
+// made — and a legal patch restating only the identity would then be refused as
+// having changed what the action blocks.
 func encodeAction(action ActionUpdate) map[string]any {
 	members := map[string]any{
 		fieldActionID: action.ActionID,
-		fieldKind:     string(action.Kind),
 		fieldState:    string(action.State),
-		fieldOwner: map[string]any{
+	}
+	withOptional(members, fieldKind, string(action.Kind))
+
+	if action.Owner != (Owner{}) {
+		members[fieldOwner] = map[string]any{
 			fieldType: string(action.Owner.Type),
 			fieldID:   action.Owner.ID,
-		},
-		fieldBlocksForeground: action.BlocksForeground != nil && *action.BlocksForeground,
+		}
+	}
+
+	if action.BlocksForeground != nil {
+		members[fieldBlocksForeground] = *action.BlocksForeground
 	}
 
 	return withOptional(members, fieldRunID, action.RunID)

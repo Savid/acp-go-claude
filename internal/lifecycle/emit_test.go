@@ -265,6 +265,127 @@ func TestEmittedActionStreamReducesThroughTheSameReducer(t *testing.T) {
 	require.Equal(t, ForegroundIdle, state.Foreground.State)
 }
 
+// TestEmittedActionPatchesStateOnlyWhatTheCallerStated proves the render is
+// patch-faithful. A patch is legal precisely because it may restate a subset of
+// an action's members, and a render that filled the rest in from zero values
+// would turn every such patch into a lie the emit gate then refuses: an unstated
+// blocking claim rendered as false reads as a change to what the action blocks,
+// and an unstated kind rendered as "" is a malformed envelope. Both shapes below
+// are wire-legal, so both must leave this emitter and reduce.
+func TestEmittedActionPatchesStateOnlyWhatTheCallerStated(t *testing.T) {
+	t.Parallel()
+
+	owner := Owner{Type: OwnerTurn, ID: "turn-1"}
+	blocks := true
+	first := ActionUpdate{
+		ActionID:         "act-1",
+		Kind:             ActionPermission,
+		State:            ActionPending,
+		Owner:            owner,
+		BlocksForeground: &blocks,
+	}
+
+	for _, testCase := range []struct {
+		name  string
+		patch ActionUpdate
+		want  map[string]any
+	}{
+		{
+			name: "a patch restating the identity but not the blocking claim",
+			patch: ActionUpdate{
+				ActionID: "act-1",
+				Kind:     ActionPermission,
+				State:    ActionAccepted,
+				Owner:    owner,
+			},
+			want: map[string]any{
+				fieldActionID: "act-1",
+				fieldKind:     string(ActionPermission),
+				fieldState:    string(ActionAccepted),
+				fieldOwner:    map[string]any{fieldType: string(OwnerTurn), fieldID: "turn-1"},
+			},
+		},
+		{
+			name:  "a patch stating the identity and the new state alone",
+			patch: ActionUpdate{ActionID: "act-1", State: ActionAccepted},
+			want: map[string]any{
+				fieldActionID: "act-1",
+				fieldState:    string(ActionAccepted),
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			negotiated := provenConfiguration()
+			stream := NewStream(negotiated)
+			stream.Incarnate("strm-1")
+
+			envelopes := make([]map[string]any, 0, 5)
+
+			for _, event := range []Event{
+				SnapshotEvent("cyc-0", QuiescenceFact{}),
+				AcceptedEvent(Submission{SubmissionID: "sub-1", ClientNonce: "non-1"}, "turn-1"),
+				TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"),
+				ActionEvent(first),
+				TransitionEvent(ForegroundRequiresAction, "cyc-1", "turn-1"),
+			} {
+				envelope, err := stream.Emit(event)
+				require.NoError(t, err)
+
+				envelopes = append(envelopes, envelope)
+			}
+
+			patched, err := stream.Emit(ActionEvent(testCase.patch))
+			require.NoError(t, err, "a legal patch is emittable")
+			require.Equal(t, testCase.want, patched[fieldEvent].(map[string]any)[fieldAction])
+
+			envelopes = append(envelopes, patched)
+
+			reducer := NewReducer(Options{Negotiated: negotiated})
+			for index, envelope := range envelopes {
+				require.NoError(t, reducer.ReduceSessionUpdate(notificationFor(t, envelope)), "envelope %d", index)
+			}
+
+			require.Equal(t, []ActionRecord{{
+				ActionID:         "act-1",
+				Kind:             ActionPermission,
+				State:            ActionAccepted,
+				Owner:            owner,
+				BlocksForeground: true,
+			}}, reducer.State().Actions, "an unstated member leaves the reduced record as it stood")
+		})
+	}
+}
+
+// TestEmittedActivityPatchesStateOnlyWhatTheCallerStated holds the activity
+// render to the same rule. This adapter proves no activity kind and emits none
+// today, but the render is also the emitter's validator, so a render that
+// fabricated kind, cause, or origin would make an unemittable patch look like a
+// caller defect.
+func TestEmittedActivityPatchesStateOnlyWhatTheCallerStated(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, map[string]any{
+		fieldActivityID: "acv-1",
+		fieldState:      string(ActivityCompleted),
+	}, encodeActivity(ActivityUpdate{ActivityID: "acv-1", State: ActivityCompleted}))
+
+	require.Equal(t, map[string]any{
+		fieldActivityID:   "acv-1",
+		fieldState:        string(ActivityRunning),
+		fieldKind:         string(ActivityTask),
+		fieldCause:        string(CauseSubmission),
+		fieldOriginTurnID: "turn-1",
+	}, encodeActivity(ActivityUpdate{
+		ActivityID:   "acv-1",
+		State:        ActivityRunning,
+		Kind:         ActivityTask,
+		Cause:        CauseSubmission,
+		OriginTurnID: "turn-1",
+	}))
+}
+
 // TestEmitterRefusesAMisshapenSnapshotForeground proves the emitter is held to
 // every rule the decoder states about a snapshot's foreground. The rendering is
 // what is validated, so a foreground member the encoder dropped would be a rule

@@ -174,6 +174,13 @@ func requireLatched(t *testing.T, reducer *Reducer, vector fixture, refusal *Vio
 	t.Helper()
 
 	for index, input := range vector.PostRefusal {
+		if input.Control != "" {
+			require.Equal(t, "session_closed", input.Control, "unknown control event")
+			reducer.Close()
+
+			continue
+		}
+
 		require.Equal(t, "session/update", input.Method, "post-refusal input %d", index)
 
 		var latched *ViolationError

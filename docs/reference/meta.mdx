@@ -132,10 +132,14 @@ The lifecycle key is refused on `session/new`, `session/load`, `session/resume`,
 `session/cancel`, `session/close`, `session/delete`, `session/list`, both
 `session/set_config_option` variants, `session/set_mode`, `authenticate`,
 `logout`, `_claude/session/fork`, `_claude/rateLimits`, and every
-`_claude/auth/*` method. Refusals name
-`_meta["acp-go.dev/lifecycle"]`; cancel refuses before interrupting Claude. Its
-route nonce authenticates admission to the current session turn, while the
-lifecycle value supplies submission and action identity.
+`_claude/auth/*` method. Refusals name `_meta["acp-go.dev/lifecycle"]`, except
+on `session/cancel`, where the route is the authenticator and is validated
+first: an absent or malformed route, a nonce that no longer names the running
+turn, and a session with no active turn are each refused naming
+`_meta["acp-go.dev/route"]`, and only a cancel whose route names the running
+turn is refused for the lifecycle key it carries. Either verdict refuses before
+interrupting Claude. The route nonce authenticates admission to the current
+session turn, while the lifecycle value supplies submission and action identity.
 
 ## Session options
 

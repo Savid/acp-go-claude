@@ -258,6 +258,8 @@ func (d *decoder) foreground(raw json.RawMessage) Foreground {
 		d.fail(ViolationMalformedEnvelope, "an idle foreground reports no turn")
 	case (foreground.TurnID == "") != (foreground.Origin == ""):
 		d.fail(ViolationMalformedEnvelope, "foreground origin is present exactly while a turn is")
+	case foreground.State != ForegroundIdle && foreground.TurnID == "":
+		d.fail(ViolationMalformedEnvelope, "a "+string(foreground.State)+" foreground names the turn that owns it")
 	case foreground.Origin != "" && foreground.Origin != CauseSubmission && foreground.Origin != CauseActivity:
 		d.fail(ViolationMalformedEnvelope, "foreground origin "+string(foreground.Origin))
 	}
@@ -289,6 +291,8 @@ func (d *decoder) stateUpdate(fields map[string]json.RawMessage) Event {
 		Outcome:    Outcome(d.identifier(fields, fieldOutcome, false)),
 	}
 
+	turnless := turnlessLiveDefect(*transition)
+
 	switch {
 	case !transition.State.Valid():
 		d.fail(ViolationMalformedEnvelope, "transition state "+string(transition.State))
@@ -296,6 +300,8 @@ func (d *decoder) stateUpdate(fields map[string]json.RawMessage) Event {
 		d.fail(ViolationMalformedEnvelope, "transition cause "+string(transition.Cause))
 	case transition.TurnID == "" && transition.Cause != CauseSession:
 		d.fail(ViolationMalformedEnvelope, "a "+string(transition.Cause)+"-caused transition names its turn")
+	case turnless != "":
+		d.fail(ViolationMalformedEnvelope, turnless)
 	case transition.State != ForegroundIdle && (transition.StopReason != "" || transition.Outcome != ""):
 		d.fail(ViolationMalformedEnvelope, "only an ending transition carries a stop reason and an outcome")
 	case transition.StopReason != "" && !ValidStopReason(transition.StopReason):

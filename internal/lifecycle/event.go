@@ -144,6 +144,28 @@ type StateTransition struct {
 	Outcome    Outcome
 }
 
+// turnlessLiveDefect reports why a transition asserting a live foreground state
+// is structurally incomplete, or the empty string when it is not. A running
+// foreground is a turn running and a blocked one is owned work blocked, so a
+// transition to either names the turn that owns it whatever its cause: a
+// session-caused one may omit the turn on an idle alone.
+//
+// The defect is in the event's own shape, so it is judged before any name is
+// resolved and before the cycle the transition reports is consulted: an event
+// carrying no name leaves nothing for a token that reports an unresolvable name,
+// and an event omitting a member its state requires says nothing about a cycle
+// for the blocked-cycle rule to judge.
+//
+// Both the decoder and the reducer consult it, so an event this adapter emits is
+// held to the same rule as one it reads.
+func turnlessLiveDefect(transition StateTransition) string {
+	if transition.State == ForegroundIdle || transition.TurnID != "" {
+		return ""
+	}
+
+	return "a " + string(transition.State) + " transition names the turn that owns it"
+}
+
 // endingIdleDefect reports why an idle transition that settles a turn is
 // structurally incomplete, or the empty string when it is not. An idle naming a
 // turn ends it, so the outcome is always required; the stop reason is required

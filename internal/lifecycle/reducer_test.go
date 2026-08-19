@@ -102,7 +102,10 @@ func TestReducerRefusesAnIncompleteSnapshotForeground(t *testing.T) {
 // TestReducerRefusesAMisshapenSnapshotForegroundTurn pins that the emit gate
 // holds a snapshot's foreground to the same turn shape the decoder enforces: an
 // idle foreground names no turn, origin travels exactly with the turn, and an
-// origin is one of the two causes.
+// origin is one of the two causes. The presence rule binds in both directions,
+// so a live foreground carrying neither member — the case the paired check
+// admits, because absent and absent agree — asserts a cycle no turn owns and is
+// refused whole.
 func TestReducerRefusesAMisshapenSnapshotForegroundTurn(t *testing.T) {
 	t.Parallel()
 
@@ -110,6 +113,8 @@ func TestReducerRefusesAMisshapenSnapshotForegroundTurn(t *testing.T) {
 		{State: ForegroundIdle, CycleID: "cyc-0", TurnID: "turn-1"},
 		{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1"},
 		{State: ForegroundRunning, CycleID: "cyc-1", Origin: CauseSubmission},
+		{State: ForegroundRunning, CycleID: "cyc-1"},
+		{State: ForegroundRequiresAction, CycleID: "cyc-1"},
 		{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: "bogus"},
 	} {
 		requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
@@ -227,6 +232,24 @@ func TestForegroundTransitionsResolveTheirTurn(t *testing.T) {
 		Event{Type: EventStateUpdate, State: &StateTransition{State: ForegroundIdle, CycleID: "cyc-1", Cause: CauseSession}})
 	require.Nil(t, refusal)
 	require.Equal(t, &Foreground{State: ForegroundIdle, CycleID: "cyc-1"}, reducer.State().Foreground)
+}
+
+// TestLiveForegroundTransitionsNameTheirTurn pins that a transition to a live
+// foreground state carries the turn that owns it whatever its cause, and that
+// the missing member is judged as the structural defect it is. The refusal
+// outranks both neighbouring rules from the direction each would otherwise
+// answer: an event carrying no name never reports an unresolvable one, and a
+// requires_action whose cycle nothing blocks never reports a consistency verdict
+// about a transition that was never structurally valid to judge.
+func TestLiveForegroundTransitionsNameTheirTurn(t *testing.T) {
+	t.Parallel()
+
+	for _, state := range []ForegroundState{ForegroundRunning, ForegroundRequiresAction} {
+		requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope, openSnapshot(),
+			Event{Type: EventStateUpdate, State: &StateTransition{
+				State: state, CycleID: "cyc-1", Cause: CauseSession,
+			}})
+	}
 }
 
 // TestSnapshotForegroundTurnSettlesWithoutAcceptance pins that a turn the

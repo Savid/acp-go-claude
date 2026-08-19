@@ -35,6 +35,9 @@ func (r *Reducer) checkSnapshot(delivery Delivery, snapshot Snapshot) error {
 		return r.fail(delivery, ViolationMalformedEnvelope, "an idle foreground reports no turn")
 	case (foreground.TurnID == "") != (foreground.Origin == ""):
 		return r.fail(delivery, ViolationMalformedEnvelope, "foreground origin is present exactly while a turn is")
+	case foreground.State != ForegroundIdle && foreground.TurnID == "":
+		return r.fail(delivery, ViolationMalformedEnvelope,
+			"a "+string(foreground.State)+" foreground names the turn that owns it")
 	case foreground.Origin != "" && foreground.Origin != CauseSubmission && foreground.Origin != CauseActivity:
 		return r.fail(delivery, ViolationMalformedEnvelope, "foreground origin "+string(foreground.Origin))
 	}
@@ -239,6 +242,10 @@ func (r *Reducer) applyStateUpdate(delivery Delivery) error {
 	transition := delivery.Event.State
 	if transition == nil {
 		return r.fail(delivery, ViolationMalformedEnvelope, "the transition payload is missing")
+	}
+
+	if detail := turnlessLiveDefect(*transition); detail != "" {
+		return r.fail(delivery, ViolationMalformedEnvelope, detail)
 	}
 
 	if detail := endingIdleDefect(*transition); detail != "" {

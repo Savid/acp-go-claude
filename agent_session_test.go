@@ -1654,3 +1654,71 @@ func TestCloseSessionRunsTheEarlyLadderBeforeAnyNativeTeardown(t *testing.T) {
 		providerAuthDone: true,
 	}}, observed, "the containment boundary is the only rung that reaches the process, and it runs last")
 }
+
+// TestDeleteWhoseTombstoneNeverLandedIsToldApartFromAnUnsettledTeardown pins the
+// two refusals a delete can carry. Both can reach the wire as -32800 — a caller
+// that withdrew its own request has no other honest answer — but they report
+// opposite states: the unsettled teardown already deleted the session and owes
+// only the cleanup behind it, while a failed tombstone deleted nothing and left
+// the id listable, loadable, and resumable. A host that read the second as the
+// first would stop naming a session that is still there.
+func TestDeleteWhoseTombstoneNeverLandedIsToldApartFromAnUnsettledTeardown(t *testing.T) {
+	sessionID := acp.SessionId("session-undeleted")
+	key := SessionKey{SessionID: string(sessionID)}
+
+	t.Run("the caller withdrew the request", func(t *testing.T) {
+		ctx := context.Background()
+		backing := NewInMemorySessionStore()
+		require.NoError(t, backing.Append(ctx, key, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+
+		agent := NewAgent(WithHome(t.TempDir()), WithSessionStore(backing))
+
+		withdrawn, cancel := context.WithCancel(ctx)
+		cancel()
+
+		_, err := agent.UnstableDeleteSession(withdrawn, DeleteSessionRequest(sessionID))
+		require.ErrorIs(t, err, context.Canceled)
+
+		mapped := requestError(withdrawn, err)
+		require.Equal(t, -32800, mapped.Code)
+
+		data, ok := mapped.Data.(map[string]any)
+		require.True(t, ok)
+		require.Contains(t, data[jsonFieldError], "claude_session_delete_untombstoned",
+			"the -32800 says which of the two refusals it is")
+		require.NotContains(t, data[jsonFieldError], "claude_session_delete_unsettled")
+
+		// Nothing was deleted: the id is not hidden and its rows are still there.
+		agent.mu.Lock()
+		_, hidden := agent.deleted[sessionID]
+		agent.mu.Unlock()
+		require.False(t, hidden, "a delete that wrote no tombstone hides nothing")
+
+		entries, loadErr := backing.Load(ctx, key)
+		require.NoError(t, loadErr)
+		require.Len(t, entries, 1, "the session the delete never deleted is still stored")
+
+		summaries, listErr := backing.ListSessions(ctx)
+		require.NoError(t, listErr)
+		require.Len(t, summaries, 1, "and still listable")
+	})
+
+	t.Run("the store itself refused the write", func(t *testing.T) {
+		agent := NewAgent(WithHome(t.TempDir()), WithSessionStore(&faultSessionStore{
+			SessionStore: NewInMemorySessionStore(),
+			deleteErr:    errors.New("tombstone write failed"),
+		}))
+
+		_, err := agent.UnstableDeleteSession(context.Background(), DeleteSessionRequest(sessionID))
+
+		var reqErr *acp.RequestError
+
+		require.ErrorAs(t, err, &reqErr)
+		require.Equal(t, -32603, reqErr.Code)
+
+		data, ok := reqErr.Data.(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, "claude_session_delete_untombstoned", data[jsonFieldError])
+		require.Equal(t, "tombstone write failed", data[jsonFieldMessage])
+	})
+}

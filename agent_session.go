@@ -394,7 +394,7 @@ func (a *Agent) UnstableDeleteSession(
 	a.mu.Unlock()
 
 	if err := a.sessionStore().Delete(ctx, SessionKey{SessionID: string(params.SessionId)}); err != nil {
-		return acp.UnstableDeleteSessionResponse{}, err
+		return acp.UnstableDeleteSessionResponse{}, sessionDeleteTombstoneError(err)
 	}
 
 	a.mu.Lock()

@@ -73,6 +73,28 @@ func sessionDeleteUnsettledError(err error) error {
 	})
 }
 
+// sessionDeleteTombstoneError is the wire answer for a delete whose durable
+// tombstone never landed. It names itself apart from the unsettled-teardown
+// refusal because the two report opposite states: that one has already deleted
+// the session and owes only the teardown, while this one deleted nothing at all —
+// the id still names whatever it named, it is still listable, loadable and
+// resumable, and the host's next delete starts from the beginning.
+//
+// A caller that withdrew its own request still gets -32800, because a request
+// nobody is waiting for has no other honest answer; what the name buys is that
+// the -32800 a host does see carries which of the two happened, rather than
+// leaving it to assume the deletion went through.
+func sessionDeleteTombstoneError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("claude_session_delete_untombstoned: %w", err)
+	}
+
+	return acp.NewInternalError(map[string]any{
+		jsonFieldError:   "claude_session_delete_untombstoned",
+		jsonFieldMessage: err.Error(),
+	})
+}
+
 // finalizeSessionRuntimeResources returns admissions only after the selected
 // containment boundary completes. An incomplete boundary retains both the
 // native admission and every adapter-owned scratch root because escaped work

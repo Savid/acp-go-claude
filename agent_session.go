@@ -1443,7 +1443,7 @@ func firstStoreUserPrompt(entry map[string]any) string {
 }
 
 func sessionMatchesListFilters(session *agentSession, params acp.ListSessionsRequest) bool {
-	if params.Cwd != nil && *params.Cwd != session.cwd {
+	if params.Cwd != nil && *params.Cwd != "" && *params.Cwd != session.cwd {
 		return false
 	}
 

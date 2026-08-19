@@ -291,6 +291,8 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 	_, err = NewAgent(WithSessionStore(NewInMemorySessionStore())).ListSessions(ctx, acp.ListSessionsRequest{Cursor: &cursor})
 	require.Error(t, err)
 	require.False(t, sessionMatchesListFilters(&agentSession{cwd: cwd}, ListSessionsRequest(WithListSessionsCwd(filepath.Join(cwd, "other")))))
+	// An empty cwd is an absent filter, never a filter that matches nothing.
+	require.True(t, sessionMatchesListFilters(&agentSession{cwd: cwd}, ListSessionsRequest(WithListSessionsCwd(""))))
 
 	filterAgent := NewAgent(WithSessionStore(NewInMemorySessionStore()))
 	filterSession, filterCleanup := newStartedAgentSessionForTest(t, filterAgent, "filter")

@@ -99,6 +99,11 @@ func sessionDeleteTombstoneError(err error) error {
 // containment boundary completes. An incomplete boundary retains both the
 // native admission and every adapter-owned scratch root because escaped work
 // may still be using them. Other close errors do not obscure completion.
+//
+// A close passes the session's own once-guarded releases, so a close that failed
+// a rung and is taken again returns each admission exactly once across both
+// attempts: the one an earlier attempt already returned is inert here. A start
+// that unwinds before acquiring one passes nothing for it.
 func finalizeSessionRuntimeResources(
 	runtimeErr error,
 	nativeRelease func(),
@@ -135,6 +140,36 @@ func finalizeSessionRuntimeResources(
 	}
 
 	return errors.Join(runtimeErr, mcpRemoveErr, imageRemoveErr, materializedRemoveErr)
+}
+
+// releaseNativeRootOnce returns the session's native-root admission and takes it
+// off the session. A close that failed a rung of its boundary is taken again, so
+// the release is consumed where it runs: an admission returned twice would credit
+// the host's pool for work it never admitted.
+func (s *agentSession) releaseNativeRootOnce() {
+	s.mu.Lock()
+	release := s.nativeRootRelease
+	s.nativeRootRelease = nil
+	s.mu.Unlock()
+
+	if release != nil {
+		release()
+	}
+}
+
+// releaseScratchRootOnce returns the session's scratch reservation and takes it
+// off the session, for the same reason and with the same exactly-once guarantee
+// across a retried close. A close whose deletions failed never reaches it, so the
+// reservation survives for the close that does complete them.
+func (s *agentSession) releaseScratchRootOnce() {
+	s.mu.Lock()
+	release := s.scratchRootRelease
+	s.scratchRootRelease = nil
+	s.mu.Unlock()
+
+	if release != nil {
+		release()
+	}
 }
 
 func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
@@ -671,32 +706,33 @@ func (s *agentSession) cancelElicitationRequestsLocked() []context.CancelFunc {
 	return elicitationCancels
 }
 
-// Close closes the underlying Claude process and memoizes the terminal result.
-// A second caller blocks until the first finishes and observes that same
-// result; the teardown, the native signalling and the active-session accounting
-// behind that result all run exactly once.
+// Close closes the underlying Claude process and memoizes a boundary that
+// completed. A second caller blocks until the first finishes and observes that
+// same result.
 //
-// A close its settlement barrier never admitted is the one result that is not
-// memoized. Nothing was torn down and nothing was settled, so there is no
-// terminal result to hand a later caller, and that caller takes the barrier
-// again under a context of its own.
+// Only a completed boundary is memoized. A close its settlement barrier never
+// admitted tore nothing down, and a close that reached the boundary and failed a
+// rung of it still owes that rung: neither has a terminal result to hand a later
+// caller, so both leave the session closable and the next caller takes the
+// boundary again under a context of its own. Each rung stands on its own once —
+// the native signalling, the durable commit, the stream fence, and each returned
+// admission are all guarded where they run, so a retry re-attempts what is still
+// owed and repeats nothing that already happened.
 func (s *agentSession) Close(ctx context.Context) error {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
 
 	if s.closeSettled {
-		return s.closeErr
+		return nil
 	}
 
-	err := s.close(ctx)
-	if errors.Is(err, errSessionCloseUnsettled) {
+	if err := s.close(ctx); err != nil {
 		return err
 	}
 
 	s.closeSettled = true
-	s.closeErr = err
 
-	return err
+	return nil
 }
 
 // beginClose latches the terminal close state before any teardown runs, so a
@@ -789,11 +825,11 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 
 	err = finalizeSessionRuntimeResources(
 		err,
-		s.nativeRootRelease,
+		s.releaseNativeRootOnce,
 		s.mcpConfigDir,
 		s.imageScratchDir,
 		s.materialized,
-		s.scratchRootRelease,
+		s.releaseScratchRootOnce,
 	)
 
 	if s.agent != nil {

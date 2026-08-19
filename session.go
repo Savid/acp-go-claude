@@ -218,12 +218,11 @@ type agentSession struct {
 	handledHookOrder []string
 	turnAcquiredHook func(int)
 	// closeMu serializes close and guards the memoized terminal result.
-	// closeSettled is set only for a close its settlement barrier admitted, so an
-	// abandoned barrier leaves the session closable rather than latching a
-	// terminal result no teardown stands behind.
+	// closeSettled is set only for a close that completed every rung it owed, so
+	// neither an abandoned barrier nor a failed boundary latches a terminal result
+	// no teardown stands behind: both leave the session closable again.
 	closeMu      sync.Mutex
 	closeSettled bool
-	closeErr     error
 	// pumpServeMu serializes pointing the session's pump at a native incarnation.
 	// Retiring the previous identity, minting the new one and publishing the
 	// reader that serves it are one step: two callers interleaving them would open

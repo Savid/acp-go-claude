@@ -517,6 +517,58 @@ func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
 	require.Error(t, lookupErr, "a settled close removes the id")
 }
 
+// TestFailedCloseRetriesItsBoundaryOnTheNextClose pins what a close that reached
+// its boundary and failed a rung of it leaves behind. The rung here is the
+// deletion of the roots the session owns: it fails, so the close reports that
+// failure, the id keeps naming the session, and nothing about the attempt is
+// memoized. The next close retakes the boundary, completes the rung, and only
+// then does the id stop resolving — dropping it on the first failure would leave
+// the host holding the only name for what this adapter had not finished.
+//
+// Each admission is still returned exactly once across both closes: the native
+// root on the close that proved containment, the scratch reservation on the
+// close that finished deleting what it reserved.
+func TestFailedCloseRetriesItsBoundaryOnTheNextClose(t *testing.T) {
+	previous := sessionRemoveAll
+	t.Cleanup(func() { sessionRemoveAll = previous })
+
+	sessionID := acp.SessionId("session-retry")
+	agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+	session := newSessionForTransport(t, agent, sessionID, newFakeClaudeTransport())
+	agent.sessions[sessionID] = session
+
+	mcp := filepath.Join(t.TempDir(), "mcp")
+	require.NoError(t, os.Mkdir(mcp, 0o700))
+	session.mcpConfigDir = mcp
+
+	nativeReleases, scratchReleases := 0, 0
+	session.nativeRootRelease = func() { nativeReleases++ }
+	session.scratchRootRelease = func() { scratchReleases++ }
+
+	removeErr := errors.New("delete MCP root")
+	sessionRemoveAll = func(string) error { return removeErr }
+
+	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
+	require.ErrorIs(t, err, removeErr)
+
+	held, lookupErr := agent.session(sessionID)
+	require.NoError(t, lookupErr, "a close that failed a rung of its boundary keeps its id addressable")
+	require.Same(t, session, held)
+	require.Equal(t, 1, nativeReleases, "containment completed, so that admission is already back")
+	require.Zero(t, scratchReleases, "the reservation survives the deletion the close still owes it")
+
+	sessionRemoveAll = previous
+
+	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
+	require.NoError(t, err, "the next close retakes the boundary rather than replaying a memoized failure")
+	require.NoDirExists(t, mcp, "the rung the first close failed is the one the retry completes")
+	require.Equal(t, 1, nativeReleases, "an admission returned twice would credit work that was never admitted")
+	require.Equal(t, 1, scratchReleases)
+
+	_, lookupErr = agent.session(sessionID)
+	require.Error(t, lookupErr, "a completed boundary removes the id")
+}
+
 // cancelAfterDeleteStore withdraws the delete request the instant its tombstone is
 // durable. It reproduces the crash window the ordering exists for: everything
 // after the tombstone fails, and the test can then ask what a host still sees.

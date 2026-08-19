@@ -323,10 +323,13 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 
 // CloseSession closes a Claude session process and removes it from the active map.
 //
-// Removal follows the settlement barrier rather than the request: a close the
-// barrier never admitted contained nothing and settled nothing, so its id keeps
-// the live session it names and the work still running behind it stays
-// addressable for the close that does take the barrier.
+// Removal follows the completed boundary rather than the request. A close the
+// settlement barrier never admitted contained nothing and settled nothing; a
+// close that reached the boundary and failed a rung of it still owes that rung.
+// Either way the id keeps the session it names, so whatever is still running
+// behind it stays addressable and the next close retakes the boundary — dropping
+// the id would leave the host holding the only name for work this adapter has
+// just failed to finish.
 //
 // The whole close is session.Close and nothing before it. A native interrupt
 // hoisted ahead of it would run rung 5 of the shutdown ladder before rungs 1
@@ -356,11 +359,11 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, sessionCloseUnsettledError(closeErr)
 	}
 
-	a.dropSession(ctx, params.SessionId, session)
-
 	if closeErr != nil {
 		return acp.CloseSessionResponse{}, closeErr
 	}
+
+	a.dropSession(ctx, params.SessionId, session)
 
 	return acp.CloseSessionResponse{}, nil
 }

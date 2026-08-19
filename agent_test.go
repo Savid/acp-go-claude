@@ -290,7 +290,12 @@ func TestCloseAndServeJoinAdmittedIncompletePromptRelaunch(t *testing.T) {
 	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
 }
 
-func TestRemovedSessionContainmentSurvivesTerminalServe(t *testing.T) {
+// TestFailedCloseRetainsItsSessionAndItsContainmentSurvivesTerminalServe pins
+// both halves of a close that could not contain its tree. The id keeps naming
+// the session, because what is still running behind it is exactly what this
+// close failed to finish, and the containment failure the agent recorded is
+// terminal for the agent: Serve and every later Close report it too.
+func TestFailedCloseRetainsItsSessionAndItsContainmentSurvivesTerminalServe(t *testing.T) {
 	previous := newServeAgent
 	t.Cleanup(func() { newServeAgent = previous })
 
@@ -301,7 +306,8 @@ func TestRemovedSessionContainmentSurvivesTerminalServe(t *testing.T) {
 
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: "session-1"})
 	require.ErrorIs(t, err, claude.ErrProcessContainmentIncomplete)
-	require.Empty(t, agent.sessions)
+	require.Contains(t, agent.sessions, acp.SessionId("session-1"),
+		"a close that contained nothing keeps the id its work is still addressable through")
 
 	newServeAgent = func(...Option) *Agent { return agent }
 	err = Serve(t.Context(), bytes.NewBuffer(nil), io.Discard)

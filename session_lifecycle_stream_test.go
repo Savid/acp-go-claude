@@ -659,10 +659,13 @@ const mirroredSessionUUID = "11111111-1111-4111-8111-111111111111"
 // carrying one transcript frame the store does not hold yet. Losing the
 // incarnation from here is what a cancel does, and everything the close still
 // owes runs after that loss.
+//
+// The configuration is the authoritative one, so this session has a positive
+// settlement fact to state and the case that asserts none was stated can fail.
 func closeFencedSession(t *testing.T, store SessionStore) (*agentSession, *recordingAgentClient, *sessionStream) {
 	t.Helper()
 
-	session, conn, stream := newLifecycleStreamTestSession(t)
+	session, conn, stream := newAuthoritativeLifecycleStreamTestSession(t)
 	projects := filepath.Join(t.TempDir(), "projects")
 	session.mirror = &sessionMirror{log: session.agent.log, store: store, projectsDir: projects}
 

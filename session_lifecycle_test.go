@@ -1264,3 +1264,95 @@ func TestSessionCloseUnsettledRefusalDependsOnWhyTheWaitEnded(t *testing.T) {
 		require.Zero(t, transport.CloseCalls())
 	})
 }
+
+// commandNamesFor lists, in order, the command names of every
+// available_commands_update the host received.
+func commandNamesFor(conn *recordingAgentClient) [][]string {
+	catalogs := [][]string{}
+
+	for _, update := range conn.Updates() {
+		advertised := update.Update.AvailableCommandsUpdate
+		if advertised == nil {
+			continue
+		}
+
+		names := []string{}
+		for _, command := range advertised.AvailableCommands {
+			names = append(names, command.Name)
+		}
+
+		catalogs = append(catalogs, names)
+	}
+
+	return catalogs
+}
+
+// TestRelaunchRefetchesAndReemitsTheCommandCatalog pins that a native relaunch
+// re-runs command discovery and says so. The replacement process discovers its
+// own catalog, so the one the retired process reported is only a memory: keeping
+// it advertised would offer a host commands nothing is left to route, and
+// staying silent about the new one leaves a host unable to tell a catalog that
+// survived the relaunch from one that never arrived. The snapshot is a full
+// replacement and is restated on every relaunch, an unchanged catalog included.
+func TestRelaunchRefetchesAndReemitsTheCommandCatalog(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		discovers []any
+		want      []string
+	}{
+		{
+			name: "a changed catalog",
+			discovers: []any{
+				map[string]any{"name": "plan", "description": "Plan"},
+				map[string]any{"name": "review", "description": "Review"},
+			},
+			want: []string{"plan", "review"},
+		},
+		{
+			// The replacement's default discovery response is byte-identical to the
+			// retired process's, so this case is a genuinely unchanged catalog and
+			// the emission below is one a diffing emitter would suppress.
+			name: "an unchanged catalog",
+			want: []string{"help"},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := t.Context()
+			session, _, cleanup := newPromptFlowSession(t)
+			defer cleanup()
+
+			conn, ok := session.agent.connection().(*recordingAgentClient)
+			require.True(t, ok)
+
+			// The session advertises what the process it is running now reported.
+			session.availableCommands = session.client.InitializeInfo().Commands
+			require.NoError(t, session.emitAvailableCommandsUpdate(ctx, true))
+			require.Equal(t, [][]string{{"help"}}, commandNamesFor(conn))
+
+			replacement := newFakeClaudeTransport()
+			if testCase.discovers != nil {
+				replacement.initialize["commands"] = testCase.discovers
+			}
+
+			session.canRelaunch = true
+			session.agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+				return claude.NewClient(log, options, replacement)
+			}
+
+			// The process behind the session is gone, which is what sends the next
+			// prompt through the lazy relaunch.
+			require.NoError(t, session.client.Close())
+			require.False(t, session.client.Alive())
+			require.NoError(t, session.ensureClientAlive(ctx))
+
+			names := []string{}
+			for _, command := range session.commands() {
+				names = append(names, command.Name)
+			}
+
+			require.Equal(t, testCase.want, names, "the session adopts the replacement's own catalog")
+			require.Equal(t, [][]string{{"help"}, testCase.want}, commandNamesFor(conn),
+				"the relaunch restates the whole catalog to the host")
+		})
+	}
+}

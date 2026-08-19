@@ -401,7 +401,23 @@ func (s *agentSession) relaunchClient(
 
 	s.client = relaunched
 	s.nativeRootRelease = nativeRelease
+	// The replacement process ran command discovery of its own, so the catalog
+	// this session advertises is the one that process actually serves. Keeping the
+	// catalog the retired process reported would advertise commands nothing is
+	// left to route.
+	s.availableCommands = relaunched.InitializeInfo().Commands
 	s.mu.Unlock()
+
+	// The snapshot is restated rather than diffed. A full replacement is what the
+	// host is owed after a discovery run, an explicit empty one included: silence
+	// after a relaunch and "this process has no commands" are different facts, and
+	// a host cannot tell a catalog that survived the relaunch from one that never
+	// arrived. The process is live either way — only the notification failed — so
+	// the failure travels to the caller and the next successful emission restates
+	// the catalog.
+	if emitErr := s.emitAvailableCommandsUpdate(ctx, true); emitErr != nil {
+		return errors.Join(previousCloseErr, emitErr)
+	}
 
 	return previousCloseErr
 }

@@ -287,6 +287,51 @@ func TestCancelWithCurrentRouteInterruptsOnce(t *testing.T) {
 	require.Empty(t, session.elicitationCancel)
 }
 
+// TestRepeatedCancelOfTheSameTurnIsIdempotent pins that a cancel arriving twice
+// for one turn cancels it once. The first cancel resolved the pending
+// interactions and completed the containment boundary, so a second that acted
+// again would interrupt a process this session had already closed and turn a
+// request that succeeded into the failure that re-issue produced — a host that
+// retries a notification it cannot see the answer to would be observing a failed
+// cancel of a turn that really was cancelled.
+//
+// The repeat is still judged like any other frame: the route authenticates it and
+// the reserved lifecycle key still refuses it, because neither verdict is about
+// how much of the turn is left to cancel.
+func TestRepeatedCancelOfTheSameTurnIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	session, transport := newRoutedCancelSessionForTest(t)
+
+	cancels := 0
+	session.cancel = func() { cancels++ }
+	session.turnNonce = "nonce-1"
+	session.permissionCancel = map[string]*permissionRequestCancel{
+		"tool": {cancel: func() {}},
+	}
+
+	require.NoError(t, session.agent.Cancel(t.Context(), CancelRequest(session.id, "nonce-1")))
+	require.NoError(t, session.agent.Cancel(t.Context(), CancelRequest(session.id, "nonce-1")),
+		"the same cancel arriving twice is not a failed cancel")
+
+	require.Equal(t, 1, interruptCalls(transport), "the native process is interrupted exactly once")
+	require.Equal(t, 1, transport.CloseCalls(), "the containment boundary is taken exactly once")
+	require.Equal(t, 1, cancels, "the turn was already cancelled, so the repeat moves nothing")
+	require.True(t, session.turnCancelled)
+
+	// The frame is judged before the repeat is answered: a route that names no
+	// running turn still fails closed, and the reserved key still outranks the
+	// repeat behind it.
+	requireExactUnsupportedField(t,
+		session.agent.Cancel(t.Context(), CancelRequest(session.id, "nonce-0")), routeMetaKey)
+	requireRequestError(t,
+		session.agent.Cancel(t.Context(), acp.CancelNotification{
+			SessionId: session.id,
+			Meta:      withLifecycleMeta(turnRouteMeta("nonce-1"), lifecycleKeyMeta()),
+		}), -32602, lifecycle.MetaPath)
+	require.Equal(t, 1, interruptCalls(transport))
+}
+
 func newRoutedCancelSessionForTest(t *testing.T) (*agentSession, *fakeClaudeTransport) {
 	t.Helper()
 

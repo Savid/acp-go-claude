@@ -185,6 +185,11 @@ type agentSession struct {
 	turnCancelled      bool
 	turnContainmentErr error
 	turnNonce          string
+	// cancelledNonce names the turn a routed cancel has already applied to. A
+	// repeated cancel of that same turn is the same request arriving twice, and
+	// applying it twice would re-issue a native interrupt against the process the
+	// first one already contained.
+	cancelledNonce     string
 	publishedToolCalls map[acp.ToolCallId]struct{}
 	toolContent        map[acp.ToolCallId][]acp.ToolCallContent
 	emittedAgentImages map[string]struct{}

@@ -459,6 +459,15 @@ func (s *agentSession) Cancel(ctx context.Context) (err error) {
 // nothing authorizes native interrupt and the request fails closed with no
 // native side effect at all — no interrupt, no pending-interaction resolution,
 // and no native client close.
+//
+// A repeat is idempotent, and only after it has been judged like any other
+// frame. The route still authenticates it and the reserved key still refuses it,
+// because both verdicts are about the frame rather than about how much of the
+// turn is left to cancel; what a second authenticated cancel of the same turn
+// does not do is act. The first one already resolved the pending interactions
+// and completed the containment boundary, so acting again would interrupt a
+// process this session has already closed and answer a request that succeeded
+// with the failure that re-issue produced.
 func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) error {
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
@@ -471,6 +480,7 @@ func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) er
 	s.mu.Lock()
 	activeNonce := s.turnNonce
 	active := s.cancel != nil && activeNonce != ""
+	applied := s.cancelledNonce != "" && s.cancelledNonce == route.turnNonce
 	s.mu.Unlock()
 
 	if !active || route.turnNonce != activeNonce {
@@ -480,6 +490,14 @@ func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) er
 	if err := rejectLifecycleMeta(meta); err != nil {
 		return err
 	}
+
+	if applied {
+		return nil
+	}
+
+	s.mu.Lock()
+	s.cancelledNonce = route.turnNonce
+	s.mu.Unlock()
 
 	return s.cancelNative(ctx)
 }

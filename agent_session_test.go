@@ -499,8 +499,7 @@ func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
 	requireCancelledCloseRefusal(t, expired, err)
 	require.Zero(t, transport.CloseCalls(), "an unsettled close contains nothing")
 	require.True(t, session.client.Alive(), "a refused close leaves the native process it never contained")
-	require.NotContains(t, sentControlSubtypes(transport), "interrupt",
-		"a refused close reaches no rung of the native teardown")
+	require.Zero(t, interruptCalls(transport), "a refused close reaches no rung of the native teardown")
 	require.Error(t, turnCtx.Err(), "the turn the close is waiting on is still asked to wind down")
 
 	held, lookupErr := agent.session(sessionID)
@@ -1564,24 +1563,6 @@ func requireExpiredDeleteRefusal(t *testing.T, ctx context.Context, err error) {
 	require.Equal(t, "claude_session_delete_unsettled", data[jsonFieldError])
 	require.Contains(t, data[jsonFieldMessage], "await the in-flight Claude turn")
 	require.Equal(t, reqErr, requestError(ctx, err), "the dispatcher forwards it unchanged")
-}
-
-// sentControlSubtypes lists, in order, the control subtypes the adapter wrote to
-// one native transport.
-func sentControlSubtypes(transport *fakeClaudeTransport) []string {
-	subtypes := []string{}
-
-	for _, payload := range transport.Sent() {
-		request, ok := payload.(claude.ControlRequest)
-		if !ok {
-			continue
-		}
-
-		subtype, _ := request.Request["subtype"].(string)
-		subtypes = append(subtypes, subtype)
-	}
-
-	return subtypes
 }
 
 // ladderProbeTransport reports the state of the shutdown ladder at the moment a

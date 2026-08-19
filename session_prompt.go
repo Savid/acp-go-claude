@@ -127,6 +127,7 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 	s.turnCancelled = false
 	s.turnContainmentErr = nil
 	s.turnNonce = route.turnNonce
+	s.cancelledNonce = ""
 	s.mu.Unlock()
 	s.cancelMu.Unlock()
 
@@ -153,6 +154,7 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 		s.turnCancelled = false
 		s.turnContainmentErr = nil
 		s.turnNonce = ""
+		s.cancelledNonce = ""
 		s.mu.Unlock()
 
 		cancel()

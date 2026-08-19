@@ -1773,25 +1773,28 @@ func TestConcurrentInstallAndDeleteNeverResurrectTheSession(t *testing.T) {
 			t.Cleanup(func() { _ = agent.Close() })
 
 			start := make(chan struct{})
-			done := make(chan error, 2)
+			installed := make(chan error, 1)
+			deleted := make(chan error, 1)
 
 			go func() {
 				<-start
-				done <- testCase.install(agent, sessionID)
+				installed <- testCase.install(agent, sessionID)
 			}()
 
 			go func() {
 				<-start
 
 				_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
-				done <- err
+				deleted <- err
 			}()
 
 			close(start)
-			require.NoError(t, <-done)
-			installErr := <-done
 
-			if installErr != nil {
+			require.NoError(t, <-deleted)
+
+			// Either verdict is legitimate: the install either finished before the
+			// tombstone or was refused by it.
+			if installErr := <-installed; installErr != nil {
 				requireUnknownSession(t, installErr)
 			}
 

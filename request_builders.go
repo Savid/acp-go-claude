@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strconv"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 )
 
 // SessionRequestOption configures embedded-Go ACP session lifecycle requests.
@@ -108,12 +110,40 @@ func WithSessionAdditionalDirectories(paths ...string) SessionRequestOption {
 	}
 }
 
-// WithSessionMeta merges metadata into a session lifecycle request.
+// WithSessionMeta merges metadata into a session lifecycle request. Caller
+// metadata is the host's own namespace and never the family's: a map naming a
+// reserved literal is refused rather than merged.
 func WithSessionMeta(meta map[string]any) SessionRequestOption {
+	rejectReservedMeta("WithSessionMeta", meta)
+
 	cloned := cloneAnyMap(meta)
 
 	return func(config *sessionRequestConfig) {
 		config.meta = mergeAnyMap(config.meta, cloned)
+	}
+}
+
+// reservedMetaLiterals is the closed family-global set. Adding a fifth is a
+// contract amendment, so the set is written out rather than matched by prefix: a
+// prefix test would also reject a literal this family has not defined and report
+// it as though the contract already did.
+var reservedMetaLiterals = []string{
+	routeMetaKey,
+	mediaEnvelopeMetaKey,
+	handoffMetaKey,
+	lifecycle.MetaKey,
+}
+
+// rejectReservedMeta refuses a caller `_meta` map that names a family literal.
+// The builders return values rather than errors, so the refusal is a panic: the
+// only alternatives inside the signature the family fixes are merging the key or
+// dropping it, and both would let a host's guess about a reserved envelope stand
+// in for the one this adapter stamps.
+func rejectReservedMeta(builder string, meta map[string]any) {
+	for _, literal := range reservedMetaLiterals {
+		if _, present := meta[literal]; present {
+			panic(builder + ": caller metadata used the family-reserved key " + strconv.Quote(literal))
+		}
 	}
 }
 
@@ -282,8 +312,12 @@ func WithListSessionsCursor(cursor string) ListSessionsRequestOption {
 	}
 }
 
-// WithListSessionsMeta sets metadata on a session/list request.
+// WithListSessionsMeta sets metadata on a session/list request. A caller map
+// naming a family-reserved literal is refused on the same terms as
+// WithSessionMeta.
 func WithListSessionsMeta(meta map[string]any) ListSessionsRequestOption {
+	rejectReservedMeta("WithListSessionsMeta", meta)
+
 	cloned := cloneAnyMap(meta)
 
 	return func(req *acp.ListSessionsRequest) {

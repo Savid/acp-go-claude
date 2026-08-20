@@ -32,6 +32,18 @@ func TestNativeOptionsRunsFlowsInTheSessionHome(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, resolved, options.ClaudeHome)
 
+	// The resume keystore read admits under ordinary shared identity: a
+	// materialized resume home never hashes to the login home's Keychain item
+	// name, so the read cannot be reserved to best-effort deployments the way
+	// the auth flows' own keychain leg is.
+	ordinaryResume := broker.agent.resumeCredentialOptions()
+	release, err = ordinaryResume.AcquireKeychainDiscovery(t.Context())
+	require.NoError(t, err)
+	release()
+	generation, err := ordinaryResume.PrepareKeychainGeneration(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, generation.Finish(true))
+
 	broker.agent.containmentMode = RuntimeContainmentBestEffort
 
 	bestEffort, err := broker.nativeOptions()

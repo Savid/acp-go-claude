@@ -306,8 +306,14 @@ func (a *Agent) resumeCredentialOptions() claude.Options {
 		AcquireKeychainDiscovery: func(discoveryCtx context.Context) (func(), error) {
 			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
 		},
+		// The resume keystore read runs under every launch mode, because the
+		// materialized destination never hashes to the login home's Keychain
+		// item name. The discovery generation is the admission that exists in
+		// every mode that can launch at all; the best-effort-only Darwin
+		// generation would refuse the ordinary shared-identity mode this read
+		// most commonly runs in.
 		PrepareKeychainGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
-			return a.prepareDarwinGeneration(generationCtx, RuntimeResourceDiscovery)
+			return a.prepareDiscoveryGeneration(generationCtx)
 		},
 	}
 }

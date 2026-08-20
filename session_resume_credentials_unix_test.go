@@ -242,7 +242,7 @@ func assertDarwinRemovalClearsPresentItems(t *testing.T, account string) {
 
 	assertDarwinReadLegCarriesSeededItems(t, account)
 
-	require.NoError(t, claude.RemoveAuthKeychainItems(t.Context(), keystoreDarwinConfigDir, account, claude.Options{}))
+	require.NoError(t, claude.RemoveAuthKeychainItems(t.Context(), keystoreDarwinConfigDir, account, darwinOrdinaryOptions()))
 
 	for _, item := range items {
 		find := exec.CommandContext(t.Context(), "security", "find-generic-password",
@@ -250,9 +250,17 @@ func assertDarwinRemovalClearsPresentItems(t *testing.T, account string) {
 		require.Error(t, find.Run(), "item %q survived the removal ladder", item.Service)
 	}
 
-	absent, err := claude.ReadAuthKeychainCredential(t.Context(), keystoreDarwinConfigDir, account, claude.Options{})
+	absent, err := claude.ReadAuthKeychainCredential(t.Context(), keystoreDarwinConfigDir, account, darwinOrdinaryOptions())
 	require.NoError(t, err)
 	require.Nil(t, absent, "the read leg answered from an item the removal ladder cleared")
+}
+
+// darwinOrdinaryOptions is the launch shape a plain darwin host runs the
+// keystore legs under: ordinary same-identity execution with the ambient
+// environment as its base, no isolation policy, and no best-effort admission
+// hooks.
+func darwinOrdinaryOptions() claude.Options {
+	return claude.Options{OrdinaryEnvironment: claude.OrdinaryEnvironment()}
 }
 
 // assertDarwinReadLegCarriesSeededItems drives the read leg against the seeded
@@ -262,7 +270,7 @@ func assertDarwinRemovalClearsPresentItems(t *testing.T, account string) {
 func assertDarwinReadLegCarriesSeededItems(t *testing.T, account string) {
 	t.Helper()
 
-	data, err := claude.ReadAuthKeychainCredential(t.Context(), keystoreDarwinConfigDir, account, claude.Options{})
+	data, err := claude.ReadAuthKeychainCredential(t.Context(), keystoreDarwinConfigDir, account, darwinOrdinaryOptions())
 	require.NoError(t, err)
 	require.Equal(t, residenceCanary, string(data))
 
@@ -271,7 +279,7 @@ func assertDarwinReadLegCarriesSeededItems(t *testing.T, account string) {
 	}
 
 	destination := t.TempDir()
-	require.NoError(t, copyClaudeResumeCredential(keystoreDarwinConfigDir, destination))
+	require.NoError(t, copyClaudeResumeCredential(keystoreDarwinConfigDir, destination, darwinOrdinaryOptions()))
 
 	carried, err := os.ReadFile(filepath.Join(destination, claudeResumeCredentialFile))
 	require.NoError(t, err)

@@ -12,6 +12,8 @@ import (
 )
 
 func TestMaterializeStoreSessionCarriesResumeCredentialPrivately(t *testing.T) {
+	stubResumeCredentialKeystore(t, func(string) ([]byte, error) { return nil, nil })
+
 	ctx := t.Context()
 	sessionID := "77777777-7777-4777-8777-777777777777"
 	cwd := t.TempDir()
@@ -84,6 +86,8 @@ func TestConfigCopySourceCannotBeRedirectedByTheProcessEnvironment(t *testing.T)
 }
 
 func TestCopyClaudeResumeCredentialMissingPreservesFirstTurnAuthContract(t *testing.T) {
+	stubResumeCredentialKeystore(t, func(string) ([]byte, error) { return nil, nil })
+
 	source := t.TempDir()
 	destination := t.TempDir()
 
@@ -190,6 +194,8 @@ func stubResumeCredentialKeystore(t *testing.T, stub func(string) ([]byte, error
 }
 
 func TestCopyClaudeResumeCredentialRejectsUnsafeSources(t *testing.T) {
+	stubResumeCredentialKeystore(t, func(string) ([]byte, error) { return nil, nil })
+
 	t.Run("symlink", func(t *testing.T) {
 		source := t.TempDir()
 		destination := t.TempDir()
@@ -269,6 +275,8 @@ func TestCopyClaudeResumeCredentialRejectsUnsafeSources(t *testing.T) {
 }
 
 func TestCopyClaudeResumeCredentialRejectsMalformedJSONShapes(t *testing.T) {
+	stubResumeCredentialKeystore(t, func(string) ([]byte, error) { return nil, nil })
+
 	for name, content := range map[string]string{
 		"empty": "", "null": "null", "array": "[]", "string": `"string"`, "invalid": "{bad}",
 	} {
@@ -287,6 +295,8 @@ func TestCopyClaudeResumeCredentialRejectsMalformedJSONShapes(t *testing.T) {
 }
 
 func TestCopyClaudeResumeCredentialRejectsUnsafeDestinations(t *testing.T) {
+	stubResumeCredentialKeystore(t, func(string) ([]byte, error) { return nil, nil })
+
 	source := t.TempDir()
 	require.NoError(t, os.WriteFile(
 		filepath.Join(source, claudeResumeCredentialFile), []byte(`{"token":"unit-secret"}`), 0o600,

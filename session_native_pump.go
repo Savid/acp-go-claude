@@ -281,20 +281,24 @@ type nativeIncarnation struct {
 	err             error
 }
 
+// nativeTaskBinding fixes one background task to the route that armed it. The
+// binding lives as long as the incarnation that minted the task id: the
+// harness's task-notification result origin is a kind alone, one task notifies
+// any number of times, and every notification resolves through the binding its
+// task_started established.
 type nativeTaskBinding struct {
 	route     string
 	toolUseID string
 }
 
-// nativeFrameOwnership fixes task, parent-tool, message, and transcript-mirror
-// identities to their exact causal route. It is owned by the incarnation's
-// single receive goroutine, so the decision is made before any prompt sink, raw
-// projection, mapper state, usage, or cost can observe the frame.
+// nativeFrameOwnership fixes task, parent-tool, and message identities to their
+// exact causal route. It is owned by the incarnation's single receive
+// goroutine, so the decision is made before any prompt sink, raw projection,
+// mapper state, usage, or cost can observe the frame.
 type nativeFrameOwnership struct {
 	tasks    map[string]nativeTaskBinding
 	tools    map[string]string
 	messages map[string]string
-	mirrors  map[string]string
 }
 
 var errNativeFrameOwnership = errors.New("claude native frame lacks exact causal ownership")
@@ -311,12 +315,6 @@ func (o *nativeFrameOwnership) resolve(msg claude.Message, currentRoute string) 
 
 	if system, ok := msg.(*claude.SystemMessage); ok {
 		if route, handled, resolveErr := o.resolveTaskSystem(system, currentRoute, parentRoute); handled {
-			return route, true, resolveErr
-		}
-	}
-
-	if result, ok := msg.(*claude.ResultMessage); ok {
-		if route, handled, resolveErr := o.resolveTaskResult(result, parentRoute); handled {
 			return route, true, resolveErr
 		}
 	}
@@ -438,30 +436,6 @@ func (o *nativeFrameOwnership) resolveTaskContinuation(
 	return binding.route, true, o.captureFrameIdentity(system, binding.route)
 }
 
-func (o *nativeFrameOwnership) resolveTaskResult(
-	result *claude.ResultMessage,
-	parentRoute string,
-) (string, bool, error) {
-	if resultOriginKind(result) != originKindTaskNotification {
-		return "", false, nil
-	}
-
-	taskID := nativeStringField(result.Origin, "task_id")
-	binding, exists := o.tasks[taskID]
-
-	if taskID == "" || !exists || (parentRoute != "" && parentRoute != binding.route) {
-		return "", true, errNativeFrameOwnership
-	}
-
-	if err := o.captureFrameIdentity(result, binding.route); err != nil {
-		return "", true, err
-	}
-
-	delete(o.tasks, taskID)
-
-	return binding.route, true, nil
-}
-
 func (o *nativeFrameOwnership) bindTool(toolUseID string, route string) error {
 	if toolUseID == "" || route == "" {
 		return errNativeFrameOwnership
@@ -513,16 +487,15 @@ func (o *nativeFrameOwnership) captureFrameIdentity(msg claude.Message, route st
 	return nil
 }
 
+// resolveMirror checks one transcript-mirror batch against the identities this
+// incarnation has bound. A transcript file interleaves entries from every route
+// the session has run, so the file itself has no owner and one batch may span
+// routes: each entry that names causal identity must name a binding this
+// incarnation knows, and the batch is attributed causally only when every such
+// identity agrees on exactly one route. A batch that spans routes, or names
+// none, is session store state on the ingress route.
 func (o *nativeFrameOwnership) resolveMirror(mirror *claude.TranscriptMirrorMessage) (string, bool, error) {
 	routes := make(map[string]struct{})
-	causal := false
-
-	if mirror.FilePath != "" && o.mirrors != nil {
-		if route := o.mirrors[mirror.FilePath]; route != "" {
-			routes[route] = struct{}{}
-			causal = true
-		}
-	}
 
 	for _, rawEntry := range mirror.Entries {
 		var entry map[string]any
@@ -531,8 +504,6 @@ func (o *nativeFrameOwnership) resolveMirror(mirror *claude.TranscriptMirrorMess
 
 		parentToolUseID := nativeStringField(entry, "parent_tool_use_id")
 		if parentToolUseID != "" {
-			causal = true
-
 			route := o.tools[parentToolUseID]
 			if route == "" {
 				return "", true, errNativeFrameOwnership
@@ -543,8 +514,6 @@ func (o *nativeFrameOwnership) resolveMirror(mirror *claude.TranscriptMirrorMess
 
 		taskID := nativeStringField(entry, "task_id")
 		if taskID != "" {
-			causal = true
-
 			binding, exists := o.tasks[taskID]
 			if !exists {
 				return "", true, errNativeFrameOwnership
@@ -556,31 +525,18 @@ func (o *nativeFrameOwnership) resolveMirror(mirror *claude.TranscriptMirrorMess
 		identity := nativeStringField(entry, "uuid")
 		if identity != "" {
 			if route := o.messages[identity]; route != "" {
-				causal = true
 				routes[route] = struct{}{}
 			}
 		}
 	}
 
-	if !causal {
-		return "", false, nil
-	}
-
 	if len(routes) != 1 {
-		return "", true, errNativeFrameOwnership
+		return "", false, nil
 	}
 
 	var route string
 	for candidate := range routes {
 		route = candidate
-	}
-
-	if mirror.FilePath != "" {
-		if o.mirrors == nil {
-			o.mirrors = make(map[string]string)
-		}
-
-		o.mirrors[mirror.FilePath] = route
 	}
 
 	return route, true, nil
@@ -617,22 +573,18 @@ func nativeStringField(values map[string]any, key string) string {
 
 // validateNativeIdentitySchema refuses a frame that spells causal identity in a
 // vocabulary the ownership grammar does not read. Identity is read only at the
-// roots the resolver consults — the frame's own top level and a result origin's
-// top level — so an aliased identity key at either root is a frame whose
-// ownership this session cannot prove. Everything below those roots, including
-// every transcript-mirror journal entry, is the harness's own vocabulary and
-// stays opaque to the ownership grammar; a mirror entry must still parse, or
-// the identity keys the resolver reads from it cannot be proven absent.
+// root the resolver consults — the frame's own top level — so an aliased
+// identity key there is a frame whose ownership this session cannot prove.
+// Everything below that root, including a result's origin and every
+// transcript-mirror journal entry, is the harness's own vocabulary and stays
+// opaque to the ownership grammar; a mirror entry must still parse, or the
+// identity keys the resolver reads from it cannot be proven absent.
 func validateNativeIdentitySchema(msg claude.Message) error {
 	if msg == nil {
 		return nil
 	}
 
 	if nativeIdentityAliasesAtRoot(msg.RawMessage()) {
-		return errNativeFrameOwnership
-	}
-
-	if result, ok := msg.(*claude.ResultMessage); ok && nativeIdentityAliasesAtRoot(result.Origin) {
 		return errNativeFrameOwnership
 	}
 

@@ -90,7 +90,7 @@ func TestNativeTurnSinkBackpressuresAndPromotesTheExactNextFrame(t *testing.T) {
 	require.Same(t, pendingMessage, last.message)
 }
 
-func TestNativeFrameOwnershipRoutesEveryCausalContinuationAndRetiresTaskIDs(t *testing.T) {
+func TestNativeFrameOwnershipRoutesEveryCausalContinuation(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -98,7 +98,6 @@ func TestNativeFrameOwnershipRoutesEveryCausalContinuationAndRetiresTaskIDs(t *t
 		routeB = "route-b"
 		taskID = "task-reused"
 		toolA  = "tool-a"
-		toolB  = "tool-b"
 	)
 
 	var ownership nativeFrameOwnership
@@ -148,36 +147,29 @@ func TestNativeFrameOwnershipRoutesEveryCausalContinuationAndRetiresTaskIDs(t *t
 		},
 		Raw: map[string]any{"type": claude.MessageTypeMirror},
 	}, routeB, routeA, true)
+
+	// A batch with no identities names no owner: the file itself is not a route,
+	// so the frame is session store state on the ingress route.
 	resolve(&claude.TranscriptMirrorMessage{
 		FilePath: path,
 		Raw:      map[string]any{"type": claude.MessageTypeMirror},
-	}, routeB, routeA, true)
+	}, routeB, "", false)
 
+	// A task-notification result names no task — the harness's origin is a kind
+	// alone — so it borrows no task owner and retires no binding: the same
+	// task's next notification still resolves through the binding its
+	// task_started established.
 	cost := 1.25
 	resolve(&claude.ResultMessage{
-		Origin:       map[string]any{"kind": originKindTaskNotification, "task_id": taskID},
+		Origin:       map[string]any{"kind": originKindTaskNotification},
 		TotalCostUSD: &cost,
 		Usage:        &claude.Usage{InputTokens: 3, OutputTokens: 5},
 		Raw:          map[string]any{"type": claude.MessageTypeResult},
-	}, routeB, routeA, true)
-
-	// The terminal result retires only the completed task binding. First sight of
-	// the same task ID under B therefore establishes a new exact owner rather
-	// than inheriting A.
-	resolve(&claude.SystemMessage{
-		Subtype: nativeTaskStartedSubtype,
-		Raw: map[string]any{
-			"task_id": taskID, "tool_use_id": toolB,
-		},
-	}, routeB, routeB, true)
+	}, routeB, "", false)
 	resolve(&claude.SystemMessage{
 		Subtype: nativeTaskNotificationSubtype,
 		Raw:     map[string]any{"task_id": taskID},
-	}, routeA, routeB, true)
-	resolve(&claude.ResultMessage{
-		Origin: map[string]any{"kind": originKindTaskNotification, "task_id": taskID},
-		Raw:    map[string]any{"type": claude.MessageTypeResult},
-	}, routeA, routeB, true)
+	}, routeB, routeA, true)
 }
 
 func TestNativeFrameOwnershipRefusesInsufficientCausalIdentity(t *testing.T) {
@@ -191,13 +183,6 @@ func TestNativeFrameOwnershipRefusesInsufficientCausalIdentity(t *testing.T) {
 	}, "current-b")
 	require.True(t, causal)
 	require.ErrorIs(t, err, errNativeFrameOwnership)
-
-	_, causal, err = ownership.resolve(&claude.ResultMessage{
-		Origin: map[string]any{"kind": originKindTaskNotification},
-		Raw:    map[string]any{"type": claude.MessageTypeResult},
-	}, "current-b")
-	require.True(t, causal)
-	require.ErrorIs(t, err, errNativeFrameOwnership, "an id-less result cannot borrow a FIFO task owner")
 
 	_, causal, err = ownership.resolve(&claude.TranscriptMirrorMessage{
 		FilePath: "/native/session/subagents/unknown.jsonl",
@@ -304,50 +289,28 @@ func TestNativeFrameOwnershipRefusesEveryConflictingIdentityPath(t *testing.T) {
 		require.ErrorIs(t, err, errNativeFrameOwnership)
 	})
 
-	t.Run("task result identity conflict", func(t *testing.T) {
-		ownership := nativeFrameOwnership{
-			tasks:    map[string]nativeTaskBinding{"task": {route: "route-a", toolUseID: "tool"}},
-			messages: map[string]string{"result": "route-b"},
-		}
-		_, causal, err := ownership.resolve(&claude.ResultMessage{
-			Origin: map[string]any{"kind": originKindTaskNotification, "task_id": "task"},
-			Raw:    map[string]any{"uuid": "result"},
-		}, "route-a")
-		require.True(t, causal)
-		require.ErrorIs(t, err, errNativeFrameOwnership)
-	})
-
-	t.Run("mirror owner conflicts", func(t *testing.T) {
+	t.Run("mirror batch spanning routes is unattributed store state", func(t *testing.T) {
 		ownership := nativeFrameOwnership{
 			tasks: map[string]nativeTaskBinding{
 				"task-a": {route: "route-a", toolUseID: "tool-a"},
 				"task-b": {route: "route-b", toolUseID: "tool-b"},
 			},
 		}
-		_, causal, err := ownership.resolve(&claude.TranscriptMirrorMessage{
+		route, causal, err := ownership.resolve(&claude.TranscriptMirrorMessage{
 			Entries: []json.RawMessage{
 				json.RawMessage(`{"task_id":"task-a"}`),
 				json.RawMessage(`{"task_id":"task-b"}`),
 			},
 			Raw: map[string]any{},
 		}, "route-a")
-		require.True(t, causal)
-		require.ErrorIs(t, err, errNativeFrameOwnership)
+		require.NoError(t, err)
+		require.False(t, causal)
+		require.Empty(t, route)
+	})
 
-		ownership = nativeFrameOwnership{
-			tasks:   map[string]nativeTaskBinding{"task-a": {route: "route-a", toolUseID: "tool-a"}},
-			mirrors: map[string]string{"/mirror": "route-b"},
-		}
-		_, causal, err = ownership.resolve(&claude.TranscriptMirrorMessage{
-			FilePath: "/mirror",
-			Entries:  []json.RawMessage{json.RawMessage(`{"task_id":"task-a"}`)},
-			Raw:      map[string]any{},
-		}, "route-a")
-		require.True(t, causal)
-		require.ErrorIs(t, err, errNativeFrameOwnership)
-
-		ownership = nativeFrameOwnership{}
-		_, causal, err = ownership.resolve(&claude.TranscriptMirrorMessage{
+	t.Run("mirror entry naming an unknown task", func(t *testing.T) {
+		ownership := nativeFrameOwnership{}
+		_, causal, err := ownership.resolve(&claude.TranscriptMirrorMessage{
 			Entries: []json.RawMessage{json.RawMessage(`{"task_id":"unknown"}`)},
 			Raw:     map[string]any{},
 		}, "route-a")
@@ -405,30 +368,6 @@ func TestNativeFrameOwnershipRefusesCamelCaseCausalFields(t *testing.T) {
 			Raw: map[string]any{
 				"type": claude.MessageTypeAssistant, "parentToolUseId": "tool-a",
 			},
-		}},
-		{name: "result origin task ID", msg: &claude.ResultMessage{
-			Origin: map[string]any{
-				"kind": originKindTaskNotification, "taskId": "task-a",
-			},
-			Raw: map[string]any{"type": claude.MessageTypeResult},
-		}},
-		{name: "result origin tool use ID", msg: &claude.ResultMessage{
-			Origin: map[string]any{
-				"kind": originKindTaskNotification, "toolUseId": "tool-a",
-			},
-			Raw: map[string]any{"type": claude.MessageTypeResult},
-		}},
-		{name: "result origin parent tool use ID", msg: &claude.ResultMessage{
-			Origin: map[string]any{
-				"kind": originKindTaskNotification, "parentToolUseId": "tool-a",
-			},
-			Raw: map[string]any{"type": claude.MessageTypeResult},
-		}},
-		{name: "mixed result origin schema", msg: &claude.ResultMessage{
-			Origin: map[string]any{
-				"kind": originKindTaskNotification, "task_id": "task-a", "taskId": "task-a",
-			},
-			Raw: map[string]any{"type": claude.MessageTypeResult},
 		}},
 		{name: "mirror frame root task ID", msg: &claude.TranscriptMirrorMessage{
 			FilePath: "/native/session/subagents/camel-root.jsonl",
@@ -517,24 +456,154 @@ func TestNativeFrameOwnershipKeepsHarnessJournalVocabularyOpaque(t *testing.T) {
 		require.Equal(t, "route-a", route)
 	})
 
-	t.Run("task result origin nested metadata", func(t *testing.T) {
+	t.Run("id-less task notification result origin", func(t *testing.T) {
 		t.Parallel()
 
+		// The harness's SDKMessageOrigin for a task notification is a kind plus
+		// whatever camelCase members the harness chooses to record; none of it
+		// names a task, so the result is session-owned ingress state and the
+		// task binding it follows stays live for the task's next notification.
 		ownership := nativeFrameOwnership{
 			tasks: map[string]nativeTaskBinding{"b0qj00gmq": {route: "route-a", toolUseID: "tool-a"}},
 		}
 		route, causal, err := ownership.resolve(&claude.ResultMessage{
 			Origin: map[string]any{
-				"kind":    originKindTaskNotification,
-				"task_id": "b0qj00gmq",
-				"task":    map[string]any{"taskId": "b0qj00gmq", "timeoutMs": 90000, "persistent": false},
+				"kind":                 originKindTaskNotification,
+				"displayName":          "Monitor",
+				"armFailed":            false,
+				"carriesDiscardRecord": false,
 			},
 			Raw: map[string]any{"type": claude.MessageTypeResult},
 		}, "route-b")
 		require.NoError(t, err)
-		require.True(t, causal)
-		require.Equal(t, "route-a", route)
+		require.False(t, causal)
+		require.Empty(t, route)
+
+		notificationRoute, notificationCausal, err := ownership.resolve(&claude.SystemMessage{
+			Subtype: nativeTaskNotificationSubtype,
+			Raw:     map[string]any{"task_id": "b0qj00gmq"},
+		}, "route-b")
+		require.NoError(t, err)
+		require.True(t, notificationCausal)
+		require.Equal(t, "route-a", notificationRoute)
 	})
+}
+
+// TestNativeFrameOwnershipStackedTaskNotificationSequence replays the live
+// stacked-notification cycle frame by frame in the harness's real vocabulary: a
+// prompt arms one Monitor, the prompt settles, the task fires two notifications
+// at once, and each notification runs its own autonomous API turn whose result
+// origin is `{"kind":"task-notification"}` — a kind and nothing else. The task
+// binding survives both notification turns, the id-less results resolve as
+// session-owned ingress state, and a transcript-mirror batch whose entries span
+// the prompt route and the autonomous route is store state rather than an
+// ownership violation.
+func TestNativeFrameOwnershipStackedTaskNotificationSequence(t *testing.T) {
+	t.Parallel()
+
+	const (
+		promptRoute     = "prompt-route"
+		autonomousRoute = "autonomous-route"
+		taskID          = "b29g2tuij"
+		toolUseID       = "toolu_01A34mCV5ZTNUcvSfgjoSWZm"
+		transcriptPath  = "/native/projects/project/4fef6a73.jsonl"
+	)
+
+	var ownership nativeFrameOwnership
+
+	resolve := func(msg claude.Message, current string, wantRoute string, wantCausal bool) {
+		t.Helper()
+
+		route, causal, err := ownership.resolve(msg, current)
+		require.NoError(t, err)
+		require.Equal(t, wantRoute, route)
+		require.Equal(t, wantCausal, causal)
+	}
+
+	// The prompt turn arms the task and journals its own frames, which binds the
+	// prompt's message identities to the prompt route.
+	resolve(&claude.SystemMessage{
+		Subtype: nativeTaskStartedSubtype,
+		Raw:     map[string]any{"task_id": taskID, "tool_use_id": toolUseID},
+	}, promptRoute, promptRoute, true)
+	resolve(&claude.AssistantMessage{
+		Raw: map[string]any{"type": claude.MessageTypeAssistant, "uuid": "prompt-assistant"},
+	}, promptRoute, "", false)
+	resolve(&claude.TranscriptMirrorMessage{
+		FilePath: transcriptPath,
+		Entries:  []json.RawMessage{json.RawMessage(`{"type":"assistant","uuid":"prompt-assistant"}`)},
+		Raw:      map[string]any{"type": claude.MessageTypeMirror},
+	}, promptRoute, promptRoute, true)
+
+	// The prompt settles; the task fires. Both queued notifications name the task
+	// and stay bound to the prompt route that armed it.
+	resolve(&claude.SystemMessage{
+		Subtype: nativeTaskNotificationSubtype,
+		Raw:     map[string]any{"task_id": taskID, "summary": "monitor event"},
+	}, autonomousRoute, promptRoute, true)
+	resolve(&claude.SystemMessage{
+		Subtype: nativeTaskNotificationSubtype,
+		Raw:     map[string]any{"task_id": taskID, "tool_use_id": toolUseID, "status": "completed"},
+	}, autonomousRoute, promptRoute, true)
+
+	// The first notification's autonomous turn: the injected user message and the
+	// assistant reply carry the excursion's ingress route.
+	resolve(&claude.UserMessage{
+		Raw: map[string]any{
+			"type": claude.MessageTypeUser, "uuid": "notification-user-1",
+			"origin": map[string]any{"kind": originKindTaskNotification},
+		},
+	}, autonomousRoute, "", false)
+	resolve(&claude.AssistantMessage{
+		Raw: map[string]any{"type": claude.MessageTypeAssistant, "uuid": "notification-assistant-1"},
+	}, autonomousRoute, "", false)
+
+	// The transcript file interleaves every route the session has run: this batch
+	// journals the autonomous turn into the same file the prompt turn already
+	// wrote. Its entries agree on the excursion's route, so it is attributed
+	// there rather than condemned against the file's earlier owner.
+	resolve(&claude.TranscriptMirrorMessage{
+		FilePath: transcriptPath,
+		Entries: []json.RawMessage{
+			json.RawMessage(`{"type":"user","uuid":"notification-user-1"}`),
+			json.RawMessage(`{"type":"assistant","uuid":"notification-assistant-1"}`),
+		},
+		Raw: map[string]any{"type": claude.MessageTypeMirror},
+	}, autonomousRoute, autonomousRoute, true)
+
+	// One flush may span the prompt's entries and the excursion's. A batch whose
+	// identities span routes has no single owner: it is store state on the
+	// ingress route, not a projection hole.
+	resolve(&claude.TranscriptMirrorMessage{
+		FilePath: transcriptPath,
+		Entries: []json.RawMessage{
+			json.RawMessage(`{"type":"assistant","uuid":"prompt-assistant"}`),
+			json.RawMessage(`{"type":"assistant","uuid":"notification-assistant-1"}`),
+		},
+		Raw: map[string]any{"type": claude.MessageTypeMirror},
+	}, autonomousRoute, "", false)
+
+	// The first autonomous turn's terminal: the harness's SDKMessageOrigin for a
+	// task notification is a kind alone. It names no task, so it borrows no task
+	// owner and it retires no binding.
+	resolve(&claude.ResultMessage{
+		Origin: map[string]any{"kind": originKindTaskNotification},
+		Raw:    map[string]any{"type": claude.MessageTypeResult, "uuid": "notification-result-1"},
+	}, autonomousRoute, "", false)
+
+	// The second notification's turn runs against the binding the first result
+	// left intact.
+	resolve(&claude.SystemMessage{
+		Subtype: nativeTaskNotificationSubtype,
+		Raw:     map[string]any{"task_id": taskID, "status": "completed"},
+	}, autonomousRoute, promptRoute, true)
+	resolve(&claude.AssistantMessage{
+		Raw: map[string]any{"type": claude.MessageTypeAssistant, "uuid": "notification-assistant-2"},
+	}, autonomousRoute, "", false)
+	resolve(&claude.ResultMessage{
+		Origin: map[string]any{"kind": originKindTaskNotification},
+		Raw:    map[string]any{"type": claude.MessageTypeResult, "uuid": "notification-result-2"},
+	}, autonomousRoute, "", false)
 }
 
 func TestNativePumpDeliversBackgroundTaskJournalFramesBetweenPrompts(t *testing.T) {
@@ -571,12 +640,8 @@ func TestNativePumpDeliversBackgroundTaskJournalFramesBetweenPrompts(t *testing.
 	require.False(t, incarnation.failed.Load())
 
 	pump.dispatch(t.Context(), incarnation, &claude.ResultMessage{
-		Origin: map[string]any{
-			"kind":    originKindTaskNotification,
-			"task_id": "b0qj00gmq",
-			"task":    map[string]any{"taskId": "b0qj00gmq", "timeoutMs": 90000, "persistent": false},
-		},
-		Raw: map[string]any{"type": claude.MessageTypeResult},
+		Origin: map[string]any{"kind": originKindTaskNotification},
+		Raw:    map[string]any{"type": claude.MessageTypeResult},
 	})
 	require.False(t, incarnation.failed.Load())
 

@@ -63,12 +63,14 @@ excursion keeps its pending permission or elicitation owned and live. Once the
 native terminal settles that excursion, the retried prompt runs as a turn of its
 own.
 
-A task keeps the route of the prompt that started it. Its later raw frame, typed
-tool update, usage, and cost stay on that route even when another prompt owns the
-foreground; the newer prompt receives none of them. A result whose `origin.kind`
-is `task-notification` never ends the prompt or agent-origin excursion currently
-reading native traffic. Settlement waits for an ordinary native result or system
-idle.
+A task keeps the route of the prompt that started it. Every later frame that
+names the task — raw frames, typed tool updates, notifications, and their usage —
+stays on that route even when another prompt owns the foreground. A result whose
+`origin.kind` is `task-notification` names no task: the harness origin carries a
+kind alone, so its usage and cost ride the foreground that read it, it retires
+no task correlation, and it never ends the prompt or agent-origin excursion
+currently reading native traffic. One task may notify any number of times inside
+one excursion. Settlement waits for an ordinary native result or system idle.
 
 Permissions and elicitations raised after native initialization but before a
 successful `session/new`, `session/load`, `session/resume`, or `session/fork`

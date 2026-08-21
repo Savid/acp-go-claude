@@ -57,17 +57,12 @@ func namedTaskNotificationFrame(taskID string) map[string]any {
 }
 
 // taskNotificationResultFrame is the terminal the harness attributes to a task
-// notification rather than to a submission. It is the frame the incident turned
-// on: nobody prompted for it, and the cycle it ends is the excursion that was
-// reading it.
-func taskNotificationResultFrame(taskIDs ...string) map[string]any {
-	taskID := "task-1"
-	if len(taskIDs) != 0 {
-		taskID = taskIDs[0]
-	}
-
+// notification rather than to a submission. Its origin is the harness's
+// SDKMessageOrigin vocabulary — a kind and nothing else — so the result names
+// no task and borrows no task owner.
+func taskNotificationResultFrame() map[string]any {
 	frame := resultFrame()
-	frame["origin"] = map[string]any{"kind": originKindTaskNotification, "task_id": taskID}
+	frame["origin"] = map[string]any{"kind": originKindTaskNotification}
 
 	return frame
 }
@@ -507,7 +502,7 @@ func TestTaskNotificationResultKeepsExcursionOpenUntilEveryTrackedTaskFinishes(t
 
 	pushNativeFrames(transport,
 		namedTaskNotificationFrame("task-2"),
-		taskNotificationResultFrame("task-2"),
+		taskNotificationResultFrame(),
 		resultFrame(),
 	)
 	awaitLifecycleEvent(t, conn, transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity))
@@ -515,6 +510,118 @@ func TestTaskNotificationResultKeepsExcursionOpenUntilEveryTrackedTaskFinishes(t
 		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity)))
 	require.Len(t, agentTurnIDs(t, conn, before), 1,
 		"delayed task continuation stays in the original agent-origin turn")
+}
+
+// TestStackedTaskNotificationsSettleOneExcursion is the incident: one task
+// fires two notifications, each runs its own autonomous API turn, and the first
+// turn's excursion is still open when the second notification's user turn
+// starts. Both replies reach the host under the one agent-origin turn, the
+// id-less task-notification results end nothing, a transcript-mirror batch that
+// journals the autonomous turn into the prompt-written file is store state, and
+// the excursion settles successfully on the harness idle.
+func TestStackedTaskNotificationsSettleOneExcursion(t *testing.T) {
+	session, transport, conn, cleanup := newNegotiatedPromptFlowSession(t)
+	defer cleanup()
+
+	const transcriptPath = "/native/projects/project/prompt-session.jsonl"
+
+	promptAssistant := assistantFrame("prompt-reply")
+	promptAssistant["uuid"] = "prompt-assistant-1"
+	transport.queryMsgs = []map[string]any{
+		taskStartedFrame(),
+		promptAssistant,
+		{
+			"type":     claude.MessageTypeMirror,
+			"filePath": transcriptPath,
+			"entries": []any{
+				map[string]any{"type": "assistant", "uuid": "prompt-assistant-1"},
+			},
+		},
+		resultFrame(),
+	}
+
+	_, err := session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "arming-turn", "arm the monitor"))
+	require.NoError(t, err)
+
+	before := len(conn.Updates())
+
+	replyOne := assistantFrame("SENTINEL-STACKED-REPLY-1")
+	replyOne["uuid"] = "notification-assistant-1"
+	pushNativeFrames(transport,
+		taskNotificationFrame(),
+		map[string]any{
+			"type":   "user",
+			"uuid":   "notification-user-1",
+			"origin": map[string]any{"kind": originKindTaskNotification},
+			"message": map[string]any{
+				"role":    "user",
+				"content": []any{map[string]any{"type": "text", "text": "<task-notification>fired</task-notification>"}},
+			},
+		},
+		replyOne,
+		map[string]any{
+			"type":     claude.MessageTypeMirror,
+			"filePath": transcriptPath,
+			"entries": []any{
+				map[string]any{"type": "user", "uuid": "notification-user-1"},
+				map[string]any{"type": "assistant", "uuid": "notification-assistant-1"},
+			},
+		},
+		taskNotificationResultFrame(),
+	)
+
+	awaitAgentUpdates(t, conn, func() bool {
+		_, found := sentinelNotificationIndex(t, conn, "SENTINEL-STACKED-REPLY-1")
+
+		return found
+	})
+	require.Zero(t, countLifecycleEvents(t, conn, before,
+		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity)),
+		"the excursion is still open when the second notification's turn starts")
+
+	// The second notification of the same task arrives while the first
+	// autonomous turn's excursion is still open.
+	replyTwo := assistantFrame("SENTINEL-STACKED-REPLY-2")
+	replyTwo["uuid"] = "notification-assistant-2"
+	pushNativeFrames(transport,
+		taskNotificationFrame(),
+		map[string]any{
+			"type":   "user",
+			"uuid":   "notification-user-2",
+			"origin": map[string]any{"kind": originKindTaskNotification},
+			"message": map[string]any{
+				"role":    "user",
+				"content": []any{map[string]any{"type": "text", "text": "<task-notification>completed</task-notification>"}},
+			},
+		},
+		replyTwo,
+		taskNotificationResultFrame(),
+		systemIdleFrame(),
+	)
+
+	awaitLifecycleEvent(t, conn, transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity))
+
+	idle, _, found := findLifecycleEvent(t, conn, before,
+		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity))
+	require.True(t, found)
+	require.Equal(t, "success", idle["outcome"], "stacked notifications end the excursion as a success")
+
+	_, found = sentinelNotificationIndex(t, conn, "SENTINEL-STACKED-REPLY-2")
+	require.True(t, found, "the second autonomous reply reaches the host")
+
+	require.Len(t, agentTurnIDs(t, conn, before), 1, "both notification turns share one excursion")
+	require.Equal(t, 1, countLifecycleEvents(t, conn, before,
+		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity)),
+		"the excursion settles exactly once")
+
+	incarnation := session.currentNativeIncarnation()
+	require.NotNil(t, incarnation)
+	require.False(t, incarnation.failed.Load(), "nothing was contained")
+	require.NoError(t, session.autonomousFailureError())
+
+	transport.queryMsgs = []map[string]any{resultFrame()}
+	_, err = session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "after-turn", "hello again"))
+	require.NoError(t, err, "the session keeps serving prompts after the stacked notifications")
 }
 
 func TestBackgroundTaskFramesKeepPromptOriginWhileAnotherPromptRuns(t *testing.T) {
@@ -584,6 +691,9 @@ func TestBackgroundTaskFramesKeepPromptOriginWhileAnotherPromptRuns(t *testing.T
 		return false
 	})
 
+	// Every frame the task identifies retains A. The task-notification result is
+	// the one frame that identifies nothing — the harness's origin is a kind
+	// alone — so its usage and cost ride the foreground that read it.
 	for _, notification := range conn.Updates()[beforeTaskEnd:] {
 		update := notification.Update
 		if update.ToolCallUpdate == nil && update.UsageUpdate == nil && update.AgentMessageChunk == nil {
@@ -591,16 +701,35 @@ func TestBackgroundTaskFramesKeepPromptOriginWhileAnotherPromptRuns(t *testing.T
 		}
 
 		route := requireAnyMap(t, notification.Meta[routeMetaKey])
-		require.Equal(t, routeA, route[routeFieldTurn], "task typed state, usage, and cost retain A")
+		if update.UsageUpdate != nil && update.UsageUpdate.Cost != nil {
+			require.Equal(t, routeB, route[routeFieldTurn], "the id-less result rides the foreground that read it")
+
+			continue
+		}
+
+		require.Equal(t, routeA, route[routeFieldTurn], "task typed state and usage retain A")
 		require.NotEqual(t, routeB, route[routeFieldTurn])
 	}
 
 	rawEvents := decodeRawEvents(t, conn)
 	require.GreaterOrEqual(t, len(rawEvents), beforeRaw+6)
+
+	resultRawSeen := false
+
 	for _, event := range rawEvents[beforeRaw:] {
 		route := requireAnyMap(t, event.Meta[routeMetaKey])
+		if payload, ok := event.Event["type"].(string); ok && payload == claude.MessageTypeResult {
+			resultRawSeen = true
+
+			require.Equal(t, routeB, route[routeFieldTurn], "the id-less result raw frame rides the foreground")
+
+			continue
+		}
+
 		require.Equal(t, routeA, route[routeFieldTurn], "task raw frames retain A")
 	}
+
+	require.True(t, resultRawSeen, "the task-notification result raw frame reaches the host")
 
 	select {
 	case err := <-bDone:

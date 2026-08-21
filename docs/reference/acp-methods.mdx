@@ -151,19 +151,19 @@ JSON-RPC code **`-32603`** with a `data` object:
 | --- | --- |
 | `error` | `claude_turn_failed` |
 | `cause` | one of the causes below |
-| `message` | the real native cause text (never a placeholder) |
+| `message` | a stable adapter-owned classification with no provider-controlled text |
 
 The `cause` vocabulary:
 
 | Cause | Meaning |
 | --- | --- |
-| `process_exit` | The Claude process died; `message` carries the real exit status and a stderr tail. |
+| `process_exit` | The Claude process died; `message` carries only the exit status. |
 | `transport` | Stream close, malformed frame, or client-lifecycle break. |
 | `provider` | Claude reported an error in its result frame (including auth failures). |
 | `timeout` | A `WithTurnTimeout` deadline expired; the selected native containment boundary completed before settlement. |
 
-Provider failures additionally include the result `subtype`, and may include an
-`errors` array and an `errorKind`.
+Provider failures expose only the fixed `claude provider turn failed` message;
+provider subtype and payload fields are not copied onto the wire.
 
 `session/close` has one refusal of its own. It settles behind the session's
 settlement barrier, so a caller whose wait for the in-flight turn ends before that

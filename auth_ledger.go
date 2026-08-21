@@ -507,8 +507,8 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 		return nil, err
 	}
 
-	// Native logout clears what it knows about; the legacy API-key item may
-	// survive it, and leaving that behind leaves a usable credential behind.
+	// Native logout is followed by explicit removal of the current composite
+	// keychain item so no independently stored credential remains usable.
 	if err := p.removeKeystoreItems(ctx); err != nil {
 		return nil, err
 	}

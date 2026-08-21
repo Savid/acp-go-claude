@@ -31,66 +31,6 @@ func TestSessionLifecycleBranches(t *testing.T) {
 	session, cleanup := newStartedAgentSessionForTest(t, agent, "session-1")
 	defer cleanup()
 
-	cancelled, cancel := context.WithCancel(ctx)
-	cancel()
-	session.turn = make(chan struct{}, 1)
-	session.turn <- struct{}{}
-	release, err := session.acquireTurn(cancelled)
-	require.ErrorIs(t, err, context.Canceled)
-	require.Nil(t, release)
-
-	// A second prompt to a busy session (its single turn slot taken) is refused
-	// with session_prompt backpressure; per-session turn capacity is fixed at 1.
-	session.turn = make(chan struct{}, sessionTurnCapacity)
-	session.turn <- struct{}{}
-	release, err = session.acquireTurn(ctx)
-	requireBackpressureLimit(t, err, "session_prompt")
-	require.Nil(t, release)
-
-	session.turn = make(chan struct{}, 2)
-	release, err = session.acquireExclusiveTurn(ctx)
-	require.NoError(t, err)
-	require.Len(t, session.turn, 2)
-	release()
-	require.Empty(t, session.turn)
-
-	partialCtx, partialCancel := context.WithCancel(ctx)
-	session.turn = make(chan struct{}, 2)
-	session.turnAcquiredHook = func(acquired int) {
-		if acquired == 1 {
-			partialCancel()
-			session.turn <- struct{}{}
-		}
-	}
-	release, err = session.acquireExclusiveTurn(partialCtx)
-	require.ErrorIs(t, err, context.Canceled)
-	require.Nil(t, release)
-	<-session.turn
-	require.Empty(t, session.turn)
-	session.turnAcquiredHook = nil
-
-	innerCancelCtx := &nthDoneContext{
-		done:       make(chan struct{}),
-		closeAfter: 3,
-	}
-	session.turn = make(chan struct{}, 2)
-	session.turnAcquiredHook = func(acquired int) {
-		if acquired == 1 {
-			session.turn <- struct{}{}
-		}
-	}
-	release, err = session.acquireExclusiveTurn(innerCancelCtx)
-	require.ErrorIs(t, err, context.Canceled)
-	require.Nil(t, release)
-	<-session.turn
-	require.Empty(t, session.turn)
-	session.turnAcquiredHook = nil
-
-	session.turn = make(chan struct{})
-	release, err = session.acquireExclusiveTurn(cancelled)
-	require.ErrorIs(t, err, context.Canceled)
-	require.Nil(t, release)
-
 	session.turn = nil
 	require.NotNil(t, session.turnQueue())
 
@@ -112,8 +52,75 @@ func TestSessionLifecycleBranches(t *testing.T) {
 	waitCtx, stopWaiting := context.WithTimeout(ctx, time.Millisecond)
 	defer stopWaiting()
 
-	err = closeSession.Close(waitCtx)
+	err := closeSession.Close(waitCtx)
 	require.Error(t, err)
+}
+
+func TestExactInteractionCancellationEdgeStates(t *testing.T) {
+	session := &agentSession{}
+	session.cancelPendingInteractionsExact(nil)
+
+	expected := &nativeIncarnation{}
+	other := &nativeIncarnation{}
+	permissionCancelled := false
+	elicitationCancelled := false
+	session.permissionCancel = map[string]*permissionRequestCancel{
+		"other":    {owner: lifecycleInteractionOwner{incarnation: other, route: "route"}, cancel: func() {}},
+		"unrouted": {owner: lifecycleInteractionOwner{incarnation: expected}, cancel: func() {}},
+		"exact": {
+			owner:  lifecycleInteractionOwner{incarnation: expected, route: "route"},
+			cancel: func() { permissionCancelled = true },
+		},
+	}
+	session.elicitationCancel = map[int64]*elicitationRequestCancel{
+		1: {owner: lifecycleInteractionOwner{incarnation: other, route: "route"}, cancel: func() {}},
+		2: {owner: lifecycleInteractionOwner{incarnation: expected}, cancel: func() {}},
+		3: {
+			owner:  lifecycleInteractionOwner{incarnation: expected, route: "route"},
+			cancel: func() { elicitationCancelled = true },
+		},
+	}
+
+	session.cancelPendingInteractionsExact(expected)
+	require.True(t, permissionCancelled)
+	require.True(t, elicitationCancelled)
+	require.Contains(t, session.permissionCancel, "other")
+	require.Contains(t, session.permissionCancel, "unrouted")
+	require.Contains(t, session.elicitationCancel, int64(1))
+	require.Contains(t, session.elicitationCancel, int64(2))
+}
+
+func TestCloseFailsClosedWhileAnAdmittedCallbackDoesNotFinish(t *testing.T) {
+	session := &agentSession{callbackAdmissions: make(map[*controlCallbackAdmission]struct{})}
+	admission := &controlCallbackAdmission{done: make(chan struct{})}
+	session.callbackAdmissions[admission] = struct{}{}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := session.close(ctx)
+	require.ErrorIs(t, err, errSessionCloseUnsettled)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestCloseFailsClosedWhileAnAdmittedProducerDoesNotFinish(t *testing.T) {
+	session := &agentSession{}
+	finish, admitted := session.producers.begin()
+	require.True(t, admitted)
+	defer finish()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := session.close(ctx)
+	require.ErrorIs(t, err, errSessionCloseUnsettled)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSessionCloseFencesAnIncompleteNativeDrain(t *testing.T) {
+	session, _, stream := newLifecycleStreamTestSession(t)
+	require.NoError(t, stream.incarnate(t.Context()))
+	drainErr := errors.New("native drain failed")
+	require.ErrorIs(t, session.settleDrainedSession(t.Context(), drainErr), drainErr)
+	require.True(t, stream.fenced)
 }
 
 func TestSessionCancelAndCloseEdgeBranches(t *testing.T) {
@@ -152,10 +159,23 @@ func TestSessionCancelAndCloseEdgeBranches(t *testing.T) {
 
 	closeErrSession, closeErrCleanup := newStartedAgentSessionForTest(t, agent, "close-error")
 	defer closeErrCleanup()
-	closeErrSession.client = claude.NewClient(nil, claude.Options{}, &closeErrTransport{Transport: newFakeClaudeTransport(), err: errors.New("close failed")})
+	closeErr := errors.New("close failed")
+	closeErrSession.client = claude.NewClient(nil, claude.Options{}, &closeErrTransport{Transport: newFakeClaudeTransport(), err: closeErr})
 	require.NoError(t, closeErrSession.client.Start(ctx))
 	err = closeErrSession.Close(ctx)
-	require.ErrorContains(t, err, "close failed")
+	require.ErrorIs(t, err, closeErr)
+}
+
+func TestCancelJoinsAnAlreadyFailedIncarnationMirrorBoundary(t *testing.T) {
+	session, _, _, cleanup := newNegotiatedPromptFlowSession(t)
+	defer cleanup()
+	require.NoError(t, session.serveNativePump(t.Context(), session.currentClient()))
+	incarnation := session.currentNativeIncarnation()
+	incarnation.failed.Store(true)
+	incarnation.signalMirrorReady()
+	session.cancel = func() {}
+
+	require.NoError(t, session.cancelNative(t.Context()))
 }
 
 func TestSessionCancelInterruptDetachedFromCallerContext(t *testing.T) {
@@ -395,7 +415,7 @@ func TestRegisterElicitationCancellation(t *testing.T) {
 	session, cleanup := newStartedAgentSessionForTest(t, agent, "elicit-register")
 	defer cleanup()
 
-	elicitationCtx, finish := session.registerElicitation(ctx)
+	elicitationCtx, finish := session.registerElicitation(ctx, lifecycleInteractionOwner{})
 	require.NoError(t, elicitationCtx.Err())
 	require.Len(t, session.elicitationCancel, 1)
 
@@ -406,42 +426,9 @@ func TestRegisterElicitationCancellation(t *testing.T) {
 	finish()
 
 	// A registration made after the turn is already cancelled is cancelled at once.
-	preCancelledCtx, preFinish := session.registerElicitation(ctx)
+	preCancelledCtx, preFinish := session.registerElicitation(ctx, lifecycleInteractionOwner{})
 	defer preFinish()
 	require.Error(t, preCancelledCtx.Err())
-}
-
-type nthDoneContext struct {
-	done       chan struct{}
-	closeAfter int
-	calls      int
-	once       sync.Once
-}
-
-func (c *nthDoneContext) Deadline() (time.Time, bool) {
-	return time.Time{}, false
-}
-
-func (c *nthDoneContext) Done() <-chan struct{} {
-	c.calls++
-	if c.calls >= c.closeAfter {
-		c.once.Do(func() { close(c.done) })
-	}
-
-	return c.done
-}
-
-func (c *nthDoneContext) Err() error {
-	select {
-	case <-c.done:
-		return context.Canceled
-	default:
-		return nil
-	}
-}
-
-func (c *nthDoneContext) Value(any) any {
-	return nil
 }
 
 const processContainmentHelperArg = "--acp-go-claude-containment-helper"
@@ -1062,32 +1049,24 @@ func TestClosedSessionRefusesEveryDoor(t *testing.T) {
 	require.Equal(t, acquires, releases)
 }
 
-// TestPromptRefusesACloseThatBeganDuringAdmission drives the check that lives
-// in the section publishing the turn. The pump already serves this process, so
-// pointing it at the current incarnation is the no-op it is meant to be and
-// refuses nothing; the close then begins after prompt admission has passed its
-// own check, leaving only the section that installs the turn to refuse it.
-func TestPromptRefusesACloseThatBeganDuringAdmission(t *testing.T) {
-	session, _, cleanup := newPromptFlowSession(t)
+func TestRelaunchStopsAfterLifecycleRetirementFailure(t *testing.T) {
+	session, _, conn, cleanup := newNegotiatedPromptFlowSession(t)
 	defer cleanup()
-
 	require.NoError(t, session.serveNativePump(t.Context(), session.currentClient()))
 
-	defer session.stopNativePump()
+	stream := session.lifecycleStream()
+	_, err := stream.dispatch(t.Context(), lifecycle.Submission{
+		SubmissionID: "submission", ClientNonce: "client",
+	}, "prompt-route", func() error { return nil })
+	require.NoError(t, err)
+	conn.sessionUpdateErr = errors.New("retirement delivery failed")
 
-	session.turnAcquiredHook = func(int) { session.beginClose() }
-
-	_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "test-turn", "hello"))
-	requireUnknownSession(t, err)
-
-	session.mu.Lock()
-	require.Nil(t, session.cancel)
-	session.mu.Unlock()
+	err = session.relaunchClient(t.Context(), session.currentClient(), nil, session.clientOptions)
+	require.ErrorContains(t, err, "lifecycle delivery failed")
 }
 
-// TestRelaunchThatLosesToCloseLeavesNoNativeProcess proves the relaunch check
-// inside the client-swap section both refuses and cleans up: the replacement
-// that was already started is torn down and its admission returned.
+// TestRelaunchThatLosesToCloseLeavesNoNativeProcess proves a replacement that
+// reaches publication after close begins is contained and never installed.
 func TestRelaunchThatLosesToCloseLeavesNoNativeProcess(t *testing.T) {
 	acquires := 0
 	releases := 0
@@ -1379,9 +1358,10 @@ func TestRelaunchReportsAFailedCatalogEmission(t *testing.T) {
 	}
 
 	require.NoError(t, session.client.Close())
-	conn.sessionUpdateErr = errors.New("host disconnected")
+	emitErr := errors.New("host disconnected")
+	conn.sessionUpdateErr = emitErr
 
-	require.ErrorContains(t, session.ensureClientAlive(ctx), "host disconnected")
+	require.ErrorIs(t, session.ensureClientAlive(ctx), emitErr)
 	require.True(t, session.client.Alive(), "the replacement is installed; only the notification failed")
 	require.Empty(t, session.advertisedCommands, "an unreceived snapshot advertises nothing")
 }

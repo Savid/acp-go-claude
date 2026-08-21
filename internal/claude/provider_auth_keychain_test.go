@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAuthKeychainItemsCoversBothItemsAndBothNameShapes(t *testing.T) {
+func TestAuthKeychainItemsCoversOnlyCurrentCredentialNameShapes(t *testing.T) {
 	t.Parallel()
 
 	const configDir = "/tmp/claude-cfg-A"
@@ -18,9 +18,7 @@ func TestAuthKeychainItemsCoversBothItemsAndBothNameShapes(t *testing.T) {
 
 	require.Equal(t, []AuthKeychainItem{
 		{Service: "Claude Code-credentials-" + hash, Account: "operator"},
-		{Service: "Claude Code-" + hash, Account: "operator"},
 		{Service: "Claude Code-custom-oauth-credentials-" + hash, Account: "operator"},
-		{Service: "Claude Code-custom-oauth-" + hash, Account: "operator"},
 	}, AuthKeychainItems(configDir, "operator"))
 
 	// Two config dirs never share an item name.
@@ -35,9 +33,6 @@ func TestAuthKeychainCredentialItemsCoversOnlyTheCredentialShapes(t *testing.T) 
 	sum := sha256.Sum256([]byte(configDir))
 	hash := hex.EncodeToString(sum[:])[:8]
 
-	// The legacy API-key item never holds the composite blob, so the read leg
-	// must not consult it: a bare key handed to the resume copy would
-	// materialize as a credential file the CLI rejects.
 	require.Equal(t, []AuthKeychainItem{
 		{Service: "Claude Code-credentials-" + hash, Account: "operator"},
 		{Service: "Claude Code-custom-oauth-credentials-" + hash, Account: "operator"},

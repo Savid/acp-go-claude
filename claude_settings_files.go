@@ -76,7 +76,7 @@ func loadDiscoveredSettings(ctx context.Context, cwd string, claudeHome string, 
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
 			if log != nil {
-				log.DebugContext(ctx, "stop loading Claude settings", slog.String(jsonFieldError, err.Error()))
+				log.DebugContext(ctx, "stop loading Claude settings", slog.String("stage", "settings_discovery"))
 			}
 
 			return merged
@@ -191,7 +191,7 @@ func loadSettingsFile(ctx context.Context, path string, log *slog.Logger) (setti
 	content, err := os.ReadFile(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) && log != nil {
-			log.DebugContext(ctx, "read Claude settings failed", slog.String("path", path), slog.String(jsonFieldError, err.Error()))
+			log.DebugContext(ctx, "read Claude settings failed", slog.String("stage", "settings_read"))
 		}
 
 		return settingsFile{}, false
@@ -200,7 +200,7 @@ func loadSettingsFile(ctx context.Context, path string, log *slog.Logger) (setti
 	var raw map[string]any
 	if err := json.Unmarshal(content, &raw); err != nil {
 		if log != nil {
-			log.DebugContext(ctx, "decode Claude settings failed", slog.String("path", path), slog.String(jsonFieldError, err.Error()))
+			log.DebugContext(ctx, "decode Claude settings failed", slog.String("stage", "settings_decode"))
 		}
 
 		return settingsFile{}, false

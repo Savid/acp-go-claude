@@ -69,7 +69,7 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 	// windows — the same answer a failed probe produces — instead of failing.
 	claudeHome, err := canonicalClaudeHome(a.options.Home)
 	if err != nil {
-		a.log.DebugContext(ctx, "resolve Claude home failed", slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "resolve Claude home failed", slog.String("stage", "claude_home_resolution"))
 
 		return RateLimitsResponse{Windows: make([]RateLimitWindow, 0)}, nil
 	}
@@ -104,7 +104,7 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 			return RateLimitsResponse{}, err
 		}
 
-		a.log.DebugContext(ctx, "claude usage probe failed", slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "claude usage probe failed", slog.String("stage", "usage_probe"))
 
 		limits = claude.RateLimits{}
 	}
@@ -154,7 +154,7 @@ func (a *Agent) rateLimitsFromAPI(ctx context.Context, options claude.Options) c
 		UserAgent: a.options.AgentName + "/" + a.options.AgentVersion,
 	})
 	if err != nil {
-		a.log.DebugContext(ctx, "direct rate-limits API probe failed", slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "direct rate-limits API probe failed", slog.String("stage", "rate_limits_probe"))
 
 		return claude.RateLimits{}
 	}
@@ -256,8 +256,6 @@ func (a *Agent) handleForkSession(
 		PermissionRules:       permissionRules,
 		MetaOptions:           metaOptions,
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
-	}, func(session *agentSession) {
-		session.persistPermissionRules(ctx)
 	})
 	if err != nil {
 		// Forking an unknown or deleted parent returns the same uniform
@@ -270,7 +268,9 @@ func (a *Agent) handleForkSession(
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
-	session.emitCurrentUsageUpdate(ctx)
+	if err := session.emitCurrentUsageUpdate(ctx); err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
 
 	return acp.UnstableForkSessionResponse{
 		SessionId:     session.id,

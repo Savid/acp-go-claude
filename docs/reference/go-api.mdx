@@ -48,7 +48,7 @@ accidentally release the quarantined admission.
 | `WithSeedFiles` | Write files into the resolved config dir before launch (requires `WithHome`). |
 | `WithSessionStore` | Replace the default in-memory session authority with a host store. |
 | `WithSessionStoreLoadTimeout` | Bound store reads used during restore and listing. |
-| `WithConcurrencyLimits` | Cap active sessions and concurrent client calls. |
+| `WithConcurrencyLimits` | Cap active sessions and concurrent outbound client calls. Zero fields use defaults of 32 sessions and 16 client calls; a full client-call limit returns `client_calls` backpressure. |
 | `WithImageLimits` | Set decoded-byte policy limits for image input and output. |
 | `WithTurnTimeout` | Bound one prompt turn; expiry fails the turn with cause `timeout` (default: no deadline). |
 | `WithRuntimeResourceHooks` | Let an embedding host admit native roots and reserve adapter scratch roots before they are created. |

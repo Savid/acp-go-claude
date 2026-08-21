@@ -487,7 +487,7 @@ func TestClaudeRelaunchFailsClosed(t *testing.T) {
 			}
 
 			err := session.ensureClientAlive(t.Context())
-			require.ErrorContains(t, err, "reapply failed")
+			require.ErrorContains(t, err, "claude control request failed")
 			require.Equal(t, 2, releases)
 		})
 	}
@@ -533,6 +533,8 @@ func deadClaudeClient(t *testing.T, closeErr error) *claude.Client {
 	client := claude.NewClient(nil, claude.Options{}, &closeErrTransport{Transport: transport, err: closeErr})
 	require.NoError(t, client.Start(t.Context()))
 	transport.errs <- errors.New("process exited")
+	close(transport.errs)
+	close(transport.messages)
 	require.Eventually(t, func() bool { return !client.Alive() }, time.Second, time.Millisecond)
 
 	return client

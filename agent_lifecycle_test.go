@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -9,6 +10,23 @@ import (
 	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNonInterruptibleLocalCarrierDeclinesLifecycle(t *testing.T) {
+	agent := NewAgent()
+	output := &bytes.Buffer{}
+	conn := newLocalAgentConnection(agent, output, bytes.NewReader(nil))
+	agent.setConnection(conn)
+
+	resp, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
+	require.NoError(t, err)
+	require.NotContains(t, resp.Meta, lifecycle.MetaKey)
+	require.False(t, agent.negotiatedLifecycle().Present())
+	require.NoError(t, conn.SessionUpdate(t.Context(), acp.SessionNotification{
+		SessionId: "ordinary", Update: acp.UpdateAgentMessageText("ordinary"),
+	}))
+	require.Contains(t, output.String(), "ordinary")
+	require.NoError(t, agent.Close())
+}
 
 func lifecycleOfferMeta(versions ...any) map[string]any {
 	return map[string]any{lifecycle.MetaKey: map[string]any{"versions": versions}}
@@ -44,8 +62,8 @@ func TestLifecycleAnswerLandsOnTheResponseMeta(t *testing.T) {
 
 // TestLifecycleAnswerIsPerConfiguration pins the truth table against the same
 // containment accessor that enforces the boundary: only the authoritative mode
-// proves whole-tree vacancy, and no configuration claims a channel outside a
-// prompt or an activity kind.
+// proves whole-tree vacancy, and every configuration carries the channel outside
+// a prompt and no activity kind without captured identity/parentage evidence.
 func TestLifecycleAnswerIsPerConfiguration(t *testing.T) {
 	t.Parallel()
 

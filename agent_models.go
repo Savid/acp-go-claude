@@ -61,25 +61,17 @@ func (a *Agent) setSessionConfigValue(
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
 
-	if poisonErr := session.poisonedError(); poisonErr != nil {
-		return acp.SetSessionConfigOptionResponse{}, poisonErr
-	}
-
 	switch params.ConfigId {
 	case configModel, configMode, configOutputStyle, configEffort:
 	default:
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField("configId")
 	}
 
-	releaseTurn, err := session.acquireTurn(ctx)
+	releaseTurn, err := session.acquirePromptTurn(ctx, false)
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
 	defer releaseTurn()
-
-	if poisonErr := session.poisonedError(); poisonErr != nil {
-		return acp.SetSessionConfigOptionResponse{}, poisonErr
-	}
 
 	switch params.ConfigId {
 	case configModel:
@@ -135,7 +127,7 @@ func (a *Agent) setSessionConfigValue(
 	options := sessionConfigOptions(session)
 	updates := []acp.SessionUpdate{{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}}}
 
-	if err := session.emitOptionalUpdates(ctx, updates); err != nil {
+	if err := session.emitUpdates(ctx, updates); err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
 

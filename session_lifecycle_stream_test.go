@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -37,6 +36,32 @@ func newLifecycleStreamTestSession(t *testing.T) (*agentSession, *recordingAgent
 // session.
 func closeCommit(err error) func() error {
 	return func() error { return err }
+}
+
+// writePreparedActionForTest crosses the same boundary as the production ACP
+// writer: reserve the action, then bind it to a concrete method and request id
+// only after the request has been written.
+func writePreparedActionForTest(
+	ctx context.Context,
+	stream *sessionStream,
+	route string,
+	kind lifecycle.ActionKind,
+) (lifecycle.ActionUpdate, error) {
+	update, err := stream.prepareAction(ctx, route, kind)
+	if err != nil || update.ActionID == "" {
+		return update, err
+	}
+
+	method := acp.ClientMethodSessionRequestPermission
+	if kind == lifecycle.ActionElicitation {
+		method = acp.ClientMethodElicitationCreate
+	}
+	err = stream.announcePreparedAction(ctx, update, actionWireIdentity{
+		method:    method,
+		requestID: "test-wire-" + update.ActionID,
+	})
+
+	return update, err
 }
 
 // lifecycleEventTypes reports, in delivery order, the event type of every
@@ -93,13 +118,297 @@ func newLifecycleActionSession(t *testing.T, nonce string) (*agentSession, *reco
 	_, err := stream.dispatch(ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, nonce, func() error { return nil })
 	require.NoError(t, err)
 
-	return session, conn, stream, withTurnRoute(ctx, nonce)
+	admission := &controlCallbackAdmission{session: session, route: nonce}
+	session.callbackAdmissions = map[*controlCallbackAdmission]struct{}{admission: {}}
+	t.Cleanup(func() {
+		session.callbackOwnershipMu.Lock()
+		delete(session.callbackAdmissions, admission)
+		session.callbackOwnershipMu.Unlock()
+	})
+
+	return session, conn, stream, context.WithValue(ctx, controlCallbackAdmissionContextKey{}, admission)
+}
+
+func TestSessionStreamOwnershipEdgeStates(t *testing.T) {
+	ctx := t.Context()
+
+	var absent *sessionStream
+	require.NoError(t, absent.announcePreparedAction(ctx, lifecycle.ActionUpdate{}, actionWireIdentity{}))
+	require.False(t, actionMethodMatches(lifecycle.ActionKind("unknown"), "unknown"))
+	turnID, err := absent.openAgentTurn(ctx, "route")
+	require.NoError(t, err)
+	require.Empty(t, turnID)
+	_, err = absent.emitCallbackContent(ctx, "route", func() error { return nil })
+	require.NoError(t, err)
+
+	session, _, stream := newLifecycleStreamTestSession(t)
+	turnID, err = stream.openAgentTurn(ctx, "route")
+	require.NoError(t, err)
+	require.Empty(t, turnID)
+	_, live := stream.callbackOwner("route")
+	require.False(t, live)
+
+	require.NoError(t, stream.incarnate(ctx))
+	session.setAutonomousRoute("route", nil)
+	stream.lost = errors.New("stream lost")
+	_, err = stream.openAgentTurn(ctx, "route")
+	require.ErrorContains(t, err, "stream lost")
+	stream.lost = nil
+
+	turnID, err = stream.openAgentTurn(ctx, "route")
+	require.NoError(t, err)
+	require.NotEmpty(t, turnID)
+	_, err = stream.dispatch(ctx, lifecycle.Submission{}, "prompt", func() error { return nil })
+	require.Error(t, err)
+	again, err := stream.openAgentTurn(ctx, "route")
+	require.NoError(t, err)
+	require.Empty(t, again)
+
+	_, live = stream.callbackOwner("wrong-route")
+	require.False(t, live)
+	_, err = writePreparedActionForTest(ctx, stream, "wrong-route", lifecycle.ActionPermission)
+	require.NoError(t, err)
+	prepared, err := stream.prepareAction(ctx, "route", lifecycle.ActionPermission)
+	require.NoError(t, err)
+
+	stream.lost = errors.New("turn stream lost")
+	err = stream.announcePreparedAction(ctx, prepared, actionWireIdentity{
+		method: acp.ClientMethodSessionRequestPermission, requestID: "lost",
+	})
+	require.ErrorContains(t, err, "turn stream lost")
+	_, err = writePreparedActionForTest(ctx, stream, "route", lifecycle.ActionPermission)
+	require.ErrorContains(t, err, "turn stream lost")
+	_, err = stream.emitCallbackContent(ctx, "route", func() error { return nil })
+	require.ErrorContains(t, err, "turn stream lost")
+	stream.lost = nil
+
+	_, err = stream.emitCallbackContent(ctx, "wrong-route", func() error { return nil })
+	require.Error(t, err)
+	emitErr := errors.New("callback content failed")
+	_, err = stream.emitCallbackContent(ctx, "route", func() error { return emitErr })
+	require.ErrorIs(t, err, emitErr)
+}
+
+func TestSessionStreamAutonomousCallbackOpeningEdges(t *testing.T) {
+	t.Run("action route retired", func(t *testing.T) {
+		session, _, stream := newLifecycleStreamTestSession(t)
+		require.NoError(t, stream.incarnate(t.Context()))
+		session.setAutonomousRoute("live-route", &nativeIncarnation{})
+
+		update, err := writePreparedActionForTest(t.Context(), stream, "retired-route", lifecycle.ActionPermission)
+		require.NoError(t, err)
+		require.Empty(t, update.ActionID)
+	})
+
+	t.Run("action turn opening fails", func(t *testing.T) {
+		session, conn, stream := newLifecycleStreamTestSession(t)
+		require.NoError(t, stream.incarnate(t.Context()))
+		session.setAutonomousRoute("live-route", &nativeIncarnation{})
+		conn.sessionUpdateErr = errors.New("agent turn delivery failed")
+
+		_, err := writePreparedActionForTest(t.Context(), stream, "live-route", lifecycle.ActionPermission)
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+	})
+
+	t.Run("content route retired", func(t *testing.T) {
+		session, _, stream := newLifecycleStreamTestSession(t)
+		require.NoError(t, stream.incarnate(t.Context()))
+		session.setAutonomousRoute("live-route", &nativeIncarnation{})
+
+		_, err := stream.emitCallbackContent(t.Context(), "retired-route", func() error { return nil })
+		require.ErrorContains(t, err, "no longer has a live owner")
+	})
+
+	t.Run("content turn opening fails", func(t *testing.T) {
+		session, conn, stream := newLifecycleStreamTestSession(t)
+		require.NoError(t, stream.incarnate(t.Context()))
+		incarnation := &nativeIncarnation{}
+		session.setAutonomousRoute("live-route", incarnation)
+		conn.sessionUpdateErr = errors.New("agent turn delivery failed")
+
+		owner, err := stream.emitCallbackContent(t.Context(), "live-route", func() error { return nil })
+		require.Same(t, incarnation, owner)
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+	})
+}
+
+func TestSessionStreamActionContentEdgeStates(t *testing.T) {
+	ctx := t.Context()
+	session, conn, stream, turnCtx := newLifecycleActionSession(t, "action-route")
+	defer session.stopNativePump()
+
+	action, err := session.beginLifecycleAction(turnCtx, lifecycle.ActionPermission)
+	require.NoError(t, err)
+	var absentAction *sessionLifecycleAction
+	require.Error(t, absentAction.afterWireWrite(ctx, actionWireIdentity{}))
+	require.False(t, absentAction.exactOwnerCurrentLocked())
+	require.False(t, absentAction.responseOwnerCurrent())
+	absentAction.failOwner(ctx, errors.New("ignored"), "test")
+	require.NoError(t, absentAction.resolve(ctx, lifecycle.ActionFailed))
+	missingRegistration := &sessionLifecycleAction{session: session, admission: &controlCallbackAdmission{session: session, route: "missing"}}
+	require.False(t, missingRegistration.exactOwnerCurrentLocked())
+
+	unannounced, err := session.beginLifecycleAction(turnCtx, lifecycle.ActionElicitation)
+	require.NoError(t, err)
+	require.Error(t, unannounced.resolve(ctx, lifecycle.ActionFailed))
+	containmentCtx, contain := context.WithCancelCause(ctx)
+	contain(errExactInteractionContainment)
+	require.Equal(t, lifecycle.ActionFailed, interactionActionState(containmentCtx, lifecycle.ActionCancelled))
+
+	missingUpdate := action.update
+	missingUpdate.Owner.ID = "missing-owner"
+	err = stream.announcePreparedAction(ctx, missingUpdate, actionWireIdentity{
+		method:    acp.ClientMethodSessionRequestPermission,
+		requestID: "missing-wire",
+	})
+	require.Error(t, err)
+
+	err = action.wireAdmission(turnCtx, nil).observeWrite(ctx, actionWireIdentity{
+		method:    acp.ClientMethodElicitationCreate,
+		requestID: "wrong-family",
+	})
+	require.ErrorContains(t, err, "no exact host request write")
+	require.False(t, action.announced)
+	err = action.wireAdmission(turnCtx, func() error {
+		return errors.New("content failed")
+	}).publishPending()
+	require.ErrorContains(t, err, "content failed")
+	require.False(t, action.announced)
+
+	staleAction, err := session.beginLifecycleAction(turnCtx, lifecycle.ActionPermission)
+	require.NoError(t, err)
+	admission := controlCallbackAdmissionFromContext(turnCtx)
+	session.callbackOwnershipMu.Lock()
+	delete(session.callbackAdmissions, admission)
+	session.callbackOwnershipMu.Unlock()
+	require.Error(t, staleAction.afterWireWrite(ctx, actionWireIdentity{
+		method: acp.ClientMethodSessionRequestPermission, requestID: "stale-owner",
+	}))
+	session.callbackOwnershipMu.Lock()
+	session.callbackAdmissions[admission] = struct{}{}
+	session.callbackOwnershipMu.Unlock()
+
+	session.closing = true
+	err = action.wireAdmission(turnCtx, nil).observeWrite(ctx, actionWireIdentity{
+		method:    acp.ClientMethodSessionRequestPermission,
+		requestID: "closing",
+	})
+	require.NoError(t, err, "a fully written admitted callback announces across the close latch")
+	require.True(t, action.announced)
+	require.NoError(t, action.resolve(ctx, lifecycle.ActionAccepted),
+		"close owns the terminal resolution once its latch is visible")
+	err = stream.announcePreparedAction(ctx, action.update, actionWireIdentity{
+		method: acp.ClientMethodSessionRequestPermission, requestID: "duplicate",
+	})
+	require.Error(t, err)
+	require.NoError(t, stream.settleClose(ctx, closeCommit(nil)))
+
+	terminal := 0
+	for _, notification := range conn.Updates() {
+		envelope, ok := notification.Meta[lifecycle.MetaKey].(map[string]any)
+		if !ok {
+			continue
+		}
+		event := requireAnyMap(t, envelope["event"])
+		if event["type"] != string(lifecycle.EventActionUpdate) {
+			continue
+		}
+		update := requireAnyMap(t, event["action"])
+		if update["actionId"] == action.update.ActionID && update["state"] == string(lifecycle.ActionCancelled) {
+			terminal++
+		}
+	}
+	require.Equal(t, 1, terminal, "the exact fully written action terminalizes once before the fence")
+}
+
+func TestLifecycleActionFailuresContainTheirExactNativeOwner(t *testing.T) {
+	newAction := func(t *testing.T) (*agentSession, *recordingAgentClient, *nativeIncarnation, *controlCallbackAdmission, *sessionLifecycleAction) {
+		t.Helper()
+		session, _, conn, cleanup := newNegotiatedPromptFlowSession(t)
+		t.Cleanup(cleanup)
+		require.NoError(t, session.serveNativePump(t.Context(), session.currentClient()))
+		incarnation := session.currentNativeIncarnation()
+		stream := session.lifecycleStream()
+		_, err := stream.dispatch(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "action-turn", func() error { return nil })
+		require.NoError(t, err)
+		admission := &controlCallbackAdmission{session: session, route: "action-turn", incarnation: incarnation}
+		session.callbackAdmissions = map[*controlCallbackAdmission]struct{}{admission: {}}
+		turnCtx := context.WithValue(t.Context(), controlCallbackAdmissionContextKey{}, admission)
+		action, err := session.beginLifecycleAction(turnCtx, lifecycle.ActionPermission)
+		require.NoError(t, err)
+		require.NoError(t, action.afterWireWrite(t.Context(), actionWireIdentity{
+			method: acp.ClientMethodSessionRequestPermission, requestID: "native-owner",
+		}))
+		incarnation.superviseOnce.Do(func() {})
+
+		return session, conn, incarnation, admission, action
+	}
+
+	t.Run("owner retired before resolution", func(t *testing.T) {
+		session, _, incarnation, admission, action := newAction(t)
+		session.callbackOwnershipMu.Lock()
+		delete(session.callbackAdmissions, admission)
+		session.callbackOwnershipMu.Unlock()
+		require.Error(t, action.resolve(t.Context(), lifecycle.ActionAccepted))
+		require.True(t, incarnation.failed.Load())
+	})
+
+	t.Run("resolution projection fails", func(t *testing.T) {
+		session, conn, incarnation, _, action := newAction(t)
+		session.agent.setConnection(&lifecycleEventFailingClient{
+			recordingAgentClient: conn,
+			eventType:            lifecycle.EventActionUpdate,
+			err:                  errors.New("resolution projection failed"),
+		})
+		require.Error(t, action.resolve(t.Context(), lifecycle.ActionAccepted))
+		require.True(t, incarnation.failed.Load())
+	})
+}
+
+func TestBeginLifecycleActionRejectsTerminalOwners(t *testing.T) {
+	session := &agentSession{agent: NewAgent()}
+	_, err := session.beginLifecycleAction(t.Context(), lifecycle.ActionPermission)
+	require.Error(t, err)
+
+	_, err = session.beginLifecycleAction(withTurnRoute(t.Context(), "stale"), lifecycle.ActionPermission)
+	require.Error(t, err)
+	staleAdmission := &controlCallbackAdmission{session: session, route: "stale"}
+	staleCtx := context.WithValue(t.Context(), controlCallbackAdmissionContextKey{}, staleAdmission)
+	_, err = session.beginLifecycleAction(staleCtx, lifecycle.ActionPermission)
+	require.Error(t, err)
+
+	closingAdmission := &controlCallbackAdmission{session: session, route: "closing"}
+	session.callbackAdmissions = map[*controlCallbackAdmission]struct{}{closingAdmission: {}}
+	closingCtx := context.WithValue(t.Context(), controlCallbackAdmissionContextKey{}, closingAdmission)
+	session.closing = true
+	_, err = session.beginLifecycleAction(closingCtx, lifecycle.ActionPermission)
+	require.Error(t, err)
+	session.closing = false
+
+	failed := &nativeIncarnation{}
+	failed.failed.Store(true)
+	failed.superviseOnce.Do(func() {})
+	failedAdmission := &controlCallbackAdmission{session: session, route: "failed", incarnation: failed}
+	session.callbackAdmissions = map[*controlCallbackAdmission]struct{}{failedAdmission: {}}
+	failedCtx := context.WithValue(t.Context(), controlCallbackAdmissionContextKey{}, failedAdmission)
+	_, err = session.beginLifecycleAction(failedCtx, lifecycle.ActionPermission)
+	require.Error(t, err)
+
+	current := &nativeIncarnation{}
+	current.superviseOnce.Do(func() {})
+	currentAdmission := &controlCallbackAdmission{session: session, route: "old", incarnation: current}
+	session.callbackAdmissions = map[*controlCallbackAdmission]struct{}{currentAdmission: {}}
+	currentCtx := context.WithValue(t.Context(), controlCallbackAdmissionContextKey{}, currentAdmission)
+	_, err = session.beginLifecycleAction(currentCtx, lifecycle.ActionPermission)
+	require.Error(t, err)
+	session.stopNativePump()
 }
 
 type lifecycleActionFailingClient struct {
 	*recordingAgentClient
-	state lifecycle.ActionState
-	err   error
+	state  lifecycle.ActionState
+	err    error
+	failed chan lifecycle.ActionState
 }
 
 func (c *lifecycleActionFailingClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
@@ -108,6 +417,10 @@ func (c *lifecycleActionFailingClient) SessionUpdate(ctx context.Context, notifi
 		event, eventOK := envelope["event"].(map[string]any)
 		action, actionOK := event["action"].(map[string]any)
 		if eventOK && actionOK && event["type"] == string(lifecycle.EventActionUpdate) && action["state"] == string(c.state) {
+			if c.failed != nil {
+				c.failed <- c.state
+			}
+
 			return c.err
 		}
 	}
@@ -146,9 +459,9 @@ func TestSessionStreamRoutesActionsAndSettlesOnce(t *testing.T) {
 	require.NotEmpty(t, turnID)
 	require.Equal(t, 1, sent)
 
-	first, err := stream.announceAction(ctx, "nonce-1", lifecycle.ActionPermission)
+	first, err := writePreparedActionForTest(ctx, stream, "nonce-1", lifecycle.ActionPermission)
 	require.NoError(t, err)
-	second, err := stream.announceAction(ctx, "nonce-1", lifecycle.ActionElicitation)
+	second, err := writePreparedActionForTest(ctx, stream, "nonce-1", lifecycle.ActionElicitation)
 	require.NoError(t, err)
 	require.NotEqual(t, first.ActionID, second.ActionID)
 	require.NotNil(t, first.BlocksForeground)
@@ -182,7 +495,7 @@ func TestSessionStreamActionEventsRestateTheWholeStoredRecord(t *testing.T) {
 		ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c", RunID: "run-1"}, "nonce", func() error { return nil })
 	require.NoError(t, err)
 
-	action, err := stream.announceAction(ctx, "nonce", lifecycle.ActionPermission)
+	action, err := writePreparedActionForTest(ctx, stream, "nonce", lifecycle.ActionPermission)
 	require.NoError(t, err)
 	require.NoError(t, stream.resolveAction(ctx, action, lifecycle.ActionAccepted))
 
@@ -227,7 +540,7 @@ func TestSessionStreamIncarnationLossTerminalizesOwnedWork(t *testing.T) {
 	oldID := stream.stream.ID()
 	turnID, err := stream.dispatch(ctx, lifecycle.Submission{SubmissionID: "submission-1", ClientNonce: "client-1"}, "nonce", func() error { return nil })
 	require.NoError(t, err)
-	_, err = stream.announceAction(ctx, "nonce", lifecycle.ActionPermission)
+	_, err = writePreparedActionForTest(ctx, stream, "nonce", lifecycle.ActionPermission)
 	require.NoError(t, err)
 	require.NoError(t, stream.loseIncarnation(ctx))
 	require.False(t, stream.live)
@@ -249,14 +562,14 @@ func TestSessionStreamRoutingRefusalsAndEmissionFailureLatch(t *testing.T) {
 
 	_, err = stream.dispatch(ctx, lifecycle.Submission{SubmissionID: "submission", ClientNonce: "client-1"}, "nonce", func() error { return nil })
 	require.NoError(t, err)
-	update, err := stream.announceAction(ctx, "wrong-incarnation-route", lifecycle.ActionPermission)
+	update, err := writePreparedActionForTest(ctx, stream, "wrong-incarnation-route", lifecycle.ActionPermission)
 	require.NoError(t, err)
 	require.Empty(t, update.ActionID)
 	require.Nil(t, stream.correlation(update))
 
 	conn.sessionUpdateErr = errors.New("host disconnected")
-	_, err = stream.announceAction(ctx, "nonce", lifecycle.ActionPermission)
-	require.ErrorContains(t, err, "host disconnected")
+	_, err = writePreparedActionForTest(ctx, stream, "nonce", lifecycle.ActionPermission)
+	require.ErrorContains(t, err, "lifecycle delivery failed")
 	latched := stream.lost
 	conn.sessionUpdateErr = nil
 	require.ErrorIs(t, stream.loseIncarnation(ctx), latched)
@@ -269,7 +582,7 @@ func TestSessionStreamCloseFenceAndHelpers(t *testing.T) {
 	require.NoError(t, stream.incarnate(ctx))
 	turnID, err := stream.dispatch(ctx, lifecycle.Submission{SubmissionID: "submission", ClientNonce: "client-1"}, "nonce", func() error { return nil })
 	require.NoError(t, err)
-	update, err := stream.announceAction(ctx, "nonce", lifecycle.ActionPermission)
+	update, err := writePreparedActionForTest(ctx, stream, "nonce", lifecycle.ActionPermission)
 	require.NoError(t, err)
 	correlation := stream.correlation(update)
 	require.Contains(t, correlation, lifecycle.MetaKey)
@@ -343,7 +656,7 @@ func TestSessionStreamBoundaryAndErrorBranches(t *testing.T) {
 	require.NoError(t, abandoned.incarnate(ctx))
 	_, err = abandoned.dispatch(ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "n", func() error { return nil })
 	require.NoError(t, err)
-	_, err = abandoned.announceAction(ctx, "n", lifecycle.ActionPermission)
+	_, err = writePreparedActionForTest(ctx, abandoned, "n", lifecycle.ActionPermission)
 	require.NoError(t, err)
 	abandoned.abandonIncarnation()
 	require.False(t, abandoned.live)
@@ -366,7 +679,7 @@ func TestSessionStreamPropagatesIdentityAndProtocolFailures(t *testing.T) {
 	require.NoError(t, stream.incarnate(t.Context()))
 	conn.sessionUpdateErr = errors.New("acceptance delivery")
 	_, err := stream.dispatch(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "n", func() error { return nil })
-	require.ErrorContains(t, err, "acceptance delivery")
+	require.ErrorContains(t, err, "lifecycle delivery failed")
 
 	// A fenced stream can announce no acceptance, so the frame is never written:
 	// the refusal is preflighted rather than discovered after the harness has the
@@ -392,7 +705,7 @@ func TestSessionStreamFailureAtEachSettlementBoundary(t *testing.T) {
 		require.NoError(t, stream.incarnate(ctx))
 		turn, err := stream.dispatch(ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "n", func() error { return nil })
 		require.NoError(t, err)
-		action, err := stream.announceAction(ctx, "n", lifecycle.ActionPermission)
+		action, err := writePreparedActionForTest(ctx, stream, "n", lifecycle.ActionPermission)
 		require.NoError(t, err)
 
 		return conn, stream, turn, action
@@ -401,12 +714,12 @@ func TestSessionStreamFailureAtEachSettlementBoundary(t *testing.T) {
 	t.Run("action resolution", func(t *testing.T) {
 		conn, stream, _, action := makeActive(t)
 		conn.sessionUpdateErr = errors.New("resolution delivery")
-		require.ErrorContains(t, stream.resolveAction(ctx, action, lifecycle.ActionAccepted), "resolution delivery")
+		require.ErrorContains(t, stream.resolveAction(ctx, action, lifecycle.ActionAccepted), "lifecycle delivery failed")
 	})
 	t.Run("turn terminalizes action", func(t *testing.T) {
 		conn, stream, turn, _ := makeActive(t)
 		conn.sessionUpdateErr = errors.New("terminal action delivery")
-		require.ErrorContains(t, stream.settleTurn(ctx, turn, lifecycleOutcome{outcome: lifecycle.OutcomeFailed}), "terminal action delivery")
+		require.ErrorContains(t, stream.settleTurn(ctx, turn, lifecycleOutcome{outcome: lifecycle.OutcomeFailed}), "lifecycle delivery failed")
 	})
 	t.Run("turn idle", func(t *testing.T) {
 		conn, stream, turn, action := makeActive(t)
@@ -415,18 +728,18 @@ func TestSessionStreamFailureAtEachSettlementBoundary(t *testing.T) {
 		require.ErrorContains(t, stream.settleTurn(ctx, turn, lifecycleOutcome{
 			stopReason: lifecycle.StopReasonEndTurn,
 			outcome:    lifecycle.OutcomeSuccess,
-		}), "idle delivery")
+		}), "lifecycle delivery failed")
 	})
 	t.Run("loss idle", func(t *testing.T) {
 		conn, stream, _, action := makeActive(t)
 		require.NoError(t, stream.resolveAction(ctx, action, lifecycle.ActionDeclined))
 		conn.sessionUpdateErr = errors.New("loss delivery")
-		require.ErrorContains(t, stream.loseIncarnation(ctx), "loss delivery")
+		require.ErrorContains(t, stream.loseIncarnation(ctx), "lifecycle delivery failed")
 	})
 	t.Run("close terminal action", func(t *testing.T) {
 		conn, stream, _, _ := makeActive(t)
 		conn.sessionUpdateErr = errors.New("close delivery")
-		require.ErrorContains(t, stream.settleClose(ctx, closeCommit(nil)), "close delivery")
+		require.ErrorContains(t, stream.settleClose(ctx, closeCommit(nil)), "lifecycle delivery failed")
 		require.True(t, stream.fenced)
 	})
 }
@@ -446,12 +759,12 @@ func TestSessionStreamAnnouncementAfterFailureLatch(t *testing.T) {
 	_, conn, stream, turnCtx := newLifecycleActionSession(t, "nonce")
 
 	conn.sessionUpdateErr = errors.New("host disconnected")
-	_, err := stream.announceAction(turnCtx, "nonce", lifecycle.ActionPermission)
-	require.ErrorContains(t, err, "host disconnected")
+	_, err := writePreparedActionForTest(turnCtx, stream, "nonce", lifecycle.ActionPermission)
+	require.ErrorContains(t, err, "lifecycle delivery failed")
 	latched := stream.lost
 
 	conn.sessionUpdateErr = nil
-	_, err = stream.announceAction(turnCtx, "nonce", lifecycle.ActionPermission)
+	_, err = writePreparedActionForTest(turnCtx, stream, "nonce", lifecycle.ActionPermission)
 	require.ErrorIs(t, err, latched)
 }
 
@@ -544,8 +857,8 @@ func TestSessionStreamSettlementIgnoresACancelledRequestContext(t *testing.T) {
 	t.Run("live work still honors its request", func(t *testing.T) {
 		_, stream, _, withdrawn := withdrawnTurn(t)
 
-		_, err := stream.announceAction(withdrawn, "nonce", lifecycle.ActionPermission)
-		require.ErrorContains(t, err, context.Canceled.Error(),
+		_, err := writePreparedActionForTest(withdrawn, stream, "nonce", lifecycle.ActionPermission)
+		require.ErrorContains(t, err, "lifecycle delivery failed",
 			"a request the host withdrew announces no new action against it")
 	})
 	t.Run("settlement does not", func(t *testing.T) {
@@ -581,7 +894,7 @@ func TestSessionStreamLostDeliveryNeverHoldsTheNextIncarnation(t *testing.T) {
 
 	conn.sessionUpdateErr = errors.New("host disconnected")
 	_, err := stream.dispatch(ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "nonce", func() error { return nil })
-	require.ErrorContains(t, err, "host disconnected")
+	require.ErrorContains(t, err, "lifecycle delivery failed")
 	require.NotNil(t, stream.lost)
 
 	conn.sessionUpdateErr = nil
@@ -667,7 +980,7 @@ func TestSessionStreamCloseSettlesWhatHappenedAndCertifiesOnlyWhatCommitted(t *t
 			ctx, lifecycle.Submission{SubmissionID: "sub-1", ClientNonce: "non-1"}, "nonce-1", func() error { return nil })
 		require.NoError(t, err)
 
-		_, err = stream.announceAction(ctx, "nonce-1", lifecycle.ActionPermission)
+		_, err = writePreparedActionForTest(ctx, stream, "nonce-1", lifecycle.ActionPermission)
 		require.NoError(t, err)
 
 		return conn, stream
@@ -745,7 +1058,7 @@ func closeFencedSession(t *testing.T, store SessionStore) (*agentSession, *recor
 		ctx, lifecycle.Submission{SubmissionID: "sub-1", ClientNonce: "non-1"}, "nonce-1", func() error { return nil })
 	require.NoError(t, err)
 
-	_, err = stream.announceAction(ctx, "nonce-1", lifecycle.ActionPermission)
+	_, err = writePreparedActionForTest(ctx, stream, "nonce-1", lifecycle.ActionPermission)
 	require.NoError(t, err)
 
 	session.nativePumpHandle().work <- nativePumpWork{frame: &claude.TranscriptMirrorMessage{
@@ -848,6 +1161,22 @@ func TestCloseTerminalizesBeforeTheCommitItThenFails(t *testing.T) {
 	require.False(t, state.Quiescence.Certified)
 }
 
+func TestCloseAdmittedPrefixAbortFencesWithoutQuiescence(t *testing.T) {
+	ctx := t.Context()
+	session, conn, stream := closeFencedSession(t, NewInMemorySessionStore())
+
+	err := session.settleSessionClose(ctx, &claude.ControllerDataError{
+		Kind: claude.ControllerDataTeardownAbort,
+	})
+	require.NoError(t, err)
+	require.True(t, stream.fenced)
+	require.False(t, stream.live)
+
+	for _, eventType := range lifecycleEventTypes(t, conn) {
+		require.NotEqual(t, string(lifecycle.EventQuiescenceUpdate), eventType)
+	}
+}
+
 // requireFailedIncarnationRecord asserts the record an incarnation loss wrote:
 // its outstanding action and its unsettled turn both ended as failed, which is
 // what tells a host a lost end from a contained one.
@@ -863,90 +1192,6 @@ func requireFailedIncarnationRecord(t *testing.T, stream *sessionStream) {
 	require.Equal(t, lifecycle.OutcomeFailed, state.Turns[0].Outcome)
 }
 
-// ctxHonoringBlockingClient is a host whose delivery never returns on its own
-// and only ends when its context does — a wedged connection, which is the one
-// thing a detached settlement has no other way out of.
-type ctxHonoringBlockingClient struct {
-	*recordingAgentClient
-
-	gate chan struct{}
-}
-
-func (c *ctxHonoringBlockingClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
-	select {
-	case <-c.gate:
-		return c.recordingAgentClient.SessionUpdate(ctx, notification)
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (c *ctxHonoringBlockingClient) release() { close(c.gate) }
-
-// TestSettlementEmissionsAreBoundedNotMerelyDetached proves the settlement
-// context keeps its detachment and gains a bound. The request is withdrawn, so a
-// cancellation-following emission would abandon work that already completed; the
-// budget is what stops a wedged host from holding the stream, the turn slot
-// behind it, and the close waiting on that slot forever. The expiry is a lost
-// delivery like any other, so it fails the caller, latches this incarnation, and
-// does not follow the next one.
-func TestSettlementEmissionsAreBoundedNotMerelyDetached(t *testing.T) {
-	previousTimeout := sessionSettlementTimeout
-	t.Cleanup(func() { sessionSettlementTimeout = previousTimeout })
-	sessionSettlementTimeout = 50 * time.Millisecond
-
-	_, conn, stream := newLifecycleStreamTestSession(t)
-	require.NoError(t, stream.incarnate(t.Context()))
-
-	turnID, err := stream.dispatch(
-		t.Context(),
-		lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"},
-		"nonce",
-		func() error { return nil },
-	)
-	require.NoError(t, err)
-
-	blocked := &ctxHonoringBlockingClient{recordingAgentClient: conn, gate: make(chan struct{})}
-	stream.session.agent.setConnection(blocked)
-
-	withdrawn, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	settled := make(chan error, 1)
-
-	go func() {
-		settled <- stream.settleTurn(withdrawn, turnID,
-			lifecycleOutcomeFor(acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil))
-	}()
-
-	var settleErr error
-
-	select {
-	case settleErr = <-settled:
-	case <-time.After(30 * time.Second):
-		blocked.release()
-		t.Fatal("settlement never returned: the detached context carries no bound")
-	}
-
-	require.ErrorContains(t, settleErr, "claude_lifecycle_violation")
-	require.ErrorContains(t, settleErr, context.DeadlineExceeded.Error())
-
-	stream.mu.Lock()
-	require.Error(t, stream.lost, "an emission the host never received is loss")
-	require.NoError(t, stream.refused, "a wedged host is not something this adapter may not state")
-	stream.mu.Unlock()
-
-	// The loss latched the incarnation it holed, not the session: the next
-	// incarnation opens on a fresh identity and re-asserts the whole state.
-	blocked.release()
-	require.NoError(t, stream.incarnate(t.Context()))
-}
-
-// agentHoldingALiveIncarnation builds an agent whose one session holds an open
-// incarnation with an unsettled turn and a blocking action, on a configuration
-// whose containment boundary proves quiescence — so the shutdown below has a
-// terminal action, a terminal idle, and a positive fact left to state, and a
-// shutdown that stated none of them can fail.
 func agentHoldingALiveIncarnation(t *testing.T, conn agentClient) (*Agent, *sessionStream) {
 	t.Helper()
 
@@ -979,7 +1224,7 @@ func agentHoldingALiveIncarnation(t *testing.T, conn agentClient) (*Agent, *sess
 		ctx, lifecycle.Submission{SubmissionID: "sub-1", ClientNonce: "non-1"}, "nonce-1", func() error { return nil })
 	require.NoError(t, err)
 
-	_, err = stream.announceAction(ctx, "nonce-1", lifecycle.ActionPermission)
+	_, err = writePreparedActionForTest(ctx, stream, "nonce-1", lifecycle.ActionPermission)
 	require.NoError(t, err)
 
 	return agent, stream
@@ -1055,7 +1300,7 @@ func TestAgentShutdownSettlesCleanlyAfterTheHostHungUp(t *testing.T) {
 
 		err := agent.Close()
 		require.ErrorContains(t, err, "claude_lifecycle_violation")
-		require.ErrorContains(t, err, "host disconnected")
+		require.ErrorContains(t, err, "lifecycle delivery failed")
 		require.True(t, stream.fenced)
 	})
 }

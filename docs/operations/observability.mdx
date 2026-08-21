@@ -36,9 +36,9 @@ full shape; use the `cause` to route the investigation:
 
 | Cause | First thing to check |
 | --- | --- |
-| `process_exit` | The `message` carries the real exit status and a stderr tail — inspect it; confirm the `claude` CLI is installed, is version 2.0.0+, and is authenticated. |
+| `process_exit` | The `message` carries only the exit status; confirm the `claude` CLI is installed, is version 2.0.0+, and is authenticated. |
 | `transport` | A stream broke mid-turn; check for client disconnects or a Claude process killed out from under the adapter. |
-| `provider` | Claude itself reported an error (including auth); read `message` and the `subtype`. |
+| `provider` | Claude itself reported an error (including auth); inspect provider-side logs because payload details are not copied onto the wire. |
 | `timeout` | A `WithTurnTimeout` deadline expired; raise the bound or investigate why the turn ran long. |
 
 <Note>

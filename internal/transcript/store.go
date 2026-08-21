@@ -525,7 +525,7 @@ func decodeLine(line string) (map[string]any, bool) {
 
 	var entry map[string]any
 	if err := json.Unmarshal([]byte(line), &entry); err != nil {
-		slog.Default().Debug("skip invalid Claude transcript line", slog.String(keyError, err.Error()))
+		slog.Default().Debug("skip invalid Claude transcript line", slog.String("stage", "transcript_decode"))
 
 		return nil, true
 	}
@@ -533,16 +533,16 @@ func decodeLine(line string) (map[string]any, bool) {
 	return entry, false
 }
 
-func logSkippedTranscriptLines(path string, count int) {
+func logSkippedTranscriptLines(_ string, count int) {
 	if count == 0 {
 		return
 	}
 
-	slog.Default().Warn("skipped malformed Claude transcript lines", slog.String("path", path), slog.Int("count", count))
+	slog.Default().Warn("skipped malformed Claude transcript lines", slog.Int("count", count))
 }
 
-func logTornTranscriptLine(path string, offset int64) {
-	slog.Default().Warn("skipped torn Claude transcript final line", slog.String("path", path), slog.Int64("byte_offset", offset))
+func logTornTranscriptLine(_ string, _ int64) {
+	slog.Default().Warn("skipped torn Claude transcript final line", slog.String("stage", "transcript_final_line"))
 }
 
 func visibleEntry(entry map[string]any) bool {

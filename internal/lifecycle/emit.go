@@ -115,26 +115,28 @@ func AcceptedEvent(submission Submission, turnID string) Event {
 	}}
 }
 
-// TransitionEvent reports one foreground transition of a submission-caused cycle
-// that does not end it. An ending idle is built by IdleEvent, which carries the
-// recorded outcome.
-func TransitionEvent(state ForegroundState, cycleID, turnID string) Event {
+// TransitionEvent reports one foreground transition that does not end its cycle.
+// The cause is the origin of the turn holding the cycle: `submission` for a turn
+// a prompt opened, `activity` for an agent-origin one, and a running transition
+// naming a turn the stream has not introduced opens the latter. An ending idle is
+// built by IdleEvent, which carries the recorded outcome.
+func TransitionEvent(cause Cause, state ForegroundState, cycleID, turnID string) Event {
 	return Event{Type: EventStateUpdate, State: &StateTransition{
 		State:   state,
 		CycleID: cycleID,
 		TurnID:  turnID,
-		Cause:   CauseSubmission,
+		Cause:   cause,
 	}}
 }
 
-// IdleEvent ends the cycle a submission caused, carrying the turn's truthful stop
-// reason and recorded outcome.
-func IdleEvent(cycleID, turnID, stopReason string, outcome Outcome) Event {
+// IdleEvent ends one cycle, carrying the turn's truthful stop reason and recorded
+// outcome under the same cause its opening transition carried.
+func IdleEvent(cause Cause, cycleID, turnID, stopReason string, outcome Outcome) Event {
 	return Event{Type: EventStateUpdate, State: &StateTransition{
 		State:      ForegroundIdle,
 		CycleID:    cycleID,
 		TurnID:     turnID,
-		Cause:      CauseSubmission,
+		Cause:      cause,
 		StopReason: stopReason,
 		Outcome:    outcome,
 	}}
@@ -174,9 +176,7 @@ func ActionCorrelationValue(streamID string, action ActionUpdate) map[string]any
 	}
 }
 
-// encodeEvent renders the events this adapter emits. It proves no activity kind,
-// so activity_update has no emitter here; the reducer still reduces all six,
-// because it is also the validator for streams this adapter reads.
+// encodeEvent renders every member of the closed lifecycle event set.
 func encodeEvent(event Event) map[string]any {
 	switch event.Type {
 	case EventSnapshot:

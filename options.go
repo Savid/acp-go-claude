@@ -212,7 +212,8 @@ type Options struct {
 	defaultPermissionModeSet bool
 }
 
-// ConcurrencyLimits controls per-agent/session backpressure. Zero fields use defaults.
+// ConcurrencyLimits controls process-local backpressure. Zero fields use their
+// defaults.
 type ConcurrencyLimits struct {
 	MaxActiveSessions        int
 	MaxConcurrentClientCalls int
@@ -550,7 +551,8 @@ func WithEnv(env map[string]string) Option {
 	}
 }
 
-// WithConcurrencyLimits sets process-local backpressure limits. Zero fields use defaults.
+// WithConcurrencyLimits sets process-local session and outbound client-call
+// limits. Zero fields use their defaults.
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) {
 		options.ConcurrencyLimits = limits

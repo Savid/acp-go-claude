@@ -18,7 +18,7 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) 
 	}
 
 	answer, common := offer.Answer(a.provenLifecycleFacts())
-	if !offered || !common {
+	if !offered || !common || !a.lifecycleCarrierSupported() {
 		a.retainNegotiatedLifecycle(lifecycle.Negotiated{})
 
 		// An omitted key and an empty answer are the same wire fact: the
@@ -27,8 +27,19 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) 
 	}
 
 	a.retainNegotiatedLifecycle(answer)
+	a.requireLifecycleWrites()
 
 	return map[string]any{lifecycle.MetaKey: answer.Advertisement()}, nil
+}
+
+func (a *Agent) requireLifecycleWrites() {
+	a.mu.Lock()
+	conn := a.conn
+	a.mu.Unlock()
+
+	if local, ok := conn.(*localAgentConnection); ok {
+		local.hooks.writes.requireInterruptible()
+	}
 }
 
 // provenLifecycleFacts states what this configuration can actually prove, read
@@ -37,15 +48,14 @@ func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) 
 //
 // The session owns the native reader and drains it from session start until the
 // process ends, so notifications are delivered with no prompt in flight and none
-// is dropped: `updatesOutsidePrompt` is true on every configuration. No activity
-// kind has a proven native source — the `task_*` frames the mapper decodes are
-// tool-call presentation, and their identity, parentage, and terminality are not
-// established by any captured frame — so `activityKinds` is empty and stays
-// empty until one is. Only the authoritative containment mode enumerates the
-// whole descendant tree, so only it proves vacancy and names the
-// `process-containment` class; ordinary same-identity execution and opted-in
-// Darwin containment prove a weaker boundary, and a weaker boundary is never
-// promoted.
+// is dropped: `updatesOutsidePrompt` is true on every configuration. No captured
+// native trace proves stable task identity and parentage, so no activity kind is
+// advertised. Background native work is still represented by agent-origin turns
+// and ordinary typed tool-call updates, without fabricating an activity registry.
+// Only the authoritative containment mode enumerates the whole
+// descendant tree, so only it proves vacancy and names the `process-containment`
+// class; ordinary same-identity execution and opted-in Darwin containment prove a
+// weaker boundary, and a weaker boundary is never promoted.
 func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
 	proven := lifecycle.Negotiated{
 		UpdatesOutsidePrompt: true,

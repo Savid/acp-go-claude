@@ -119,9 +119,15 @@ func (t *WorkflowTracker) DrainFrameErrors() []WorkflowFrameError {
 	return errors
 }
 
-// HasTracked reports whether this turn has seen any Workflow state.
-func (t *WorkflowTracker) HasTracked() bool {
-	return t != nil && len(t.states) > 0
+// Tracked reports how many distinct Workflow tasks this tracker has correlated.
+// It is a watermark rather than a flag, so a caller whose tracker outlives it can
+// tell the work it correlated itself from the work it inherited.
+func (t *WorkflowTracker) Tracked() int {
+	if t == nil {
+		return 0
+	}
+
+	return len(t.states)
 }
 
 // HasActive reports whether any tracked Workflow has started and has not

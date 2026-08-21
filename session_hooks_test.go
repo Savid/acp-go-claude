@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/stretchr/testify/require"
 )
@@ -18,16 +19,17 @@ func TestHookHelpers(t *testing.T) {
 	conn := newRecordingAgentClient()
 	agent.setConnection(conn)
 	session := &agentSession{agent: agent, id: "session-1", mode: modeDefault, model: "sonnet"}
+	turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
 
-	resp, err := session.handleHookCallback(context.Background(), claude.HookRequest{EventName: "Other"})
+	resp, err := session.handleHookCallback(turnCtx, claude.HookRequest{EventName: "Other"})
 	require.NoError(t, err)
 	require.True(t, resp.Continue)
-	resp, err = session.handleHookCallback(context.Background(), claude.HookRequest{EventName: systemHookPostToolUse})
+	resp, err = session.handleHookCallback(turnCtx, claude.HookRequest{EventName: systemHookPostToolUse})
 	require.NoError(t, err)
 	require.True(t, resp.Continue)
 	require.False(t, session.hookHandled("missing"))
 
-	resp, err = session.handleHookCallback(context.Background(), claude.HookRequest{EventName: systemHookPostToolUse, ToolName: enterPlanModeTool, ToolUseID: "plan-1"})
+	resp, err = session.handleHookCallback(turnCtx, claude.HookRequest{EventName: systemHookPostToolUse, ToolName: enterPlanModeTool, ToolUseID: "plan-1"})
 	require.NoError(t, err)
 	require.True(t, resp.Continue)
 	require.Equal(t, modePlan, session.mode)
@@ -43,14 +45,14 @@ func TestHookHelpers(t *testing.T) {
 	require.Len(t, session.handledHookOrder, orderLen)
 
 	conn.sessionUpdateErr = errors.New("update failed")
-	err = session.handlePostToolUseHook(context.Background(), "plan-error", enterPlanModeTool, nil)
+	err = session.handlePostToolUseHook(turnCtx, "plan-error", enterPlanModeTool, nil)
 	require.ErrorContains(t, err, "update failed")
 	conn.sessionUpdateErr = nil
 
-	require.NoError(t, session.handlePostToolUseHook(context.Background(), "edit-1", "Read", map[string]any{}))
-	require.NoError(t, session.handlePostToolUseHook(context.Background(), "edit-1", "Edit", nil))
-	require.NoError(t, session.handlePostToolUseHook(context.Background(), "edit-1", "Edit", map[string]any{}))
-	require.NoError(t, session.handlePostToolUseHook(context.Background(), "edit-2", "Write", map[string]any{
+	require.NoError(t, session.handlePostToolUseHook(turnCtx, "edit-1", "Read", map[string]any{}))
+	require.NoError(t, session.handlePostToolUseHook(turnCtx, "edit-1", "Edit", nil))
+	require.NoError(t, session.handlePostToolUseHook(turnCtx, "edit-1", "Edit", map[string]any{}))
+	require.NoError(t, session.handlePostToolUseHook(turnCtx, "edit-2", "Write", map[string]any{
 		"filePath": "/tmp/file.txt",
 		"structuredPatch": []any{
 			map[string]any{"newStart": 2, "lines": []any{"-old", "+new"}},
@@ -65,4 +67,51 @@ func TestHookHelpers(t *testing.T) {
 	require.Nil(t, systemMap(system, "missing"))
 	require.Equal(t, "e1", elicitationIDFromSystem(&claude.SystemMessage{Raw: map[string]any{"elicitation_id": "e1"}}))
 	require.NoError(t, session.emitHookResponseUpdates(context.Background(), &claude.SystemMessage{Subtype: systemSubtypeHookResponse, Raw: map[string]any{systemHookEventName: systemHookPostToolUse, systemToolUseID: "hook-1", systemToolResponse: map[string]any{"filePath": "/tmp/file.txt", "structuredPatch": []any{map[string]any{"lines": []any{"+new"}}}}}}, mapper.ToolUpdateOptions{ToolUses: map[string]claude.ToolUseBlock{"hook-1": {Name: "Edit"}}}))
+}
+
+func TestHookCallbackContentRejectsTerminalAdmissions(t *testing.T) {
+	session := &agentSession{agent: NewAgent(), callbackAdmissions: make(map[*controlCallbackAdmission]struct{})}
+	closingAdmission := &controlCallbackAdmission{session: session, route: "closing"}
+	session.callbackAdmissions[closingAdmission] = struct{}{}
+	closingCtx := context.WithValue(t.Context(), controlCallbackAdmissionContextKey{}, closingAdmission)
+	session.closing = true
+	require.Error(t, session.emitControlCallbackContent(closingCtx, func() error { return nil }))
+	session.closing = false
+
+	stale := &controlCallbackAdmission{session: session, route: "stale"}
+	staleCtx := context.WithValue(t.Context(), controlCallbackAdmissionContextKey{}, stale)
+	require.Error(t, session.emitControlCallbackContent(staleCtx, func() error { return nil }))
+	require.Error(t, session.emitControlCallbackContent(withTurnRoute(t.Context(), "stale"), func() error { return nil }))
+
+	failed := &nativeIncarnation{}
+	failed.failed.Store(true)
+	failedAdmission := &controlCallbackAdmission{session: session, route: "failed", incarnation: failed}
+	session.callbackAdmissions[failedAdmission] = struct{}{}
+	failedCtx := context.WithValue(t.Context(), controlCallbackAdmissionContextKey{}, failedAdmission)
+	require.Error(t, session.emitControlCallbackContent(failedCtx, func() error { return nil }))
+
+	current := &nativeIncarnation{}
+	currentAdmission := &controlCallbackAdmission{session: session, route: "old", incarnation: current}
+	session.callbackAdmissions[currentAdmission] = struct{}{}
+	currentCtx := context.WithValue(t.Context(), controlCallbackAdmissionContextKey{}, currentAdmission)
+	require.Error(t, session.emitControlCallbackContent(currentCtx, func() error { return nil }))
+	session.stopNativePump()
+}
+
+func TestHookProjectionFailureContainsItsExactNativeOwner(t *testing.T) {
+	session, _, _, cleanup := newNegotiatedPromptFlowSession(t)
+	defer cleanup()
+	require.NoError(t, session.serveNativePump(t.Context(), session.currentClient()))
+	incarnation := session.currentNativeIncarnation()
+	incarnation.superviseOnce.Do(func() {})
+	stream := session.lifecycleStream()
+	_, err := stream.dispatch(t.Context(), lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "hook-turn", func() error { return nil })
+	require.NoError(t, err)
+	admission := &controlCallbackAdmission{session: session, route: "hook-turn", incarnation: incarnation}
+	session.callbackAdmissions = map[*controlCallbackAdmission]struct{}{admission: {}}
+	turnCtx := context.WithValue(t.Context(), controlCallbackAdmissionContextKey{}, admission)
+
+	err = session.emitControlCallbackContent(turnCtx, func() error { return errors.New("hook update failed") })
+	require.ErrorContains(t, err, "hook update failed")
+	require.True(t, incarnation.failed.Load())
 }

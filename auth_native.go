@@ -256,10 +256,8 @@ func (p *providerAuth) nativeLogout(ctx context.Context) error {
 	return nil
 }
 
-// removeKeystoreItems clears the platform keystore items native logout may
-// leave behind. Both items per config dir are removed across both reachable
-// name shapes: either may be present, and removing only the credential item
-// leaves a usable legacy API key behind.
+// removeKeystoreItems clears the current platform credential items native
+// logout may leave behind across both reachable name shapes.
 func (p *providerAuth) removeKeystoreItems(ctx context.Context) error {
 	options, err := p.nativeRemovalOptions()
 	if err != nil {

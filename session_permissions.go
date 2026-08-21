@@ -46,7 +46,8 @@ func (s *agentSession) setPermissionRule(ctx context.Context, toolName string, b
 	}
 
 	if err != nil {
-		s.agent.log.WarnContext(ctx, "save permission rules failed", slog.String(jsonFieldError, err.Error()))
+		s.agent.log.WarnContext(ctx, "save permission rules failed",
+			slog.String("stage", "permission_rules_write"))
 
 		return
 	}
@@ -80,7 +81,8 @@ func (s *agentSession) persistPermissionRules(ctx context.Context) {
 	}
 
 	if err != nil {
-		s.agent.log.WarnContext(ctx, "save permission rules failed", slog.String(jsonFieldError, err.Error()))
+		s.agent.log.WarnContext(ctx, "save permission rules failed",
+			slog.String("stage", "permission_rules_write"))
 
 		return
 	}
@@ -128,16 +130,9 @@ func (s *agentSession) handlePermission(ctx context.Context, request claude.Perm
 		}, nil
 	}
 
-	permissionCtx, finishPermissionRequest := s.permissionRequestContext(ctx, toolCallID)
-	defer finishPermissionRequest()
-
 	title := request.Title
 	if title == "" {
 		title = mapper.ToolTitle(request.ToolName, request.Input)
-	}
-
-	if emitErr := s.emitPendingToolCall(ctx, request.ToolName, toolCallID, title, request.Input, request.Raw); emitErr != nil {
-		return claude.PermissionDecision{}, emitErr
 	}
 
 	info := mapper.ToolCallInfo(request.ToolName, toolCallID, request.Input, mapper.ToolUpdateOptions{
@@ -147,23 +142,35 @@ func (s *agentSession) handlePermission(ctx context.Context, request claude.Perm
 	status := acp.ToolCallStatusPending
 	kind := info.Kind
 
-	actionMeta, resolveAction, err := s.beginLifecycleAction(ctx, lifecycle.ActionPermission)
+	action, err := s.beginLifecycleAction(ctx, lifecycle.ActionPermission)
 	if err != nil {
 		return claude.PermissionDecision{}, err
 	}
+
+	permissionCtx, finishPermissionRequest := s.permissionRequestContext(ctx, toolCallID, action.interactionOwner())
+	defer finishPermissionRequest()
 
 	actionState := lifecycle.ActionFailed
 
 	defer func() {
 		// The state is read when the deferred resolution runs, not when it is
 		// registered: an action resolves once, with the answer it actually got.
-		if resolveErr := resolveAction(ctx, actionState); resolveErr != nil && err == nil {
+		if resolveErr := action.resolve(ctx, actionState); resolveErr != nil && err == nil {
 			decision, err = claude.PermissionDecision{}, resolveErr
 		}
 	}()
 
+	emitPending := func() error {
+		return s.emitPendingToolCall(ctx, request.ToolName, toolCallID, title, request.Input, request.Raw)
+	}
+
+	wireAdmission, err := action.prepareWireAdmission(ctx, emitPending)
+	if err != nil {
+		return claude.PermissionDecision{}, err
+	}
+
 	resp, err := conn.RequestPermission(permissionCtx, acp.RequestPermissionRequest{
-		Meta:      actionMeta,
+		Meta:      action.meta(),
 		SessionId: s.id,
 		ToolCall: acp.ToolCallUpdate{
 			ToolCallId: acp.ToolCallId(toolCallID),
@@ -181,10 +188,10 @@ func (s *agentSession) handlePermission(ctx context.Context, request claude.Perm
 			{OptionId: permissionRejectOnce, Name: "Reject once", Kind: acp.PermissionOptionKindRejectOnce},
 			{OptionId: permissionRejectAlways, Name: "Reject always", Kind: acp.PermissionOptionKindRejectAlways},
 		},
-	})
-	actionState = permissionActionState(resp, err, permissionAllowsTool)
-
+	}, wireAdmission)
 	if err != nil {
+		actionState = interactionActionState(permissionCtx, permissionActionState(resp, err, permissionAllowsTool))
+
 		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
 			return claude.PermissionDecision{
 				Behavior:  claude.BehaviorDeny,
@@ -195,6 +202,15 @@ func (s *agentSession) handlePermission(ctx context.Context, request claude.Perm
 
 		return claude.PermissionDecision{}, err
 	}
+
+	if !action.responseOwnerCurrent() {
+		return claude.PermissionDecision{
+			Behavior: claude.BehaviorDeny,
+			Message:  "Permission response belongs to a retired native incarnation",
+		}, nil
+	}
+
+	actionState = interactionActionState(permissionCtx, permissionActionState(resp, nil, permissionAllowsTool))
 
 	if resp.Outcome.Selected == nil {
 		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: permissionCancelledMessage}, nil
@@ -228,24 +244,41 @@ func (s *agentSession) handlePermission(ctx context.Context, request claude.Perm
 	}
 }
 
-func (s *agentSession) permissionRequestContext(ctx context.Context, id string) (context.Context, context.CancelFunc) {
+func (s *agentSession) permissionRequestContext(
+	ctx context.Context,
+	id string,
+	owner lifecycleInteractionOwner,
+) (context.Context, context.CancelFunc) {
 	if id == "" {
 		return ctx, func() {}
 	}
 
-	permissionCtx, cancel := context.WithCancel(ctx)
-	entry := &permissionRequestCancel{cancel: cancel}
+	permissionCtx, cancelCause := context.WithCancelCause(ctx)
+	cancel := func() { cancelCause(context.Canceled) }
+	fail := func() { cancelCause(errExactInteractionContainment) }
+	entry := &permissionRequestCancel{cancel: cancel, fail: fail, owner: owner}
 
+	s.callbackOwnershipMu.Lock()
+	ownerCurrent := owner.incarnation == nil || s.currentNativeIncarnation() == owner.incarnation
 	s.mu.Lock()
 	if s.permissionCancel == nil {
 		s.permissionCancel = make(map[string]*permissionRequestCancel)
 	}
 
-	s.permissionCancel[id] = entry
+	ownerFailed := owner.incarnation != nil && owner.incarnation.failed.Load()
+	closing := s.closing
+
+	if !ownerFailed && ownerCurrent && !closing {
+		s.permissionCancel[id] = entry
+	}
+
 	turnCancelled := s.turnCancelled
 	s.mu.Unlock()
+	s.callbackOwnershipMu.Unlock()
 
-	if turnCancelled {
+	if ownerFailed || !ownerCurrent {
+		fail()
+	} else if turnCancelled || closing {
 		cancel()
 	}
 
@@ -275,6 +308,8 @@ func permissionRequestCancelled(err error) bool {
 
 type permissionRequestCancel struct {
 	cancel context.CancelFunc
+	fail   context.CancelFunc
+	owner  lifecycleInteractionOwner
 }
 
 func (s *agentSession) handleExitPlanMode(
@@ -290,7 +325,7 @@ func (s *agentSession) handleExitPlanMode(
 	if !active {
 		return claude.PermissionDecision{
 			Behavior: claude.BehaviorDeny,
-			Message:  "ExitPlanMode callback is outside the active turn",
+			Message:  exitPlanModeOutsideMessage,
 		}, nil
 	}
 
@@ -317,25 +352,37 @@ func (s *agentSession) handleExitPlanMode(
 		title = request.Title
 	}
 
-	if err := s.emitPendingToolCall(ctx, request.ToolName, toolCallID, title, request.Input, request.Raw); err != nil {
-		return claude.PermissionDecision{}, err
-	}
-
-	actionMeta, resolveAction, err := s.beginLifecycleAction(ctx, lifecycle.ActionPermission)
+	action, err := s.beginLifecycleAction(ctx, lifecycle.ActionPermission)
 	if err != nil {
 		return claude.PermissionDecision{}, err
 	}
 
+	permissionCtx, finishPermissionRequest := s.permissionRequestContext(ctx, toolCallID, action.interactionOwner())
+	defer finishPermissionRequest()
+
 	actionState := lifecycle.ActionFailed
 
 	defer func() {
-		if resolveErr := resolveAction(ctx, actionState); resolveErr != nil && planErr == nil {
+		if resolveErr := action.resolve(ctx, actionState); resolveErr != nil && planErr == nil {
 			decision, planErr = claude.PermissionDecision{}, resolveErr
 		}
 	}()
 
-	resp, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{
-		Meta:      actionMeta,
+	emitPending := func() error {
+		return s.emitPendingToolCall(ctx, request.ToolName, toolCallID, title, request.Input, request.Raw)
+	}
+
+	wireAdmission, err := action.prepareWireAdmission(ctx, emitPending)
+	if err != nil {
+		return claude.PermissionDecision{}, err
+	}
+
+	selectionAllows := func(option acp.PermissionOptionId) bool {
+		return exitPlanModeSelectionAllows(acp.SessionModeId(option), options)
+	}
+
+	resp, err := conn.RequestPermission(permissionCtx, acp.RequestPermissionRequest{
+		Meta:      action.meta(),
 		SessionId: s.id,
 		ToolCall: acp.ToolCallUpdate{
 			ToolCallId: acp.ToolCallId(toolCallID),
@@ -348,14 +395,21 @@ func (s *agentSession) handleExitPlanMode(
 			Meta:       map[string]any{claudeMetaKey: map[string]any{acpFieldRaw: request.Raw}},
 		},
 		Options: options,
-	})
-	actionState = permissionActionState(resp, err, func(option acp.PermissionOptionId) bool {
-		return exitPlanModeSelectionAllows(acp.SessionModeId(option), options)
-	})
-
+	}, wireAdmission)
 	if err != nil {
+		actionState = interactionActionState(permissionCtx, permissionActionState(resp, err, selectionAllows))
+
 		return claude.PermissionDecision{}, err
 	}
+
+	if !action.responseOwnerCurrent() {
+		return claude.PermissionDecision{
+			Behavior: claude.BehaviorDeny,
+			Message:  exitPlanModeOutsideMessage,
+		}, nil
+	}
+
+	actionState = interactionActionState(permissionCtx, permissionActionState(resp, nil, selectionAllows))
 
 	if resp.Outcome.Selected == nil {
 		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: permissionCancelledMessage}, nil
@@ -373,7 +427,7 @@ func (s *agentSession) handleExitPlanMode(
 	if !active {
 		return claude.PermissionDecision{
 			Behavior: claude.BehaviorDeny,
-			Message:  "ExitPlanMode callback is outside the active turn",
+			Message:  exitPlanModeOutsideMessage,
 		}, nil
 	}
 
@@ -381,7 +435,7 @@ func (s *agentSession) handleExitPlanMode(
 
 	s.setMode(selectedMode)
 
-	if err := s.emitOptionalUpdates(ctx, []acp.SessionUpdate{
+	if err := s.emitUpdates(ctx, []acp.SessionUpdate{
 		{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: sessionConfigOptions(s)}},
 	}); err != nil {
 		return claude.PermissionDecision{}, err

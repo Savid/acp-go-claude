@@ -27,7 +27,7 @@ var errSessionMirrorAppend = errors.New("append transcript mirror entries")
 
 var (
 	sessionMirrorAppendTimeout = defaultSessionMirrorAppendTimeout
-	sessionMirrorCommitTimeout = defaultSessionMirrorCommitTimeout
+	sessionSettlementTimeout   = defaultSessionMirrorCommitTimeout
 )
 
 type sessionMirror struct {
@@ -56,7 +56,9 @@ func newSessionMirror(log *slog.Logger, store SessionStore, claudeHome string, s
 func (m *sessionMirror) appendFrame(ctx context.Context, frame *claude.TranscriptMirrorMessage) error {
 	key, err := sessionKeyForMirrorPath(frame.FilePath, m.projectsDir)
 	if err != nil {
-		m.log.WarnContext(ctx, "dropping transcript mirror frame", slog.String("path", frame.FilePath), slog.String(jsonFieldError, err.Error()))
+		m.log.WarnContext(ctx, "dropping transcript mirror frame",
+			slog.String("stage", "mirror_path_validation"),
+			slog.String("class", safeErrorClass(err)))
 
 		return nil
 	}

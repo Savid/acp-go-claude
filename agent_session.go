@@ -60,7 +60,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		McpServers:            params.McpServers,
 		MetaOptions:           metaOptions,
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
-	}, nil)
+	})
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
@@ -102,7 +102,9 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
 	}
 	if session := a.activeSessionForStart(params.SessionId, start); session != nil {
-		session.emitCurrentUsageUpdate(ctx)
+		if updateErr := session.emitCurrentUsageUpdate(ctx); updateErr != nil {
+			return acp.ResumeSessionResponse{}, updateErr
+		}
 
 		resp = acp.ResumeSessionResponse{
 			Meta:          sessionReuseResponseMeta(session, metaOptions.ProviderAuth),
@@ -123,7 +125,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 	start.StoreEntries = storeEntries
 
-	session, err := a.startAndStoreSession(ctx, params.SessionId, start, nil)
+	session, err := a.startAndStoreSession(ctx, params.SessionId, start)
 	if err != nil {
 		if missingClaudeSessionError(err) {
 			return acp.ResumeSessionResponse{}, unknownSessionError()
@@ -132,7 +134,9 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	session.emitCurrentUsageUpdate(ctx)
+	if err := session.emitCurrentUsageUpdate(ctx); err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
 
 	resp = acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(session),
@@ -183,8 +187,18 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	session := a.activeSessionForStart(params.SessionId, start)
 	startedSession := false
 
+	// A live session whose incarnation this adapter had to contain resumes
+	// nothing. The transcript this load would replay continues a projection the
+	// host has already been told has a hole in it, and the process behind that
+	// incarnation is gone or going.
+	if session != nil {
+		if failureErr := session.autonomousFailureError(); failureErr != nil {
+			return acp.LoadSessionResponse{}, failureErr
+		}
+	}
+
 	if session == nil {
-		session, err = a.startAndStoreSession(ctx, params.SessionId, start, nil)
+		session, err = a.startAndStoreSession(ctx, params.SessionId, start)
 		if err != nil {
 			if missingClaudeSessionError(err) {
 				return acp.LoadSessionResponse{}, unknownSessionError()
@@ -204,7 +218,9 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, replayErr
 	}
 
-	session.emitCurrentUsageUpdate(ctx)
+	if err := session.emitCurrentUsageUpdate(ctx); err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
 
 	resp = acp.LoadSessionResponse{
 		Meta:          sessionLoadResponseMeta(session, metaOptions.ProviderAuth, startedSession),
@@ -527,7 +543,7 @@ func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, sess
 	if session != nil {
 		if err := session.Close(ctx); err != nil {
 			a.recordContainmentError(err)
-			a.log.DebugContext(ctx, "close removed Claude session failed", slog.String(jsonFieldError, err.Error()))
+			a.log.DebugContext(ctx, "close removed Claude session failed", slog.String("class", safeErrorClass(err)))
 
 			if errors.Is(err, errSessionCloseUnsettled) {
 				return
@@ -539,11 +555,10 @@ func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, sess
 }
 
 // ensureOpen answers the admission check every entry point runs, and answers it
-// already shaped for the wire so the two refusals stay apart: a closed agent
-// cannot accept the request at all (-32600), while a refused construction
-// option is the embedding host's fault (-32603). Returning the bare sentinel for
-// one branch and a structured verdict for the other invites a caller to coerce
-// both into a single code and flatten the configuration payload into prose.
+// already shaped for the wire so the refusals stay apart: a closed agent cannot
+// accept the request at all (-32600), a negative concurrency limit is invalid
+// params (-32602), and an unusable runtime boundary is the embedding host's
+// internal construction failure (-32603).
 func (a *Agent) ensureOpen() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -555,20 +570,21 @@ func (a *Agent) ensureOpen() error {
 	return a.configurationError()
 }
 
-// configurationError reports the options this agent was built with as refused,
-// as an internal error: the caller's params are fine, the embedding host built
-// an agent that cannot serve them. Every entry point answers it, not only
-// initialize: an in-process host that drives the agent directly may never call
-// initialize, and an agent whose limits or read root were rejected must not
-// serve a turn under them. The joined prose is the whole payload because no
-// single wire field is at fault for an operator to be pointed at.
+// configurationError reports refused construction options at every entry point.
+// Negative public concurrency fields retain their normative invalid-params
+// verdict; runtime configuration failures remain internal because the caller's
+// method params did not cause them. An in-process host may never call initialize,
+// so neither class is allowed to serve work through another door.
 func (a *Agent) configurationError() error {
-	err := errors.Join(a.activeLimitErr, a.configurationErr)
-	if err == nil {
-		return nil
+	if a.activeLimitErr != nil {
+		return acp.NewInvalidParams(map[string]any{jsonFieldError: a.activeLimitErr.Error()})
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	if a.configurationErr != nil {
+		return acp.NewInternalError(map[string]any{jsonFieldError: a.configurationErr.Error()})
+	}
+
+	return nil
 }
 
 // storeStartedSession publishes one freshly started instance under its id, and
@@ -687,7 +703,7 @@ func (a *Agent) closeRejectedSession(
 		a.recordContainmentError(err)
 		a.log.DebugContext(ctx, "close unadmitted Claude session failed",
 			slog.String(jsonFieldReason, reason),
-			slog.String(jsonFieldError, err.Error()),
+			slog.String("class", safeErrorClass(err)),
 		)
 	}
 
@@ -706,7 +722,7 @@ func (a *Agent) closeReplacedSession(ctx context.Context, session *agentSession,
 	}
 
 	a.recordContainmentError(closeErr)
-	a.log.WarnContext(ctx, "close replaced Claude session failed", slog.String(jsonFieldError, closeErr.Error()))
+	a.log.WarnContext(ctx, "close replaced Claude session failed", slog.String("class", safeErrorClass(closeErr)))
 
 	if !errors.Is(closeErr, errSessionCloseUnsettled) {
 		return nil
@@ -719,7 +735,6 @@ func (a *Agent) startAndStoreSession(
 	ctx context.Context,
 	id acp.SessionId,
 	start sessionStart,
-	afterStart func(*agentSession),
 ) (*agentSession, error) {
 	if err := a.beginSessionConstruction(); err != nil {
 		return nil, err
@@ -731,8 +746,8 @@ func (a *Agent) startAndStoreSession(
 		return nil, err
 	}
 
-	if afterStart != nil {
-		afterStart(session)
+	if start.ForkSession {
+		session.persistPermissionRules(ctx)
 	}
 
 	if err := a.storeStartedSession(ctx, session); err != nil {
@@ -1067,7 +1082,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		SettingsFile:            settingsFileArg,
 		InitializeTimeout:       a.options.InitializeTimeout,
 		ControlHandlerTimeout:   a.options.ControlHandlerTimeout,
-		ControlHandlerContext:   withTurnRoute,
 		ObserveStartupStage: func(stageCtx context.Context, stage string, elapsed time.Duration, stageErr error) {
 			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
 			if observe != nil {
@@ -1132,7 +1146,21 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	options.HookHandler = session.handleHookCallback
 	session.clientOptions = options
 	session.canRelaunch = true
+
 	session.client = a.newClaudeClient(a.log, options)
+	if _, local := a.connection().(*localAgentConnection); local {
+		if installErr := session.installEstablishmentGate(session.client); installErr != nil {
+			return nil, installErr
+		}
+
+		defer func() {
+			if err != nil {
+				session.settleEstablishment(err)
+			}
+		}()
+	}
+
+	session.client.SetControlHandlerAdmission(session.admitControlCallback)
 
 	nativeRelease, err = acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
 	if err != nil {
@@ -1170,7 +1198,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	settingsKnown := true
 
 	if err != nil {
-		a.log.DebugContext(ctx, "get Claude settings failed", slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "get Claude settings failed", slog.String("stage", "settings_read"))
 
 		settings = &claude.SettingsSnapshot{}
 		settingsKnown = false
@@ -1344,7 +1372,8 @@ func (a *Agent) isDeletedLocked(sessionID acp.SessionId) bool {
 
 func (a *Agent) retryDeleteNativeTranscript(ctx context.Context, sessionID acp.SessionId) {
 	if err := deleteNativeTranscript(ctx, a.options.Home, string(sessionID)); err != nil {
-		a.log.DebugContext(ctx, "retry delete native Claude transcript failed", slog.String(acpFieldSessionID, string(sessionID)), slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "retry delete native Claude transcript failed",
+			slog.String(acpFieldSessionID, string(sessionID)), slog.String("class", safeErrorClass(err)))
 	}
 }
 

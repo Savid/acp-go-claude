@@ -19,6 +19,7 @@ const (
 	ForkSessionMethod = "_claude/session/fork"
 	RawEventMethod    = "_claude/rawEvent"
 	RateLimitsMethod  = "_claude/rateLimits"
+	metaElicitation   = "elicitation"
 )
 
 const (
@@ -82,6 +83,7 @@ type Agent struct {
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
 	lifecycle          lifecycle.Negotiated
+	lifecycleCarrier   *bool
 	permissionCache    map[acp.SessionId]map[string]string
 	activeLimitErr     error
 	configurationErr   error
@@ -177,7 +179,8 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	agent := newServeAgent(opts...)
 	defer func() {
 		if closeErr := agent.Close(); closeErr != nil {
-			agent.log.DebugContext(context.Background(), "close Claude ACP agent failed", slog.String(jsonFieldError, closeErr.Error()))
+			agent.log.DebugContext(context.Background(), "close Claude ACP agent failed",
+				slog.String("class", safeErrorClass(closeErr)))
 			serveErr = closeErr
 		}
 	}()
@@ -207,7 +210,17 @@ func (a *Agent) close() error {
 	a.closed = true
 	a.mu.Unlock()
 
+	connectionErr := a.interruptActiveHostWrite()
+
 	a.constructions.Wait()
+
+	a.mu.Lock()
+	connection := a.conn
+	a.mu.Unlock()
+
+	if local, ok := connection.(*localAgentConnection); ok {
+		local.hooks.cancelPending()
+	}
 
 	a.mu.Lock()
 
@@ -252,11 +265,16 @@ func (a *Agent) close() error {
 	// them undeliverable, and a shutdown that closed cleanly would report the
 	// adapter's own missing connection as a lifecycle violation.
 	a.mu.Lock()
+	conn := a.conn
 	a.conn = nil
 	containmentErr := a.containmentErr
 	a.mu.Unlock()
 
-	return errors.Join(errors.Join(closeErrs...), containmentErr)
+	if local, ok := conn.(*localAgentConnection); ok {
+		connectionErr = errors.Join(connectionErr, local.hooks.closeWrites())
+	}
+
+	return errors.Join(errors.Join(closeErrs...), containmentErr, connectionErr)
 }
 
 func (a *Agent) beginSessionConstruction() error {
@@ -293,6 +311,31 @@ func (a *Agent) setConnection(conn agentClient) {
 	defer a.mu.Unlock()
 
 	a.conn = conn
+}
+
+func (a *Agent) setLifecycleCarrier(interruptible bool) {
+	a.mu.Lock()
+	a.lifecycleCarrier = &interruptible
+	a.mu.Unlock()
+}
+
+func (a *Agent) lifecycleCarrierSupported() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.lifecycleCarrier == nil || *a.lifecycleCarrier
+}
+
+func (a *Agent) interruptActiveHostWrite() error {
+	a.mu.Lock()
+	conn := a.conn
+	a.mu.Unlock()
+
+	if local, ok := conn.(*localAgentConnection); ok {
+		return local.hooks.interruptActiveWrite()
+	}
+
+	return nil
 }
 
 // Initialize implements ACP initialize.
@@ -362,10 +405,10 @@ func (a *Agent) capabilityMeta() map[string]any {
 			"fork": map[string]any{
 				"unstable":        true,
 				jsonFieldMethod:   ForkSessionMethod,
-				"request":         "acp.UnstableForkSessionRequest JSON payload only",
+				jsonFieldRequest:  "acp.UnstableForkSessionRequest JSON payload only",
 				jsonFieldResponse: "acp.UnstableForkSessionResponse JSON payload only",
 			},
-			"elicitation": map[string]any{
+			metaElicitation: map[string]any{
 				"unstable": true,
 				"scope":    string(RuntimeResourceSession),
 				"tracks":   "ACP v1 elicitation",

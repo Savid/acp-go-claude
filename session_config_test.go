@@ -98,10 +98,11 @@ func TestSetSessionConfigValueBranches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			agent, _, transport, _, cleanup := newStartedConfigTestSession(t, sessionID)
 			defer cleanup()
-			transport.sendErr = errors.New("send failed")
+			sendErr := errors.New("send failed")
+			transport.sendErr = sendErr
 
 			_, err := agent.SetSessionConfigOption(ctx, tc.request)
-			require.ErrorContains(t, err, "send failed")
+			require.ErrorIs(t, err, sendErr)
 		})
 	}
 
@@ -112,6 +113,25 @@ func TestSetSessionConfigValueBranches(t *testing.T) {
 
 		_, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest(sessionID, configOutputStyle, acp.SessionConfigValueId("concise")))
 		require.ErrorContains(t, err, "update failed")
+	})
+
+	t.Run("model clamp mode error", func(t *testing.T) {
+		agent, session, transport, _, cleanup := newStartedConfigTestSession(t, sessionID)
+		defer cleanup()
+		session.mode = modeAuto
+		transport.controlErr = map[string]error{"set_permission_mode": errors.New("mode clamp failed")}
+
+		_, err := agent.SetSessionConfigOption(ctx, SetModelRequest(sessionID, "opus"))
+		require.Error(t, err)
+	})
+
+	t.Run("model clamp effort error", func(t *testing.T) {
+		agent, _, transport, _, cleanup := newStartedConfigTestSession(t, sessionID)
+		defer cleanup()
+		transport.controlErr = map[string]error{"apply_flag_settings": errors.New("effort clamp failed")}
+
+		_, err := agent.SetSessionConfigOption(ctx, SetModelRequest(sessionID, "opus"))
+		require.Error(t, err)
 	})
 
 	t.Run("clear effort", func(t *testing.T) {

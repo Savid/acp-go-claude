@@ -65,8 +65,8 @@ func TestEmittedStreamReducesThroughTheSameReducer(t *testing.T) {
 	for _, event := range []Event{
 		SnapshotEvent("cyc-0", QuiescenceFact{}),
 		AcceptedEvent(submission, "turn-1"),
-		TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"),
-		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
+		TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"),
+		IdleEvent(CauseSubmission, "cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
 	} {
 		envelope, err := stream.Emit(event)
 		require.NoError(t, err)
@@ -117,7 +117,7 @@ func TestEmitClaimsTheSequenceBeforeDelivery(t *testing.T) {
 	stream := NewStream(provenConfiguration())
 	stream.Incarnate("strm-1")
 
-	_, err := stream.Emit(TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"))
+	_, err := stream.Emit(TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"))
 	require.ErrorAs(t, err, new(*ViolationError))
 	require.Equal(t, uint64(1), stream.sequence)
 }
@@ -235,12 +235,12 @@ func TestEmittedActionStreamReducesThroughTheSameReducer(t *testing.T) {
 	for _, event := range []Event{
 		SnapshotEvent("cyc-0", QuiescenceFact{}),
 		AcceptedEvent(Submission{SubmissionID: "sub-1", ClientNonce: "non-1", RunID: "run-1"}, "turn-1"),
-		TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"),
+		TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"),
 		ActionEvent(pending),
-		TransitionEvent(ForegroundRequiresAction, "cyc-1", "turn-1"),
+		TransitionEvent(CauseSubmission, ForegroundRequiresAction, "cyc-1", "turn-1"),
 		ActionEvent(accepted),
-		TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"),
-		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
+		TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"),
+		IdleEvent(CauseSubmission, "cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
 	} {
 		envelope, err := stream.Emit(event)
 		require.NoError(t, err)
@@ -326,9 +326,9 @@ func TestEmittedActionPatchesStateOnlyWhatTheCallerStated(t *testing.T) {
 			for _, event := range []Event{
 				SnapshotEvent("cyc-0", QuiescenceFact{}),
 				AcceptedEvent(Submission{SubmissionID: "sub-1", ClientNonce: "non-1"}, "turn-1"),
-				TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"),
+				TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"),
 				ActionEvent(first),
-				TransitionEvent(ForegroundRequiresAction, "cyc-1", "turn-1"),
+				TransitionEvent(CauseSubmission, ForegroundRequiresAction, "cyc-1", "turn-1"),
 			} {
 				envelope, err := stream.Emit(event)
 				require.NoError(t, err)
@@ -561,7 +561,7 @@ func TestEmitterRefusesAnEventOnASupersededIncarnation(t *testing.T) {
 	stream.id = "strm-1"
 	stream.sequence = superseded
 
-	_, err = stream.Emit(TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"))
+	_, err = stream.Emit(TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"))
 
 	var refusal *ViolationError
 	require.ErrorAs(t, err, &refusal)

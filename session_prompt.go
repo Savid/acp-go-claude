@@ -11,10 +11,13 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/savid/acp-go-claude/internal/mapper"
 )
 
-var finishPromptResultCall = (*agentSession).finishPromptResult
+var errPromptPreDispatchFrame = errors.New("native frame preceded prompt dispatch")
+
+const costCurrencyUSD = "USD"
 
 // Prompt sends one turn to Claude and streams updates.
 func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single settlement remain visibly paired.
@@ -37,18 +40,6 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 		return acp.PromptResponse{}, err
 	}
 
-	if poisonErr := s.poisonedError(); poisonErr != nil {
-		return acp.PromptResponse{}, poisonErr
-	}
-
-	// A session that is already closing is refused before it is admitted, so a
-	// caller gets the terminal answer rather than a native failure from the
-	// process being torn down. The section that publishes the turn holds the
-	// authoritative check.
-	if s.isClosing() {
-		return acp.PromptResponse{}, closedSessionError()
-	}
-
 	availableCommands := s.commands()
 	commandName := mapper.PromptCommandName(params.Prompt)
 	deniedName, alternative, denied := mapper.DeniedPromptCommand(params.Prompt, availableCommands)
@@ -59,10 +50,6 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 		return acp.PromptResponse{}, err
 	}
 	defer releaseTurn()
-
-	if poisonErr := s.poisonedError(); poisonErr != nil {
-		return acp.PromptResponse{}, poisonErr
-	}
 
 	if denied {
 		return acp.PromptResponse{}, acp.NewInvalidParams(map[string]any{
@@ -96,6 +83,16 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 		return acp.PromptResponse{}, nativeTurnFailure(clientErr)
 	}
 
+	// An incarnation this adapter had to contain because it could not report that
+	// incarnation's own between-prompt output serves no further prompt. The check
+	// follows the relaunch above rather than preceding it: the refusal is about
+	// the contained process, so a session that already replaced it is admitted
+	// normally, and one that cannot replace it is refused before any native side
+	// effect.
+	if failureErr := s.autonomousFailureError(); failureErr != nil {
+		return acp.PromptResponse{}, failureErr
+	}
+
 	// The MCP relaunch and the lazy relaunch above both replace the native
 	// process, so the reader and the incarnation identity are pointed at the
 	// current one here: after validation and before acceptance.
@@ -105,6 +102,41 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 
 	stream := s.lifecycleStream()
 	turnID := ""
+
+	nextAutonomousRoute, err := newUUID()
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+
+	// A prompt owns the session's foreground exclusively, from here until its own
+	// settlement has finished. Taking it waits out any between-prompt frame the
+	// pump is mapping, so the agent-origin turn and this one are never open at
+	// once and the handoff between them happens at one point rather than across a
+	// window.
+	defer s.takeForeground()()
+
+	// An open agent-origin turn holds that same foreground, and this prompt does
+	// not take it away: it is refused as busy, before the sink is attached and
+	// before anything is dispatched, and the retry after the excursion's native
+	// terminal proceeds.
+	if conflictErr := s.excursionConflict(); conflictErr != nil {
+		return acp.PromptResponse{}, conflictErr
+	}
+
+	// The route this query binds returns to the incarnation's autonomous one once
+	// the turn has settled, so a callback the harness raises for work that outlived
+	// the prompt names a live owner rather than a turn that is over. The rebind is
+	// conditional on the route still being this query's, so it can never take a
+	// newer query's.
+	queryClient := s.currentClient()
+	queryIncarnation := s.nativePumpHandle().currentIncarnation()
+
+	defer func() { queryClient.HandOffQuery(route.turnNonce, s.autonomousRoute()) }()
+
+	// The turn is attached to the exact reader before the frame is dispatched, so
+	// raw and typed frames resolve to the same prompt route.
+	sink, releaseSink := s.nativePumpHandle().attachTurn(route.turnNonce, queryIncarnation)
+	defer releaseSink()
 
 	var timedOut atomic.Bool
 
@@ -134,6 +166,11 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 	defer func() {
 		s.cancelMu.Lock()
 		defer s.cancelMu.Unlock()
+
+		// Retire the exact ingress owner before its durability and lifecycle
+		// boundary. Every frame admitted behind the native terminal is projected in
+		// arrival order while this turn still holds the foreground.
+		releaseSink()
 
 		// One settlement runs on every exit, in the one order the contract fixes:
 		// the native terminal, then the containment boundary this configuration
@@ -176,25 +213,38 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 		}()
 	}
 
-	defer s.client.EndQuery(route.turnNonce)
-
-	// The turn is attached to the session's reader before the frame is dispatched,
-	// so no frame this turn caused can arrive before there is somewhere for it to
-	// go.
-	sink, releaseSink := s.nativePumpHandle().attachTurn()
-	defer releaseSink()
-
 	var (
 		sendErr    error
 		dispatched bool
 	)
 
-	turnID, err = stream.dispatch(ctx, submission, route.turnNonce, func() error {
-		sendErr = s.client.Query(turnCtx, route.turnNonce, content)
-		dispatched = sendErr == nil
+	for {
+		if drainErr := s.drainBeforePromptDispatch(ctx, sink, queryIncarnation); drainErr != nil {
+			return acp.PromptResponse{}, drainErr
+		}
 
-		return sendErr
-	})
+		if conflictErr := s.excursionConflict(); conflictErr != nil {
+			return acp.PromptResponse{}, conflictErr
+		}
+
+		turnID, err = s.dispatchPrompt(ctx, stream, submission, route.turnNonce, queryIncarnation, sink, func() error {
+			sendErr = queryClient.Query(turnCtx, route.turnNonce, content)
+			if sendErr != nil {
+				return sendErr
+			}
+
+			dispatched = true
+
+			if !s.rotateAutonomousRoute(queryIncarnation, nextAutonomousRoute) {
+				return lifecycleViolationError("prompt dispatch lost its exact native incarnation")
+			}
+
+			return nil
+		})
+		if !errors.Is(err, errPromptPreDispatchFrame) {
+			break
+		}
+	}
 
 	if sendErr != nil {
 		return acp.PromptResponse{}, nativeTurnFailure(sendErr)
@@ -212,20 +262,26 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 		return acp.PromptResponse{}, err
 	}
 
-	toolUpdateOptions := mapper.ToolUpdateOptions{
-		Cwd:                    s.cwd,
-		SupportsTerminalOutput: s.agent.clientSupportsTerminalOutput(),
-		ToolUses:               make(map[string]claude.ToolUseBlock),
-		Workflow:               mapper.NewWorkflowTracker(),
-	}
+	sink.accept()
 
+	toolUpdateOptions := s.sessionToolUpdateOptions()
 	state := &promptLoopState{}
 
 	for {
-		msg, err := s.nativePumpHandle().next(turnCtx, sink)
+		msg, err := s.nativePumpHandle().next(turnCtx, sink, queryIncarnation)
 		if err != nil {
 			if poisonErr := s.poisonedError(); poisonErr != nil {
 				return acp.PromptResponse{}, poisonErr
+			}
+
+			if queryIncarnation != nil && queryIncarnation.failed.Load() && !s.wasTurnCancelled() {
+				<-queryIncarnation.mirrorReady
+
+				if commitErr := s.nativePumpHandle().storeError(); commitErr != nil {
+					return acp.PromptResponse{}, storeCommitError(commitErr)
+				}
+
+				return acp.PromptResponse{}, nativeTurnFailure(err)
 			}
 
 			return s.receiveTurnFailure(ctx, turnCtx, params.MessageId, err, timedOut.Load())
@@ -236,8 +292,7 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 		}
 
 		if result, ok := msg.(*claude.ResultMessage); ok {
-			resp, done, err := finishPromptResultCall(
-				s,
+			resp, done, err := s.finishPromptResult(
 				turnCtx,
 				ctx,
 				params,
@@ -282,6 +337,79 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 	}
 }
 
+// dispatchPrompt is the prompt side of callback ownership admission. The same
+// primitive that installs an autonomous callback reservation covers the native
+// send and its acceptance, so exactly one side can become the foreground owner.
+func (s *agentSession) dispatchPrompt(
+	ctx context.Context,
+	stream *sessionStream,
+	submission lifecycle.Submission,
+	nonce string,
+	expected *nativeIncarnation,
+	sink *nativeTurnSink,
+	send func() error,
+) (string, error) {
+	s.callbackOwnershipMu.Lock()
+	defer s.callbackOwnershipMu.Unlock()
+
+	if s.hasControlCallbackLocked() {
+		return "", backpressureError("session_foreground")
+	}
+
+	s.mu.Lock()
+	closing := s.closing
+	s.mu.Unlock()
+
+	if closing {
+		return "", closedSessionError()
+	}
+
+	if expected == nil || expected.failed.Load() || !s.nativePumpHandle().serves(expected) {
+		return "", lifecycleViolationError("prompt native incarnation is no longer current")
+	}
+
+	if sink == nil || sink.incarnation != expected || !sink.beginDispatch() {
+		return "", errPromptPreDispatchFrame
+	}
+
+	return stream.dispatch(ctx, submission, nonce, send)
+}
+
+func (s *agentSession) drainBeforePromptDispatch(
+	ctx context.Context,
+	sink *nativeTurnSink,
+	incarnation *nativeIncarnation,
+) error {
+	if sink == nil || incarnation == nil {
+		return lifecycleViolationError("prompt has no exact native sink")
+	}
+
+	route, owned := s.autonomousRouteExact(incarnation)
+	if !owned {
+		return lifecycleViolationError("prompt native incarnation has no autonomous owner")
+	}
+
+	ownerCtx := withTurnRoute(ctx, route)
+	for _, frame := range sink.takeBeforeDispatch() {
+		conversation, err := s.nativePumpHandle().projectOwnedFrame(ownerCtx, incarnation, frame.message)
+		if err != nil {
+			s.nativePumpHandle().failIncarnation(ownerCtx, incarnation, err, "projection")
+
+			return err
+		}
+
+		if conversation {
+			s.observeAutonomousFrame(ownerCtx, incarnation, frame.message)
+		}
+
+		if failure := s.autonomousFailureError(); failure != nil {
+			return failure
+		}
+	}
+
+	return nil
+}
+
 // finishPromptSystemIdle ends a turn the harness closed with a state frame rather
 // than a result frame. There is no result to read, so there is no native stop
 // reason, no usage beyond what the turn already streamed, and no provider error
@@ -322,11 +450,56 @@ func (s *agentSession) finishPromptSystemIdle(
 }
 
 func (s *agentSession) acquirePromptTurn(ctx context.Context, exclusive bool) (func(), error) {
-	if exclusive {
-		return s.acquireExclusiveTurn(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.poisonCause != "" {
+		return nil, poisonedSessionError(s.poisonCause)
 	}
 
-	return s.acquireTurn(ctx)
+	if s.closing {
+		return nil, closedSessionError()
+	}
+
+	if s.turn == nil {
+		s.turn = make(chan struct{}, sessionTurnCapacity)
+	}
+
+	if !exclusive {
+		select {
+		case s.turn <- struct{}{}:
+			return func() { <-s.turn }, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			return nil, backpressureError("session_prompt")
+		}
+	}
+
+	capacity := cap(s.turn)
+	if capacity <= 0 {
+		capacity = 1
+	}
+
+	acquired := 0
+	for acquired < capacity {
+		if err := ctx.Err(); err != nil {
+			releaseTurnPrefix(s.turn, acquired)
+
+			return nil, err
+		}
+
+		select {
+		case s.turn <- struct{}{}:
+			acquired++
+		default:
+			releaseTurnPrefix(s.turn, acquired)
+
+			return nil, backpressureError("session_prompt")
+		}
+	}
+
+	return func() { releaseTurnPrefix(s.turn, acquired) }, nil
 }
 
 func (s *agentSession) commandAdvertised(name string) bool {
@@ -371,25 +544,25 @@ func (s *agentSession) finishPromptResult(
 	params acp.PromptRequest,
 	result *claude.ResultMessage,
 	state *promptLoopState,
-	toolUpdateOptions mapper.ToolUpdateOptions,
+	_ mapper.ToolUpdateOptions,
 	localOnlyCommand bool,
 ) (acp.PromptResponse, bool, error) {
 	state.promptUsage = mergeUsage(state.promptUsage, mapper.Usage(result))
 
 	contextUsage, contextUsageErr := s.client.GetContextUsage(turnCtx)
 	if contextUsageErr != nil {
-		s.agent.log.DebugContext(turnCtx, "get Claude context usage failed", slog.String(jsonFieldError, contextUsageErr.Error()))
+		s.agent.log.DebugContext(turnCtx, "get Claude context usage failed",
+			slog.String("stage", "context_usage"))
 	}
 
-	if err := s.emitOptionalUpdates(
+	if err := s.emitUpdates(
 		turnCtx,
 		s.resultUsageUpdates(result, contextUsage, state.lastAssistantModel),
 	); err != nil {
 		return acp.PromptResponse{}, false, s.interruptAfterEmitError(interruptCtx, err)
 	}
 
-	if resultOriginKind(result) == originKindTaskNotification &&
-		!workflowTaskNotificationResultCompletesPrompt(toolUpdateOptions.Workflow) {
+	if resultOriginKind(result) == originKindTaskNotification {
 		return acp.PromptResponse{}, false, nil
 	}
 
@@ -426,17 +599,9 @@ func (s *agentSession) finishPromptResult(
 	}, true, nil
 }
 
-func workflowTaskNotificationResultCompletesPrompt(tracker *mapper.WorkflowTracker) bool {
-	if tracker == nil {
-		return true
-	}
-
-	return tracker.HasTracked() && !tracker.HasActive()
-}
-
 func (s *agentSession) logUnknownStopReason(ctx context.Context, result *claude.ResultMessage) {
 	if reason := mapper.UnknownStopReason(result); reason != "" {
-		s.agent.log.DebugContext(ctx, "unknown Claude stop reason", slog.String("stop_reason", reason))
+		s.agent.log.DebugContext(ctx, "unknown Claude stop reason", slog.String("stage", "result_stop_reason"))
 	}
 }
 
@@ -516,10 +681,10 @@ func (s *agentSession) settleTurnLifecycle(
 // turn streamed. It is not a native turn failure: the harness produced the turn
 // correctly and the durability boundary that failed is the adapter's own.
 func storeCommitError(err error) error {
-	return acp.NewInternalError(map[string]any{
+	return newSafeRequestFailure(acp.NewInternalError(map[string]any{
 		jsonFieldError:   "claude_store_commit_failed",
-		jsonFieldMessage: err.Error(),
-	})
+		jsonFieldMessage: "session store commit failed",
+	}), err)
 }
 
 // turnContainmentError reports the selected containment boundary's failure for
@@ -574,7 +739,7 @@ func (s *agentSession) observePromptMessage(ctx context.Context, msg claude.Mess
 		state.lastAssistantModel = model
 	}
 
-	return s.emitOptionalUpdates(ctx, updates)
+	return s.emitUpdates(ctx, updates)
 }
 
 func (s *agentSession) recordWorkflowFrameErrors(ctx context.Context, tracker *mapper.WorkflowTracker) {
@@ -796,7 +961,7 @@ func (s *agentSession) resultUsageUpdates(
 
 	cost := (*acp.Cost)(nil)
 	if result.TotalCostUSD != nil {
-		cost = &acp.Cost{Amount: *result.TotalCostUSD, Currency: "USD"}
+		cost = &acp.Cost{Amount: *result.TotalCostUSD, Currency: costCurrencyUSD}
 	}
 
 	if used == 0 && cost == nil && len(result.StructuredOutput) == 0 {
@@ -839,15 +1004,15 @@ func sessionUsageClaudeMeta(update *acp.SessionUsageUpdate) map[string]any {
 	return claudeMeta
 }
 
-func (s *agentSession) emitCurrentUsageUpdate(ctx context.Context) {
+func (s *agentSession) emitCurrentUsageUpdate(ctx context.Context) error {
 	contextUsage, err := s.client.GetContextUsage(ctx)
 	if err != nil {
-		s.agent.log.DebugContext(ctx, "get Claude context usage failed", slog.String(jsonFieldError, err.Error()))
+		s.agent.log.DebugContext(ctx, "get Claude context usage failed", slog.String("stage", "context_usage"))
 
-		return
+		return err
 	}
 
-	_ = s.emitOptionalUpdates(ctx, s.contextUsageUpdates(contextUsage))
+	return s.emitUpdates(ctx, s.contextUsageUpdates(contextUsage))
 }
 
 func (s *agentSession) contextUsageUpdates(contextUsage *claude.ContextUsage) []acp.SessionUpdate {

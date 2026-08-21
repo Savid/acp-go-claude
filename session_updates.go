@@ -191,24 +191,22 @@ func (s *agentSession) emitNativeMessageIdentity(ctx context.Context, messageID 
 	}}, messageID, false)
 }
 
-func (s *agentSession) emitOptionalUpdates(ctx context.Context, updates []acp.SessionUpdate) error {
-	if len(updates) == 0 {
-		return nil
-	}
-
-	err := s.emitUpdates(ctx, updates)
-	if errors.Is(err, errAgentClosed) || errors.Is(err, errACPConnectionNotAttached) {
-		return nil
-	}
-
-	return err
-}
-
 // emitAvailableCommandsUpdate advertises the harness's command catalog. A forced
 // update always states one, an empty catalog included: silence and "no commands"
 // are different facts, and a host that never receives the empty snapshot cannot
 // tell a harness with no commands from one whose catalog has not arrived yet.
 func (s *agentSession) emitAvailableCommandsUpdate(ctx context.Context, force bool) error {
+	s.callbackOwnershipMu.Lock()
+	defer s.callbackOwnershipMu.Unlock()
+
+	s.mu.Lock()
+	closing := s.closing
+	s.mu.Unlock()
+
+	if closing {
+		return closedSessionError()
+	}
+
 	updates := mapper.AvailableCommandsUpdate(s.commands())
 	current := availableCommandsFromUpdates(updates)
 
@@ -231,7 +229,7 @@ func (s *agentSession) emitAvailableCommandsUpdate(ctx context.Context, force bo
 		return nil
 	}
 
-	if err := s.emitOptionalUpdates(ctx, emit); err != nil {
+	if err := s.emitUpdates(ctx, emit); err != nil {
 		return err
 	}
 
@@ -251,7 +249,7 @@ func (s *agentSession) emitClearAvailableCommandsUpdate(ctx context.Context) err
 		return nil
 	}
 
-	if err := s.emitOptionalUpdates(ctx, emptyAvailableCommandsUpdate()); err != nil {
+	if err := s.emitUpdates(ctx, emptyAvailableCommandsUpdate()); err != nil {
 		return err
 	}
 
@@ -350,33 +348,38 @@ func (s *agentSession) poison(ctx context.Context, cause string) error {
 	cancel := s.cancel
 	s.mu.Unlock()
 
-	if cancel != nil {
-		cancel()
-	}
-
 	if s.agent == nil {
+		if cancel != nil {
+			cancel()
+		}
+
 		return poisonedSessionError(cause)
 	}
 
 	s.agent.log.ErrorContext(ctx, "poison Claude session after native invariant violation",
 		slog.String(acpFieldSessionID, string(s.id)),
-		slog.String("cause", cause),
 	)
 
-	if err := s.emitClearAvailableCommandsUpdate(ctx); err != nil {
-		s.agent.log.ErrorContext(ctx, "clear available Claude commands after poison failed",
+	emitCtx, cancelEmit := settlementContext(ctx)
+	if err := s.emitClearAvailableCommandsUpdate(emitCtx); err != nil {
+		s.agent.log.ErrorContext(emitCtx, "clear available Claude commands after poison failed",
 			slog.String(acpFieldSessionID, string(s.id)),
-			slog.String(jsonFieldError, err.Error()),
 		)
+	}
+
+	cancelEmit()
+
+	if cancel != nil {
+		cancel()
 	}
 
 	return poisonedSessionError(cause)
 }
 
-func poisonedSessionError(cause string) error {
+func poisonedSessionError(string) error {
 	return acp.NewInternalError(map[string]any{
 		jsonFieldError:   "session poisoned",
-		jsonFieldMessage: cause,
+		jsonFieldMessage: "native session invariant failed",
 	})
 }
 
@@ -394,7 +397,7 @@ func (s *agentSession) emitLiveSessionInfoUpdate(ctx context.Context, prompt []a
 	}
 	s.mu.Unlock()
 
-	return s.emitOptionalUpdates(ctx, []acp.SessionUpdate{{SessionInfoUpdate: &update}})
+	return s.emitUpdates(ctx, []acp.SessionUpdate{{SessionInfoUpdate: &update}})
 }
 
 func (s *agentSession) sessionInfo(id acp.SessionId) acp.SessionInfo {
@@ -450,20 +453,19 @@ func normalizeLiveSessionTitle(text string) string {
 }
 
 // emitRawClaudeMessage emits one live raw-event notification when raw events are
-// enabled. It never returns an error and never aborts the caller's turn: raw
-// events are non-authoritative debug output, so oversized/unserializable events
-// become markers and emit failures are recorded on the internal observer hook.
-func (s *agentSession) emitRawClaudeMessage(ctx context.Context, msg claude.Message) {
+// enabled. The caller has already resolved the frame's exact route, so raw and
+// typed projections share one owner and one failure boundary.
+func (s *agentSession) emitRawClaudeMessage(ctx context.Context, msg claude.Message) error {
 	raw := rawClaudeMessage(msg)
 	if !s.rawMessages.ShouldEmit(raw) {
-		return
+		return nil
 	}
 
 	s.agent.mu.Lock()
 	if s.agent.closed || s.agent.conn == nil {
 		s.agent.mu.Unlock()
 
-		return
+		return errACPConnectionNotAttached
 	}
 
 	conn := s.agent.conn
@@ -491,19 +493,18 @@ func (s *agentSession) emitRawClaudeMessage(ctx context.Context, msg claude.Mess
 	if err != nil {
 		s.agent.observe.RecordRawMessageEmitFailure(ctx, err)
 
-		return
+		return nil
 	}
 
-	// A raw-event emit failure must not abort the prompt turn: raw events are
-	// non-authoritative debug output. Record it on the internal observer hook
-	// and continue.
 	if err := conn.NotifyExtension(ctx, RawEventMethod, capped); err != nil {
 		s.agent.observe.RecordRawMessageEmitFailure(ctx, err)
 
-		return
+		return nil
 	}
 
 	s.rawEventSequence = sequence
+
+	return nil
 }
 
 func resultOriginKind(result *claude.ResultMessage) string {
@@ -613,12 +614,12 @@ func (s *agentSession) emitMessageSideEffects(ctx context.Context, msg claude.Me
 	switch system.Subtype {
 	case systemStatus:
 		if systemString(system, systemStatus) == systemStatusCompacting {
-			return s.emitOptionalUpdates(ctx, []acp.SessionUpdate{acp.UpdateAgentMessageText(compactingMessageText)})
+			return s.emitUpdates(ctx, []acp.SessionUpdate{acp.UpdateAgentMessageText(compactingMessageText)})
 		}
 
 		return nil
 	case systemSubtypeCompactBoundary:
-		return s.emitOptionalUpdates(ctx, []acp.SessionUpdate{
+		return s.emitUpdates(ctx, []acp.SessionUpdate{
 			{
 				UsageUpdate: &acp.SessionUsageUpdate{
 					Size: s.currentContextWindow(),
@@ -629,7 +630,7 @@ func (s *agentSession) emitMessageSideEffects(ctx context.Context, msg claude.Me
 		})
 	case systemSubtypeLocalCommandOutput:
 		if content := systemString(system, systemContent); content != "" {
-			return s.emitOptionalUpdates(ctx, []acp.SessionUpdate{acp.UpdateAgentMessageText(content)})
+			return s.emitUpdates(ctx, []acp.SessionUpdate{acp.UpdateAgentMessageText(content)})
 		}
 
 		return nil
@@ -682,5 +683,5 @@ func (s *agentSession) emitHookResponseUpdates(ctx context.Context, msg claude.M
 
 	toolUse := options.ToolUses[toolUseID]
 
-	return s.handlePostToolUseHook(ctx, toolUseID, toolUse.Name, systemMap(system, systemToolResponse))
+	return s.handlePostToolUseFrame(ctx, toolUseID, toolUse.Name, systemMap(system, systemToolResponse))
 }

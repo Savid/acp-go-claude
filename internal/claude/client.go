@@ -31,11 +31,15 @@ type Client struct {
 	closeOnce  sync.Once
 	closeErr   error
 
+	transportCloseOnce sync.Once
+	transportCloseErr  error
+
 	infoMu         sync.RWMutex
 	initializeInfo InitializeInfo
 
 	controlTurnMu    sync.RWMutex
 	controlTurnNonce string
+	controlAdmission ControlHandlerAdmission
 }
 
 // InitializeInfo describes metadata returned by Claude's control initialize response.
@@ -91,7 +95,29 @@ func NewClient(log *slog.Logger, options Options, transport Transport) *Client {
 		transport = NewProcessTransport(log, options)
 	}
 
-	return &Client{log: log, options: options, transport: transport}
+	return &Client{
+		log:              log,
+		options:          options,
+		transport:        transport,
+		controlAdmission: rejectControlHandlerAdmission,
+	}
+}
+
+// SetControlHandlerAdmission installs the mandatory exact-route admission used
+// by every permission, elicitation, and hook callback. A nil value restores the
+// fail-closed admission and cannot admit a callback.
+func (c *Client) SetControlHandlerAdmission(admission ControlHandlerAdmission) {
+	if admission == nil {
+		admission = rejectControlHandlerAdmission
+	}
+
+	c.controlTurnMu.Lock()
+	c.controlAdmission = admission
+	c.controlTurnMu.Unlock()
+}
+
+func rejectControlHandlerAdmission(ctx context.Context, _ string) (context.Context, func(), bool) {
+	return ctx, func() {}, false
 }
 
 // Start launches Claude, starts the controller, and initializes the control protocol.
@@ -116,7 +142,7 @@ func (c *Client) Start(ctx context.Context) error {
 
 	c.observeStartupStage(ctx, "spawn", spawnStarted, nil)
 
-	controller := NewController(c.log, c.transport)
+	controller := NewController(c.log, clientControllerTransport{Transport: c.transport, close: c.closeTransport})
 	controller.SetHandlerTimeout(c.options.ControlHandlerTimeout)
 	controller.RegisterHandler("can_use_tool", c.handleCanUseTool)
 	controller.RegisterHandler("elicitation", c.handleElicitation)
@@ -180,13 +206,38 @@ func (c *Client) observeStartupStage(ctx context.Context, stage string, started 
 }
 
 func (c *Client) closeTransportDebug(ctx context.Context, reason string) error {
-	if err := c.transport.Close(); err != nil {
-		c.log.DebugContext(ctx, "close Claude transport failed", slog.String("reason", reason), slog.String("error", err.Error()))
+	if err := c.closeTransport(); err != nil {
+		closed := closedTransportError(err)
+		c.log.DebugContext(ctx, "close Claude transport failed",
+			slog.String("reason", reason),
+			slog.String("class", transportErrorClass(closed)),
+		)
 
-		return err
+		return closed
 	}
 
 	return nil
+}
+
+// clientControllerTransport makes the controller and Client.Close share one
+// exact transport teardown. A fatal reader error may reach the controller at
+// the same time its owner closes the client; the underlying writer/process is
+// interrupted once and both paths observe the same result.
+type clientControllerTransport struct {
+	Transport
+	close func() error
+}
+
+func (t clientControllerTransport) Close() error { return t.close() }
+
+func (c *Client) closeTransport() error {
+	c.transportCloseOnce.Do(func() {
+		if c.transport != nil {
+			c.transportCloseErr = c.transport.Close()
+		}
+	})
+
+	return c.transportCloseErr
 }
 
 func (c *Client) activeController() *Controller {
@@ -343,7 +394,7 @@ func parseAvailableModels(value any) []AvailableModelInfo {
 }
 
 // Query sends user content to Claude and binds inbound control callbacks to
-// turnNonce until EndQuery clears that exact turn.
+// turnNonce until HandOffQuery releases that exact turn.
 func (c *Client) Query(ctx context.Context, turnNonce string, content any) error {
 	if c.isClosed() {
 		return ErrClientClosed
@@ -363,31 +414,41 @@ func (c *Client) Query(ctx context.Context, turnNonce string, content any) error
 		keySessionID:    c.options.SessionID,
 	}
 
-	return c.transport.Send(ctx, payload)
+	return closedTransportError(c.transport.Send(ctx, payload))
 }
 
-// EndQuery clears callback routing only when turnNonce still names the bound
-// query. An older prompt's deferred cleanup therefore cannot clear a newer
-// query's callback route.
-func (c *Client) EndQuery(turnNonce string) {
+// AdoptControlRoute binds inbound control callbacks to turnNonce outside any
+// query. It names the route a callback carries when no query owns one, so
+// callbacks the harness raises for work nobody submitted still arrive with an
+// identity their owner can be resolved from.
+func (c *Client) AdoptControlRoute(turnNonce string) {
+	c.controlTurnMu.Lock()
+	defer c.controlTurnMu.Unlock()
+
+	c.controlTurnNonce = turnNonce
+}
+
+// HandOffQuery rebinds callback routing from turnNonce to successor, and only
+// while turnNonce still names the bound query. An older prompt's deferred
+// handoff therefore cannot take a newer query's callback route, and a query that
+// ends leaves the route it held pointing at its successor rather than at nothing:
+// a callback raised after the query is still the session's to answer.
+func (c *Client) HandOffQuery(turnNonce string, successor string) {
 	c.controlTurnMu.Lock()
 	defer c.controlTurnMu.Unlock()
 
 	if c.controlTurnNonce == turnNonce {
-		c.controlTurnNonce = ""
+		c.controlTurnNonce = successor
 	}
 }
 
-func (c *Client) controlHandlerContext(ctx context.Context) context.Context {
+func (c *Client) controlHandlerContext(ctx context.Context) (context.Context, func(), bool) {
 	c.controlTurnMu.RLock()
 	turnNonce := c.controlTurnNonce
+	admission := c.controlAdmission
 	c.controlTurnMu.RUnlock()
 
-	if turnNonce == "" || c.options.ControlHandlerContext == nil {
-		return ctx
-	}
-
-	return c.options.ControlHandlerContext(ctx, turnNonce)
+	return admission(ctx, turnNonce)
 }
 
 // Receive waits for the next parsed Claude message.
@@ -400,8 +461,8 @@ func (c *Client) Receive(ctx context.Context) (Message, error) {
 	select {
 	case raw, ok := <-controller.Messages():
 		if !ok {
-			// Surface the real transport/process cause (exit status, stderr
-			// tail, transport error) rather than a bare stream-closed sentinel.
+			// Surface only the closed transport/process classification retained
+			// by the controller rather than a bare stream-closed sentinel.
 			if lastErr := controller.LastError(); lastErr != nil {
 				return nil, lastErr
 			}
@@ -556,14 +617,32 @@ func (c *Client) Close() error {
 		c.stateMu.Lock()
 		c.closed = true
 		cancel := c.cancel
+		controller := c.controller
 		c.stateMu.Unlock()
+
+		if c.transport != nil {
+			c.closeErr = closedTransportError(c.closeTransport())
+		}
+
+		if controller != nil {
+			select {
+			case <-controller.Done():
+			case <-time.After(5 * time.Second):
+				controller.AbortData()
+
+				if cancel != nil {
+					cancel()
+				}
+
+				<-controller.Done()
+
+				c.closeErr = errors.Join(c.closeErr,
+					&ControllerDataError{Kind: ControllerDataTeardownAbort})
+			}
+		}
 
 		if cancel != nil {
 			cancel()
-		}
-
-		if c.transport != nil {
-			c.closeErr = c.transport.Close()
 		}
 	})
 
@@ -571,9 +650,17 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) handleCanUseTool(ctx context.Context, req *ControlRequest) (map[string]any, error) {
-	ctx = c.controlHandlerContext(ctx)
+	ctx, finishAdmission, admitted := c.controlHandlerContext(ctx)
+	defer finishAdmission()
 
 	input, _ := req.Request["input"].(map[string]any)
+	if !admitted {
+		return PermissionDecision{
+			Behavior: BehaviorDeny,
+			Message:  "permission callback no longer has a live owner",
+		}.toPayload(input), nil
+	}
+
 	request := PermissionRequest{
 		Input: input,
 		Raw:   req.Request,
@@ -599,7 +686,12 @@ func (c *Client) handleCanUseTool(ctx context.Context, req *ControlRequest) (map
 }
 
 func (c *Client) handleElicitation(ctx context.Context, req *ControlRequest) (map[string]any, error) {
-	ctx = c.controlHandlerContext(ctx)
+	ctx, finishAdmission, admitted := c.controlHandlerContext(ctx)
+	defer finishAdmission()
+
+	if !admitted {
+		return ElicitationResponse{Action: ElicitationActionDecline}.toPayload(), nil
+	}
 
 	if c.options.ElicitationHandler == nil {
 		return ElicitationResponse{Action: ElicitationActionDecline}.toPayload(), nil
@@ -631,7 +723,12 @@ func (c *Client) handleElicitation(ctx context.Context, req *ControlRequest) (ma
 }
 
 func (c *Client) handleHookCallback(ctx context.Context, req *ControlRequest) (map[string]any, error) {
-	ctx = c.controlHandlerContext(ctx)
+	ctx, finishAdmission, admitted := c.controlHandlerContext(ctx)
+	defer finishAdmission()
+
+	if !admitted {
+		return HookResponse{}.toPayload(), nil
+	}
 
 	input, _ := req.Request[keyInput].(map[string]any)
 	responseMap, _ := input["tool_response"].(map[string]any)

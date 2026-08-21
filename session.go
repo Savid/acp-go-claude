@@ -6,6 +6,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/savid/acp-go-claude/internal/permissions"
 )
 
@@ -23,6 +24,7 @@ const (
 	jsonFieldFormat               = "format"
 	jsonFieldImportID             = "importId"
 	jsonFieldLine                 = "line"
+	jsonFieldLimit                = "limit"
 	jsonFieldData                 = "data"
 	jsonFieldMediaType            = "media_type"
 	jsonFieldMessage              = "message"
@@ -76,6 +78,7 @@ const (
 	elicitationComplete        = "elicitation_complete"
 	permissionCancelledMessage = "Permission request cancelled"
 	permissionRejectedMessage  = "Rejected by ACP client"
+	exitPlanModeOutsideMessage = "ExitPlanMode callback is outside the active turn"
 
 	askFieldAnswers     = "answers"
 	askFieldDescription = "description"
@@ -174,7 +177,52 @@ type agentSession struct {
 	// deliberately expose only a readiness tool during session establishment.
 	mcpRefreshPending bool
 
-	turn               chan struct{}
+	turn chan struct{}
+	// foreground is the session's foreground token: exactly one of a prompt turn
+	// and an agent-origin excursion holds it at a time. It is a one-slot channel
+	// rather than a mutex because the native reader must be able to offer a frame
+	// to a prompt that publishes its sink while the reader is still waiting for
+	// the foreground, which a blocking lock could not do.
+	foreground chan struct{}
+	// excursion is the open agent-origin turn, held under the foreground token. It
+	// exists only while native work runs with no prompt behind it.
+	excursion *agentExcursion
+	// autonomousErr latches the first between-prompt failure this session could
+	// not report to the host, and autonomousClient names the native client whose
+	// incarnation that failure ended. Both are guarded by mu. The pair is what
+	// makes the refusal specific: work addressed to the contained incarnation is
+	// refused, and a relaunched one clears it.
+	autonomousErr    error
+	autonomousClient *claude.Client
+	// toolUpdates is the incarnation's tool-call and workflow correlation, held
+	// under the foreground token. It follows the native process rather than the
+	// prompt, so a task started inside a prompt and finished after it stays one
+	// task.
+	toolUpdates mapper.ToolUpdateOptions
+	// autonomousNonce is the callback route this incarnation's native work carries
+	// while no prompt owns the foreground. It rotates whenever a prompt dispatches,
+	// so a callback captured before that prompt can never become current again when
+	// the prompt hands control back. autonomousIncarnation is the exact pump
+	// generation that owns every route minted during that process lifetime.
+	// autonomousMu guards both and the foreground token, and is a leaf: it is taken
+	// under the lifecycle stream's lock and takes nothing itself.
+	autonomousMu          sync.Mutex
+	autonomousNonce       string
+	autonomousIncarnation *nativeIncarnation
+	// callbackOwnershipMu is the callback/prompt admission primitive. A native
+	// callback registers its exact route and incarnation under it, while prompt
+	// dispatch checks the same set before sending. The stream lock is always below
+	// this lock.
+	callbackOwnershipMu sync.Mutex
+	callbackAdmissions  map[*controlCallbackAdmission]struct{}
+	// producers gates work that may emit after an establishing response or from
+	// detached native-retirement supervision. Close shuts the gate before it
+	// tears down the carrier and joins every producer admitted before that point.
+	producers sessionProducerGate
+	// establishment holds the exact route native callbacks capture while the
+	// session response has not reached the host yet.
+	establishmentMu    sync.Mutex
+	establishment      *sessionEstablishment
 	cancelMu           sync.Mutex
 	toolCallUpdateMu   sync.Mutex
 	imageMu            sync.Mutex
@@ -216,7 +264,6 @@ type agentSession struct {
 	rawEventSequence int64
 	handledHooks     map[string]struct{}
 	handledHookOrder []string
-	turnAcquiredHook func(int)
 	// closeMu serializes close and guards the memoized terminal result.
 	// closeSettled is set only for a close that completed every rung it owed, so
 	// neither an abandoned barrier nor a failed boundary latches a terminal result

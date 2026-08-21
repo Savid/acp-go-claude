@@ -1,7 +1,9 @@
 package claudeacp
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"testing"
@@ -11,6 +13,40 @@ import (
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
+
+func TestFailureBoundariesKeepSecretsOutAndCausalIdentityIn(t *testing.T) {
+	const secret = "SECRET_SENTINEL_store_callback_panic_mirror_provider_path"
+	cause := errors.New(secret)
+
+	storeFailure := storeCommitError(cause)
+	require.ErrorIs(t, storeFailure, cause)
+	require.NotContains(t, storeFailure.Error(), secret)
+
+	providerFailure := providerTurnFailure(&claude.ResultMessage{
+		IsError: true, Error: secret, Result: secret, Subtype: secret,
+	})
+	require.NotContains(t, providerFailure.Error(), secret)
+
+	deadlineFailure := errors.Join(context.DeadlineExceeded, cause)
+	wireDeadline := requestError(context.Background(), deadlineFailure)
+	require.Equal(t, "deadline", requireAnyMap(t, wireDeadline.Data)["class"])
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	wireCancelled := requestError(cancelledCtx, errors.Join(context.Canceled, cause))
+	require.Equal(t, -32800, wireCancelled.Code)
+
+	wireStore := requestError(context.Background(), storeFailure)
+	encoded, err := json.Marshal([]*acp.RequestError{wireDeadline, wireCancelled, wireStore})
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), secret)
+
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	handleAgentGoroutinePanic(t.Context(), log, "secret-safe-test", nil, secret)
+	mirror := newSessionMirror(log, NewInMemorySessionStore(), t.TempDir(), nil)
+	require.NoError(t, mirror.appendFrame(t.Context(), &claude.TranscriptMirrorMessage{FilePath: secret}))
+	require.NotContains(t, logs.String(), secret)
+}
 
 // requireTurnFailure asserts err is the uniform claude_turn_failed JSON-RPC
 // error with the given code, cause, and (when non-empty) a message substring.
@@ -42,18 +78,19 @@ func TestNativeTurnFailureClassification(t *testing.T) {
 	t.Parallel()
 
 	require.Nil(t, nativeTurnFailure(nil))
+	requireTurnFailure(t, nativeTurnFailure(context.DeadlineExceeded), -32603, failureCauseTransport, context.DeadlineExceeded.Error())
 	requireTurnFailure(t, nativeTurnFailure(claude.ErrProcessExited), -32603, failureCauseProcessExit, "claude exited")
-	requireTurnFailure(t, nativeTurnFailure(errors.New("weird")), -32603, failureCauseTransport, "weird")
+	data := requireTurnFailure(t, nativeTurnFailure(errors.New("provider-store-tool-user-secret")), -32603,
+		failureCauseTransport, nativeTransportFailureMessage)
+	require.NotContains(t, data[jsonFieldMessage], "provider-store-tool-user-secret")
 }
 
-func TestProviderErrorMessageFallbacks(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t, "result text", providerErrorMessage(&claude.ResultMessage{Result: "result text"}))
-	require.Equal(t, "singular error", providerErrorMessage(&claude.ResultMessage{Error: "singular error"}))
-	require.Equal(t, "a; b", providerErrorMessage(&claude.ResultMessage{Errors: []string{"a", "b"}}))
-	require.Equal(t, "sub", providerErrorMessage(&claude.ResultMessage{Subtype: "sub"}))
-	require.Equal(t, "claude reported a turn error", providerErrorMessage(&claude.ResultMessage{}))
+func TestReceiveTurnFailureRecordsUnexpectedNativeExitBeforeSanitizing(t *testing.T) {
+	session := &agentSession{agent: NewAgent()}
+	_, err := session.receiveTurnFailure(
+		t.Context(), t.Context(), nil, claude.ErrMessageStreamClosed, false,
+	)
+	requireTurnFailure(t, err, -32603, failureCauseTransport, nativeTransportFailureMessage)
 }
 
 // A relaunch that fails to start surfaces as a transport failure at the next
@@ -88,7 +125,8 @@ func TestEnsureClientAliveRelaunchError(t *testing.T) {
 	require.False(t, session.client.Alive())
 
 	_, err = agent.Prompt(ctx, TextPromptRequest(sid, "test-turn", "hello"))
-	requireTurnFailure(t, err, -32603, failureCauseTransport, "relaunch failed")
+	data := requireTurnFailure(t, err, -32603, failureCauseTransport, nativeTransportFailureMessage)
+	require.NotContains(t, data[jsonFieldMessage], "relaunch failed")
 	require.Contains(t, agent.sessions, sid)
 }
 
@@ -106,8 +144,7 @@ func TestTurnFailureProviderError(t *testing.T) {
 		session, transport, cleanup := newPromptFlowSession(t)
 		defer cleanup()
 
-		// The result frame carries the cause in the singular error field with an
-		// empty result; it must still be surfaced.
+		// Provider payload text is classified but never surfaced.
 		transport.queryMsgs = []map[string]any{{
 			"type":     "result",
 			"subtype":  "error",
@@ -117,11 +154,11 @@ func TestTurnFailureProviderError(t *testing.T) {
 
 		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.Empty(t, resp.StopReason)
-		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "rate limit exceeded")
+		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "claude provider turn failed")
+		require.NotContains(t, data[jsonFieldMessage], "rate limit exceeded")
 
-		// The failure data carries only the uniform fields: a non-empty subtype
-		// is surfaced, and the undocumented top-level errors/errorKind are gone.
-		require.Equal(t, "error", data[jsonFieldSubtype])
+		// The failure data carries only adapter-owned uniform fields.
+		require.NotContains(t, data, jsonFieldSubtype)
 		require.NotContains(t, data, "errors")
 		require.NotContains(t, data, "errorKind")
 	})
@@ -139,15 +176,15 @@ func TestTurnFailureProviderError(t *testing.T) {
 
 		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.Empty(t, resp.StopReason)
-		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "Please run /login")
+		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "claude provider turn failed")
+		require.NotContains(t, data[jsonFieldMessage], "Please run /login")
 
 		// An empty subtype is omitted entirely rather than emitted as "".
 		require.NotContains(t, data, jsonFieldSubtype)
 	})
 }
 
-// T2 — a severed turn transport recovers and surfaces the real cause, never a
-// bare EOF or the fixed "start a new session" placeholder.
+// T2 — a severed turn transport reports the fixed sanitized classification.
 func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	t.Parallel()
 
@@ -157,20 +194,19 @@ func TestTurnFailureTransportRecoversCause(t *testing.T) {
 	transport.queryMsgs = nil
 	transport.onQuery = func() {
 		transport.errs <- &claude.ProcessExitError{
-			ExitCode:   1,
-			StderrTail: "anthropic api: connection reset by peer",
-			Err:        errors.New("read: connection reset"),
+			ExitCode: 1,
 		}
 	}
 
 	_, err := session.Prompt(context.Background(), TextPromptRequest(session.id, "test-turn", "hello"))
-	data := requireTurnFailure(t, err, -32603, failureCauseProcessExit, "anthropic api: connection reset by peer")
+	data := requireTurnFailure(t, err, -32603, failureCauseProcessExit, "claude exited with status 1")
 	message, _ := data[jsonFieldMessage].(string)
+	require.NotContains(t, message, "anthropic api")
 	require.NotContains(t, message, "Please start a new session")
 }
 
-// T3 — process death mid-turn surfaces the exit status and stderr tail, leaves
-// the session addressable, and a follow-up prompt relaunches the native process.
+// T3 — process death mid-turn surfaces only the closed exit status, leaves the
+// session addressable, and a follow-up prompt relaunches the native process.
 func TestTurnFailureProcessDeathRelaunch(t *testing.T) {
 	t.Parallel()
 
@@ -196,14 +232,12 @@ func TestTurnFailureProcessDeathRelaunch(t *testing.T) {
 	first.queryMsgs = nil
 	first.onQuery = func() {
 		first.errs <- &claude.ProcessExitError{
-			ExitCode:   9,
-			StderrTail: "fatal: out of memory",
-			Err:        errors.New("signal: killed"),
+			ExitCode: 9,
 		}
 	}
 
 	_, err = agent.Prompt(ctx, TextPromptRequest(sid, "test-turn", "hello"))
-	data := requireTurnFailure(t, err, -32603, failureCauseProcessExit, "fatal: out of memory")
+	data := requireTurnFailure(t, err, -32603, failureCauseProcessExit, "claude exited with status 9")
 	exitMessage, _ := data[jsonFieldMessage].(string)
 	require.Contains(t, exitMessage, "status 9")
 

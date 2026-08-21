@@ -25,6 +25,25 @@ type bufferWriteCloser struct {
 	closed bool
 }
 
+func splitEventsForTest(events <-chan TransportEvent) (<-chan map[string]any, <-chan error) {
+	messages := make(chan map[string]any)
+	errs := make(chan error, 1)
+	go func() {
+		defer close(messages)
+		defer close(errs)
+		for event := range events {
+			if event.Err != nil {
+				errs <- event.Err
+
+				return
+			}
+			messages <- event.Message
+		}
+	}()
+
+	return messages, errs
+}
+
 func (w *bufferWriteCloser) Close() error {
 	w.closed = true
 
@@ -42,6 +61,13 @@ type errorWriteCloser struct{}
 
 type errorReadCloser struct {
 	err error
+}
+
+type panicReadCloser struct{}
+
+type cancelAfterLineReader struct {
+	line   []byte
+	cancel context.CancelFunc
 }
 
 type deadlineWriteCloser struct {
@@ -139,6 +165,32 @@ func (r errorReadCloser) Read([]byte) (int, error) {
 }
 
 func (r errorReadCloser) Close() error {
+	return nil
+}
+
+func (panicReadCloser) Read([]byte) (int, error) {
+	panic("boom")
+}
+
+func (panicReadCloser) Close() error {
+	return nil
+}
+
+func (r *cancelAfterLineReader) Read(data []byte) (int, error) {
+	if len(r.line) == 0 {
+		return 0, io.EOF
+	}
+
+	n := copy(data, r.line)
+	r.line = r.line[n:]
+	if len(r.line) == 0 {
+		r.cancel()
+	}
+
+	return n, nil
+}
+
+func (*cancelAfterLineReader) Close() error {
 	return nil
 }
 
@@ -266,13 +318,13 @@ func TestProcessTransportSendContextCancelUnblocksDeadlineWriter(t *testing.T) {
 	require.ErrorIs(t, <-done, context.Canceled)
 }
 
-func TestProcessTransportMessages(t *testing.T) {
+func TestProcessTransportEvents(t *testing.T) {
 	t.Parallel()
 
 	transport := &ProcessTransport{
 		stdout: io.NopCloser(strings.NewReader("noise\n{\"type\":\"assistant\"}\n{\"bad\"\n{\"type\":\"result\"}\n")),
 	}
-	messages, errs := transport.Messages(context.Background())
+	messages, errs := splitEventsForTest(transport.Events(context.Background()))
 
 	var got []map[string]any
 	for msg := range messages {
@@ -308,58 +360,36 @@ func TestProcessTransportRecoverStderrDrainClosesTransport(t *testing.T) {
 	require.True(t, stdin.closed)
 }
 
-func TestProcessTransportRecoverStdoutReaderReportsAndClosesTransport(t *testing.T) {
-	t.Parallel()
-
-	stdin := &bufferWriteCloser{Buffer: &bytes.Buffer{}}
-	errs := make(chan error, 1)
-	transport := &ProcessTransport{
-		log:   slog.New(slog.DiscardHandler),
-		stdin: stdin,
-	}
-
-	func() {
-		defer transport.recoverStdoutReader(context.Background(), errs)
-
-		panic("boom")
-	}()
-
-	require.ErrorContains(t, <-errs, "claude stdout reader panic: boom")
-	require.True(t, stdin.closed)
-}
-
-func TestProcessTransportMessagesRecoversStdoutPanic(t *testing.T) {
-	afterDecode := processAfterDecode
-	processAfterDecode = func() { panic("boom") }
-	t.Cleanup(func() { processAfterDecode = afterDecode })
-
+func TestProcessTransportEventsRecoverStdoutPanic(t *testing.T) {
 	stdin := &bufferWriteCloser{Buffer: &bytes.Buffer{}}
 	transport := &ProcessTransport{
 		log:    slog.New(slog.DiscardHandler),
 		stdin:  stdin,
-		stdout: io.NopCloser(strings.NewReader("{\"type\":\"assistant\"}\n")),
+		stdout: panicReadCloser{},
 	}
-	messages, errs := transport.Messages(context.Background())
+	messages, errs := splitEventsForTest(transport.Events(context.Background()))
 
 	for range messages {
 	}
 
-	require.ErrorContains(t, <-errs, "claude stdout reader panic: boom")
+	err := <-errs
+	require.ErrorIs(t, err, errClaudeStdoutReaderPanic)
+	require.NotContains(t, err.Error(), "boom")
 	require.True(t, stdin.closed)
 }
 
-func TestProcessTransportMessagesIsSingleUse(t *testing.T) {
+func TestProcessTransportEventsAreSingleUse(t *testing.T) {
 	t.Parallel()
 
 	transport := &ProcessTransport{
 		stdout: io.NopCloser(strings.NewReader("{\"type\":\"assistant\"}\n")),
 	}
-	firstMessages, firstErrs := transport.Messages(context.Background())
-	secondMessages, secondErrs := transport.Messages(context.Background())
+	firstMessages, firstErrs := splitEventsForTest(transport.Events(context.Background()))
+	secondMessages, secondErrs := splitEventsForTest(transport.Events(context.Background()))
 
 	_, ok := <-secondMessages
 	require.False(t, ok)
-	require.ErrorIs(t, <-secondErrs, errMessagesAlreadyStarted)
+	require.ErrorIs(t, <-secondErrs, errEventsAlreadyStarted)
 
 	var got []map[string]any
 	for msg := range firstMessages {
@@ -371,7 +401,7 @@ func TestProcessTransportMessagesIsSingleUse(t *testing.T) {
 	require.Len(t, got, 1)
 }
 
-func TestProcessTransportMessagesAfterClose(t *testing.T) {
+func TestProcessTransportEventsAfterClose(t *testing.T) {
 	t.Parallel()
 
 	transport := &ProcessTransport{
@@ -379,13 +409,13 @@ func TestProcessTransportMessagesAfterClose(t *testing.T) {
 	}
 	require.NoError(t, transport.Close())
 
-	messages, errs := transport.Messages(context.Background())
+	messages, errs := splitEventsForTest(transport.Events(context.Background()))
 	_, ok := <-messages
 	require.False(t, ok)
 	require.ErrorIs(t, <-errs, ErrClientClosed)
 }
 
-func TestProcessTransportMessagesContextCancelled(t *testing.T) {
+func TestProcessTransportEventsContextCancelled(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -394,7 +424,7 @@ func TestProcessTransportMessagesContextCancelled(t *testing.T) {
 	transport := &ProcessTransport{
 		stdout: io.NopCloser(strings.NewReader("{\"type\":\"assistant\"}\n")),
 	}
-	messages, errs := transport.Messages(ctx)
+	messages, errs := splitEventsForTest(transport.Events(ctx))
 
 	var got []map[string]any
 	for msg := range messages {
@@ -405,25 +435,24 @@ func TestProcessTransportMessagesContextCancelled(t *testing.T) {
 	require.ErrorIs(t, <-errs, context.Canceled)
 }
 
-func TestProcessTransportMessagesCancelledWhileSending(t *testing.T) {
+func TestProcessTransportEventsCancellationPreservesQueuedFrame(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	afterDecode := processAfterDecode
-	processAfterDecode = cancel
-	t.Cleanup(func() {
-		processAfterDecode = afterDecode
-	})
 
 	transport := &ProcessTransport{
-		stdout: io.NopCloser(strings.NewReader("{\"type\":\"assistant\"}\n")),
+		stdout: &cancelAfterLineReader{
+			line:   []byte("{\"type\":\"assistant\"}\n"),
+			cancel: cancel,
+		},
 	}
-	messages, errs := transport.Messages(ctx)
+	messages, errs := splitEventsForTest(transport.Events(ctx))
 
+	require.Equal(t, "assistant", (<-messages)["type"])
 	require.ErrorIs(t, <-errs, context.Canceled)
 	_, ok := <-messages
 	require.False(t, ok)
 }
 
-func TestProcessTransportMessagesContextCancelWaitsForProcess(t *testing.T) {
+func TestProcessTransportEventsContextCancelWaitsForProcess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
@@ -438,7 +467,7 @@ func TestProcessTransportMessagesContextCancelWaitsForProcess(t *testing.T) {
 		cmd:    cmd,
 		stdout: io.NopCloser(strings.NewReader("{\"type\":\"assistant\"}\n")),
 	}
-	messages, errs := transport.Messages(ctx)
+	messages, errs := splitEventsForTest(transport.Events(ctx))
 	for range messages {
 	}
 	for range errs {
@@ -447,18 +476,18 @@ func TestProcessTransportMessagesContextCancelWaitsForProcess(t *testing.T) {
 	require.NotNil(t, cmd.ProcessState)
 }
 
-func TestProcessTransportMessagesReadAndWaitErrors(t *testing.T) {
+func TestProcessTransportEventsReadAndWaitErrors(t *testing.T) {
 	t.Parallel()
 
 	transport := &ProcessTransport{
 		stdout: errorReadCloser{err: errors.New("read failed")},
 	}
-	messages, errs := transport.Messages(context.Background())
+	messages, errs := splitEventsForTest(transport.Events(context.Background()))
 	for range messages {
 	}
 	err := <-errs
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "read claude stdout")
+	require.ErrorIs(t, err, errClaudeStdoutRead)
 
 	cmd := exec.Command("sh", "-c", "exit 7")
 	require.NoError(t, cmd.Start())
@@ -467,7 +496,7 @@ func TestProcessTransportMessagesReadAndWaitErrors(t *testing.T) {
 		cmd:    cmd,
 		stdout: io.NopCloser(strings.NewReader("")),
 	}
-	messages, errs = transport.Messages(context.Background())
+	messages, errs = splitEventsForTest(transport.Events(context.Background()))
 	for range messages {
 	}
 
@@ -476,7 +505,7 @@ func TestProcessTransportMessagesReadAndWaitErrors(t *testing.T) {
 	require.Contains(t, err.Error(), "claude exited")
 }
 
-func TestProcessTransportMessagesReadAndWaitErrorsDoNotBlock(t *testing.T) {
+func TestProcessTransportEventsReadAndWaitErrorsDoNotBlock(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
@@ -488,7 +517,7 @@ func TestProcessTransportMessagesReadAndWaitErrorsDoNotBlock(t *testing.T) {
 		cmd:    cmd,
 		stdout: io.NopCloser(strings.NewReader("{bad\n")),
 	}
-	messages, errs := transport.Messages(context.Background())
+	messages, errs := splitEventsForTest(transport.Events(context.Background()))
 	for range messages {
 	}
 
@@ -497,21 +526,21 @@ func TestProcessTransportMessagesReadAndWaitErrorsDoNotBlock(t *testing.T) {
 		got = append(got, err)
 	}
 
-	// The malformed line is skipped (not surfaced); only the non-zero process
-	// exit is reported, and it carries the real cause.
+	// The malformed line is skipped; only the sanitized process status is
+	// reported.
 	require.Len(t, got, 1)
 	require.Contains(t, got[0].Error(), "claude exited")
 	require.ErrorIs(t, got[0], ErrProcessExited)
 	require.Equal(t, uint64(1), transport.malformedLines.Load())
 }
 
-func TestProcessTransportMessagesPreservesBurstErrors(t *testing.T) {
+func TestProcessTransportEventsPreserveJoinedTerminalErrors(t *testing.T) {
 	t.Parallel()
 
 	transport := &ProcessTransport{
 		stdout: io.NopCloser(strings.NewReader("{bad\n{worse\n{nope\n{still-bad\n")),
 	}
-	messages, errs := transport.Messages(context.Background())
+	messages, errs := splitEventsForTest(transport.Events(context.Background()))
 	for range messages {
 	}
 
@@ -526,14 +555,14 @@ func TestProcessTransportMessagesPreservesBurstErrors(t *testing.T) {
 	require.Equal(t, uint64(4), transport.malformedLines.Load())
 }
 
-func TestProcessTransportMessagesAcceptsLargeJSONLines(t *testing.T) {
+func TestProcessTransportEventsAcceptLargeJSONLines(t *testing.T) {
 	t.Parallel()
 
 	large := strings.Repeat("x", maxJSONLineBytes/2)
 	transport := &ProcessTransport{
 		stdout: io.NopCloser(strings.NewReader(`{"type":"assistant","text":"` + large + `"}`)),
 	}
-	messages, errs := transport.Messages(context.Background())
+	messages, errs := splitEventsForTest(transport.Events(context.Background()))
 
 	msg := <-messages
 	require.Equal(t, MessageTypeAssistant, msg[keyType])
@@ -542,33 +571,6 @@ func TestProcessTransportMessagesAcceptsLargeJSONLines(t *testing.T) {
 	_, ok := <-messages
 	require.False(t, ok)
 	require.Empty(t, errs)
-}
-
-func TestSendTransportErrorIgnoresNil(t *testing.T) {
-	t.Parallel()
-
-	errs := make(chan error, 1)
-	require.True(t, sendTransportError(errs, nil))
-
-	require.Empty(t, errs)
-}
-
-func TestProcessTransportLogsDroppedErrors(t *testing.T) {
-	t.Parallel()
-
-	var logs bytes.Buffer
-	transport := &ProcessTransport{
-		log: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-	}
-	errs := make(chan error, 1)
-	errs <- errors.New("first")
-
-	transport.sendError(errs, errors.New("second"))
-
-	require.Contains(t, logs.String(), "dropped claude transport error")
-	require.Contains(t, logs.String(), "second")
-
-	(&ProcessTransport{}).sendError(errs, errors.New("third"))
 }
 
 func TestProcessTransportDrainStderr(t *testing.T) {
@@ -584,17 +586,17 @@ func TestProcessTransportDrainStderr(t *testing.T) {
 
 	transport.drainStderr()
 
-	require.Contains(t, logs.String(), "first")
-	require.Contains(t, logs.String(), "second")
+	require.NotContains(t, logs.String(), "first")
+	require.NotContains(t, logs.String(), "second")
 }
 
-func TestProcessTransportMessagesRejectsOversizedLine(t *testing.T) {
+func TestProcessTransportEventsRejectOversizedLine(t *testing.T) {
 	t.Parallel()
 
 	transport := &ProcessTransport{
 		stdout: io.NopCloser(strings.NewReader(`{"type":"` + strings.Repeat("x", maxJSONLineBytes+1) + `"}` + "\n")),
 	}
-	messages, errs := transport.Messages(context.Background())
+	messages, errs := splitEventsForTest(transport.Events(context.Background()))
 
 	for range messages {
 		t.Fatal("oversized line should not produce a message")
@@ -605,7 +607,7 @@ func TestProcessTransportMessagesRejectsOversizedLine(t *testing.T) {
 		gotErr = err
 	}
 	require.Error(t, gotErr)
-	require.Contains(t, gotErr.Error(), "read claude stdout")
+	require.ErrorIs(t, gotErr, errClaudeStdoutRead)
 }
 
 func TestProcessTransportCloseStopsStderrDrain(t *testing.T) {
@@ -618,7 +620,7 @@ func TestProcessTransportCloseStopsStderrDrain(t *testing.T) {
 		stdout: io.NopCloser(strings.NewReader("")),
 		stderr: stderrReader,
 	}
-	messages, errs := transport.Messages(context.Background())
+	messages, errs := splitEventsForTest(transport.Events(context.Background()))
 	for range messages {
 	}
 	for range errs {

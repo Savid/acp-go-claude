@@ -3,7 +3,6 @@ package claudeacp
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"strconv"
 	"sync"
@@ -18,9 +17,7 @@ import (
 // the budget its own durable prefix was given is not slow, it is wedged.
 const defaultSessionSettlementTimeout = defaultSessionMirrorCommitTimeout
 
-// sessionSettlementTimeout is the live bound. It is a var so a test can prove
-// the bound exists without waiting out the real budget.
-var sessionSettlementTimeout = defaultSessionSettlementTimeout
+var errExactInteractionContainment = errors.New("the owning native incarnation failed")
 
 // The entities one incarnation mints are named from the incarnation identity, so
 // a reader can see at a glance which stream a cycle, a turn, or an action
@@ -108,15 +105,20 @@ type sessionStream struct {
 	actions map[string]*streamAction
 }
 
-// streamTurn is one open foreground cycle. The nonce is the route the prompt
-// authenticated with, which is what makes an inbound control callback's owner a
-// fact rather than an assumption about which prompt happens to be running.
+// streamTurn is one open foreground cycle. The nonce is the route the callback
+// surface authenticated with — the prompt's for a submission-origin turn and the
+// incarnation's autonomous route for an agent-origin one — which is what makes an
+// inbound control callback's owner a fact rather than an assumption about which
+// turn happens to be running. The origin is fixed when the turn opens and is the
+// cause every one of its transitions carries.
 type streamTurn struct {
-	turnID   string
-	cycleID  string
-	nonce    string
-	runID    string
-	blockers int
+	turnID      string
+	cycleID     string
+	nonce       string
+	runID       string
+	origin      lifecycle.Cause
+	incarnation *nativeIncarnation
+	blockers    int
 }
 
 // streamAction is one announced action awaiting an answer. It holds the record
@@ -125,6 +127,12 @@ type streamTurn struct {
 type streamAction struct {
 	update lifecycle.ActionUpdate
 	turn   *streamTurn
+	wire   actionWireIdentity
+}
+
+type controlCallbackOwner struct {
+	incarnation *nativeIncarnation
+	autonomous  bool
 }
 
 // newSessionStream builds the stream for a negotiated connection.
@@ -226,6 +234,15 @@ func (p *sessionStream) dispatch(
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// A callback carrying the autonomous route can open an agent-origin turn
+	// after Prompt's early foreground check but before this acceptance point.
+	// This check shares p.mu with action preparation, so exactly one wins. The prompt
+	// that loses is refused before send and leaves the excursion, its blocker and
+	// the stream's refusal latches untouched.
+	if p.turn != nil && p.turn.origin == lifecycle.CauseActivity {
+		return "", backpressureError("session_foreground")
+	}
+
 	if err := p.emittable(); err != nil {
 		return "", err
 	}
@@ -235,10 +252,12 @@ func (p *sessionStream) dispatch(
 	}
 
 	turn := &streamTurn{
-		turnID:  p.mint(lifecycleTurnSuffix),
-		cycleID: p.cycleID,
-		nonce:   nonce,
-		runID:   submission.RunID,
+		turnID:      p.mint(lifecycleTurnSuffix),
+		cycleID:     p.cycleID,
+		nonce:       nonce,
+		runID:       submission.RunID,
+		origin:      lifecycle.CauseSubmission,
+		incarnation: p.session.currentNativeIncarnation(),
 	}
 
 	if err := p.emitLocked(ctx, lifecycle.AcceptedEvent(submission, turn.turnID)); err != nil {
@@ -247,7 +266,100 @@ func (p *sessionStream) dispatch(
 
 	p.turn = turn
 
-	return turn.turnID, p.emitLocked(ctx, lifecycle.TransitionEvent(lifecycle.ForegroundRunning, turn.cycleID, turn.turnID))
+	return turn.turnID, p.emitLocked(ctx,
+		lifecycle.TransitionEvent(turn.origin, lifecycle.ForegroundRunning, turn.cycleID, turn.turnID))
+}
+
+// openAgentTurn opens the agent-origin turn that represents one between-prompt
+// excursion, and reports its identity. The turn carries no submission because no
+// client input caused it: the `activity`-caused running transition naming a turn
+// the stream has not introduced is what opens it, and is the only event other
+// than acceptance that opens a turn at all.
+//
+// A foreground a turn already holds opens nothing. The prompt path settles the
+// excursion it pre-empts before it dispatches, so a second turn here would be a
+// foreground two turns claim rather than an excursion the host was owed.
+func (p *sessionStream) openAgentTurn(ctx context.Context, route string) (string, error) {
+	if p == nil {
+		return "", nil
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.openAgentTurnLocked(ctx, route)
+}
+
+func (p *sessionStream) openAgentTurnLocked(ctx context.Context, route string) (string, error) {
+	if !p.live || p.turn != nil {
+		return "", nil
+	}
+
+	if err := p.emittable(); err != nil {
+		return "", err
+	}
+
+	turn := &streamTurn{
+		turnID:      p.mint(lifecycleTurnSuffix),
+		cycleID:     p.cycleID,
+		nonce:       route,
+		origin:      lifecycle.CauseActivity,
+		incarnation: p.session.autonomousOwner(route),
+	}
+	p.turn = turn
+
+	return turn.turnID, p.emitLocked(ctx,
+		lifecycle.TransitionEvent(turn.origin, lifecycle.ForegroundRunning, turn.cycleID, turn.turnID))
+}
+
+// agentTurnID reports the open agent-origin turn, or the empty string when the
+// foreground is idle or a prompt holds it. It is how the native pump adopts a
+// turn a control callback opened ahead of the first frame of the same excursion:
+// one excursion is one turn, whichever of the two first proved it was running.
+func (p *sessionStream) agentTurnID() string {
+	if p == nil {
+		return ""
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.turn == nil || p.turn.origin != lifecycle.CauseActivity {
+		return ""
+	}
+
+	return p.turn.turnID
+}
+
+// callbackOwner resolves one captured route while the session's callback
+// ownership primitive excludes prompt dispatch. A running turn is the only
+// owner while it exists; otherwise the current autonomous route names the exact
+// incarnation that may open an agent-origin turn.
+func (p *sessionStream) callbackOwner(nonce string) (controlCallbackOwner, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.live || p.fenced {
+		return controlCallbackOwner{}, false
+	}
+
+	if p.turn != nil {
+		if p.turn.nonce != nonce {
+			return controlCallbackOwner{}, false
+		}
+
+		return controlCallbackOwner{
+			incarnation: p.turn.incarnation,
+			autonomous:  p.turn.origin == lifecycle.CauseActivity,
+		}, true
+	}
+
+	incarnation := p.session.autonomousOwner(nonce)
+	if incarnation == nil || incarnation.failed.Load() {
+		return controlCallbackOwner{}, false
+	}
+
+	return controlCallbackOwner{incarnation: incarnation, autonomous: true}, true
 }
 
 // settleTurn ends the open turn. Every action still blocking the cycle
@@ -276,12 +388,14 @@ func (p *sessionStream) settleTurn(ctx context.Context, turnID string, outcome l
 	turn := p.turn
 	p.turn = nil
 
-	return p.emitLocked(ctx, lifecycle.IdleEvent(turn.cycleID, turn.turnID, outcome.stopReason, outcome.outcome))
+	return p.emitLocked(ctx,
+		lifecycle.IdleEvent(turn.origin, turn.cycleID, turn.turnID, outcome.stopReason, outcome.outcome))
 }
 
-// announceAction registers one inbound native control request against a fresh
-// action identity and emits the announcing action_update, so a host never sees an
-// action id the adapter cannot yet resolve. The owner and the blocking fact are
+// prepareAction reserves the identity and owner correlation an outbound host
+// request carries. It emits no pending action yet: the real JSON-RPC request must
+// be registered and written successfully before announcePreparedAction can state
+// that the host has a pending action. The owner and the blocking fact are
 // read from the callback's own turn route: this adapter admits a control callback
 // only for the turn that authenticated it, and that turn's native dispatcher is
 // waiting on the answer, so the action blocks exactly that cycle.
@@ -289,7 +403,15 @@ func (p *sessionStream) settleTurn(ctx context.Context, turnID string, outcome l
 // A callback the stream cannot attribute to an open turn announces nothing and
 // carries no correlation value: an owner is a fact, never a guess about which
 // prompt happens to be running.
-func (p *sessionStream) announceAction(
+//
+// Ownership is resolved before emittability, and the order is load-bearing. A
+// callback that owns nothing on this stream is the same non-event whatever state
+// the stream is in, so a stream latched by work this callback has nothing to do
+// with must not turn it into a wire-visible error: a retired route stays unowned
+// rather than becoming a failure the caller reports. Only a callback that really
+// does name a live owner is entitled to an answer about whether this stream can
+// still speak.
+func (p *sessionStream) prepareAction(
 	ctx context.Context,
 	nonce string,
 	kind lifecycle.ActionKind,
@@ -300,6 +422,30 @@ func (p *sessionStream) announceAction(
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// The route the callback authenticated with is the whole answer about its
+	// owner. A callback naming the turn that holds the foreground belongs to that
+	// turn; one naming this incarnation's autonomous route while the foreground is
+	// idle is native work running with no prompt behind it, which is an excursion
+	// and opens the agent-origin turn that owns it.
+	//
+	// Every other callback belongs to nothing and announces nothing. A dead
+	// prompt's route, a route a newer prompt replaced, and a route from a retired
+	// incarnation each name no live owner, and an owner is a fact rather than a
+	// guess about which turn happens to be running.
+	if p.turn == nil {
+		if nonce != p.session.autonomousRoute() {
+			return lifecycle.ActionUpdate{}, nil
+		}
+
+		if err := p.emittable(); err != nil {
+			return lifecycle.ActionUpdate{}, err
+		}
+
+		if _, err := p.openAgentTurnLocked(ctx, nonce); err != nil {
+			return lifecycle.ActionUpdate{}, err
+		}
+	}
 
 	turn := p.turn
 	if turn == nil || turn.nonce != nonce {
@@ -320,21 +466,100 @@ func (p *sessionStream) announceAction(
 		BlocksForeground: &blocks,
 	}
 
-	p.actions[update.ActionID] = &streamAction{update: update, turn: turn}
+	return update, nil
+}
+
+// announcePreparedAction binds a prepared action to the exact JSON-RPC request
+// line observed at the transport boundary, then emits pending and blocks its
+// owner. A lost owner, duplicate write, wrong request family, or empty request
+// identity fails closed before any action is published.
+func (p *sessionStream) announcePreparedAction(
+	ctx context.Context,
+	update lifecycle.ActionUpdate,
+	wire actionWireIdentity,
+) error {
+	if p == nil || update.ActionID == "" {
+		return nil
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if wire.requestID == "" || !actionMethodMatches(update.Kind, wire.method) {
+		return lifecycleViolationError("lifecycle action has no exact host request write")
+	}
+
+	if _, exists := p.actions[update.ActionID]; exists {
+		return lifecycleViolationError("lifecycle action host request was announced more than once")
+	}
+
+	turn := p.turn
+	if turn == nil || update.Owner.Type != lifecycle.OwnerTurn || update.Owner.ID != turn.turnID {
+		return lifecycleViolationError("the lifecycle action no longer has its prepared owner")
+	}
+
+	if err := p.emittable(); err != nil {
+		return err
+	}
+
+	p.actions[update.ActionID] = &streamAction{update: update, turn: turn, wire: wire}
 	turn.blockers++
 
 	if err := p.emitLocked(ctx, lifecycle.ActionEvent(update)); err != nil {
-		return lifecycle.ActionUpdate{}, err
+		return err
 	}
 
 	if turn.blockers > 1 {
-		// The cycle already reports requires_action: a second blocker adds to the
-		// set that holds it there rather than transitioning again.
-		return update, nil
+		return nil
 	}
 
-	return update, p.emitLocked(ctx,
-		lifecycle.TransitionEvent(lifecycle.ForegroundRequiresAction, turn.cycleID, turn.turnID))
+	return p.emitLocked(ctx,
+		lifecycle.TransitionEvent(turn.origin, lifecycle.ForegroundRequiresAction, turn.cycleID, turn.turnID))
+}
+
+func actionMethodMatches(kind lifecycle.ActionKind, method string) bool {
+	switch kind {
+	case lifecycle.ActionPermission:
+		return method == acp.ClientMethodSessionRequestPermission
+	case lifecycle.ActionElicitation:
+		return method == acp.ClientMethodElicitationCreate
+	default:
+		return false
+	}
+}
+
+func (p *sessionStream) emitCallbackContent(
+	ctx context.Context,
+	nonce string,
+	emit func() error,
+) (*nativeIncarnation, error) {
+	if p == nil {
+		return nil, emit()
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.turn == nil {
+		if nonce != p.session.autonomousRoute() {
+			return nil, lifecycleViolationError("callback route no longer has a live owner")
+		}
+
+		if _, err := p.openAgentTurnLocked(ctx, nonce); err != nil {
+			return p.session.autonomousOwner(nonce), err
+		}
+	}
+
+	if p.turn == nil || p.turn.nonce != nonce {
+		return nil, lifecycleViolationError("callback route no longer has a live owner")
+	}
+
+	incarnation := p.turn.incarnation
+	if err := p.emittable(); err != nil {
+		return incarnation, err
+	}
+
+	return incarnation, emit()
 }
 
 // resolveAction terminalizes one announced action exactly once and releases the
@@ -385,8 +610,8 @@ func (p *sessionStream) resolveLocked(
 		return nil
 	}
 
-	return p.emitLocked(ctx,
-		lifecycle.TransitionEvent(lifecycle.ForegroundRunning, action.turn.cycleID, action.turn.turnID))
+	return p.emitLocked(ctx, lifecycle.TransitionEvent(
+		action.turn.origin, lifecycle.ForegroundRunning, action.turn.cycleID, action.turn.turnID))
 }
 
 // terminalizeLocked settles every action still blocking one turn, in
@@ -481,7 +706,8 @@ func (p *sessionStream) endIncarnationLocked(
 		return nil
 	}
 
-	return p.emitLocked(ctx, lifecycle.IdleEvent(turn.cycleID, turn.turnID, stopReasonForOutcome(outcome), outcome))
+	return p.emitLocked(ctx,
+		lifecycle.IdleEvent(turn.origin, turn.cycleID, turn.turnID, stopReasonForOutcome(outcome), outcome))
 }
 
 // settleClose runs the close-fenced settlement in the one order the contract
@@ -628,7 +854,7 @@ func (p *sessionStream) emitLocked(ctx context.Context, event lifecycle.Event) e
 
 	envelope, err := p.stream.Emit(event)
 	if err != nil {
-		p.refused = lifecycleViolationError(err.Error())
+		p.refused = lifecycleViolationError("the lifecycle event was refused")
 
 		return p.refused
 	}
@@ -672,9 +898,9 @@ var errLifecyclePeerGone = errors.New("the ACP peer connection has ended")
 func emissionLoss(conn agentClient, err error) error {
 	select {
 	case <-conn.Done():
-		return fmt.Errorf("%w: %w", errLifecyclePeerGone, err)
+		return errLifecyclePeerGone
 	default:
-		return lifecycleViolationError(err.Error())
+		return lifecycleViolationError("lifecycle delivery failed")
 	}
 }
 
@@ -725,30 +951,258 @@ func lifecycleViolationError(message string) error {
 	})
 }
 
-// beginLifecycleAction announces one outbound permission or elicitation on the
-// ordered stream and returns the correlation value to stamp on the request beside
-// whatever reserved envelopes that surface already carries, plus the resolution
-// that terminalizes the action exactly once.
+// sessionLifecycleAction is one lifecycle action after its ownership has been
+// prepared but before its lifecycle announcement is visible. The exact pending
+// tool update is published first; the correlated ACP request must then be
+// registered and written in full before afterWireWrite announces the action.
+type sessionLifecycleAction struct {
+	session     *agentSession
+	stream      *sessionStream
+	update      lifecycle.ActionUpdate
+	route       string
+	incarnation *nativeIncarnation
+	admission   *controlCallbackAdmission
+	announced   bool
+}
+
+// lifecycleInteractionOwner is the cancellation identity copied into a pending
+// host request. The incarnation is the containment target, while route and
+// actionID retain the callback cause that registered it.
+type lifecycleInteractionOwner struct {
+	incarnation *nativeIncarnation
+	route       string
+	actionID    string
+}
+
+func (a sessionLifecycleAction) meta() map[string]any {
+	if a.stream == nil || a.update.ActionID == "" {
+		return nil
+	}
+
+	return a.stream.correlation(a.update)
+}
+
+func (a *sessionLifecycleAction) wireAdmission(ctx context.Context, emit func() error) actionWireAdmission {
+	if a == nil || a.stream == nil || a.update.ActionID == "" {
+		return actionWireAdmission{}
+	}
+
+	return actionWireAdmission{
+		actionID: a.update.ActionID,
+		publish:  emit,
+		written: func(_ context.Context, wire actionWireIdentity) error {
+			return a.afterWireWrite(ctx, wire)
+		},
+	}
+}
+
+func (a *sessionLifecycleAction) prepareWireAdmission(
+	ctx context.Context,
+	emit func() error,
+) (actionWireAdmission, error) {
+	admission := a.wireAdmission(ctx, emit)
+	if admission.present() || emit == nil {
+		return admission, nil
+	}
+
+	return admission, emit()
+}
+
+func (a *sessionLifecycleAction) afterWireWrite(
+	ctx context.Context,
+	wire actionWireIdentity,
+) error {
+	if a == nil || a.admission == nil || a.admission.session != a.session {
+		return lifecycleViolationError("lifecycle action has no exact callback admission")
+	}
+
+	a.session.callbackOwnershipMu.Lock()
+
+	if !a.exactOwnerCurrentLocked() {
+		a.session.callbackOwnershipMu.Unlock()
+
+		return lifecycleViolationError("lifecycle action owner is no longer current")
+	}
+
+	if err := a.stream.announcePreparedAction(ctx, a.update, wire); err != nil {
+		a.session.callbackOwnershipMu.Unlock()
+		a.failOwner(ctx, err, "action_announcement")
+
+		return err
+	}
+
+	a.announced = true
+	a.session.callbackOwnershipMu.Unlock()
+
+	return nil
+}
+
+func (a *sessionLifecycleAction) failOwner(ctx context.Context, err error, classification string) {
+	if a == nil || a.incarnation == nil || err == nil {
+		return
+	}
+
+	a.session.failNativeIncarnation(ctx, a.incarnation, err, classification)
+}
+
+// exactOwnerCurrentLocked revalidates the registered callback reservation and
+// the owner it captured. The caller holds callbackOwnershipMu, the same
+// primitive prompt dispatch and close use to rotate or revoke ownership.
+func (a *sessionLifecycleAction) exactOwnerCurrentLocked() bool {
+	if a == nil || a.admission == nil || a.admission.session != a.session {
+		return false
+	}
+
+	if _, live := a.session.callbackAdmissions[a.admission]; !live {
+		return false
+	}
+
+	if a.incarnation != nil &&
+		(a.incarnation.failed.Load() || !a.session.nativePumpHandle().serves(a.incarnation)) {
+		return false
+	}
+
+	return true
+}
+
+// responseOwnerCurrent revalidates the exact native incarnation after the host
+// wait and before any answer can mutate adapter state or be accepted by Claude.
+// The callback admission may still be registered while its old process is being
+// retired, so the incarnation identity is the decisive boundary.
+func (a *sessionLifecycleAction) responseOwnerCurrent() bool {
+	if a == nil || a.session == nil {
+		return false
+	}
+
+	a.session.callbackOwnershipMu.Lock()
+	defer a.session.callbackOwnershipMu.Unlock()
+
+	return a.exactOwnerCurrentLocked()
+}
+
+func (a *sessionLifecycleAction) resolve(ctx context.Context, state lifecycle.ActionState) error {
+	if a == nil || a.stream == nil || a.update.ActionID == "" {
+		return nil
+	}
+
+	resolutionCtx, cancel := settlementContext(ctx)
+	defer cancel()
+
+	a.session.callbackOwnershipMu.Lock()
+	a.session.mu.Lock()
+	closing := a.session.closing
+	a.session.mu.Unlock()
+
+	if closing || (a.incarnation != nil && a.incarnation.failed.Load()) {
+		a.session.callbackOwnershipMu.Unlock()
+
+		return nil
+	}
+
+	if !a.exactOwnerCurrentLocked() {
+		a.session.callbackOwnershipMu.Unlock()
+
+		failure := lifecycleViolationError("lifecycle action resolution lost its exact owner")
+		a.failOwner(ctx, failure, "action_resolution")
+
+		return failure
+	}
+
+	if !a.announced {
+		a.session.callbackOwnershipMu.Unlock()
+
+		failure := lifecycleViolationError("lifecycle action host request was not announced")
+		a.failOwner(ctx, failure, "action_registration")
+
+		return failure
+	}
+
+	err := a.stream.resolveAction(resolutionCtx, a.update, state)
+	a.session.callbackOwnershipMu.Unlock()
+
+	if err != nil && a.incarnation != nil {
+		a.session.failNativeIncarnation(ctx, a.incarnation, err, "action_resolution")
+	}
+
+	return err
+}
+
+func (a *sessionLifecycleAction) interactionOwner() lifecycleInteractionOwner {
+	return lifecycleInteractionOwner{
+		incarnation: a.incarnation,
+		route:       a.route,
+		actionID:    a.update.ActionID,
+	}
+}
+
+// beginLifecycleAction prepares one outbound permission or elicitation under the
+// exact controller admission. Its lifecycle pending event is emitted later,
+// only after the correlated host JSON-RPC request is observed written in full.
 //
-// The announcement precedes the request, so the host never sees an action id the
-// adapter cannot yet resolve, and the owner is the turn whose route admitted this
-// callback rather than whichever prompt happens to be running.
+// The request write precedes the announcement, so pending never claims a host
+// request that failed to reach the wire. The owner is the turn whose registered
+// callback admission prepared the action, never whichever prompt is current
+// when the host later answers.
 func (s *agentSession) beginLifecycleAction(
 	ctx context.Context,
 	kind lifecycle.ActionKind,
-) (map[string]any, func(context.Context, lifecycle.ActionState) error, error) {
+) (*sessionLifecycleAction, error) {
 	stream := s.lifecycleStream()
 
-	update, err := stream.announceAction(ctx, turnNonceFromContext(ctx), kind)
+	admission := controlCallbackAdmissionFromContext(ctx)
+	if admission == nil || admission.session != s || admission.route == "" {
+		return nil, lifecycleViolationError("callback has no exact registered admission")
+	}
+
+	var update lifecycle.ActionUpdate
+
+	err := func() error {
+		var announceErr error
+
+		s.callbackOwnershipMu.Lock()
+		defer s.callbackOwnershipMu.Unlock()
+
+		s.mu.Lock()
+		closing := s.closing
+		s.mu.Unlock()
+
+		if closing {
+			return closedSessionError()
+		}
+
+		if _, live := s.callbackAdmissions[admission]; !live {
+			return lifecycleViolationError("callback admission is no longer live")
+		}
+
+		incarnation := admission.incarnation
+		if incarnation != nil && incarnation.failed.Load() {
+			return lifecycleViolationError("callback native incarnation is no longer live")
+		}
+
+		if incarnation != nil && !s.nativePumpHandle().serves(incarnation) {
+			return lifecycleViolationError("callback native incarnation is no longer current")
+		}
+
+		update, announceErr = stream.prepareAction(ctx, admission.route, kind)
+
+		return announceErr
+	}()
 	if err != nil {
-		return nil, nil, err
+		if admission.incarnation != nil {
+			s.failNativeIncarnation(ctx, admission.incarnation, err, "action_preparation")
+		}
+
+		return nil, err
 	}
 
-	resolve := func(resolveCtx context.Context, state lifecycle.ActionState) error {
-		return stream.resolveAction(resolveCtx, update, state)
-	}
-
-	return stream.correlation(update), resolve, nil
+	return &sessionLifecycleAction{
+		session:     s,
+		stream:      stream,
+		update:      update,
+		route:       admission.route,
+		incarnation: admission.incarnation,
+		admission:   admission,
+	}, nil
 }
 
 // withLifecycleMeta merges the action correlation into a request's own `_meta`,
@@ -814,4 +1268,16 @@ func elicitationActionState(resp acp.UnstableCreateElicitationResponse, err erro
 	default:
 		return lifecycle.ActionCancelled
 	}
+}
+
+// interactionActionState distinguishes exact-incarnation containment from a
+// user/session cancellation. Both wake the host request through context
+// cancellation, but only the latter truthfully terminalizes the action as
+// cancelled; losing the process that owned it is a failed action.
+func interactionActionState(ctx context.Context, state lifecycle.ActionState) lifecycle.ActionState {
+	if errors.Is(context.Cause(ctx), errExactInteractionContainment) {
+		return lifecycle.ActionFailed
+	}
+
+	return state
 }

@@ -59,10 +59,6 @@ type Options struct {
 
 	InitializeTimeout     time.Duration
 	ControlHandlerTimeout time.Duration
-	// ControlHandlerContext stamps the exact active query turn onto one inbound
-	// control-handler context. The client captures the turn at callback admission
-	// so a handler that outlives its query cannot be rebound to a later turn.
-	ControlHandlerContext func(context.Context, string) context.Context
 	// ObserveStartupStage receives exact spawn/readiness durations. It is
 	// observational only and must not influence startup control flow.
 	ObserveStartupStage func(context.Context, string, time.Duration, error)
@@ -171,6 +167,11 @@ func (h Hooks) toPayload() map[string]any {
 
 // HookHandler handles Claude hook_callback control requests.
 type HookHandler func(ctx context.Context, request HookRequest) (HookResponse, error)
+
+// ControlHandlerAdmission admits the exact callback route captured by Client.
+// Every Client owns one: the constructor installs a fail-closed admission and a
+// session replaces it before Start. There is no unadmitted handler path.
+type ControlHandlerAdmission func(context.Context, string) (context.Context, func(), bool)
 
 // HookRequest describes a Claude hook callback request.
 type HookRequest struct {

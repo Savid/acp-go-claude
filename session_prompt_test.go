@@ -186,22 +186,6 @@ func TestCommandTurnExclusivity(t *testing.T) {
 	requireBackpressureLimit(t, err, "session_prompt")
 }
 
-func TestPromptPoisonAfterAcquireTurn(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	session, _, cleanup := newPromptFlowSession(t)
-	defer cleanup()
-	session.turnAcquiredHook = func(int) {
-		session.mu.Lock()
-		session.poisonCause = "poisoned after prompt acquire"
-		session.mu.Unlock()
-	}
-
-	_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
-	require.ErrorContains(t, err, "poisoned after prompt acquire")
-}
-
 func TestAvailableCommandsEmptyClear(t *testing.T) {
 	t.Parallel()
 
@@ -353,7 +337,6 @@ func TestInvariantGuardPoisonsSession(t *testing.T) {
 	tests := []struct {
 		name      string
 		queryMsgs []map[string]any
-		wantCause string
 	}{
 		{
 			name: "conversation reset frame",
@@ -361,7 +344,6 @@ func TestInvariantGuardPoisonsSession(t *testing.T) {
 				{"type": "conversation_reset"},
 				{"type": "transcript_mirror", "filePath": "/tmp/ignored.jsonl", "entries": []any{map[string]any{"type": "user"}}},
 			},
-			wantCause: "conversation_reset",
 		},
 		{
 			name: "native session id drift",
@@ -372,7 +354,6 @@ func TestInvariantGuardPoisonsSession(t *testing.T) {
 					"message":    map[string]any{"content": []any{map[string]any{"type": "text", "text": "wrong session"}}},
 				},
 			},
-			wantCause: "native session_id drift",
 		},
 	}
 
@@ -399,7 +380,7 @@ func TestInvariantGuardPoisonsSession(t *testing.T) {
 			require.NoError(t, session.emitAvailableCommandsUpdate(ctx, true))
 
 			_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
-			require.ErrorContains(t, err, tc.wantCause)
+			require.ErrorContains(t, err, "native session invariant failed")
 
 			conn, ok := session.agent.connection().(*recordingAgentClient)
 			require.True(t, ok)
@@ -409,10 +390,10 @@ func TestInvariantGuardPoisonsSession(t *testing.T) {
 			require.Empty(t, updates[1].AvailableCommands)
 
 			_, err = session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "again"))
-			require.ErrorContains(t, err, tc.wantCause)
+			require.ErrorContains(t, err, "native session invariant failed")
 
 			_, err = session.agent.SetSessionConfigOption(ctx, SetModelRequest(session.id, "opus"))
-			require.ErrorContains(t, err, tc.wantCause)
+			require.ErrorContains(t, err, "native session invariant failed")
 		})
 	}
 }
@@ -496,7 +477,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		defer cleanup()
 		transport.sendErr = errors.New("query failed")
 		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
-		require.ErrorContains(t, err, "query failed")
+		requireTurnFailure(t, err, -32603, failureCauseTransport, nativeTransportFailureMessage)
 	})
 
 	t.Run("acquire turn error", func(t *testing.T) {
@@ -528,18 +509,6 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		require.Equal(t, acp.StopReasonCancelled, resp.StopReason)
 	})
 
-	t.Run("raw emit error does not abort turn", func(t *testing.T) {
-		session, _, cleanup := newPromptFlowSession(t)
-		defer cleanup()
-		session.rawMessages = rawMessageConfig{All: true}
-		conn, ok := session.agent.connection().(*recordingAgentClient)
-		require.True(t, ok)
-		conn.extensionErr = errors.New("raw failed")
-		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
-		require.NoError(t, err)
-		require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
-	})
-
 	t.Run("stream read error answers pending permissions cancelled", func(t *testing.T) {
 		session, transport, cleanup := newPromptFlowSession(t)
 		defer cleanup()
@@ -555,12 +524,19 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		}
 
 		transport.queryMsgs = nil
-		transport.onQuery = func() { transport.errs <- errors.New("stream failed") }
+		transport.onQuery = func() {
+			incarnation := session.currentNativeIncarnation()
+			session.mu.Lock()
+			entry := session.permissionCancel["tool"]
+			entry.owner = lifecycleInteractionOwner{incarnation: incarnation, route: "test-turn"}
+			session.mu.Unlock()
+			transport.errs <- errors.New("stream failed")
+		}
 
 		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		// The real transport cause is surfaced in the uniform failure, never a
 		// bare stream-closed sentinel.
-		requireTurnFailure(t, err, -32603, failureCauseTransport, "stream failed")
+		requireTurnFailure(t, err, -32603, failureCauseTransport, nativeTransportFailureMessage)
 
 		select {
 		case <-permissionCancelled:
@@ -597,7 +573,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			"entries":  []any{map[string]any{"type": "user"}},
 		}}
 		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
-		requireStoreCommitFailure(t, err, errSessionMirrorAppend.Error())
+		requireStoreCommitFailure(t, err)
 	})
 
 	t.Run("stream usage update error interrupts", func(t *testing.T) {
@@ -672,59 +648,6 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 		require.ErrorContains(t, err, "hook failed")
 	})
 
-	t.Run("finish result loop controls", func(t *testing.T) {
-		session, transport, cleanup := newPromptFlowSession(t)
-		defer cleanup()
-		transport.queryMsgs = []map[string]any{
-			{"type": "result", "subtype": "success", "is_error": false, "stop_reason": "end_turn"},
-			{"type": "result", "subtype": "success", "is_error": false, "stop_reason": "end_turn"},
-		}
-		previousFinish := finishPromptResultCall
-		calls := 0
-		finishPromptResultCall = func(
-			s *agentSession,
-			turnCtx context.Context,
-			interruptCtx context.Context,
-			params acp.PromptRequest,
-			result *claude.ResultMessage,
-			state *promptLoopState,
-			toolUpdateOptions mapper.ToolUpdateOptions,
-			localOnlyCommand bool,
-		) (acp.PromptResponse, bool, error) {
-			calls++
-			if calls == 1 {
-				return acp.PromptResponse{}, false, nil
-			}
-
-			return previousFinish(s, turnCtx, interruptCtx, params, result, state, toolUpdateOptions, localOnlyCommand)
-		}
-		t.Cleanup(func() { finishPromptResultCall = previousFinish })
-		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
-		require.NoError(t, err)
-		require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
-		require.Equal(t, 2, calls)
-		finishPromptResultCall = previousFinish
-
-		errorSession, errorTransport, errorCleanup := newPromptFlowSession(t)
-		defer errorCleanup()
-		errorTransport.queryMsgs = []map[string]any{{"type": "result", "subtype": "success", "is_error": false}}
-		finishPromptResultCall = func(
-			*agentSession,
-			context.Context,
-			context.Context,
-			acp.PromptRequest,
-			*claude.ResultMessage,
-			*promptLoopState,
-			mapper.ToolUpdateOptions,
-			bool,
-		) (acp.PromptResponse, bool, error) {
-			return acp.PromptResponse{}, false, errors.New("finish failed")
-		}
-		_, err = errorSession.Prompt(ctx, TextPromptRequest(errorSession.id, "test-turn", "hello"))
-		require.ErrorContains(t, err, "finish failed")
-		finishPromptResultCall = previousFinish
-	})
-
 	t.Run("system idle completion", func(t *testing.T) {
 		session, transport, cleanup := newPromptFlowSession(t)
 		defer cleanup()
@@ -794,7 +717,7 @@ func TestSessionPromptFlowEdgeBranches(t *testing.T) {
 			},
 		}
 		_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
-		requireStoreCommitFailure(t, err, errSessionMirrorAppend.Error())
+		requireStoreCommitFailure(t, err)
 	})
 
 	t.Run("local command emits result text", func(t *testing.T) {
@@ -977,12 +900,201 @@ func TestPromptHelperRemainingBranches(t *testing.T) {
 	client := claude.NewClient(nil, claude.Options{}, transport)
 	require.NoError(t, client.Start(ctx))
 	usageErrSession := &agentSession{agent: session.agent, id: "usage", client: client}
-	usageErrSession.emitCurrentUsageUpdate(ctx)
+	require.Error(t, usageErrSession.emitCurrentUsageUpdate(ctx))
 	require.NoError(t, client.Close())
 
 	// An unknown context window is 0, never a fabricated default.
 	unknownWindow := (&agentSession{model: "sonnet"}).currentContextWindow()
 	require.Equal(t, 0, unknownWindow)
+}
+
+func TestPromptDispatchAndPredispatchDrainRejectEveryStaleOwner(t *testing.T) {
+	session, _, _, cleanup := newNegotiatedPromptFlowSession(t)
+	defer cleanup()
+	require.NoError(t, session.serveNativePump(t.Context(), session.currentClient()))
+	incarnation := session.currentNativeIncarnation()
+	stream := session.lifecycleStream()
+	sink := newNativeTurnSink("prompt", incarnation)
+
+	admission := &controlCallbackAdmission{session: session, route: "callback", done: make(chan struct{})}
+	session.callbackAdmissions = map[*controlCallbackAdmission]struct{}{admission: {}}
+	_, err := session.dispatchPrompt(t.Context(), stream, lifecycle.Submission{}, "prompt", incarnation, sink, func() error { return nil })
+	requireBackpressureLimit(t, err, "session_foreground")
+	delete(session.callbackAdmissions, admission)
+
+	session.closing = true
+	_, err = session.dispatchPrompt(t.Context(), stream, lifecycle.Submission{}, "prompt", incarnation, sink, func() error { return nil })
+	require.Error(t, err)
+	session.closing = false
+
+	_, err = session.dispatchPrompt(t.Context(), stream, lifecycle.Submission{}, "prompt", nil, sink, func() error { return nil })
+	require.Error(t, err)
+	_, err = session.dispatchPrompt(t.Context(), stream, lifecycle.Submission{}, "prompt", incarnation, nil, func() error { return nil })
+	require.ErrorIs(t, err, errPromptPreDispatchFrame)
+
+	predispatch := newNativeTurnSink("prompt", incarnation)
+	predispatch.admit(nativeOwnedFrame{route: "prompt", message: &claude.AssistantMessage{}})
+	_, err = session.dispatchPrompt(t.Context(), stream, lifecycle.Submission{}, "prompt", incarnation, predispatch, func() error { return nil })
+	require.ErrorIs(t, err, errPromptPreDispatchFrame)
+
+	require.Error(t, session.drainBeforePromptDispatch(t.Context(), nil, incarnation))
+	require.Error(t, session.drainBeforePromptDispatch(t.Context(), sink, nil))
+	session.clearAutonomousRoute(incarnation)
+	require.Error(t, session.drainBeforePromptDispatch(t.Context(), sink, incarnation))
+}
+
+func TestPredispatchDrainProjectsEveryAdmittedAutonomousFrame(t *testing.T) {
+	t.Run("projection failure", func(t *testing.T) {
+		session, _, _, cleanup := newNegotiatedPromptFlowSession(t)
+		defer cleanup()
+		require.NoError(t, session.serveNativePump(t.Context(), session.currentClient()))
+		incarnation := session.currentNativeIncarnation()
+		incarnation.superviseOnce.Do(func() {})
+		session.rawMessages = rawMessageConfig{All: true}
+		session.agent.setConnection(nil)
+		sink := newNativeTurnSink("prompt", incarnation)
+		sink.admit(nativeOwnedFrame{route: session.autonomousRoute(), message: &claude.AssistantMessage{
+			Raw: map[string]any{"type": claude.MessageTypeAssistant},
+		}})
+
+		require.ErrorIs(t, session.drainBeforePromptDispatch(t.Context(), sink, incarnation), errACPConnectionNotAttached)
+	})
+
+	t.Run("conversation frame", func(t *testing.T) {
+		session, _, _, cleanup := newNegotiatedPromptFlowSession(t)
+		defer cleanup()
+		require.NoError(t, session.serveNativePump(t.Context(), session.currentClient()))
+		incarnation := session.currentNativeIncarnation()
+		sink := newNativeTurnSink("prompt", incarnation)
+		sink.admit(nativeOwnedFrame{route: session.autonomousRoute(), message: &claude.AssistantMessage{
+			Content: []claude.ContentBlock{claude.TextBlock{Text: "before prompt"}},
+			Raw:     map[string]any{"type": claude.MessageTypeAssistant},
+		}})
+
+		require.NoError(t, session.drainBeforePromptDispatch(t.Context(), sink, incarnation))
+		require.NotNil(t, session.excursion)
+	})
+
+	t.Run("mapping failure is latched before dispatch", func(t *testing.T) {
+		session, _, conn, cleanup := newNegotiatedPromptFlowSession(t)
+		defer cleanup()
+		require.NoError(t, session.serveNativePump(t.Context(), session.currentClient()))
+		incarnation := session.currentNativeIncarnation()
+		incarnation.superviseOnce.Do(func() {})
+		session.agent.setConnection(&selectiveUpdateFailureClient{
+			recordingAgentClient: conn,
+			err:                  errors.New("autonomous update failed"),
+			fail: func(notification acp.SessionNotification) bool {
+				return notification.Update.AgentMessageChunk != nil
+			},
+		})
+		sink := newNativeTurnSink("prompt", incarnation)
+		sink.admit(nativeOwnedFrame{route: session.autonomousRoute(), message: &claude.AssistantMessage{
+			Content: []claude.ContentBlock{claude.TextBlock{Text: "before prompt"}},
+			Raw:     map[string]any{"type": claude.MessageTypeAssistant},
+		}})
+
+		require.Error(t, session.drainBeforePromptDispatch(t.Context(), sink, incarnation))
+		require.Error(t, session.autonomousFailureError())
+	})
+}
+
+func TestPromptRejectsStateChangesAfterItsSinkIsAttached(t *testing.T) {
+	startBlocked := func(t *testing.T) (*agentSession, *fakeClaudeTransport, *recordingAgentClient, *nativeTurnSink, chan error, func()) {
+		t.Helper()
+		session, transport, conn, cleanup := newNegotiatedPromptFlowSession(t)
+		t.Cleanup(cleanup)
+		require.NoError(t, session.serveNativePump(t.Context(), session.currentClient()))
+		pump := session.nativePumpHandle()
+		pump.mu.Lock()
+		attached := pump.attachedSignalLocked()
+		pump.mu.Unlock()
+		session.cancelMu.Lock()
+		done := make(chan error, 1)
+		go func() {
+			_, err := session.Prompt(context.Background(), lifecyclePromptRequest(session.id, "blocked-turn", "hello"))
+			done <- err
+		}()
+		<-attached
+		pump.mu.Lock()
+		sink := pump.sink
+		pump.mu.Unlock()
+		require.NotNil(t, sink)
+
+		return session, transport, conn, sink, done, session.cancelMu.Unlock
+	}
+
+	t.Run("close latch", func(t *testing.T) {
+		session, _, _, _, done, release := startBlocked(t)
+		session.mu.Lock()
+		session.closing = true
+		session.mu.Unlock()
+		release()
+		require.Error(t, <-done)
+	})
+
+	t.Run("projection failure", func(t *testing.T) {
+		session, _, _, sink, done, release := startBlocked(t)
+		session.rawMessages = rawMessageConfig{All: true}
+		session.agent.setConnection(nil)
+		sink.admit(nativeOwnedFrame{route: session.autonomousRoute(), message: &claude.AssistantMessage{
+			Raw: map[string]any{"type": claude.MessageTypeAssistant},
+		}})
+		release()
+		require.ErrorIs(t, <-done, errACPConnectionNotAttached)
+	})
+
+	t.Run("autonomous excursion conflict", func(t *testing.T) {
+		session, _, _, sink, done, release := startBlocked(t)
+		sink.admit(nativeOwnedFrame{route: session.autonomousRoute(), message: &claude.AssistantMessage{
+			Content: []claude.ContentBlock{claude.TextBlock{Text: "between turns"}},
+			Raw:     map[string]any{"type": claude.MessageTypeAssistant},
+		}})
+		release()
+		err := <-done
+		requireBackpressureLimit(t, err, "session_foreground")
+	})
+}
+
+func TestPromptRejectsTheCurrentIncarnationsLatchedAutonomousFailure(t *testing.T) {
+	session, transport, _, cleanup := newNegotiatedPromptFlowSession(t)
+	defer cleanup()
+	session.mu.Lock()
+	session.autonomousErr = errors.New("autonomous projection failed")
+	session.autonomousClient = session.client
+	session.mu.Unlock()
+
+	_, err := session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "failed-autonomous", "hello"))
+	require.Error(t, err)
+	require.Zero(t, sentUserFrames(transport))
+}
+
+func TestPromptTurnAdmissionIsAtomicWithTerminalSessionState(t *testing.T) {
+	session := &agentSession{}
+	release, err := session.acquirePromptTurn(t.Context(), false)
+	require.NoError(t, err)
+	require.NotNil(t, session.turn)
+	release()
+
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	session.turn <- struct{}{}
+	release, err = session.acquirePromptTurn(cancelled, false)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, release)
+	<-session.turn
+
+	session.turn = make(chan struct{})
+	release, err = session.acquirePromptTurn(cancelled, true)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, release)
+
+	session.turn = make(chan struct{}, 2)
+	release, err = session.acquirePromptTurn(t.Context(), true)
+	require.NoError(t, err)
+	require.Len(t, session.turn, 2)
+	release()
+	require.Empty(t, session.turn)
 }
 
 func newPromptFlowSession(t *testing.T) (*agentSession, *fakeClaudeTransport, func()) {
@@ -991,21 +1103,29 @@ func newPromptFlowSession(t *testing.T) (*agentSession, *fakeClaudeTransport, fu
 	transport := newFakeClaudeTransport()
 	agent, conn, _ := newFakeLifecycleAgent(t, transport)
 	agent.setConnection(conn)
-	client := claude.NewClient(agent.log, claude.Options{}, transport)
-	require.NoError(t, client.Start(context.Background()))
 
 	session := &agentSession{
 		agent:             agent,
 		id:                "prompt-session",
 		cwd:               t.TempDir(),
 		model:             "sonnet",
-		client:            client,
 		turn:              make(chan struct{}, sessionTurnCapacity),
 		contextWindowSize: 200000,
 		mirror:            newSessionMirror(agent.log, nil, t.TempDir(), nil),
 	}
+	client := claude.NewClient(agent.log, claude.Options{
+		PermissionHandler:  session.handlePermission,
+		ElicitationHandler: session.handleElicitation,
+		HookHandler:        session.handleHookCallback,
+	}, transport)
+	client.SetControlHandlerAdmission(session.admitControlCallback)
+	session.client = client
+	require.NoError(t, client.Start(context.Background()))
 
-	return session, transport, func() { _ = client.Close() }
+	return session, transport, func() {
+		session.stopNativePump()
+		_ = client.Close()
+	}
 }
 
 func newNegotiatedPromptFlowSession(t *testing.T) (*agentSession, *fakeClaudeTransport, *recordingAgentClient, func()) {
@@ -1055,6 +1175,66 @@ func TestPromptRefusesAMissingCorrelationValue(t *testing.T) {
 	require.Zero(t, sentUserFrames(transport), "a refused correlation value never reaches the harness")
 }
 
+func TestPromptRouteGenerationAndRotationFailuresWriteNoUnownedTurn(t *testing.T) {
+	t.Run("route generation", func(t *testing.T) {
+		session, _, _, cleanup := newNegotiatedPromptFlowSession(t)
+		defer cleanup()
+		_, err := session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "first-turn", "hello"))
+		require.NoError(t, err)
+
+		previous := uuidRandom
+		uuidRandom = errReader{err: errors.New("route generation failed")}
+		t.Cleanup(func() { uuidRandom = previous })
+		_, err = session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "second-turn", "again"))
+		require.ErrorContains(t, err, "route generation failed")
+	})
+
+	t.Run("route rotation", func(t *testing.T) {
+		session, transport, _, cleanup := newNegotiatedPromptFlowSession(t)
+		defer cleanup()
+		_, err := session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "first-turn", "hello"))
+		require.NoError(t, err)
+		incarnation := session.currentNativeIncarnation()
+		transport.onSend = func(payload any) {
+			message, ok := payload.(map[string]any)
+			if ok && message["type"] == claude.MessageTypeUser {
+				session.clearAutonomousRoute(incarnation)
+			}
+		}
+
+		_, err = session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "second-turn", "again"))
+		require.Error(t, err)
+	})
+}
+
+func TestExactFailureWhilePromptWaitsReportsTheLatchedCommitFailure(t *testing.T) {
+	session, transport, _, cleanup := newNegotiatedPromptFlowSession(t)
+	defer cleanup()
+	transport.queryMsgs = nil
+	querySent := make(chan struct{})
+	transport.onQuery = func() { close(querySent) }
+
+	promptErr := make(chan error, 1)
+	go func() {
+		_, err := session.Prompt(context.Background(),
+			lifecyclePromptRequest(session.id, "failed-turn", "hello"))
+		promptErr <- err
+	}()
+	<-querySent
+
+	incarnation := session.currentNativeIncarnation()
+	pump := session.nativePumpHandle()
+	commitErr := errors.New("prompt mirror commit failed")
+	pump.recordCommitError(commitErr)
+	incarnation.failed.Store(true)
+	pump.recordIncarnationEnd(incarnation, errors.New("native stream lost"))
+	incarnation.signalMirrorReady()
+
+	err := <-promptErr
+	require.ErrorIs(t, err, commitErr)
+	require.NotContains(t, err.Error(), commitErr.Error())
+}
+
 // TestPromptFailsWhenTheOpeningSnapshotCannotBeDelivered proves an incarnation
 // the host was never told about does not stay live: the frame is never written
 // and the process the snapshot could not name is contained.
@@ -1064,7 +1244,7 @@ func TestPromptFailsWhenTheOpeningSnapshotCannotBeDelivered(t *testing.T) {
 
 	conn.sessionUpdateErr = errors.New("snapshot delivery")
 	_, err := session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "test-turn", "hello"))
-	require.ErrorContains(t, err, "snapshot delivery")
+	require.ErrorContains(t, err, "lifecycle delivery failed")
 	require.Zero(t, sentUserFrames(transport))
 	require.Equal(t, 1, transport.CloseCalls(), "an unannounced incarnation is contained, not left running")
 
@@ -1089,7 +1269,7 @@ func TestPromptFailsWhenAcceptanceCannotBeDelivered(t *testing.T) {
 		err:                  errors.New("acceptance delivery"),
 	})
 	_, err := session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "test-turn", "hello"))
-	require.ErrorContains(t, err, "acceptance delivery")
+	require.ErrorContains(t, err, "lifecycle delivery failed")
 	require.Equal(t, 1, sentUserFrames(transport), "the native dispatcher accepted the frame first")
 	require.Positive(t, transport.CloseCalls(), "native work no lifecycle event covers is contained")
 }
@@ -1115,13 +1295,13 @@ func TestPromptWritesNoFrameBehindALatchedLifecycleStream(t *testing.T) {
 	conn.sessionUpdateErr = errors.New("host disconnected")
 	_, err := stream.dispatch(
 		ctx, lifecycle.Submission{SubmissionID: "s", ClientNonce: "c"}, "latch", func() error { return nil })
-	require.ErrorContains(t, err, "host disconnected")
+	require.ErrorContains(t, err, "lifecycle delivery failed")
 
 	conn.sessionUpdateErr = nil
 	closeCalls := transport.CloseCalls()
 
 	_, err = session.Prompt(ctx, lifecyclePromptRequest(session.id, "test-turn", "hello"))
-	require.ErrorContains(t, err, "host disconnected", "the latched stream refuses the turn")
+	require.ErrorContains(t, err, "lifecycle delivery failed", "the latched stream refuses the turn")
 	require.Zero(t, sentUserFrames(transport), "no frame is written behind a stream that cannot announce it")
 	require.Equal(t, closeCalls, transport.CloseCalls(), "a refusal before dispatch contains nothing")
 }
@@ -1157,7 +1337,7 @@ func TestPromptFailsWhenTheTerminalIdleCannotBeDelivered(t *testing.T) {
 	})
 
 	_, err := session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "test-turn", "hello"))
-	require.ErrorContains(t, err, "terminal idle delivery")
+	require.ErrorContains(t, err, "lifecycle delivery failed")
 }
 
 func TestSettleTurnLifecyclePropagatesIncarnationLossFailure(t *testing.T) {
@@ -1169,7 +1349,7 @@ func TestSettleTurnLifecyclePropagatesIncarnationLossFailure(t *testing.T) {
 
 	conn.sessionUpdateErr = errors.New("loss delivery")
 	_, err = session.settleTurnLifecycle(ctx, stream, "another-turn", acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil)
-	require.ErrorContains(t, err, "loss delivery")
+	require.ErrorContains(t, err, "lifecycle delivery failed")
 
 	session.stopNativePump()
 }
@@ -1177,8 +1357,6 @@ func TestSettleTurnLifecyclePropagatesIncarnationLossFailure(t *testing.T) {
 func TestPromptResultAndLocalCommandHelpers(t *testing.T) {
 	t.Parallel()
 
-	require.True(t, workflowTaskNotificationResultCompletesPrompt(nil))
-	require.False(t, workflowTaskNotificationResultCompletesPrompt(mapper.NewWorkflowTracker()))
 	require.NoError(t, providerTurnFailure(nil))
 	require.NoError(t, providerTurnFailure(&claude.ResultMessage{IsError: true, StopReason: stopReasonMaxTokens}))
 	require.NoError(t, providerTurnFailure(&claude.ResultMessage{IsError: false}))
@@ -1354,7 +1532,7 @@ func TestResultUsageHelpers(t *testing.T) {
 
 // requireStoreCommitFailure asserts a turn failed at its own durability boundary
 // rather than reporting a native failure it did not have.
-func requireStoreCommitFailure(t *testing.T, err error, message string) {
+func requireStoreCommitFailure(t *testing.T, err error) {
 	t.Helper()
 
 	var reqErr *acp.RequestError
@@ -1365,5 +1543,5 @@ func requireStoreCommitFailure(t *testing.T, err error, message string) {
 	data, ok := reqErr.Data.(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "claude_store_commit_failed", data[jsonFieldError])
-	require.Contains(t, data[jsonFieldMessage], message)
+	require.Equal(t, "session store commit failed", data[jsonFieldMessage])
 }

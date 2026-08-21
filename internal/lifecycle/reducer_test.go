@@ -204,15 +204,15 @@ func TestTurnNeverReopens(t *testing.T) {
 	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
 		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
 	}}
-	idle := IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess)
+	idle := IdleEvent(CauseSubmission, "cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess)
 
 	for _, event := range []Event{
 		accepted,
-		TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"),
+		TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"),
 		idle,
 	} {
 		requireReduceRefusal(t, richConfiguration(), ViolationPostTerminalMutation,
-			openSnapshot(), accepted, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"), idle, event)
+			openSnapshot(), accepted, TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"), idle, event)
 	}
 }
 
@@ -223,10 +223,10 @@ func TestForegroundTransitionsResolveTheirTurn(t *testing.T) {
 	t.Parallel()
 
 	requireReduceRefusal(t, richConfiguration(), ViolationUnknownEntity,
-		openSnapshot(), TransitionEvent(ForegroundRunning, "cyc-1", "turn-ghost"))
+		openSnapshot(), TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-ghost"))
 
 	requireReduceRefusal(t, richConfiguration(), ViolationUnknownEntity,
-		openSnapshot(), IdleEvent("cyc-1", "turn-ghost", StopReasonEndTurn, OutcomeSuccess))
+		openSnapshot(), IdleEvent(CauseSubmission, "cyc-1", "turn-ghost", StopReasonEndTurn, OutcomeSuccess))
 
 	reducer, refusal := reduceAll(t, richConfiguration(), openSnapshot(),
 		Event{Type: EventStateUpdate, State: &StateTransition{State: ForegroundIdle, CycleID: "cyc-1", Cause: CauseSession}})
@@ -261,7 +261,7 @@ func TestSnapshotForegroundTurnSettlesWithoutAcceptance(t *testing.T) {
 		Event{Type: EventSnapshot, Snapshot: &Snapshot{
 			Foreground: Foreground{State: ForegroundRunning, CycleID: "cyc-1", TurnID: "turn-1", Origin: CauseSubmission},
 		}},
-		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
+		IdleEvent(CauseSubmission, "cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
 	)
 	require.Nil(t, refusal)
 
@@ -285,8 +285,8 @@ func TestBlockingActionOwesItsForegroundTransition(t *testing.T) {
 	})
 
 	requireReduceRefusal(t, richConfiguration(), ViolationInconsistentForeground,
-		openSnapshot(), accepted, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"), blocking,
-		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
+		openSnapshot(), accepted, TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"), blocking,
+		IdleEvent(CauseSubmission, "cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 }
 
 // TestEmittedEndingIdleRecordsHowItSettled pins the rule on the emitter's own
@@ -309,7 +309,7 @@ func TestEmittedEndingIdleRecordsHowItSettled(t *testing.T) {
 		},
 	} {
 		requireReduceRefusal(t, richConfiguration(), ViolationMalformedEnvelope,
-			openSnapshot(), accepted, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"),
+			openSnapshot(), accepted, TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"),
 			Event{Type: EventStateUpdate, State: &ending})
 	}
 }
@@ -392,7 +392,7 @@ func TestActionRules(t *testing.T) {
 	accepted := Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
 		SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
 	}}
-	opening := []Event{openSnapshot(), accepted, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1")}
+	opening := []Event{openSnapshot(), accepted, TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1")}
 	pending := actionEvent(ActionUpdate{
 		ActionID: "req-1", Kind: ActionPermission, State: ActionPending,
 		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, RunID: "run-1", BlocksForeground: stated(false),
@@ -438,8 +438,8 @@ func TestTerminalActionOnFirstSightNeverBlocks(t *testing.T) {
 	})
 
 	reducer, refusal := reduceAll(t, richConfiguration(),
-		openSnapshot(), accepted, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"), resolved,
-		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
+		openSnapshot(), accepted, TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"), resolved,
+		IdleEvent(CauseSubmission, "cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 	require.Nil(t, refusal)
 	require.True(t, reducer.State().Vacant())
 }
@@ -482,7 +482,7 @@ func TestQuiescenceRefusesAnUnprovenClass(t *testing.T) {
 func TestReducerLatchesOnTheFirstRefusal(t *testing.T) {
 	t.Parallel()
 
-	reducer, refusal := reduceAll(t, richConfiguration(), TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"))
+	reducer, refusal := reduceAll(t, richConfiguration(), TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"))
 	require.NotNil(t, refusal)
 	require.Equal(t, ViolationDeltaBeforeSnapshot, refusal.Kind)
 	require.Same(t, refusal, reducer.Failed())
@@ -508,7 +508,7 @@ func TestReducerRefusesAnIneligibleCarrier(t *testing.T) {
 	reducer = NewReducer(Options{Negotiated: richConfiguration()})
 	require.NoError(t, reducer.Reduce(deliver(1, openSnapshot())))
 
-	later := deliver(2, TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"))
+	later := deliver(2, TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"))
 	later.Carrier = CarrierIneligible
 
 	require.Error(t, reducer.Reduce(later))
@@ -523,7 +523,7 @@ func TestReducerRefusesADeltaFromAnUnseenStream(t *testing.T) {
 	reducer := NewReducer(Options{Negotiated: richConfiguration()})
 	require.NoError(t, reducer.Reduce(deliver(1, openSnapshot())))
 
-	foreign := Delivery{StreamID: "other", Sequence: 2, Carrier: CarrierSessionInfo, Event: TransitionEvent(ForegroundRunning, "c", "t")}
+	foreign := Delivery{StreamID: "other", Sequence: 2, Carrier: CarrierSessionInfo, Event: TransitionEvent(CauseSubmission, ForegroundRunning, "c", "t")}
 	require.Error(t, reducer.Reduce(foreign))
 	require.Equal(t, ViolationStaleStream, reducer.Failed().Kind)
 }
@@ -603,8 +603,8 @@ func TestVacancyIsNotForegroundState(t *testing.T) {
 		Cause: CauseSubmission, OriginTurnID: "turn-1",
 	})
 	working, refusal := reduceAll(t, richConfiguration(), openSnapshot(), accepted,
-		TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"), live,
-		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
+		TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"), live,
+		IdleEvent(CauseSubmission, "cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 	require.Nil(t, refusal)
 	require.False(t, working.State().Vacant(), "an unfinished activity holds the session open")
 
@@ -613,8 +613,8 @@ func TestVacancyIsNotForegroundState(t *testing.T) {
 		Owner: Owner{Type: OwnerTurn, ID: "turn-1"}, BlocksForeground: stated(false),
 	})
 	held, refusal := reduceAll(t, richConfiguration(), openSnapshot(), accepted,
-		TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"), background,
-		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
+		TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"), background,
+		IdleEvent(CauseSubmission, "cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess))
 	require.Nil(t, refusal)
 	require.False(t, held.State().Vacant(), "an unanswered request holds the session open")
 }
@@ -752,13 +752,13 @@ func fencedStream(t *testing.T) *Reducer {
 		Event{Type: EventPromptAccepted, PromptAccepted: &PromptAccepted{
 			SubmissionID: "sub-1", ClientNonce: "non-1", TurnID: "turn-1",
 		}},
-		TransitionEvent(ForegroundRunning, "cyc-1", "turn-1"),
+		TransitionEvent(CauseSubmission, ForegroundRunning, "cyc-1", "turn-1"),
 		activityEvent(ActivityUpdate{
 			ActivityID: "act-1", Kind: ActivityTask, State: ActivityRunning,
 			Cause: CauseSubmission, OriginTurnID: "turn-1",
 		}),
 		activityEvent(ActivityUpdate{ActivityID: "act-1", State: ActivityCompleted}),
-		IdleEvent("cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
+		IdleEvent(CauseSubmission, "cyc-1", "turn-1", StopReasonEndTurn, OutcomeSuccess),
 		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClassProcessContainment, Watermark: 6}),
 		Event{Type: EventStateUpdate, State: &StateTransition{
 			State: ForegroundRunning, CycleID: "cyc-2", TurnID: "turn-2", Cause: CauseActivity,

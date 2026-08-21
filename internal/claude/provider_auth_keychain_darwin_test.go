@@ -30,7 +30,7 @@ func TestRemoveAuthKeychainItemsRemovesEveryItemUnderABoundedCall(t *testing.T) 
 	}
 
 	require.NoError(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator", Options{}))
-	require.Len(t, calls, 4)
+	require.Len(t, calls, 2)
 	require.Equal(t, "delete-generic-password", calls[0][0])
 	require.Equal(t, "-a", calls[0][3])
 	require.Equal(t, "operator", calls[0][4])

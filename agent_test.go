@@ -26,7 +26,8 @@ func TestNewAgentDefaultClientAndCloseBranches(t *testing.T) {
 	transport := newFakeClaudeTransport()
 	sessionClient := claude.NewClient(nil, claude.Options{}, transport)
 	require.NoError(t, sessionClient.Start(context.Background()))
-	transport.closeErr = errors.New("close failed")
+	closeErr := errors.New("close failed")
+	transport.closeErr = closeErr
 
 	session := &agentSession{
 		agent:  agent,
@@ -40,7 +41,7 @@ func TestNewAgentDefaultClientAndCloseBranches(t *testing.T) {
 	agent.setConnection(newRecordingAgentClient())
 
 	err := agent.Close()
-	require.ErrorContains(t, err, "close failed")
+	require.ErrorIs(t, err, closeErr)
 	require.Empty(t, agent.sessions)
 	require.Empty(t, agent.permissionCache)
 	require.Empty(t, agent.deleted)
@@ -398,7 +399,8 @@ func TestAgentLifecycleErrors(t *testing.T) {
 
 	transports[0].closeErr = errors.New("close failed")
 	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: first.SessionId})
-	require.ErrorContains(t, err, "close failed")
+	require.ErrorContains(t, err, "claude transport failed")
+	require.NotContains(t, err.Error(), "close failed")
 
 	closed := NewAgent(WithHome(t.TempDir()))
 	require.NoError(t, closed.Close())

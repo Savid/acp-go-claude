@@ -148,16 +148,13 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	emitConn, ok := emitFail.connection().(*recordingAgentClient)
 	require.True(t, ok)
 	emitConn.sessionUpdateErr = errors.New("update failed")
-	respAny, err := emitFail.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
-	require.NoError(t, err)
-	resp, ok := respAny.(acp.UnstableForkSessionResponse)
-	require.True(t, ok)
-	require.NotEmpty(t, resp.SessionId)
+	_, err = emitFail.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
+	require.ErrorContains(t, err, "update failed")
 
 	success := newForkTestAgent(t, nil)
-	respAny, err = success.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
+	respAny, err := success.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
 	require.NoError(t, err)
-	resp, ok = respAny.(acp.UnstableForkSessionResponse)
+	resp, ok := respAny.(acp.UnstableForkSessionResponse)
 	require.True(t, ok)
 	require.NotEmpty(t, resp.SessionId)
 	require.NotEmpty(t, resp.ConfigOptions)
@@ -546,7 +543,7 @@ func TestClosedAgentRejectsDirectNativeConstructionAdmissions(t *testing.T) {
 
 	_, err := agent.handleRateLimits(t.Context(), nil)
 	require.ErrorIs(t, err, errAgentClosed)
-	_, err = agent.startAndStoreSession(t.Context(), "closed", sessionStart{}, nil)
+	_, err = agent.startAndStoreSession(t.Context(), "closed", sessionStart{})
 	require.ErrorIs(t, err, errAgentClosed)
 
 	session := &agentSession{agent: agent, id: "closed", client: deadClaudeClient(t, nil), canRelaunch: true}

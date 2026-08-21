@@ -67,7 +67,7 @@ func TestRawEventOversizeMarker(t *testing.T) {
 	ctx := withTurnRoute(context.Background(), "turn-raw")
 	session, conn := newRawEventSession(t, "session-1", true)
 
-	session.emitRawClaudeMessage(ctx, oversizedMessage())
+	require.NoError(t, session.emitRawClaudeMessage(ctx, oversizedMessage()))
 
 	events := decodeRawEvents(t, conn)
 	require.Len(t, events, 1)
@@ -136,7 +136,7 @@ func TestRawEventFinalPayloadRejectsUnboundedInternalRoute(t *testing.T) {
 	require.ErrorContains(t, err, "exceeds")
 
 	session, conn := newRawEventSession(t, "session-1", true)
-	session.emitRawClaudeMessage(withTurnRoute(context.Background(), hugeNonce), normalMessage())
+	require.NoError(t, session.emitRawClaudeMessage(withTurnRoute(context.Background(), hugeNonce), normalMessage()))
 	require.Empty(t, conn.Extensions())
 	require.Zero(t, session.rawEventSequence)
 
@@ -153,10 +153,10 @@ func TestRawEventContiguousSequence(t *testing.T) {
 	ctx := context.Background()
 	session, conn := newRawEventSession(t, "session-1", true)
 
-	session.emitRawClaudeMessage(ctx, normalMessage())
-	session.emitRawClaudeMessage(ctx, oversizedMessage())
-	session.emitRawClaudeMessage(ctx, normalMessage())
-	session.emitRawClaudeMessage(ctx, normalMessage())
+	require.NoError(t, session.emitRawClaudeMessage(ctx, normalMessage()))
+	require.NoError(t, session.emitRawClaudeMessage(ctx, oversizedMessage()))
+	require.NoError(t, session.emitRawClaudeMessage(ctx, normalMessage()))
+	require.NoError(t, session.emitRawClaudeMessage(ctx, normalMessage()))
 
 	events := decodeRawEvents(t, conn)
 	require.Len(t, events, 4)
@@ -178,10 +178,10 @@ func TestRawEventCrossSessionIsolation(t *testing.T) {
 	first := &agentSession{agent: agent, id: "session-a", rawMessages: rawMessageConfig{All: true}}
 	second := &agentSession{agent: agent, id: "session-b", rawMessages: rawMessageConfig{All: true}}
 
-	first.emitRawClaudeMessage(ctx, normalMessage())
-	second.emitRawClaudeMessage(ctx, normalMessage())
-	first.emitRawClaudeMessage(ctx, normalMessage())
-	second.emitRawClaudeMessage(ctx, normalMessage())
+	require.NoError(t, first.emitRawClaudeMessage(ctx, normalMessage()))
+	require.NoError(t, second.emitRawClaudeMessage(ctx, normalMessage()))
+	require.NoError(t, first.emitRawClaudeMessage(ctx, normalMessage()))
+	require.NoError(t, second.emitRawClaudeMessage(ctx, normalMessage()))
 
 	var seqA, seqB []int
 	for _, event := range decodeRawEvents(t, conn) {
@@ -205,12 +205,12 @@ func TestRawEventValidJSONInvariant(t *testing.T) {
 	ctx := context.Background()
 	session, conn := newRawEventSession(t, "session-1", true)
 
-	session.emitRawClaudeMessage(ctx, normalMessage())
-	session.emitRawClaudeMessage(ctx, oversizedMessage())
+	require.NoError(t, session.emitRawClaudeMessage(ctx, normalMessage()))
+	require.NoError(t, session.emitRawClaudeMessage(ctx, oversizedMessage()))
 	// A message whose raw payload cannot marshal still emits a valid marker.
-	session.emitRawClaudeMessage(ctx, &claude.SystemMessage{
+	require.NoError(t, session.emitRawClaudeMessage(ctx, &claude.SystemMessage{
 		Raw: map[string]any{"type": "system", "bad": func() {}},
-	})
+	}))
 
 	events := decodeRawEvents(t, conn)
 	require.Len(t, events, 3)
@@ -220,21 +220,20 @@ func TestRawEventValidJSONInvariant(t *testing.T) {
 	require.NotContains(t, events[2].Event, rawEventFieldSizeBytes)
 }
 
-// Case 5 — a raw-event emit failure never aborts the turn: it is recorded
-// internally and never surfaced on the wire.
-func TestRawEventEmitFailureDoesNotFailTurn(t *testing.T) {
+// Case 5 — a raw-event emit failure is optional and does not advance sequence.
+func TestRawEventEmitFailureIsContained(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	session, conn := newRawEventSession(t, "session-1", true)
 	conn.extensionErr = errors.New("notify failed")
 
-	session.emitRawClaudeMessage(ctx, normalMessage())
+	require.NoError(t, session.emitRawClaudeMessage(ctx, normalMessage()))
 	require.Empty(t, conn.Extensions())
 	require.Zero(t, session.rawEventSequence)
 
 	conn.extensionErr = nil
-	session.emitRawClaudeMessage(ctx, normalMessage())
+	require.NoError(t, session.emitRawClaudeMessage(ctx, normalMessage()))
 	events := decodeRawEvents(t, conn)
 	require.Len(t, events, 1)
 	require.Equal(t, 1, events[0].Sequence)
@@ -250,7 +249,7 @@ func TestRawEventDefaultOff(t *testing.T) {
 	session, conn := newRawEventSession(t, "session-1", false)
 
 	for range 5 {
-		session.emitRawClaudeMessage(ctx, normalMessage())
+		require.NoError(t, session.emitRawClaudeMessage(ctx, normalMessage()))
 	}
 
 	require.Empty(t, conn.Extensions())

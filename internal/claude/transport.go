@@ -11,32 +11,25 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-var errMessagesAlreadyStarted = errors.New("claude transport messages already started")
+var errEventsAlreadyStarted = errors.New("claude transport events already started")
 
 // ErrProcessContainmentIncomplete means the selected native containment
 // boundary did not complete.
 var ErrProcessContainmentIncomplete = errors.New("claude process containment incomplete")
 
-const transportErrorBuffer = 8
 const defaultMaxJSONLineBytes = 10 * 1024 * 1024
 const processWaitTimedOutMessage = "wait for claude process after kill timed out"
-
-// stderrTailLines bounds the ring of recent stderr lines kept so a process exit
-// error can carry the real cause.
-const stderrTailLines = 20
 
 var (
 	processCommand                 = newProcessCommand
 	processPrepareContained        = prepareProcessTreeCommand
 	processStartContained          = startContainedProcess
 	processWaitContained           = waitContainedProcess
-	processAfterDecode             = func() {}
 	processGetwd                   = os.Getwd
 	processTerminate               = terminateProcess
 	processKill                    = killProcess
@@ -58,8 +51,15 @@ var claudeVersionProbe = validateClaudeVersion
 type Transport interface {
 	Start(ctx context.Context) error
 	Send(ctx context.Context, payload any) error
-	Messages(ctx context.Context) (<-chan map[string]any, <-chan error)
+	Events(ctx context.Context) <-chan TransportEvent
 	Close() error
+}
+
+// TransportEvent is one causally ordered native frame or terminal failure.
+// A terminal failure is the final event and the channel closes behind it.
+type TransportEvent struct {
+	Message map[string]any
+	Err     error
 }
 
 // ProcessTransport starts and owns a Claude CLI subprocess.
@@ -79,45 +79,23 @@ type ProcessTransport struct {
 	stdout   io.ReadCloser
 	stderr   io.ReadCloser
 
-	mu              sync.Mutex
-	closeOnce       sync.Once
-	closeErr        error
-	stdinOnce       sync.Once
-	stdinErr        error
-	stderrWG        sync.WaitGroup
-	closed          bool
-	messagesStarted bool
-	waitOnce        sync.Once
-	waitErr         error
+	mu            sync.Mutex
+	closeOnce     sync.Once
+	closeErr      error
+	stdinOnce     sync.Once
+	stdinErr      error
+	stderrWG      sync.WaitGroup
+	closed        bool
+	eventsStarted bool
+	waitOnce      sync.Once
+	waitErr       error
 
-	stderrMu       sync.Mutex
-	stderrTail     []string
 	malformedLines atomic.Uint64
 }
 
-// appendStderr records one stderr line into the bounded tail ring.
-func (t *ProcessTransport) appendStderr(line string) {
-	t.stderrMu.Lock()
-	defer t.stderrMu.Unlock()
-
-	t.stderrTail = append(t.stderrTail, line)
-	if len(t.stderrTail) > stderrTailLines {
-		t.stderrTail = t.stderrTail[len(t.stderrTail)-stderrTailLines:]
-	}
-}
-
-// StderrTail returns the most recent stderr lines joined by newlines.
-func (t *ProcessTransport) StderrTail() string {
-	t.stderrMu.Lock()
-	defer t.stderrMu.Unlock()
-
-	return strings.Join(t.stderrTail, "\n")
-}
-
-// processExitError builds a ProcessExitError enriched with the process exit
-// status and the captured stderr tail.
+// processExitError reports only the closed process status classification.
 func (t *ProcessTransport) processExitError(err error) error {
-	exit := &ProcessExitError{ExitCode: -1, StderrTail: t.StderrTail(), Err: err}
+	exit := &ProcessExitError{ExitCode: -1}
 
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
@@ -285,7 +263,7 @@ func (t *ProcessTransport) Start(ctx context.Context) (returnErr error) {
 func (t *ProcessTransport) Send(ctx context.Context, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal payload: %w", err)
+		return errClaudePayloadMarshal
 	}
 
 	if len(data)+1 > maxJSONLineBytes {
@@ -313,28 +291,28 @@ func (t *ProcessTransport) Send(ctx context.Context, payload any) error {
 			return ctxErr
 		}
 
-		return fmt.Errorf("write claude stdin: %w", err)
+		return errClaudeStdinWrite
 	}
 
 	return nil
 }
 
-// Messages reads Claude stdout as line-delimited JSON maps.
-func (t *ProcessTransport) Messages(ctx context.Context) (<-chan map[string]any, <-chan error) {
+// Events reads Claude stdout as causally ordered line-delimited JSON frames.
+func (t *ProcessTransport) Events(ctx context.Context) <-chan TransportEvent {
 	t.mu.Lock()
-	if t.messagesStarted {
+	if t.eventsStarted {
 		t.mu.Unlock()
 
-		return closedMessageChannels(errMessagesAlreadyStarted)
+		return closedTransportEvents(errEventsAlreadyStarted)
 	}
 
 	if t.closed {
 		t.mu.Unlock()
 
-		return closedMessageChannels(ErrClientClosed)
+		return closedTransportEvents(ErrClientClosed)
 	}
 
-	t.messagesStarted = true
+	t.eventsStarted = true
 
 	drainStderr := t.stderr != nil
 
@@ -343,8 +321,7 @@ func (t *ProcessTransport) Messages(ctx context.Context) (<-chan map[string]any,
 	}
 	t.mu.Unlock()
 
-	messages := make(chan map[string]any)
-	errs := make(chan error, transportErrorBuffer)
+	events := make(chan TransportEvent, 1)
 
 	if drainStderr {
 		go func() {
@@ -356,25 +333,40 @@ func (t *ProcessTransport) Messages(ctx context.Context) (<-chan map[string]any,
 	}
 
 	go func() {
-		defer close(messages)
-		defer close(errs)
+		var terminal error
+
 		defer func() {
-			if err := t.wait(); err != nil {
-				t.sendError(errs, t.processExitError(err))
+			if recover() != nil {
+				terminal = errors.Join(terminal, errClaudeStdoutReaderPanic)
+				_ = t.Close()
 			}
+
+			if waitErr := t.wait(); waitErr != nil {
+				terminal = errors.Join(terminal, t.processExitError(waitErr))
+			}
+
+			terminal = errors.Join(terminal, context.Cause(ctx))
+			if terminal != nil {
+				events <- TransportEvent{Err: terminal}
+			}
+
+			close(events)
 		}()
-		defer t.recoverStdoutReader(ctx, errs)
 
 		scanner := bufio.NewScanner(t.stdout)
 		scanner.Buffer(make([]byte, 0, 64*1024), maxJSONLineBytes)
 
-		for scanner.Scan() {
+		for {
 			select {
 			case <-ctx.Done():
-				t.sendError(errs, ctx.Err())
+				terminal = context.Cause(ctx)
 
 				return
 			default:
+			}
+
+			if !scanner.Scan() {
+				break
 			}
 
 			line := bytes.TrimSpace(scanner.Bytes())
@@ -393,47 +385,32 @@ func (t *ProcessTransport) Messages(ctx context.Context) (<-chan map[string]any,
 				} else {
 					msg[rawJSONInternalKey] = string(line)
 
-					processAfterDecode()
-
-					select {
-					case messages <- msg:
-					case <-ctx.Done():
-						t.sendError(errs, ctx.Err())
-
-						return
-					}
+					events <- TransportEvent{Message: msg}
 				}
 			}
 		}
 
 		if err := scanner.Err(); err != nil {
-			t.sendError(errs, fmt.Errorf("read claude stdout: %w", err))
+			terminal = errClaudeStdoutRead
 		}
+
+		terminal = errors.Join(terminal, context.Cause(ctx))
 	}()
 
-	return messages, errs
+	return events
 }
 
-func closedMessageChannels(err error) (<-chan map[string]any, <-chan error) {
-	messages := make(chan map[string]any)
-	errs := make(chan error, 1)
+func closedTransportEvents(err error) <-chan TransportEvent {
+	events := make(chan TransportEvent, 1)
+	events <- TransportEvent{Err: err}
 
-	close(messages)
-	sendTransportError(errs, err)
-	close(errs)
+	close(events)
 
-	return messages, errs
+	return events
 }
 
 func (t *ProcessTransport) recoverStderrDrain(ctx context.Context) {
 	handleClaudeGoroutinePanic(ctx, t.log, "stderr drain", func(any) { _ = t.Close() }, recover())
-}
-
-func (t *ProcessTransport) recoverStdoutReader(ctx context.Context, errs chan<- error) {
-	handleClaudeGoroutinePanic(ctx, t.log, "stdout reader", func(recovered any) {
-		t.sendError(errs, fmt.Errorf("claude stdout reader panic: %v", recovered))
-		_ = t.Close()
-	}, recover())
 }
 
 func (t *ProcessTransport) wait() error {
@@ -473,32 +450,6 @@ func (t *ProcessTransport) closeStdin() error {
 	return t.stdinErr
 }
 
-func (t *ProcessTransport) sendError(errs chan<- error, err error) {
-	if sendTransportError(errs, err) {
-		return
-	}
-
-	log := t.log
-	if log == nil {
-		log = slog.Default()
-	}
-
-	log.Debug("dropped claude transport error", slog.String(keyError, err.Error()))
-}
-
-func sendTransportError(errs chan<- error, err error) bool {
-	if err == nil {
-		return true
-	}
-
-	select {
-	case errs <- err:
-		return true
-	default:
-		return false
-	}
-}
-
 type writeDeadliner interface {
 	SetWriteDeadline(time.Time) error
 }
@@ -531,12 +482,7 @@ func (t *ProcessTransport) drainStderr() {
 
 	reader := bufio.NewReader(t.stderr)
 	for {
-		line, err := reader.ReadString('\n')
-		if trimmed := strings.TrimRight(line, "\r\n"); trimmed != "" {
-			t.appendStderr(trimmed)
-			t.log.Debug("claude stderr", slog.String("line", trimmed))
-		}
-
+		_, err := reader.ReadString('\n')
 		if err != nil {
 			return
 		}

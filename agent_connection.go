@@ -13,11 +13,10 @@ import (
 type agentClient interface {
 	Done() <-chan struct{}
 	UnstableCompleteElicitation(context.Context, acp.UnstableCompleteElicitationNotification) error
-	CreateElicitation(context.Context, acp.UnstableCreateElicitationRequest, elicitationScope) (acp.UnstableCreateElicitationResponse, error)
-	UnstableCreateElicitation(context.Context, acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
+	CreateElicitation(context.Context, acp.UnstableCreateElicitationRequest, elicitationScope, actionWireAdmission) (acp.UnstableCreateElicitationResponse, error)
 	ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error)
 	WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error)
-	RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
+	RequestPermission(context.Context, acp.RequestPermissionRequest, actionWireAdmission) (acp.RequestPermissionResponse, error)
 	SessionUpdate(context.Context, acp.SessionNotification) error
 	CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error)
 	KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error)
@@ -27,11 +26,76 @@ type agentClient interface {
 	NotifyExtension(context.Context, string, any) error
 }
 
+// actionWireAdmission binds a prepared lifecycle action to the actual JSON-RPC
+// request that carries its correlation. Production calls written only after the
+// registered request line has been written in full; test clients must cross the
+// same boundary explicitly.
+type actionWireAdmission struct {
+	actionID string
+	publish  func() error
+	written  func(context.Context, actionWireIdentity) error
+}
+
+type actionWireIdentity struct {
+	method    string
+	requestID string
+}
+
+func (a actionWireAdmission) present() bool {
+	return a.written != nil
+}
+
+func (a actionWireAdmission) observeWrite(ctx context.Context, identity actionWireIdentity) error {
+	if !a.present() {
+		return nil
+	}
+
+	return a.written(ctx, identity)
+}
+
+func (a actionWireAdmission) publishPending() error {
+	if a.publish == nil {
+		return nil
+	}
+
+	return a.publish()
+}
+
 type elicitationScope struct {
 	SessionID  acp.SessionId
 	TurnNonce  string
 	ToolCallID acp.ToolCallId
 	RequestID  *string
+}
+
+// safeRequestError keeps the original causal identity available to errors.Is
+// while exposing only adapter-owned structured data to JSON-RPC and logs.
+type safeRequestError struct {
+	request *acp.RequestError
+	cause   error
+}
+
+func newSafeRequestFailure(request *acp.RequestError, cause error) error {
+	return &safeRequestError{request: request, cause: cause}
+}
+
+func (e *safeRequestError) Error() string {
+	return e.request.Error()
+}
+
+func (e *safeRequestError) Unwrap() error {
+	return e.cause
+}
+
+func (e *safeRequestError) As(target any) bool {
+	request, ok := target.(**acp.RequestError)
+	if !ok {
+		return false
+	}
+
+	*request = e.request
+
+	return true
 }
 
 func scopedElicitationParams(
@@ -94,7 +158,14 @@ func requestError(ctx context.Context, err error) *acp.RequestError {
 	}
 
 	if context.Cause(ctx) == context.Canceled {
-		return acp.NewRequestCancelled(map[string]any{jsonFieldError: err.Error()})
+		return acp.NewRequestCancelled(map[string]any{jsonFieldError: "request_cancelled"})
+	}
+
+	if context.Cause(ctx) == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
+		return acp.NewInternalError(map[string]any{
+			jsonFieldError: "request_deadline_exceeded",
+			"class":        "deadline",
+		})
 	}
 
 	var reqErr *acp.RequestError
@@ -102,5 +173,19 @@ func requestError(ctx context.Context, err error) *acp.RequestError {
 		return reqErr
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	return acp.NewInternalError(map[string]any{
+		jsonFieldError: "claude_internal_failure",
+		"class":        safeErrorClass(err),
+	})
+}
+
+func safeErrorClass(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	default:
+		return "internal"
+	}
 }

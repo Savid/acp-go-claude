@@ -61,6 +61,35 @@ func TestNewSessionEdgeBranches(t *testing.T) {
 	require.Same(t, agent.store, agent.sessions[resp.SessionId].mirror.store)
 }
 
+func TestLocalSessionStartSettlesEveryEstablishmentFailure(t *testing.T) {
+	newLocalAgent := func(options ...Option) *Agent {
+		agent := NewAgent(options...)
+		agent.setConnection(&localAgentConnection{agent: agent, hooks: &postResponseHooks{}})
+
+		return agent
+	}
+
+	previous := uuidRandom
+	uuidRandom = bytes.NewReader(nil)
+	agent := newLocalAgent(WithHome(t.TempDir()), WithScratchDir(t.TempDir()))
+	_, err := agent.startSession(t.Context(), "session-install-failure", sessionStart{Cwd: t.TempDir()})
+	uuidRandom = previous
+	require.ErrorContains(t, err, "read random uuid")
+
+	rootErr := errors.New("native root refused")
+	agent = newLocalAgent(
+		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
+		WithRuntimeResourceHooks(RuntimeResourceHooks{
+			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
+				return nil, rootErr
+			},
+		}),
+	)
+	_, err = agent.startSession(t.Context(), "session-root-failure", sessionStart{Cwd: t.TempDir()})
+	require.ErrorIs(t, err, rootErr)
+}
+
 func TestResumeSessionEdgeBranches(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
@@ -105,7 +134,7 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, err)
 	activeConn.sessionUpdateErr = errors.New("active update failed")
 	_, err = active.ResumeSession(ctx, ResumeSessionRequest(newResp.SessionId, cwd))
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "active update failed")
 	activeConn.sessionUpdateErr = nil
 	require.NoError(t, active.Close())
 
@@ -119,9 +148,8 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, emitStore.Append(ctx, SessionKey{SessionID: "22222222-2222-4222-8222-222222222222"}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
 	emitFail, emitConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(emitStore))
 	emitConn.sessionUpdateErr = errors.New("resume update failed")
-	resp, err = emitFail.ResumeSession(ctx, ResumeSessionRequest("22222222-2222-4222-8222-222222222222", cwd))
-	require.NoError(t, err)
-	require.NotEmpty(t, resp.ConfigOptions)
+	_, err = emitFail.ResumeSession(ctx, ResumeSessionRequest("22222222-2222-4222-8222-222222222222", cwd))
+	require.ErrorContains(t, err, "resume update failed")
 
 	backpressureStore := NewInMemorySessionStore()
 	require.NoError(t, backpressureStore.Append(ctx, SessionKey{SessionID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
@@ -232,9 +260,8 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	}))
 	emitFail, emitConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(emptyUpdateStore))
 	emitConn.sessionUpdateErr = errors.New("load update failed")
-	loadResp, err := emitFail.LoadSession(ctx, LoadSessionRequest("44444444-4444-4444-8444-444444444444", cwd))
-	require.NoError(t, err)
-	require.NotEmpty(t, loadResp.ConfigOptions)
+	_, err = emitFail.LoadSession(ctx, LoadSessionRequest("44444444-4444-4444-8444-444444444444", cwd))
+	require.ErrorContains(t, err, "load update failed")
 
 	replayErrStore := NewInMemorySessionStore()
 	require.NoError(t, replayErrStore.Append(ctx, SessionKey{SessionID: "55555555-5555-4555-8555-555555555555"}, []SessionStoreEntry{
@@ -368,7 +395,7 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 
 	deleteErrAgent := NewAgent(WithSessionStore(&faultSessionStore{SessionStore: NewInMemorySessionStore(), deleteErr: errors.New("delete failed")}))
 	_, err = deleteErrAgent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
-	require.ErrorContains(t, err, "delete failed")
+	require.ErrorContains(t, err, "session delete tombstone failed")
 
 	previousDelete := deleteNativeTranscript
 	t.Cleanup(func() { deleteNativeTranscript = previousDelete })
@@ -390,7 +417,7 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 		turn:   make(chan struct{}, 1),
 	}
 	_, err = activeDelete.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
-	require.ErrorContains(t, err, "close failed")
+	require.ErrorContains(t, err, "claude transport failed")
 }
 
 // newSessionForTransport builds one started session over transport, so a test can
@@ -470,8 +497,13 @@ func requireExpiredCloseRefusal(t *testing.T, ctx context.Context, err error) {
 	data, ok := reqErr.Data.(map[string]any)
 	require.True(t, ok, "the refusal names itself")
 	require.Equal(t, "claude_session_close_unsettled", data[jsonFieldError])
-	require.Contains(t, data[jsonFieldMessage], "await the in-flight Claude turn")
-	require.Equal(t, reqErr, requestError(ctx, err), "the dispatcher forwards it unchanged")
+	require.Equal(t, "session close did not reach its settlement barrier", data[jsonFieldMessage])
+	mapped := requestError(ctx, err)
+	require.Equal(t, -32603, mapped.Code)
+	mappedData, ok := mapped.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "request_deadline_exceeded", mappedData[jsonFieldError])
+	require.Equal(t, "deadline", mappedData["class"])
 }
 
 // TestCloseSessionKeepsAnUnsettledSessionAddressable proves removal follows the
@@ -807,7 +839,7 @@ type closeErrTransport struct {
 }
 
 func (t *closeErrTransport) Close() error {
-	return t.err
+	return errors.Join(t.err, t.Transport.Close())
 }
 
 func TestAgentSessionRemovalAndStoreStartBranches(t *testing.T) {
@@ -1209,7 +1241,7 @@ func TestStartSessionEdgeBranches(t *testing.T) {
 	setModelErrTransport.controlErr = map[string]error{"set_model": errors.New("set model failed")}
 	setModelErrAgent, _, _ := newFakeLifecycleAgent(t, setModelErrTransport, WithEnv(map[string]string{envAnthropicModel: "opus"}))
 	_, err = setModelErrAgent.startSession(ctx, sessionID, sessionStart{Cwd: cwd})
-	require.ErrorContains(t, err, "set model failed")
+	require.ErrorContains(t, err, "claude control request failed")
 
 	reconcileTransport := newFakeClaudeTransport()
 	reconcileTransport.settings = map[string]any{
@@ -1239,7 +1271,7 @@ func TestStartSessionEdgeBranches(t *testing.T) {
 	modeApplyErrTransport.controlErr = map[string]error{"set_permission_mode": errors.New("set default mode failed")}
 	modeApplyErrAgent, _, _ := newFakeLifecycleAgent(t, modeApplyErrTransport, WithClaudeDefaultPermissionMode("auto"))
 	_, err = modeApplyErrAgent.startSession(ctx, sessionID, sessionStart{Cwd: cwd, MetaOptions: ClaudeOptions{Model: "opus"}})
-	require.ErrorContains(t, err, "set default mode failed")
+	require.ErrorContains(t, err, "claude control request failed")
 }
 
 func TestStartSessionIsolationFailureBranches(t *testing.T) {
@@ -1615,8 +1647,13 @@ func requireExpiredDeleteRefusal(t *testing.T, ctx context.Context, err error) {
 	data, ok := reqErr.Data.(map[string]any)
 	require.True(t, ok, "the refusal names itself")
 	require.Equal(t, "claude_session_delete_unsettled", data[jsonFieldError])
-	require.Contains(t, data[jsonFieldMessage], "await the in-flight Claude turn")
-	require.Equal(t, reqErr, requestError(ctx, err), "the dispatcher forwards it unchanged")
+	require.Equal(t, "session delete teardown did not reach its settlement barrier", data[jsonFieldMessage])
+	mapped := requestError(ctx, err)
+	require.Equal(t, -32603, mapped.Code)
+	mappedData, ok := mapped.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "request_deadline_exceeded", mappedData[jsonFieldError])
+	require.Equal(t, "deadline", mappedData["class"])
 }
 
 // ladderProbeTransport reports the state of the shutdown ladder at the moment a
@@ -1738,9 +1775,7 @@ func TestDeleteWhoseTombstoneNeverLandedIsToldApartFromAnUnsettledTeardown(t *te
 
 		data, ok := mapped.Data.(map[string]any)
 		require.True(t, ok)
-		require.Contains(t, data[jsonFieldError], "claude_session_delete_untombstoned",
-			"the -32800 says which of the two refusals it is")
-		require.NotContains(t, data[jsonFieldError], "claude_session_delete_unsettled")
+		require.Equal(t, "request_cancelled", data[jsonFieldError])
 
 		// Nothing was deleted: the id is not hidden and its rows are still there.
 		agent.mu.Lock()
@@ -1773,7 +1808,7 @@ func TestDeleteWhoseTombstoneNeverLandedIsToldApartFromAnUnsettledTeardown(t *te
 		data, ok := reqErr.Data.(map[string]any)
 		require.True(t, ok)
 		require.Equal(t, "claude_session_delete_untombstoned", data[jsonFieldError])
-		require.Equal(t, "tombstone write failed", data[jsonFieldMessage])
+		require.Equal(t, "session delete tombstone failed", data[jsonFieldMessage])
 	})
 }
 

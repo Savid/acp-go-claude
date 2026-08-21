@@ -615,6 +615,14 @@ func nativeStringField(values map[string]any, key string) string {
 	return value
 }
 
+// validateNativeIdentitySchema refuses a frame that spells causal identity in a
+// vocabulary the ownership grammar does not read. Identity is read only at the
+// roots the resolver consults — the frame's own top level and a result origin's
+// top level — so an aliased identity key at either root is a frame whose
+// ownership this session cannot prove. Everything below those roots, including
+// every transcript-mirror journal entry, is the harness's own vocabulary and
+// stays opaque to the ownership grammar; a mirror entry must still parse, or
+// the identity keys the resolver reads from it cannot be proven absent.
 func validateNativeIdentitySchema(msg claude.Message) error {
 	if msg == nil {
 		return nil
@@ -624,19 +632,14 @@ func validateNativeIdentitySchema(msg claude.Message) error {
 		return errNativeFrameOwnership
 	}
 
-	if result, ok := msg.(*claude.ResultMessage); ok && nativeIdentityAliasesRecursive(result.Origin) {
+	if result, ok := msg.(*claude.ResultMessage); ok && nativeIdentityAliasesAtRoot(result.Origin) {
 		return errNativeFrameOwnership
 	}
 
 	if mirror, ok := msg.(*claude.TranscriptMirrorMessage); ok {
 		for _, rawEntry := range mirror.Entries {
-			var entry any
-			if err := json.Unmarshal(rawEntry, &entry); err != nil {
+			if !json.Valid(rawEntry) {
 				return fmt.Errorf("%w: transcript mirror identity", errNativeFrameOwnership)
-			}
-
-			if nativeIdentityAliasesRecursive(entry) {
-				return errNativeFrameOwnership
 			}
 		}
 	}
@@ -652,29 +655,6 @@ func nativeIdentityAliasesAtRoot(values map[string]any) bool {
 	for _, key := range []string{nativeTaskIDAlias, nativeToolUseIDAlias, nativeParentToolUseIDAlias} {
 		if _, exists := values[key]; exists {
 			return true
-		}
-	}
-
-	return false
-}
-
-func nativeIdentityAliasesRecursive(value any) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		if nativeIdentityAliasesAtRoot(typed) {
-			return true
-		}
-
-		for _, child := range typed {
-			if nativeIdentityAliasesRecursive(child) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range typed {
-			if nativeIdentityAliasesRecursive(child) {
-				return true
-			}
 		}
 	}
 

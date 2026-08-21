@@ -424,53 +424,18 @@ func TestNativeFrameOwnershipRefusesCamelCaseCausalFields(t *testing.T) {
 			},
 			Raw: map[string]any{"type": claude.MessageTypeResult},
 		}},
-		{name: "nested result origin alias", msg: &claude.ResultMessage{
-			Origin: map[string]any{
-				"kind":   originKindTaskNotification,
-				"nested": map[string]any{"toolUseId": "tool-a"},
-			},
-			Raw: map[string]any{"type": claude.MessageTypeResult},
-		}},
 		{name: "mixed result origin schema", msg: &claude.ResultMessage{
 			Origin: map[string]any{
 				"kind": originKindTaskNotification, "task_id": "task-a", "taskId": "task-a",
 			},
 			Raw: map[string]any{"type": claude.MessageTypeResult},
 		}},
-		{name: "mirror task ID", msg: &claude.TranscriptMirrorMessage{
-			FilePath: "/native/session/subagents/camel-task.jsonl",
+		{name: "mirror frame root task ID", msg: &claude.TranscriptMirrorMessage{
+			FilePath: "/native/session/subagents/camel-root.jsonl",
 			Entries: []json.RawMessage{
-				json.RawMessage(`{"type":"assistant","taskId":"task-a"}`),
+				json.RawMessage(`{"type":"assistant"}`),
 			},
-			Raw: map[string]any{"type": claude.MessageTypeMirror},
-		}},
-		{name: "mirror parent tool use ID", msg: &claude.TranscriptMirrorMessage{
-			FilePath: "/native/session/subagents/camel-parent.jsonl",
-			Entries: []json.RawMessage{
-				json.RawMessage(`{"type":"assistant","parentToolUseId":"tool-a"}`),
-			},
-			Raw: map[string]any{"type": claude.MessageTypeMirror},
-		}},
-		{name: "mirror tool use ID", msg: &claude.TranscriptMirrorMessage{
-			FilePath: "/native/session/subagents/camel-tool.jsonl",
-			Entries: []json.RawMessage{
-				json.RawMessage(`{"type":"assistant","toolUseId":"tool-a"}`),
-			},
-			Raw: map[string]any{"type": claude.MessageTypeMirror},
-		}},
-		{name: "nested mirror alias", msg: &claude.TranscriptMirrorMessage{
-			FilePath: "/native/session/subagents/camel-nested.jsonl",
-			Entries: []json.RawMessage{
-				json.RawMessage(`{"type":"assistant","message":{"content":[{"parentToolUseId":"tool-a"}]}}`),
-			},
-			Raw: map[string]any{"type": claude.MessageTypeMirror},
-		}},
-		{name: "mixed mirror schema", msg: &claude.TranscriptMirrorMessage{
-			FilePath: "/native/session/subagents/camel-mixed.jsonl",
-			Entries: []json.RawMessage{
-				json.RawMessage(`{"type":"assistant","task_id":"task-a","taskId":"task-a"}`),
-			},
-			Raw: map[string]any{"type": claude.MessageTypeMirror},
+			Raw: map[string]any{"type": claude.MessageTypeMirror, "taskId": "task-a"},
 		}},
 	}
 
@@ -484,6 +449,180 @@ func TestNativeFrameOwnershipRefusesCamelCaseCausalFields(t *testing.T) {
 			require.ErrorIs(t, err, errNativeFrameOwnership)
 		})
 	}
+}
+
+// backgroundTaskJournalEntry is a verbatim Claude Code 2.1.238 transcript
+// journal line for a background task result: the harness's own camelCase
+// vocabulary (toolUseResult.taskId) below the entry root the resolver reads.
+const backgroundTaskJournalEntry = `{"parentUuid":"9c5f2c1e-8a24-4c53-b8a7-6a4f4a1c2d3e",` +
+	`"isSidechain":false,"userType":"external","cwd":"/workspace",` +
+	`"sessionId":"4fef6a73-9030-4f2e-ad32-775b6ea7ca25","version":"2.1.238","gitBranch":"main",` +
+	`"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01XcE9vJb3M",` +
+	`"type":"tool_result","content":"Async task started"}]},` +
+	`"uuid":"7f3b6f6e-0d5c-4a3e-9a4a-2f1d8c9b0a11","timestamp":"2026-08-21T06:00:45.063Z",` +
+	`"toolUseResult":{"taskId":"b0qj00gmq","timeoutMs":90000,"persistent":false}}`
+
+func TestNativeFrameOwnershipKeepsHarnessJournalVocabularyOpaque(t *testing.T) {
+	t.Parallel()
+
+	t.Run("background task result entry", func(t *testing.T) {
+		t.Parallel()
+
+		var ownership nativeFrameOwnership
+		route, causal, err := ownership.resolve(&claude.TranscriptMirrorMessage{
+			FilePath: "/native/projects/project/4fef6a73-9030-4f2e-ad32-775b6ea7ca25.jsonl",
+			Entries:  []json.RawMessage{json.RawMessage(backgroundTaskJournalEntry)},
+			Raw:      map[string]any{"type": claude.MessageTypeMirror},
+		}, "route-a")
+		require.NoError(t, err)
+		require.False(t, causal)
+		require.Empty(t, route)
+	})
+
+	t.Run("sidechain entry parent alias", func(t *testing.T) {
+		t.Parallel()
+
+		var ownership nativeFrameOwnership
+		_, causal, err := ownership.resolve(&claude.TranscriptMirrorMessage{
+			FilePath: "/native/projects/project/4fef6a73-9030-4f2e-ad32-775b6ea7ca25.jsonl",
+			Entries: []json.RawMessage{
+				json.RawMessage(`{"parentUuid":null,"isSidechain":true,"userType":"external",` +
+					`"sessionId":"4fef6a73-9030-4f2e-ad32-775b6ea7ca25","version":"2.1.238",` +
+					`"type":"user","message":{"role":"user","content":"subagent prompt"},` +
+					`"uuid":"0b6d7a52-3f1e-4c8b-a4d9-5e2f6c7a8b90",` +
+					`"timestamp":"2026-08-21T06:00:40.000Z","parentToolUseId":"toolu_01Sub"}`),
+			},
+			Raw: map[string]any{"type": claude.MessageTypeMirror},
+		}, "route-a")
+		require.NoError(t, err)
+		require.False(t, causal)
+	})
+
+	t.Run("bound entry keeps its exact owner beside harness spellings", func(t *testing.T) {
+		t.Parallel()
+
+		ownership := nativeFrameOwnership{
+			tasks: map[string]nativeTaskBinding{"task-a": {route: "route-a", toolUseID: "tool-a"}},
+		}
+		route, causal, err := ownership.resolve(&claude.TranscriptMirrorMessage{
+			FilePath: "/native/projects/project/4fef6a73-9030-4f2e-ad32-775b6ea7ca25.jsonl",
+			Entries: []json.RawMessage{
+				json.RawMessage(`{"type":"assistant","task_id":"task-a","taskId":"task-a",` +
+					`"toolUseResult":{"taskId":"task-a"}}`),
+			},
+			Raw: map[string]any{"type": claude.MessageTypeMirror},
+		}, "route-b")
+		require.NoError(t, err)
+		require.True(t, causal)
+		require.Equal(t, "route-a", route)
+	})
+
+	t.Run("task result origin nested metadata", func(t *testing.T) {
+		t.Parallel()
+
+		ownership := nativeFrameOwnership{
+			tasks: map[string]nativeTaskBinding{"b0qj00gmq": {route: "route-a", toolUseID: "tool-a"}},
+		}
+		route, causal, err := ownership.resolve(&claude.ResultMessage{
+			Origin: map[string]any{
+				"kind":    originKindTaskNotification,
+				"task_id": "b0qj00gmq",
+				"task":    map[string]any{"taskId": "b0qj00gmq", "timeoutMs": 90000, "persistent": false},
+			},
+			Raw: map[string]any{"type": claude.MessageTypeResult},
+		}, "route-b")
+		require.NoError(t, err)
+		require.True(t, causal)
+		require.Equal(t, "route-a", route)
+	})
+}
+
+func TestNativePumpDeliversBackgroundTaskJournalFramesBetweenPrompts(t *testing.T) {
+	session, _, stream := newLifecycleStreamTestSession(t)
+	session.id = "4fef6a73-9030-4f2e-ad32-775b6ea7ca25"
+	store := NewInMemorySessionStore()
+	home := t.TempDir()
+	session.mirror = newSessionMirror(session.agent.log, store, home, session)
+	pump := session.nativePumpHandle()
+	defer session.stopNativePump()
+
+	require.NoError(t, stream.incarnate(t.Context()))
+
+	incarnation := &nativeIncarnation{
+		lost: make(chan struct{}), done: make(chan struct{}), mirrorReady: make(chan struct{}),
+	}
+	incarnation.superviseOnce.Do(func() {})
+	session.setAutonomousRoute("autonomous-route", incarnation)
+
+	pump.dispatch(t.Context(), incarnation, &claude.SystemMessage{
+		Subtype: nativeTaskStartedSubtype,
+		Raw: map[string]any{
+			"type": claude.MessageTypeSystem, "subtype": nativeTaskStartedSubtype,
+			"task_id": "b0qj00gmq", "tool_use_id": "toolu_01XcE9vJb3M",
+		},
+	})
+	require.False(t, incarnation.failed.Load())
+
+	pump.dispatch(t.Context(), incarnation, &claude.TranscriptMirrorMessage{
+		FilePath: filepath.Join(home, "projects", "project", string(session.id)+".jsonl"),
+		Entries:  []json.RawMessage{json.RawMessage(backgroundTaskJournalEntry)},
+		Raw:      map[string]any{"type": claude.MessageTypeMirror},
+	})
+	require.False(t, incarnation.failed.Load())
+
+	pump.dispatch(t.Context(), incarnation, &claude.ResultMessage{
+		Origin: map[string]any{
+			"kind":    originKindTaskNotification,
+			"task_id": "b0qj00gmq",
+			"task":    map[string]any{"taskId": "b0qj00gmq", "timeoutMs": 90000, "persistent": false},
+		},
+		Raw: map[string]any{"type": claude.MessageTypeResult},
+	})
+	require.False(t, incarnation.failed.Load())
+
+	require.NoError(t, pump.barrier(t.Context()))
+	entries, err := store.Load(t.Context(), SessionKey{SessionID: string(session.id)})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Contains(t, string(entries[0]), `"toolUseResult":{"persistent":false,"taskId":"b0qj00gmq"`)
+}
+
+func TestNativePumpAdmitsBackgroundTaskJournalFramesMidTurn(t *testing.T) {
+	session, _, stream := newLifecycleStreamTestSession(t)
+	session.id = "4fef6a73-9030-4f2e-ad32-775b6ea7ca25"
+	store := NewInMemorySessionStore()
+	home := t.TempDir()
+	session.mirror = newSessionMirror(session.agent.log, store, home, session)
+	pump := session.nativePumpHandle()
+	defer session.stopNativePump()
+
+	require.NoError(t, stream.incarnate(t.Context()))
+
+	incarnation := &nativeIncarnation{
+		lost: make(chan struct{}), done: make(chan struct{}), mirrorReady: make(chan struct{}),
+	}
+	incarnation.superviseOnce.Do(func() {})
+	session.setAutonomousRoute("autonomous-route", incarnation)
+
+	sink, release := pump.attachTurn("prompt-route", incarnation)
+	require.True(t, sink.beginDispatch())
+	sink.accept()
+
+	pump.dispatch(t.Context(), incarnation, &claude.TranscriptMirrorMessage{
+		FilePath: filepath.Join(home, "projects", "project", string(session.id)+".jsonl"),
+		Entries:  []json.RawMessage{json.RawMessage(backgroundTaskJournalEntry)},
+		Raw:      map[string]any{"type": claude.MessageTypeMirror},
+	})
+	require.False(t, incarnation.failed.Load())
+
+	release()
+	require.False(t, incarnation.failed.Load())
+
+	require.NoError(t, pump.barrier(t.Context()))
+	entries, err := store.Load(t.Context(), SessionKey{SessionID: string(session.id)})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Contains(t, string(entries[0]), `"toolUseResult":{"persistent":false,"taskId":"b0qj00gmq"`)
 }
 
 func (c *gatedRawNotificationClient) NotifyExtension(ctx context.Context, method string, params any) error {

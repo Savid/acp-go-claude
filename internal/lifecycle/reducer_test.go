@@ -464,7 +464,8 @@ func TestQuiescenceInvalidationIsExplicit(t *testing.T) {
 }
 
 // TestQuiescenceRefusesAnUnprovenClass pins that a fact naming a class the answer
-// never advertised asserts something the connection did not claim.
+// never advertised asserts something the connection did not claim, whether the
+// answer proved no class at all or proved a different one.
 func TestQuiescenceRefusesAnUnprovenClass(t *testing.T) {
 	t.Parallel()
 
@@ -472,6 +473,15 @@ func TestQuiescenceRefusesAnUnprovenClass(t *testing.T) {
 
 	requireReduceRefusal(t, degenerate, ViolationUnnegotiatedFact, openSnapshot(),
 		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClassProcessContainment}))
+
+	proven := Negotiated{
+		Versions: []int{Version}, UpdatesOutsidePrompt: true,
+		AuthoritativeQuiescence: true, QuiescenceSource: ProofClassProcessContainment,
+		ActivityKinds: []ActivityKind{},
+	}
+
+	requireReduceRefusal(t, proven, ViolationUnnegotiatedFact, openSnapshot(),
+		QuiescenceEvent(QuiescenceFact{Quiescent: true, Source: ProofClass("quiet-for-a-while")}))
 }
 
 // TestReducerLatchesOnTheFirstRefusal pins fail-closed on the consumer side: a

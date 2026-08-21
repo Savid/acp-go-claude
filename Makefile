@@ -7,7 +7,7 @@ GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$
 
 # Removed public surfaces and forbidden hard-cutover terms. Hex-escaped so the
 # term list never contains a literal forbidden term. Expanded with `printf %b`.
-REMOVED_PUBLIC_TERMS = --cl\x69|claude\x20acp|pro\x78y|compatibilit\x79|deprecat\x65d|legac\x79|migratio\x6e|session/imp\x6frt|sdkMessag\x65|emitRawSDKMessag\x65s|setGoa\x6c|goa\x6cs|thoughtLeve\x6c|"_meta"\\s*:\\s*\\{[^}]*"mode"|\x4e\x45\x53|SSE\x20MCP|mcpCapabilities\\.ac\x70|\\bExportSessio\x6e\\b|\\bImportSessio\x6e\\b|\\bDeleteSessio\x6e\\b|\\bParseConfi\x67\\b
+REMOVED_PUBLIC_TERMS = --cl\x69|claude\x20acp|pro\x78y|compatibilit\x79|deprecat\x65d|legac\x79|migratio\x6e|session/imp\x6frt|sdkMessag\x65|emitRawSDKMessag\x65s|setGoa\x6c|goa\x6cs|\x60goa\x6c\x60|"goa\x6c"|\\bActivityGoa\x6c\\b|thoughtLeve\x6c|"_meta"\\s*:\\s*\\{[^}]*"mode"|\x4e\x45\x53|SSE\x20MCP|mcpCapabilities\\.ac\x70|\\bExportSessio\x6e\\b|\\bImportSessio\x6e\\b|\\bDeleteSessio\x6e\\b|\\bParseConfi\x67\\b
 
 .PHONY: build lint fmt-check fmt test coverage-check test-cross-compile test-integration-smoke test-integration-live test-integration-attended test-integration-keystore test-integration-cover test-integration-native-browser docs-audit clean tidy vuln modernize-check audit test/cover help
 

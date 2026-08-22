@@ -24,11 +24,13 @@ const (
 	failureCauseProvider    = "provider"
 	failureCauseTimeout     = "timeout"
 
+	nativeTransportFailureMessage = "claude transport failed"
+
 	authLoginMarker = "Please run /login"
 )
 
-// turnFailureError builds the uniform -32603 claude_turn_failed error with the
-// given machine-readable cause and the real native cause text.
+// turnFailureError builds the uniform -32603 claude_turn_failed error with a
+// stable, adapter-owned message. Provider payloads and paths never cross it.
 func turnFailureError(cause string, message string) *acp.RequestError {
 	return acp.NewInternalError(map[string]any{
 		jsonFieldError:    turnFailedError,
@@ -38,13 +40,20 @@ func turnFailureError(cause string, message string) *acp.RequestError {
 }
 
 // nativeTurnFailure classifies an error observed while reading the Claude turn
-// stream into the uniform failure shape. Process death maps to process_exit
-// (with the real exit status and stderr tail); everything else (stream close,
-// malformed frame, client lifecycle) maps to transport. It never surfaces a
-// fixed placeholder or a bare stream-closed sentinel.
+// stream into the uniform failure shape. Process death maps to process_exit with
+// only its closed status classification; provider stderr is never retained or
+// returned. Everything else maps to the transport classification.
 func nativeTurnFailure(err error) error {
 	if err == nil {
 		return nil
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return turnFailureError(failureCauseTransport, context.Canceled.Error())
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return turnFailureError(failureCauseTransport, context.DeadlineExceeded.Error())
 	}
 
 	var exit *claude.ProcessExitError
@@ -53,10 +62,14 @@ func nativeTurnFailure(err error) error {
 	}
 
 	if errors.Is(err, claude.ErrProcessExited) {
-		return turnFailureError(failureCauseProcessExit, err.Error())
+		return turnFailureError(failureCauseProcessExit, claude.ErrProcessExited.Error())
 	}
 
-	return turnFailureError(failureCauseTransport, err.Error())
+	if errors.Is(err, claude.ErrProcessContainmentIncomplete) {
+		return turnFailureError(failureCauseTransport, claude.ErrProcessContainmentIncomplete.Error())
+	}
+
+	return turnFailureError(failureCauseTransport, nativeTransportFailureMessage)
 }
 
 // isNativeProcessExit reports whether err is a Claude process-death error, used
@@ -196,37 +209,10 @@ func providerTurnFailure(result *claude.ResultMessage) error {
 	data := map[string]any{
 		jsonFieldError:    turnFailedError,
 		failureFieldCause: failureCauseProvider,
-		jsonFieldMessage:  providerErrorMessage(result),
-	}
-
-	if result.Subtype != "" {
-		data[jsonFieldSubtype] = result.Subtype
+		jsonFieldMessage:  "claude provider turn failed",
 	}
 
 	return acp.NewInternalError(data)
-}
-
-// providerErrorMessage returns the best available native cause text from a
-// result frame, preferring result, then the singular error field, then joined
-// errors, then the subtype. It never returns an empty placeholder.
-func providerErrorMessage(result *claude.ResultMessage) string {
-	if text := strings.TrimSpace(result.Result); text != "" {
-		return result.Result
-	}
-
-	if text := strings.TrimSpace(result.Error); text != "" {
-		return result.Error
-	}
-
-	if len(result.Errors) > 0 {
-		return strings.Join(result.Errors, "; ")
-	}
-
-	if result.Subtype != "" {
-		return result.Subtype
-	}
-
-	return "claude reported a turn error"
 }
 
 func isProviderAuthError(result *claude.ResultMessage) bool {

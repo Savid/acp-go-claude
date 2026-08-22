@@ -1,8 +1,10 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -12,22 +14,44 @@ import (
 )
 
 type fakeTransport struct {
-	incoming chan map[string]any
-	errs     chan error
+	events chan TransportEvent
 
 	mu   sync.Mutex
 	sent []any
 
-	sendErr  error
-	closeErr error
-	closed   bool
-	closes   int
+	sendErr   error
+	panicSend bool
+	closeErr  error
+	closed    bool
+	closes    int
+	closeSig  chan struct{}
+	closeOne  sync.Once
 }
+
+type panicOnceHandler struct {
+	panicked bool
+}
+
+func (h *panicOnceHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *panicOnceHandler) Handle(context.Context, slog.Record) error {
+	if !h.panicked {
+		h.panicked = true
+
+		panic("observer panic")
+	}
+
+	return nil
+}
+
+func (h *panicOnceHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *panicOnceHandler) WithGroup(string) slog.Handler { return h }
 
 func newFakeTransport() *fakeTransport {
 	return &fakeTransport{
-		incoming: make(chan map[string]any, 16),
-		errs:     make(chan error, 1),
+		events:   make(chan TransportEvent, 16),
+		closeSig: make(chan struct{}),
 	}
 }
 
@@ -35,6 +59,11 @@ func (f *fakeTransport) Start(context.Context) error { return nil }
 
 func (f *fakeTransport) Send(_ context.Context, payload any) error {
 	f.mu.Lock()
+	if f.panicSend {
+		f.mu.Unlock()
+
+		panic("send panic")
+	}
 	f.sent = append(f.sent, payload)
 	err := f.sendErr
 	f.mu.Unlock()
@@ -42,8 +71,43 @@ func (f *fakeTransport) Send(_ context.Context, payload any) error {
 	return err
 }
 
-func (f *fakeTransport) Messages(context.Context) (<-chan map[string]any, <-chan error) {
-	return f.incoming, f.errs
+func (f *fakeTransport) Events(ctx context.Context) <-chan TransportEvent {
+	events := make(chan TransportEvent)
+
+	go func() {
+		defer close(events)
+
+		for {
+			select {
+			case event, ok := <-f.events:
+				if !ok {
+					return
+				}
+
+				select {
+				case events <- event:
+				case <-ctx.Done():
+					return
+				case <-f.closeSig:
+					return
+				}
+			case <-ctx.Done():
+				return
+			case <-f.closeSig:
+				return
+			}
+		}
+	}()
+
+	return events
+}
+
+func (f *fakeTransport) sendMessage(message map[string]any) {
+	f.events <- TransportEvent{Message: message}
+}
+
+func (f *fakeTransport) sendError(err error) {
+	f.events <- TransportEvent{Err: err}
 }
 
 func (f *fakeTransport) Close() error {
@@ -52,6 +116,7 @@ func (f *fakeTransport) Close() error {
 
 	f.closed = true
 	f.closes++
+	f.closeOne.Do(func() { close(f.closeSig) })
 
 	return f.closeErr
 }
@@ -94,40 +159,37 @@ func startControllerForTest(t *testing.T, controller *Controller, parent context
 	return ctx
 }
 
-func TestControllerRecoverRouterClosesTransport(t *testing.T) {
-	t.Parallel()
-
+func TestControllerRouterOwnsDoneAfterControlResponsePanicAndDataJoin(t *testing.T) {
 	transport := newFakeTransport()
 	controller := NewController(slog.New(slog.DiscardHandler), transport)
+	for index := range cap(controller.messages) {
+		controller.messages <- map[string]any{"type": "blocked", "number": index}
+	}
+	startControllerForTest(t, controller, t.Context())
 
-	func() {
-		defer controller.recoverRouter(context.Background())
+	transport.sendMessage(map[string]any{"type": "assistant", "number": cap(controller.messages)})
+	transport.mu.Lock()
+	transport.panicSend = true
+	transport.mu.Unlock()
+	transport.sendMessage(map[string]any{
+		keyType:      controlRequestType,
+		keyRequestID: "panic-response",
+		keyRequest:   map[string]any{keySubtype: "missing"},
+	})
 
-		panic("boom")
-	}()
-
-	require.True(t, transport.isClosed())
-}
-
-func TestControllerRecoverControlRequestStopsAndClosesTransport(t *testing.T) {
-	t.Parallel()
-
-	transport := newFakeTransport()
-	controller := NewController(slog.New(slog.DiscardHandler), transport)
-
-	func() {
-		defer controller.recoverControlRequest(context.Background())
-
-		panic("boom")
-	}()
-
-	require.True(t, transport.isClosed())
+	<-transport.closeSig
 
 	select {
 	case <-controller.Done():
+		t.Fatal("the router published Done before joining its blocked data prefix")
 	default:
-		t.Fatal("controller was not stopped")
 	}
+
+	for range cap(controller.messages) + 1 {
+		<-controller.Messages()
+	}
+	<-controller.Done()
+	require.ErrorIs(t, controller.LastError(), errControlResponseWrite)
 }
 
 func TestControllerRoutesDataMessages(t *testing.T) {
@@ -139,7 +201,7 @@ func TestControllerRoutesDataMessages(t *testing.T) {
 	controller := NewController(nil, transport)
 	startControllerForTest(t, controller, ctx)
 
-	transport.incoming <- map[string]any{"type": "assistant"}
+	transport.sendMessage(map[string]any{"type": "assistant"})
 
 	select {
 	case msg := <-controller.Messages():
@@ -158,7 +220,7 @@ func TestControllerDoneClosesWhenTransportStops(t *testing.T) {
 	controller := NewController(nil, transport)
 	startControllerForTest(t, controller, ctx)
 
-	close(transport.incoming)
+	close(transport.events)
 
 	select {
 	case <-controller.Done():
@@ -178,13 +240,10 @@ func TestControllerDoneClosesOnTransportErrorAndContextCancel(t *testing.T) {
 	transport := newFakeTransport()
 	controller := NewController(nil, transport)
 	startControllerForTest(t, controller, ctx)
-	transport.errs <- errors.New("transport failed")
+	transport.sendError(errors.New("transport failed"))
+	close(transport.events)
 
-	select {
-	case <-controller.Done():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for controller done")
-	}
+	<-controller.Done()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	transport = newFakeTransport()
@@ -192,147 +251,141 @@ func TestControllerDoneClosesOnTransportErrorAndContextCancel(t *testing.T) {
 	startControllerForTest(t, controller, ctx)
 	cancel()
 
-	select {
-	case <-controller.Done():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for controller done")
-	}
+	<-controller.Done()
+
+	var failure *ControllerDataError
+	require.ErrorAs(t, controller.LastError(), &failure)
+	require.Equal(t, ControllerDataTeardownAbort, failure.Kind)
+	require.ErrorIs(t, controller.LastError(), context.Canceled)
 }
 
-func TestControllerStartStopsWhenDoneClosed(t *testing.T) {
-	t.Parallel()
-
+func TestControllerContainsObserverPanicAtTransportFailureBoundary(t *testing.T) {
 	transport := newFakeTransport()
-	controller := NewController(nil, transport)
-	controller.Start(context.Background())
-	controller.stop()
+	controller := NewController(slog.New(&panicOnceHandler{}), transport)
+	startControllerForTest(t, controller, t.Context())
 
-	select {
-	case <-controller.Done():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for controller done")
-	}
-}
+	transport.sendError(errors.New("transport failed"))
+	<-controller.Done()
 
-func TestControllerStartStopsWhenDataQueueOverflows(t *testing.T) {
-	t.Parallel()
-
-	transport := newFakeTransport()
-	controller := NewController(nil, transport)
-	for range cap(controller.messages) {
-		controller.messages <- map[string]any{"type": "queued"}
-	}
-
-	controller.Start(context.Background())
-	controller.dataIn <- map[string]any{"type": "queued"}
-	require.Eventually(t, func() bool {
-		return len(controller.dataIn) == 0
-	}, time.Second, 10*time.Millisecond)
-
-	for range cap(controller.dataIn) {
-		controller.dataIn <- map[string]any{"type": "queued"}
-	}
-
-	transport.incoming <- map[string]any{"type": "assistant"}
-
-	select {
-	case <-controller.Done():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for controller done")
-	}
+	require.ErrorIs(t, controller.LastError(), errClaudeTransportFailure)
 	require.True(t, transport.isClosed())
 }
 
-func TestControllerDrainsMessagesAfterTransportError(t *testing.T) {
+func TestControllerEOFDrainsEveryAdmittedFrameInOrder(t *testing.T) {
 	t.Parallel()
-
-	ctx := t.Context()
 
 	transport := newFakeTransport()
+	transport.events = make(chan TransportEvent, 8)
 	controller := NewController(nil, transport)
-	startControllerForTest(t, controller, ctx)
-
-	transport.incoming <- map[string]any{"type": "assistant"}
-	transport.errs <- errors.New("transport failed")
-	close(transport.incoming)
-
-	select {
-	case msg := <-controller.Messages():
-		require.Equal(t, "assistant", msg["type"])
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for drained data message")
+	for i := range cap(controller.messages) {
+		controller.messages <- map[string]any{"type": "blocked", "number": i}
 	}
+	controller.Start(t.Context())
 
+	for i := range 8 {
+		transport.sendMessage(map[string]any{"type": "assistant", "number": i})
+	}
+	close(transport.events)
+
+	// Keep the consumer gated beyond the abandoned implementation's 100 ms
+	// cutoff. EOF must remain in its ordered drain state rather than dropping a
+	// suffix to make Done close.
+	timer := time.NewTimer(150 * time.Millisecond)
+	defer timer.Stop()
+	<-timer.C
 	select {
 	case <-controller.Done():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for controller done")
-	}
-}
-
-func TestControllerDrainMessagesStopsOnContextCancel(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	controller := NewController(nil, newFakeTransport())
-	controller.drainMessages(ctx, make(chan map[string]any))
-}
-
-func TestControllerDrainMessagesRoutesBufferedMessages(t *testing.T) {
-	t.Parallel()
-
-	messages := make(chan map[string]any, 1)
-	messages <- map[string]any{"type": "assistant"}
-	close(messages)
-
-	controller := NewController(nil, newFakeTransport())
-	go controller.pumpDataMessages()
-	t.Cleanup(controller.closeDataPump)
-
-	controller.drainMessages(context.Background(), messages)
-
-	select {
-	case msg := <-controller.Messages():
-		require.Equal(t, "assistant", msg["type"])
-	case <-time.After(time.Second):
-		t.Fatal("buffered message was not drained")
-	}
-}
-
-func TestControllerDrainMessagesStopsWhenRouteFails(t *testing.T) {
-	t.Parallel()
-
-	messages := make(chan map[string]any, 1)
-	messages <- map[string]any{"type": "assistant"}
-	close(messages)
-
-	controller := NewController(nil, newFakeTransport())
-	for range cap(controller.dataIn) {
-		controller.dataIn <- map[string]any{"type": "queued"}
-	}
-
-	controller.drainMessages(context.Background(), messages)
-}
-
-func TestControllerCloseDataPumpStopsBlockedPump(t *testing.T) {
-	t.Parallel()
-
-	controller := NewController(nil, newFakeTransport())
-	for range cap(controller.messages) {
-		controller.messages <- map[string]any{"type": "queued"}
-	}
-
-	go controller.pumpDataMessages()
-	controller.dataIn <- map[string]any{"type": "assistant"}
-	controller.closeDataPump()
-
-	select {
-	case <-controller.dataDone:
+		t.Fatal("controller completed before the admitted EOF suffix was consumed")
 	default:
-		t.Fatal("data pump did not stop")
 	}
+
+	for i := range cap(controller.messages) {
+		msg := <-controller.Messages()
+		require.Equal(t, "blocked", msg["type"])
+		require.Equal(t, i, msg["number"])
+	}
+	for i := range 8 {
+		msg := <-controller.Messages()
+		require.Equal(t, "assistant", msg["type"])
+		require.Equal(t, i, msg["number"])
+	}
+
+	_, open := <-controller.Messages()
+	require.False(t, open)
+	<-controller.Done()
+	require.NoError(t, controller.LastError())
+}
+
+func TestControllerTerminalEventDrainsItsCausalPrefix(t *testing.T) {
+	transport := newFakeTransport()
+	transport.events = make(chan TransportEvent, 9)
+	controller := NewController(nil, transport)
+	for i := range cap(controller.messages) {
+		controller.messages <- map[string]any{"type": "blocked", "number": i}
+	}
+	controller.Start(t.Context())
+
+	for i := range 8 {
+		transport.sendMessage(map[string]any{"type": "assistant", "number": i})
+	}
+	terminal := errors.New("ordered terminal")
+	transport.sendError(terminal)
+	close(transport.events)
+
+	for i := range cap(controller.messages) {
+		msg := <-controller.Messages()
+		require.Equal(t, "blocked", msg["type"])
+		require.Equal(t, i, msg["number"])
+	}
+	for i := range 8 {
+		msg := <-controller.Messages()
+		require.Equal(t, "assistant", msg["type"])
+		require.Equal(t, i, msg["number"])
+	}
+
+	_, open := <-controller.Messages()
+	require.False(t, open)
+	<-controller.Done()
+	require.ErrorIs(t, controller.LastError(), errClaudeTransportFailure)
+	require.NotContains(t, controller.LastError().Error(), terminal.Error())
+}
+
+func TestControllerOverflowDrainsAdmittedPrefixAndReportsTypedCause(t *testing.T) {
+	t.Parallel()
+
+	transport := newFakeTransport()
+	transport.events = make(chan TransportEvent, controllerDataBuffer+2)
+	controller := NewController(nil, transport)
+	for i := range cap(controller.messages) {
+		controller.messages <- map[string]any{"type": "blocked", "number": i}
+	}
+	controller.Start(t.Context())
+
+	for i := range controllerDataBuffer + 2 {
+		transport.sendMessage(map[string]any{"type": "assistant", "number": i})
+	}
+	close(transport.events)
+	<-transport.closeSig
+
+	for i := range cap(controller.messages) {
+		msg := <-controller.Messages()
+		require.Equal(t, "blocked", msg["type"])
+		require.Equal(t, i, msg["number"])
+	}
+
+	number := 0
+	for msg := range controller.Messages() {
+		require.Equal(t, "assistant", msg["type"])
+		require.Equal(t, number, msg["number"])
+		number++
+	}
+	require.Equal(t, controllerDataBuffer, number)
+	<-controller.Done()
+	require.True(t, transport.isClosed())
+
+	var failure *ControllerDataError
+	require.ErrorAs(t, controller.LastError(), &failure)
+	require.Equal(t, ControllerDataOverflow, failure.Kind)
 }
 
 func TestControllerSendRequestReceivesResponse(t *testing.T) {
@@ -366,14 +419,14 @@ func TestControllerSendRequestReceivesResponse(t *testing.T) {
 	require.Equal(t, "initialize", sent.Request["subtype"])
 	require.Equal(t, true, sent.Request["x"])
 
-	transport.incoming <- map[string]any{
+	transport.sendMessage(map[string]any{
 		"type": "control_response",
 		"response": map[string]any{
 			"subtype":    "success",
 			"request_id": sent.RequestID,
 			"response":   map[string]any{"ok": true},
 		},
-	}
+	})
 
 	select {
 	case err := <-errs:
@@ -399,7 +452,7 @@ func TestControllerRoutesControlResponseWhileDataOutputBlocked(t *testing.T) {
 	}
 
 	ctx = startControllerForTest(t, controller, ctx)
-	transport.incoming <- map[string]any{"type": "assistant", "message": "blocked"}
+	transport.sendMessage(map[string]any{"type": "assistant", "message": "blocked"})
 
 	done := make(chan *ControlResponse, 1)
 	errs := make(chan error, 1)
@@ -420,14 +473,14 @@ func TestControllerRoutesControlResponseWhileDataOutputBlocked(t *testing.T) {
 
 	sent, ok := transport.sentPayloads()[0].(ControlRequest)
 	require.True(t, ok)
-	transport.incoming <- map[string]any{
+	transport.sendMessage(map[string]any{
 		"type": "control_response",
 		"response": map[string]any{
 			"subtype":    "success",
 			"request_id": sent.RequestID,
 			"response":   map[string]any{"ok": true},
 		},
-	}
+	})
 
 	select {
 	case err := <-errs:
@@ -503,28 +556,28 @@ func TestControllerRouteDropsDataMessageAfterContextOrStop(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	require.False(t, controller.route(ctx, map[string]any{"type": "assistant"}))
+	err := controller.route(ctx, map[string]any{"type": "assistant"})
+	require.ErrorIs(t, err, context.Canceled)
 
-	controller = NewController(nil, newFakeTransport())
-	controller.stop()
-	require.False(t, controller.route(context.Background(), map[string]any{"type": "assistant"}))
-
-	controller = NewController(nil, newFakeTransport())
-	close(controller.dataStop)
-	require.False(t, controller.route(context.Background(), map[string]any{"type": "assistant"}))
+	var failure *ControllerDataError
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, ControllerDataTeardownAbort, failure.Kind)
 }
 
-func TestControllerRouteDataOverflowClosesTransport(t *testing.T) {
+func TestControllerRouteDataOverflowReturnsTypedCause(t *testing.T) {
 	t.Parallel()
 
 	transport := newFakeTransport()
 	controller := NewController(nil, transport)
-	for range cap(controller.dataIn) {
-		controller.dataIn <- map[string]any{"type": "queued"}
+	for range cap(controller.dataSlots) {
+		controller.dataSlots <- struct{}{}
 	}
 
-	require.False(t, controller.route(context.Background(), map[string]any{"type": "assistant"}))
-	require.True(t, transport.isClosed())
+	err := controller.route(context.Background(), map[string]any{"type": "assistant"})
+	var failure *ControllerDataError
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, ControllerDataOverflow, failure.Kind)
+	require.False(t, transport.isClosed(), "the router owns teardown after classifying the cause")
 }
 
 func TestControllerSendRequestErrorResponse(t *testing.T) {
@@ -549,18 +602,18 @@ func TestControllerSendRequestErrorResponse(t *testing.T) {
 	sent, ok := transport.sentPayloads()[0].(ControlRequest)
 	require.True(t, ok)
 
-	transport.incoming <- map[string]any{
+	transport.sendMessage(map[string]any{
 		keyType: controlResponseType,
 		keyResponse: map[string]any{
 			keySubtype:           responseSubtypeError,
 			keyRequestID:         sent.RequestID,
 			responseSubtypeError: "bad model",
 		},
-	}
+	})
 
 	err := <-errs
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "bad model")
+	require.ErrorIs(t, err, errClaudeControlRequestFail)
+	require.NotContains(t, err.Error(), "bad model")
 }
 
 func TestControlRequestErrorClassifiesSessionFailures(t *testing.T) {
@@ -589,7 +642,7 @@ func TestControllerSendRequestTimeout(t *testing.T) {
 func TestControllerSendRequestFailures(t *testing.T) {
 	t.Parallel()
 
-	sendErr := errors.New("send failed")
+	sendErr := errors.New("opaque-send-failure")
 	transport := newFakeTransport()
 	transport.sendErr = sendErr
 
@@ -600,7 +653,8 @@ func TestControllerSendRequestFailures(t *testing.T) {
 	startControllerForTest(t, controller, runCtx)
 
 	_, err := controller.SendRequest(context.Background(), "initialize", nil, time.Second)
-	require.ErrorIs(t, err, sendErr)
+	require.ErrorIs(t, err, errClaudeTransportFailure)
+	require.NotContains(t, err.Error(), sendErr.Error())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -618,7 +672,7 @@ func TestControllerSendRequestFailures(t *testing.T) {
 	transport = newFakeTransport()
 	controller = NewController(nil, transport)
 	startControllerForTest(t, controller, context.Background())
-	close(transport.incoming)
+	close(transport.events)
 
 	select {
 	case <-controller.Done():
@@ -655,13 +709,13 @@ func TestControllerHandlesInboundRequest(t *testing.T) {
 	})
 	startControllerForTest(t, controller, ctx)
 
-	transport.incoming <- map[string]any{
+	transport.sendMessage(map[string]any{
 		"type":       "control_request",
 		"request_id": "req-1",
 		"request": map[string]any{
 			"subtype": "can_use_tool",
 		},
-	}
+	})
 
 	require.Eventually(t, func() bool {
 		return len(transport.sentPayloads()) == 1
@@ -685,20 +739,20 @@ func TestControllerHandlesInboundRequestErrors(t *testing.T) {
 	})
 	startControllerForTest(t, controller, ctx)
 
-	transport.incoming <- map[string]any{
+	transport.sendMessage(map[string]any{
 		keyType:      controlRequestType,
 		keyRequestID: "req-1",
 		keyRequest: map[string]any{
 			keySubtype: "bad",
 		},
-	}
-	transport.incoming <- map[string]any{
+	})
+	transport.sendMessage(map[string]any{
 		keyType:      controlRequestType,
 		keyRequestID: "req-2",
 		keyRequest: map[string]any{
 			keySubtype: "missing",
 		},
-	}
+	})
 
 	require.Eventually(t, func() bool {
 		return len(transport.sentPayloads()) == 2
@@ -725,22 +779,50 @@ func TestControllerRecoversInboundRequestHandlerPanic(t *testing.T) {
 	})
 	startControllerForTest(t, controller, ctx)
 
-	transport.incoming <- map[string]any{
+	transport.sendMessage(map[string]any{
 		keyType:      controlRequestType,
 		keyRequestID: "req-1",
 		keyRequest: map[string]any{
 			keySubtype: "panic",
 		},
+	})
+
+	<-controller.Done()
+	require.True(t, transport.isClosed())
+	require.ErrorIs(t, controller.LastError(), errControlHandlerPanic)
+	for _, payload := range transport.sentPayloads() {
+		resp, ok := payload.(ControlResponse)
+		if ok {
+			require.NotContains(t, resp.Response[responseSubtypeError], "boom")
+		}
 	}
+}
 
-	require.Eventually(t, func() bool {
-		return len(transport.sentPayloads()) == 1
-	}, time.Second, 10*time.Millisecond)
+func TestControllerClosesOpaqueHandlerErrorOnWireAndLogs(t *testing.T) {
+	t.Parallel()
 
-	resp, ok := transport.sentPayloads()[0].(ControlResponse)
+	const sentinel = "provider-store-tool-user-secret"
+	var logs bytes.Buffer
+	transport := newFakeTransport()
+	controller := NewController(
+		slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		transport,
+	)
+	controller.RegisterHandler("sensitive", func(context.Context, *ControlRequest) (map[string]any, error) {
+		return nil, errors.New(sentinel)
+	})
+
+	controller.handleRequest(t.Context(), map[string]any{
+		keyRequestID: "req-sensitive",
+		keyRequest:   map[string]any{keySubtype: "sensitive"},
+	})
+
+	require.Len(t, transport.sentPayloads(), 1)
+	response, ok := transport.sentPayloads()[0].(ControlResponse)
 	require.True(t, ok)
-	require.Equal(t, responseSubtypeError, resp.Response[keySubtype])
-	require.Contains(t, resp.Response[responseSubtypeError], "handler panic: boom")
+	require.Equal(t, errControlHandlerFailure.Error(), response.Response[responseSubtypeError])
+	require.NotContains(t, response.Response[responseSubtypeError], sentinel)
+	require.NotContains(t, logs.String(), sentinel)
 }
 
 func TestControllerInboundRequestHandlerTimeout(t *testing.T) {
@@ -762,13 +844,13 @@ func TestControllerInboundRequestHandlerTimeout(t *testing.T) {
 	})
 	startControllerForTest(t, controller, ctx)
 
-	transport.incoming <- map[string]any{
+	transport.sendMessage(map[string]any{
 		keyType:      controlRequestType,
 		keyRequestID: "req-1",
 		keyRequest: map[string]any{
 			keySubtype: "slow",
 		},
-	}
+	})
 
 	select {
 	case <-started:
@@ -785,11 +867,47 @@ func TestControllerInboundRequestHandlerTimeout(t *testing.T) {
 	require.Equal(t, responseSubtypeError, resp.Response[keySubtype])
 	require.Contains(t, resp.Response[responseSubtypeError], "timed out")
 
+	require.Len(t, controller.handlerSem, 1)
+
+	close(release)
 	require.Eventually(t, func() bool {
 		return len(controller.handlerSem) == 0
 	}, time.Second, 10*time.Millisecond)
+}
+
+func TestControllerTimeoutKeepsTrueWorkersBoundedAtSixtyFour(t *testing.T) {
+	transport := newFakeTransport()
+	controller := NewController(nil, transport)
+	controller.SetHandlerTimeout(5 * time.Millisecond)
+
+	started := make(chan struct{}, maxConcurrentControlHandlers)
+	release := make(chan struct{})
+	controller.RegisterHandler("stubborn", func(context.Context, *ControlRequest) (map[string]any, error) {
+		started <- struct{}{}
+		<-release
+
+		return map[string]any{}, nil
+	})
+
+	for index := range maxConcurrentControlHandlers + 1 {
+		controller.routeRequest(t.Context(), map[string]any{
+			keyRequestID: fmt.Sprintf("req-%d", index),
+			keyRequest: map[string]any{
+				keySubtype: "stubborn",
+			},
+		})
+	}
+
+	require.Eventually(t, func() bool {
+		return len(started) == maxConcurrentControlHandlers &&
+			len(controller.handlerSem) == maxConcurrentControlHandlers &&
+			len(transport.sentPayloads()) == maxConcurrentControlHandlers+1
+	}, time.Second, time.Millisecond)
 
 	close(release)
+	require.Eventually(t, func() bool {
+		return len(controller.handlerSem) == 0
+	}, time.Second, time.Millisecond)
 }
 
 func TestControllerSetHandlerTimeoutDefault(t *testing.T) {
@@ -804,22 +922,23 @@ func TestControllerSetHandlerTimeoutDefault(t *testing.T) {
 func TestControllerLogsControlResponseSendError(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
-
+	var logs bytes.Buffer
+	const sentinel = "opaque-response-write-failure"
 	transport := newFakeTransport()
-	transport.sendErr = errors.New("send failed")
-	controller := NewController(nil, transport)
-	startControllerForTest(t, controller, ctx)
+	transport.sendErr = errors.New(sentinel)
+	controller := NewController(
+		slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		transport,
+	)
 
-	transport.incoming <- map[string]any{
+	controller.handleRequest(t.Context(), map[string]any{
 		keyType:      controlRequestType,
 		keyRequestID: "req-1",
 		keyRequest: map[string]any{
 			keySubtype: "missing",
 		},
-	}
+	})
 
-	require.Eventually(t, func() bool {
-		return len(transport.sentPayloads()) == 1
-	}, time.Second, 10*time.Millisecond)
+	require.Len(t, transport.sentPayloads(), 1)
+	require.NotContains(t, logs.String(), sentinel)
 }

@@ -26,14 +26,14 @@ func TestNewAgentDefaultClientAndCloseBranches(t *testing.T) {
 	transport := newFakeClaudeTransport()
 	sessionClient := claude.NewClient(nil, claude.Options{}, transport)
 	require.NoError(t, sessionClient.Start(context.Background()))
-	transport.closeErr = errors.New("close failed")
+	closeErr := errors.New("close failed")
+	transport.closeErr = closeErr
 
 	session := &agentSession{
-		agent:         agent,
-		id:            "session-1",
-		client:        sessionClient,
-		turn:          make(chan struct{}, 1),
-		closeTurnWait: defaultSessionCloseTurnWait,
+		agent:  agent,
+		id:     "session-1",
+		client: sessionClient,
+		turn:   make(chan struct{}, 1),
 	}
 	agent.sessions[session.id] = session
 	agent.permissionCache[session.id] = map[string]string{"Read": "allow"}
@@ -41,7 +41,7 @@ func TestNewAgentDefaultClientAndCloseBranches(t *testing.T) {
 	agent.setConnection(newRecordingAgentClient())
 
 	err := agent.Close()
-	require.ErrorContains(t, err, "close failed")
+	require.ErrorIs(t, err, closeErr)
 	require.Empty(t, agent.sessions)
 	require.Empty(t, agent.permissionCache)
 	require.Empty(t, agent.deleted)
@@ -60,11 +60,10 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	require.NoError(t, sessionClient.Start(context.Background()))
 	transport.closeErr = errors.Join(errors.New("close failed"), claude.ErrProcessContainmentIncomplete)
 	agent.sessions["session-1"] = &agentSession{
-		agent:         agent,
-		id:            acp.SessionId("session-1"),
-		client:        sessionClient,
-		turn:          make(chan struct{}, 1),
-		closeTurnWait: defaultSessionCloseTurnWait,
+		agent:  agent,
+		id:     acp.SessionId("session-1"),
+		client: sessionClient,
+		turn:   make(chan struct{}, 1),
 	}
 	newServeAgent = func(...Option) *Agent { return agent }
 
@@ -292,7 +291,12 @@ func TestCloseAndServeJoinAdmittedIncompletePromptRelaunch(t *testing.T) {
 	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
 }
 
-func TestRemovedSessionContainmentSurvivesTerminalServe(t *testing.T) {
+// TestFailedCloseRetainsItsSessionAndItsContainmentSurvivesTerminalServe pins
+// both halves of a close that could not contain its tree. The id keeps naming
+// the session, because what is still running behind it is exactly what this
+// close failed to finish, and the containment failure the agent recorded is
+// terminal for the agent: Serve and every later Close report it too.
+func TestFailedCloseRetainsItsSessionAndItsContainmentSurvivesTerminalServe(t *testing.T) {
 	previous := newServeAgent
 	t.Cleanup(func() { newServeAgent = previous })
 
@@ -303,7 +307,8 @@ func TestRemovedSessionContainmentSurvivesTerminalServe(t *testing.T) {
 
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: "session-1"})
 	require.ErrorIs(t, err, claude.ErrProcessContainmentIncomplete)
-	require.Empty(t, agent.sessions)
+	require.Contains(t, agent.sessions, acp.SessionId("session-1"),
+		"a close that contained nothing keeps the id its work is still addressable through")
 
 	newServeAgent = func(...Option) *Agent { return agent }
 	err = Serve(t.Context(), bytes.NewBuffer(nil), io.Discard)
@@ -364,7 +369,9 @@ func TestAgentLifecycleWithFakeClaude(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, resumeResp.ConfigOptions)
 
-	require.NoError(t, agent.Cancel(ctx, acp.CancelNotification{SessionId: newResp.SessionId}))
+	// The turn has already settled, so no nonce can authorize a cancel: the
+	// idle session refuses it and stays open for the close that follows.
+	requireExactUnsupportedField(t, agent.Cancel(ctx, acp.CancelNotification{SessionId: newResp.SessionId}), routeMetaKey)
 	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: newResp.SessionId})
 	require.NoError(t, err)
 	_, err = agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "test-turn", "after close"))
@@ -392,7 +399,8 @@ func TestAgentLifecycleErrors(t *testing.T) {
 
 	transports[0].closeErr = errors.New("close failed")
 	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: first.SessionId})
-	require.ErrorContains(t, err, "close failed")
+	require.ErrorContains(t, err, "claude transport failed")
+	require.NotContains(t, err.Error(), "close failed")
 
 	closed := NewAgent(WithHome(t.TempDir()))
 	require.NoError(t, closed.Close())

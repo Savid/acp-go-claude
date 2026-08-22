@@ -47,8 +47,7 @@ func TestApplyOptionsBranches(t *testing.T) {
 		WithTurnTimeout(90 * time.Second),
 		WithEnv(env),
 		WithConcurrencyLimits(ConcurrencyLimits{
-			MaxActiveSessions:        2,
-			MaxConcurrentClientCalls: 4,
+			MaxActiveSessions: 2, MaxConcurrentClientCalls: 3,
 		}),
 		WithImageLimits(ImageLimits{
 			MaxInputBytesPerImage:     1,
@@ -86,7 +85,7 @@ func TestApplyOptionsBranches(t *testing.T) {
 	env["ANTHROPIC_BASE_URL"] = "https://mutated.example.test"
 	require.Equal(t, "https://example.test", options.Env["ANTHROPIC_BASE_URL"])
 	require.Equal(t, 2, options.ConcurrencyLimits.MaxActiveSessions)
-	require.Equal(t, 4, options.ConcurrencyLimits.MaxConcurrentClientCalls)
+	require.Equal(t, 3, options.ConcurrencyLimits.MaxConcurrentClientCalls)
 	require.Equal(t, ImageLimits{
 		MaxInputBytesPerImage:     1,
 		MaxInputBytesPerPrompt:    2,

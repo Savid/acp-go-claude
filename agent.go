@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/savid/acp-go-claude/internal/observer"
 )
 
@@ -18,6 +19,7 @@ const (
 	ForkSessionMethod = "_claude/session/fork"
 	RawEventMethod    = "_claude/rawEvent"
 	RateLimitsMethod  = "_claude/rateLimits"
+	metaElicitation   = "elicitation"
 )
 
 const (
@@ -80,6 +82,8 @@ type Agent struct {
 	clientCalls        chan struct{}
 	clientCapabilities acp.ClientCapabilities
 	positionEncoding   acp.PositionEncodingKind
+	lifecycle          lifecycle.Negotiated
+	lifecycleCarrier   *bool
 	permissionCache    map[acp.SessionId]map[string]string
 	activeLimitErr     error
 	configurationErr   error
@@ -175,7 +179,8 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	agent := newServeAgent(opts...)
 	defer func() {
 		if closeErr := agent.Close(); closeErr != nil {
-			agent.log.DebugContext(context.Background(), "close Claude ACP agent failed", slog.String(jsonFieldError, closeErr.Error()))
+			agent.log.DebugContext(context.Background(), "close Claude ACP agent failed",
+				slog.String("class", safeErrorClass(closeErr)))
 			serveErr = closeErr
 		}
 	}()
@@ -205,7 +210,17 @@ func (a *Agent) close() error {
 	a.closed = true
 	a.mu.Unlock()
 
+	connectionErr := a.interruptActiveHostWrite()
+
 	a.constructions.Wait()
+
+	a.mu.Lock()
+	connection := a.conn
+	a.mu.Unlock()
+
+	if local, ok := connection.(*localAgentConnection); ok {
+		local.hooks.cancelPending()
+	}
 
 	a.mu.Lock()
 
@@ -217,7 +232,6 @@ func (a *Agent) close() error {
 	a.sessions = make(map[acp.SessionId]*agentSession)
 	a.permissionCache = make(map[acp.SessionId]map[string]string)
 	a.deleted = make(map[acp.SessionId]struct{})
-	a.conn = nil
 	a.mu.Unlock()
 
 	if len(sessions) > 0 {
@@ -244,11 +258,23 @@ func (a *Agent) close() error {
 
 	closes.Wait()
 
+	// The connection outlives the close ladders that run on it. Each session's
+	// close is the containment-proving boundary, and the terminal actions, the
+	// terminal idle and the quiescence fact it proves are the last thing this
+	// agent owes the host: discarding the carrier first would leave every one of
+	// them undeliverable, and a shutdown that closed cleanly would report the
+	// adapter's own missing connection as a lifecycle violation.
 	a.mu.Lock()
+	conn := a.conn
+	a.conn = nil
 	containmentErr := a.containmentErr
 	a.mu.Unlock()
 
-	return errors.Join(errors.Join(closeErrs...), containmentErr)
+	if local, ok := conn.(*localAgentConnection); ok {
+		connectionErr = errors.Join(connectionErr, local.hooks.closeWrites())
+	}
+
+	return errors.Join(errors.Join(closeErrs...), containmentErr, connectionErr)
 }
 
 func (a *Agent) beginSessionConstruction() error {
@@ -287,12 +313,42 @@ func (a *Agent) setConnection(conn agentClient) {
 	a.conn = conn
 }
 
+func (a *Agent) setLifecycleCarrier(interruptible bool) {
+	a.mu.Lock()
+	a.lifecycleCarrier = &interruptible
+	a.mu.Unlock()
+}
+
+func (a *Agent) lifecycleCarrierSupported() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.lifecycleCarrier == nil || *a.lifecycleCarrier
+}
+
+func (a *Agent) interruptActiveHostWrite() error {
+	a.mu.Lock()
+	conn := a.conn
+	a.mu.Unlock()
+
+	if local, ok := conn.(*localAgentConnection); ok {
+		return local.hooks.interruptActiveWrite()
+	}
+
+	return nil
+}
+
 // Initialize implements ACP initialize.
 func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (resp acp.InitializeResponse, err error) {
 	_, finish := a.observe.StartACP(ctx, params.Meta, "initialize")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
-	if err := a.configurationError(); err != nil {
+	if configurationErr := a.configurationError(); configurationErr != nil {
+		return acp.InitializeResponse{}, configurationErr
+	}
+
+	lifecycleMeta, err := a.negotiateLifecycle(params.Meta)
+	if err != nil {
 		return acp.InitializeResponse{}, err
 	}
 
@@ -306,6 +362,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 
 	resp = acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
+		Meta:            lifecycleMeta,
 		AgentInfo: &acp.Implementation{
 			Name:    a.options.AgentName,
 			Title:   &title,
@@ -348,10 +405,10 @@ func (a *Agent) capabilityMeta() map[string]any {
 			"fork": map[string]any{
 				"unstable":        true,
 				jsonFieldMethod:   ForkSessionMethod,
-				"request":         "acp.UnstableForkSessionRequest JSON payload only",
+				jsonFieldRequest:  "acp.UnstableForkSessionRequest JSON payload only",
 				jsonFieldResponse: "acp.UnstableForkSessionResponse JSON payload only",
 			},
-			"elicitation": map[string]any{
+			metaElicitation: map[string]any{
 				"unstable": true,
 				"scope":    string(RuntimeResourceSession),
 				"tracks":   "ACP v1 elicitation",
@@ -395,6 +452,10 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 	_, finish := a.observe.StartACP(ctx, params.Meta, "authenticate")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.AuthenticateResponse{}, err
+	}
+
 	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 }
 
@@ -403,6 +464,14 @@ func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest
 // dispatch and before any parameter validation.
 func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	if err := a.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	// The reserved lifecycle key is refused here, at the dispatch boundary and
+	// before any leg's own closed-member validation, so every extension surface
+	// names the exact family path rather than the `_meta` object its own decoder
+	// happens to reject first. No side effect of any leg runs behind it.
+	if err := rejectLifecycleExtensionMeta(params); err != nil {
 		return nil, err
 	}
 

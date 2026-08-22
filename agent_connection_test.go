@@ -134,3 +134,24 @@ func TestRequestErrorReportsAnExpiredDeadlineAsAnInternalFailure(t *testing.T) {
 	require.Equal(t, -32603, requestError(ctx, context.DeadlineExceeded).Code)
 	require.Equal(t, -32603, requestError(ctx, errors.New("boom")).Code)
 }
+
+func TestSafeRequestFailureExposesOnlyItsTypedWireError(t *testing.T) {
+	t.Parallel()
+
+	request := acp.NewInternalError(map[string]any{jsonFieldError: "safe_failure"})
+	cause := errors.New("opaque native cause")
+	failure := newSafeRequestFailure(request, cause)
+
+	var typed *acp.RequestError
+	require.ErrorAs(t, failure, &typed)
+	require.Same(t, request, typed)
+	require.ErrorIs(t, failure, cause)
+	require.NotContains(t, failure.Error(), cause.Error())
+
+	var unrelated *safeStageError
+	require.False(t, errors.As(failure, &unrelated))
+
+	require.Equal(t, "cancelled", safeErrorClass(context.Canceled))
+	require.Equal(t, "deadline", safeErrorClass(context.DeadlineExceeded))
+	require.Equal(t, "internal", safeErrorClass(cause))
+}

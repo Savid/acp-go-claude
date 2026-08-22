@@ -11,7 +11,7 @@ and to the test in this repository that reproduces it.
 | Symptom | Cause | Reproducing tests |
 | --- | --- | --- |
 | An MCP tool exposed after session establishment is not visible to the model until the first prompt completes its refresh. | The Claude Code CLI fixes its MCP tool registry at process startup; the adapter refreshes it by closing the CLI process and starting a replacement. | `TestClaudeCLIAuthorizedMCPRefresh`, `TestClaudeFirstMCPPromptRefreshesFixedRegistryOnce` |
-| A prompt fails at finish even though the model produced a result, or assistant content streams while the turn is finishing. | At prompt finish the adapter drains trailing transcript-mirror frames within a bounded window before returning the response; failures in that drain fail the turn. | `TestFinishPromptResultAndDrainEdges`, `TestLateMirrorNoopBranches` |
+| A prompt fails at finish even though the model produced a result. | A transcript-mirror append failed before the prompt's durable foreground-prefix barrier; settlement refuses to emit terminal `idle` for state the store does not hold. | `TestSessionPromptFlowEdgeBranches`, `TestNativePumpBarrierHonorsCancellationAndDrain` |
 | The native `claude` CLI raises its AskUserQuestion tool but no question ever reaches the host. | The client did not advertise elicitation capability at initialize, so the adapter suppresses the emission and hands the CLI a bounded failure instead of an `elicitation/create` request. | `TestClientElicitationCapabilityGating`, `TestHandleAskUserQuestion`, `TestClaudeAskUserQuestionElicitationLive` |
 | A forwarded question is answered but the answer is discarded and the turn stops. | The turn was cancelled while the elicitation was pending; the adapter fails the pending elicitation closed rather than feeding a late answer back to the CLI. | `TestElicitationCancelledDuringTurn` |
 | Compiled-binary integration tests skip and report no coverage. | Those tests run only when `ACP_GO_CLAUDE_AGENT_BINARY` points at a built agent binary. | `connectLiveAgentBinary` skip in `integration/helpers_test.go` |
@@ -46,24 +46,22 @@ process; the refresh exists purely because the Claude Code CLI cannot extend a
 live registry.
 </Note>
 
-## Trailing transcript updates at prompt finish
+## Transcript persistence across prompt boundaries
 
-The adapter mirrors the native Claude transcript into the session store, and a
-turn result can arrive while trailing transcript-mirror frames are still
-pending. At prompt finish the adapter drains those frames within a bounded
-window before returning the prompt response: drained assistant content is still
-forwarded as session updates, and a session-store append failure during the
-drain fails the turn instead of silently dropping transcript entries.
+The session-owned native pump reads Claude frames from process start until the
+incarnation ends, including between prompts. Transcript-mirror frames enter one
+ordered, lossless store outbox. Every prompt exit places a durability barrier in
+that same outbox before terminal `idle`, so settlement covers the complete
+foreground prefix admitted before the barrier without treating silence or a
+timer as native quiescence. An append failure in that prefix fails settlement
+instead of acknowledging state the store does not hold.
 
-- `TestFinishPromptResultAndDrainEdges` (`session_prompt_test.go`) exercises
-  the finish path's edge branches: a task-notification result that does not
-  complete the prompt while a workflow is still active, a context-usage fetch
-  failure that still finishes the turn, update-emit failures that fail the
-  turn, an error result surfacing as a turn failure, and a store append failure
-  during the trailing-frame drain.
-- `TestLateMirrorNoopBranches` (`session_late_mirror_test.go`) proves that
-  starting and stopping the late-mirror processor on a session with no mirror
-  configured is a safe no-op.
+- `TestSessionPromptFlowEdgeBranches` (`session_prompt_test.go`) covers result
+  handling, system-idle completion, and store failures at the foreground-prefix
+  boundary.
+- `TestNativePumpBarrierHonorsCancellationAndDrain`
+  (`session_native_pump_lifecycle_test.go`) covers the ordered outbox barrier and
+  its cancellation behavior.
 
 ## AskUserQuestion never reaches the host
 

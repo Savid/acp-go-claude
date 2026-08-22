@@ -183,7 +183,8 @@ type Options struct {
 	DefaultPermissionMode string
 	// DefaultSystemPrompt is passed to newly created Claude sessions when non-empty.
 	DefaultSystemPrompt string
-	// HideAuth suppresses Claude subscription terminal auth methods.
+	// HideAuth withdraws the Claude subscription sign-in from the advertised
+	// provider auth catalog. The setup-token and API-key methods still stand.
 	HideAuth bool
 	// BareMode launches Claude with --bare for deterministic sessions that opt
 	// out of Claude's automatic project/context discovery. Bare mode also
@@ -211,7 +212,8 @@ type Options struct {
 	defaultPermissionModeSet bool
 }
 
-// ConcurrencyLimits controls per-agent/session backpressure. Zero fields use defaults.
+// ConcurrencyLimits controls process-local backpressure. Zero fields use their
+// defaults.
 type ConcurrencyLimits struct {
 	MaxActiveSessions        int
 	MaxConcurrentClientCalls int
@@ -459,7 +461,8 @@ func WithClaudeDefaultSystemPrompt(prompt string) Option {
 	}
 }
 
-// WithClaudeHideAuth suppresses Claude subscription terminal auth methods.
+// WithClaudeHideAuth withdraws the Claude subscription sign-in from the
+// advertised provider auth catalog.
 func WithClaudeHideAuth(enabled bool) Option {
 	return func(options *Options) {
 		options.HideAuth = enabled
@@ -548,7 +551,8 @@ func WithEnv(env map[string]string) Option {
 	}
 }
 
-// WithConcurrencyLimits sets process-local backpressure limits. Zero fields use defaults.
+// WithConcurrencyLimits sets process-local session and outbound client-call
+// limits. Zero fields use their defaults.
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
 	return func(options *Options) {
 		options.ConcurrencyLimits = limits

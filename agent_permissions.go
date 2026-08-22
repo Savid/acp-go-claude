@@ -10,6 +10,12 @@ import (
 )
 
 func (a *Agent) permissionRulesForSession(ctx context.Context, sessionID acp.SessionId) (map[string]string, error) {
+	// A tombstoned parent is wire-indistinguishable from one that never
+	// existed, even while its teardown still retains a live instance.
+	if a.isDeleted(sessionID) {
+		return nil, unknownSessionError()
+	}
+
 	a.mu.Lock()
 	session := a.sessions[sessionID]
 	a.mu.Unlock()
@@ -50,12 +56,12 @@ func (a *Agent) loadPermissionRules(ctx context.Context, sessionID acp.SessionId
 	rules, err := store.Load(ctx, string(sessionID))
 	if err != nil {
 		if cached, ok := a.cachedPermissionRules(sessionID); ok {
-			a.log.WarnContext(ctx, "load permission rules failed; using cached rules", slog.String(jsonFieldError, err.Error()))
+			a.log.WarnContext(ctx, "load permission rules failed; using cached rules", slog.String("stage", "permission_rules_load"))
 
 			return cached, nil
 		}
 
-		a.log.WarnContext(ctx, "load permission rules failed", slog.String(jsonFieldError, err.Error()))
+		a.log.WarnContext(ctx, "load permission rules failed", slog.String("stage", "permission_rules_load"))
 
 		return nil, fmt.Errorf("load permission rules: %w", err)
 	}

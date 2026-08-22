@@ -6,38 +6,19 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/stretchr/testify/require"
 )
 
 const permissionControlTurnNonce = "permission-turn-0123456789abcdef"
-
-type blockingExitPlanClient struct {
-	*recordingAgentClient
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (c *blockingExitPlanClient) RequestPermission(
-	ctx context.Context,
-	_ acp.RequestPermissionRequest,
-) (acp.RequestPermissionResponse, error) {
-	close(c.entered)
-	select {
-	case <-c.release:
-		return acp.RequestPermissionResponse{
-			Outcome: acp.NewRequestPermissionOutcomeSelected(acp.PermissionOptionId(modeDefault)),
-		}, nil
-	case <-ctx.Done():
-		return acp.RequestPermissionResponse{}, ctx.Err()
-	}
-}
 
 func activatePermissionControlTurn(t *testing.T, session *agentSession, turnNonce string) context.Context {
 	t.Helper()
@@ -49,7 +30,10 @@ func activatePermissionControlTurn(t *testing.T, session *agentSession, turnNonc
 	session.turnNonce = turnNonce
 	session.mu.Unlock()
 
-	return withTurnRoute(ctx, turnNonce)
+	admittedCtx, finish := admitControlCallbackForTest(t, session, ctx, turnNonce)
+	t.Cleanup(finish)
+
+	return admittedCtx
 }
 
 func TestPermissionRulePersistenceHelpers(t *testing.T) {
@@ -109,11 +93,11 @@ func TestPermissionHelperBranches(t *testing.T) {
 	require.False(t, permissionRequestCancelled(errors.New("boom")))
 
 	session := &agentSession{permissionRules: map[string]string{}, turnCancelled: true}
-	ctx, finish := session.permissionRequestContext(context.Background(), "")
+	ctx, finish := session.permissionRequestContext(context.Background(), "", lifecycleInteractionOwner{})
 	require.NotNil(t, ctx)
 	finish()
 
-	ctx, finish = session.permissionRequestContext(context.Background(), "tool")
+	ctx, finish = session.permissionRequestContext(context.Background(), "tool", lifecycleInteractionOwner{})
 	select {
 	case <-ctx.Done():
 	default:
@@ -167,6 +151,225 @@ func TestPermissionHelperBranches(t *testing.T) {
 	require.Equal(t, map[string]any{jsonFieldType: permissionUpdateSetMode, jsonFieldMode: string(modePlan), permissionUpdateDestination: permissionUpdateSession}, permissionModeUpdate(modePlan))
 }
 
+func TestExactInteractionRegistrationRejectsFailedOwner(t *testing.T) {
+	session := &agentSession{}
+	incarnation := &nativeIncarnation{}
+	incarnation.failed.Store(true)
+	pump := session.nativePumpHandle()
+	pump.incarnation = incarnation
+	defer session.stopNativePump()
+	owner := lifecycleInteractionOwner{incarnation: incarnation, route: "route", actionID: "action"}
+
+	permissionCtx, finishPermission := session.permissionRequestContext(t.Context(), "tool", owner)
+	defer finishPermission()
+	require.ErrorIs(t, context.Cause(permissionCtx), errExactInteractionContainment)
+
+	elicitationCtx, finishElicitation := session.registerElicitation(t.Context(), owner)
+	defer finishElicitation()
+	require.ErrorIs(t, context.Cause(elicitationCtx), errExactInteractionContainment)
+}
+
+type heldNativeResponseClient struct {
+	*recordingAgentClient
+	entered chan string
+	release chan struct{}
+}
+
+func newHeldNativeResponseClient() *heldNativeResponseClient {
+	return &heldNativeResponseClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		entered:              make(chan string, 1),
+		release:              make(chan struct{}),
+	}
+}
+
+func (c *heldNativeResponseClient) RequestPermission(
+	ctx context.Context,
+	request acp.RequestPermissionRequest,
+	action actionWireAdmission,
+) (acp.RequestPermissionResponse, error) {
+	if err := action.publishPending(); err != nil {
+		return acp.RequestPermissionResponse{}, err
+	}
+	if err := action.observeWrite(ctx, actionWireIdentity{
+		method: acp.ClientMethodSessionRequestPermission, requestID: "held-permission",
+	}); err != nil {
+		return acp.RequestPermissionResponse{}, err
+	}
+
+	c.entered <- "permission"
+	<-c.release
+
+	return acp.RequestPermissionResponse{
+		Outcome: acp.NewRequestPermissionOutcomeSelected(permissionAllowAlways),
+	}, nil
+}
+
+func (c *heldNativeResponseClient) CreateElicitation(
+	ctx context.Context,
+	request acp.UnstableCreateElicitationRequest,
+	_ elicitationScope,
+	action actionWireAdmission,
+) (acp.UnstableCreateElicitationResponse, error) {
+	if err := action.publishPending(); err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
+	if err := action.observeWrite(ctx, actionWireIdentity{
+		method: acp.ClientMethodElicitationCreate, requestID: "held-elicitation",
+	}); err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
+
+	if request.Form != nil {
+		c.entered <- "form"
+	} else {
+		c.entered <- "url"
+	}
+	<-c.release
+
+	response := acp.NewUnstableCreateElicitationResponseAccept()
+	response.Accept.Content = map[string]any{"answer": "accepted"}
+
+	return response, nil
+}
+
+func TestLateHostResponsesCannotCrossNativeIncarnations(t *testing.T) {
+	previousSave := savePermissionRules
+	var saved int
+	savePermissionRules = func(context.Context, string, acp.SessionId, map[string]string) error {
+		saved++
+
+		return nil
+	}
+	t.Cleanup(func() { savePermissionRules = previousSave })
+
+	tests := []struct {
+		name string
+		run  func(context.Context, *agentSession) (bool, error)
+	}{
+		{
+			name: "permission",
+			run: func(ctx context.Context, session *agentSession) (bool, error) {
+				decision, err := session.handlePermission(ctx, claude.PermissionRequest{
+					ToolName: "Write", ToolUseID: "late-permission",
+					Input: map[string]any{"file_path": "/tmp/late", "content": "x"},
+				})
+
+				return decision.Behavior == claude.BehaviorAllow, err
+			},
+		},
+		{
+			name: "form elicitation",
+			run: func(ctx context.Context, session *agentSession) (bool, error) {
+				response, err := session.createFormElicitation(ctx, session.agent.connection(), claude.ElicitationRequest{
+					Mode: claude.ElicitationModeForm,
+					RequestedSchema: map[string]any{
+						"type": "object", "properties": map[string]any{"answer": map[string]any{"type": "string"}},
+					},
+				})
+
+				return response.Action == claude.ElicitationActionAccept, err
+			},
+		},
+		{
+			name: "url elicitation",
+			run: func(ctx context.Context, session *agentSession) (bool, error) {
+				response, err := session.createURLElicitation(ctx, session.agent.connection(), claude.ElicitationRequest{
+					Mode: claude.ElicitationModeURL, URL: "https://example.test/late", ElicitationID: "late-url",
+				})
+
+				return response.Action == claude.ElicitationActionAccept, err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := NewAgent()
+			client := newHeldNativeResponseClient()
+			agent.setConnection(client)
+			agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{
+				Form: &acp.ElicitationFormCapabilities{}, Url: &acp.ElicitationUrlCapabilities{},
+			}
+			_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOfferMeta(1),
+				ClientCapabilities: agent.clientCapabilities,
+			})
+			require.NoError(t, err)
+
+			session := &agentSession{
+				agent: agent, id: acp.SessionId("late-" + tc.name), cwd: t.TempDir(),
+				turn: make(chan struct{}, sessionTurnCapacity), permissionRules: map[string]string{},
+			}
+			pump := session.nativePumpHandle()
+			defer session.stopNativePump()
+			incarnationA := &nativeIncarnation{generation: 1}
+			pump.mu.Lock()
+			pump.incarnation = incarnationA
+			pump.mu.Unlock()
+
+			stream := session.lifecycleStream()
+			require.NoError(t, stream.incarnate(t.Context()))
+			_, err = stream.dispatch(t.Context(), lifecycle.Submission{
+				SubmissionID: "late-a", ClientNonce: "late-client-a",
+			}, "late-route-a", func() error { return nil })
+			require.NoError(t, err)
+			callbackCtx, finish := admitControlCallbackForTest(t, session, t.Context(), "late-route-a")
+
+			result := make(chan struct {
+				accepted bool
+				err      error
+			}, 1)
+			go func() {
+				accepted, runErr := tc.run(callbackCtx, session)
+				result <- struct {
+					accepted bool
+					err      error
+				}{accepted: accepted, err: runErr}
+			}()
+			require.Equal(t, strings.Fields(tc.name)[0], <-client.entered)
+
+			// Retire A, terminalize everything it still owns, then publish B while
+			// the host's answer to A remains held.
+			incarnationA.failed.Store(true)
+			require.NoError(t, stream.loseIncarnation(t.Context()))
+			incarnationB := &nativeIncarnation{generation: 2}
+			pump.mu.Lock()
+			pump.incarnation = incarnationB
+			pump.mu.Unlock()
+			session.setAutonomousRoute("late-route-b", incarnationB)
+			require.NoError(t, stream.incarnate(t.Context()))
+
+			close(client.release)
+			late := <-result
+			finish()
+			require.NoError(t, late.err)
+			require.False(t, late.accepted, "A's late answer cannot be accepted by B")
+			require.True(t, pump.serves(incarnationB))
+			require.False(t, incarnationB.failed.Load())
+			require.Empty(t, session.permissionRules)
+
+			failedActions := 0
+			acceptedActions := 0
+			for _, entry := range lifecycleNotificationEvents(t, client.recordingAgentClient) {
+				if entry.event["type"] != string(lifecycle.EventActionUpdate) {
+					continue
+				}
+				action := requireAnyMap(t, entry.event["action"])
+				switch action["state"] {
+				case string(lifecycle.ActionFailed):
+					failedActions++
+				case string(lifecycle.ActionAccepted):
+					acceptedActions++
+				}
+			}
+			require.Equal(t, 1, failedActions, "A's action terminalizes exactly once")
+			require.Zero(t, acceptedActions)
+		})
+	}
+
+	require.Zero(t, saved, "no late allow-always response persists a rule")
+}
+
 func TestHandlePermissionBranches(t *testing.T) {
 	agent := NewAgent()
 	session := &agentSession{
@@ -177,18 +380,19 @@ func TestHandlePermissionBranches(t *testing.T) {
 		model:           "sonnet",
 		permissionRules: map[string]string{"Read": claude.BehaviorAllow, "Write": claude.BehaviorDeny},
 	}
+	turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
 
-	decision, err := session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Read", Input: map[string]any{"file_path": "/tmp/a"}})
+	decision, err := session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: "Read", Input: map[string]any{"file_path": "/tmp/a"}})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorAllow, decision.Behavior)
-	decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Write"})
+	decision, err = session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: "Write"})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorDeny, decision.Behavior)
 	require.Contains(t, decision.Message, "saved")
-	decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-cancelled"})
+	decision, err = session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-cancelled"})
 	require.NoError(t, err)
 	require.Equal(t, "ACP client is unavailable", decision.Message)
-	decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: askUserQuestionTool})
+	decision, err = session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: askUserQuestionTool})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorDeny, decision.Behavior)
 
@@ -214,7 +418,7 @@ func TestHandlePermissionBranches(t *testing.T) {
 			agent.setConnection(conn)
 			session.permissionRules = map[string]string{}
 
-			decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash", ToolUseID: "tool-1", Input: map[string]any{jsonFieldCommand: "true"}})
+			decision, err = session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: "Bash", ToolUseID: "tool-1", Input: map[string]any{jsonFieldCommand: "true"}})
 			require.NoError(t, err)
 			require.Equal(t, tc.want, decision.Behavior)
 			if tc.wantUpdate {
@@ -226,24 +430,24 @@ func TestHandlePermissionBranches(t *testing.T) {
 	conn := newRecordingAgentClient()
 	conn.nilPermission = true
 	agent.setConnection(conn)
-	decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-cancelled"})
+	decision, err = session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-cancelled"})
 	require.NoError(t, err)
 	require.Equal(t, permissionCancelledMessage, decision.Message)
 
 	conn = newRecordingAgentClient()
 	conn.permissionErr = errors.New("permission failed")
 	agent.setConnection(conn)
-	_, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-error"})
+	_, err = session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-error"})
 	require.ErrorContains(t, err, "permission failed")
 
-	decision, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash"})
+	decision, err = session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: "Bash"})
 	require.NoError(t, err)
 	require.Contains(t, decision.Message, "missing its native tool-use ID")
 
 	conn = newRecordingAgentClient()
 	conn.sessionUpdateErr = errors.New("pending update failed")
 	agent.setConnection(conn)
-	_, err = session.handlePermission(context.Background(), claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-update-error"})
+	_, err = session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-update-error"})
 	require.ErrorContains(t, err, "pending update failed")
 }
 
@@ -286,6 +490,155 @@ func TestExitPlanModePermission(t *testing.T) {
 	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-rejected"})
 	require.NoError(t, err)
 	require.Equal(t, claude.BehaviorDeny, decision.Behavior)
+}
+
+func TestPermissionLifecycleActionFailures(t *testing.T) {
+	t.Run("announcement failure", func(t *testing.T) {
+		session, conn, _, turnCtx := newLifecycleActionSession(t, permissionControlTurnNonce)
+		failLifecycleAction(session, conn, lifecycle.ActionPending,
+			errors.New("action announcement delivery"))
+
+		_, err := session.handlePermission(turnCtx, claude.PermissionRequest{
+			ToolName: "Bash", ToolUseID: "bash-announce", Input: map[string]any{jsonFieldCommand: "true"},
+		})
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+	})
+
+	t.Run("resolution failure fails after the answer", func(t *testing.T) {
+		session, conn, _, turnCtx := newLifecycleActionSession(t, permissionControlTurnNonce)
+		conn.permission = permissionAllowOnce
+		failLifecycleAction(session, conn, lifecycle.ActionAccepted,
+			errors.New("action resolution delivery"))
+
+		decision, err := session.handlePermission(turnCtx, claude.PermissionRequest{
+			ToolName: "Bash", ToolUseID: "bash-resolve", Input: map[string]any{jsonFieldCommand: "true"},
+		})
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+		require.Equal(t, claude.PermissionDecision{}, decision)
+	})
+}
+
+func TestExitPlanModeLifecycleActionFailures(t *testing.T) {
+	newSession := func(t *testing.T) (*agentSession, *recordingAgentClient, context.Context) {
+		t.Helper()
+		session, conn, _, _ := newLifecycleActionSession(t, permissionControlTurnNonce)
+		session.mode = modePlan
+		session.model = "sonnet"
+
+		return session, conn, activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+	}
+
+	t.Run("announcement failure", func(t *testing.T) {
+		session, conn, turnCtx := newSession(t)
+		failLifecycleAction(session, conn, lifecycle.ActionPending,
+			errors.New("action announcement delivery"))
+
+		_, err := session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool, ToolUseID: "exit-announce"})
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+	})
+
+	t.Run("resolution failure fails after the answer", func(t *testing.T) {
+		session, conn, turnCtx := newSession(t)
+		conn.permission = acp.PermissionOptionId(modeDefault)
+		failLifecycleAction(session, conn, lifecycle.ActionAccepted,
+			errors.New("action resolution delivery"))
+
+		decision, err := session.handleExitPlanMode(turnCtx, claude.PermissionRequest{
+			ToolName: exitPlanModeTool, ToolUseID: "exit-resolve", Input: map[string]any{"plan": "done"},
+		})
+		require.ErrorContains(t, err, "lifecycle delivery failed")
+		require.Equal(t, claude.PermissionDecision{}, decision)
+	})
+}
+
+type permissionAfterResponseClient struct {
+	*recordingAgentClient
+	after func()
+	err   error
+}
+
+func (c *permissionAfterResponseClient) RequestPermission(
+	ctx context.Context,
+	request acp.RequestPermissionRequest,
+	action actionWireAdmission,
+) (acp.RequestPermissionResponse, error) {
+	if c.err != nil {
+		if err := action.publishPending(); err != nil {
+			return acp.RequestPermissionResponse{}, err
+		}
+		if err := action.observeWrite(ctx, actionWireIdentity{
+			method: acp.ClientMethodSessionRequestPermission, requestID: "mixed-error",
+		}); err != nil {
+			return acp.RequestPermissionResponse{}, err
+		}
+
+		return acp.RequestPermissionResponse{
+			Outcome: acp.NewRequestPermissionOutcomeSelected(acp.PermissionOptionId(modeDefault)),
+		}, c.err
+	}
+
+	response, err := c.recordingAgentClient.RequestPermission(ctx, request, action)
+	if c.after != nil {
+		c.after()
+	}
+
+	return response, err
+}
+
+func TestExitPlanModeRejectsOwnershipChangesAcrossTheHostWait(t *testing.T) {
+	newSession := func(t *testing.T) (*agentSession, *recordingAgentClient, context.Context) {
+		t.Helper()
+		session, conn, _, _ := newLifecycleActionSession(t, permissionControlTurnNonce)
+		session.mode = modePlan
+		session.model = "sonnet"
+		conn.permission = acp.PermissionOptionId(modeDefault)
+
+		return session, conn, activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+	}
+
+	t.Run("action owner retired", func(t *testing.T) {
+		session, conn, turnCtx := newSession(t)
+		client := &permissionAfterResponseClient{recordingAgentClient: conn, after: func() {
+			session.callbackOwnershipMu.Lock()
+			clear(session.callbackAdmissions)
+			session.callbackOwnershipMu.Unlock()
+		}}
+		session.agent.setConnection(client)
+		decision, err := session.handleExitPlanMode(turnCtx, claude.PermissionRequest{
+			ToolName: exitPlanModeTool, ToolUseID: "exit-retired",
+		})
+		require.Error(t, err)
+		require.Equal(t, claude.PermissionDecision{}, decision)
+	})
+
+	t.Run("active callback rotated", func(t *testing.T) {
+		session, conn, turnCtx := newSession(t)
+		client := &permissionAfterResponseClient{recordingAgentClient: conn, after: func() {
+			stream := session.lifecycleStream()
+			stream.mu.Lock()
+			stream.turn.nonce = "replacement-turn"
+			stream.mu.Unlock()
+		}}
+		session.agent.setConnection(client)
+		decision, err := session.handleExitPlanMode(turnCtx, claude.PermissionRequest{
+			ToolName: exitPlanModeTool, ToolUseID: "exit-rotated",
+		})
+		require.NoError(t, err)
+		require.Equal(t, claude.BehaviorDeny, decision.Behavior)
+	})
+
+	t.Run("selected response with host error", func(t *testing.T) {
+		session, conn, turnCtx := newSession(t)
+		client := &permissionAfterResponseClient{
+			recordingAgentClient: conn,
+			err:                  errors.New("host permission failed"),
+		}
+		session.agent.setConnection(client)
+		_, err := session.handleExitPlanMode(turnCtx, claude.PermissionRequest{
+			ToolName: exitPlanModeTool, ToolUseID: "exit-mixed-error",
+		})
+		require.ErrorContains(t, err, "host permission failed")
+	})
 }
 
 func TestExitPlanModeControlCallbackRequiresExactActiveRoute(t *testing.T) {
@@ -345,45 +698,6 @@ func TestExitPlanModeControlCallbackRequiresExactActiveRoute(t *testing.T) {
 		require.Empty(t, conn.Updates())
 	})
 
-	t.Run("callback becomes stale while awaiting permission", func(t *testing.T) {
-		agent := NewAgent()
-		conn := &blockingExitPlanClient{
-			recordingAgentClient: newRecordingAgentClient(),
-			entered:              make(chan struct{}),
-			release:              make(chan struct{}),
-		}
-		agent.setConnection(conn)
-		session := &agentSession{agent: agent, id: "session-1", mode: modePlan, model: "sonnet"}
-		turnCtx := activatePermissionControlTurn(t, session, "turn-old-0123456789abcdef")
-		decisionCh := make(chan claude.PermissionDecision, 1)
-		errCh := make(chan error, 1)
-
-		go func() {
-			decision, err := session.handleExitPlanMode(turnCtx, request)
-			decisionCh <- decision
-			errCh <- err
-		}()
-
-		select {
-		case <-conn.entered:
-		case <-time.After(time.Second):
-			t.Fatal("timed out waiting for ExitPlanMode permission request")
-		}
-
-		session.mu.Lock()
-		session.turnNonce = "turn-new-0123456789abcdef"
-		session.cancel = func() {}
-		session.mu.Unlock()
-		close(conn.release)
-
-		require.NoError(t, <-errCh)
-		require.Equal(t, claude.BehaviorDeny, (<-decisionCh).Behavior)
-		require.Equal(t, modePlan, session.mode)
-		updates := conn.Updates()
-		require.Len(t, updates, 1)
-		require.Equal(t, acp.ToolCallId("exit-1"), updates[0].Update.ToolCall.ToolCallId)
-	})
-
 	t.Run("outside turn", func(t *testing.T) {
 		session, conn := newSession()
 
@@ -428,8 +742,9 @@ func TestPermissionAdditionalEdgeBranches(t *testing.T) {
 	conn := newRecordingAgentClient()
 	conn.permissionErr = acp.NewRequestCancelled(nil)
 	agent.setConnection(conn)
+	turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
 	session.turnCancelled = true
-	decision, err := session.handlePermission(ctx, claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-1"})
+	decision, err := session.handlePermission(turnCtx, claude.PermissionRequest{ToolName: "Bash", ToolUseID: "bash-1"})
 	require.NoError(t, err)
 	require.True(t, decision.Interrupt)
 	require.Equal(t, permissionCancelledMessage, decision.Message)
@@ -438,7 +753,6 @@ func TestPermissionAdditionalEdgeBranches(t *testing.T) {
 	conn = newRecordingAgentClient()
 	conn.permission = acp.PermissionOptionId(modeDefault)
 	agent.setConnection(conn)
-	turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
 	decision, err = session.handleExitPlanMode(turnCtx, claude.PermissionRequest{ToolName: exitPlanModeTool})
 	require.NoError(t, err)
 	require.Contains(t, decision.Message, "missing its native tool-use ID")
@@ -521,8 +835,21 @@ func (c *callbackOrderWireClient) UnstableCreateElicitation(
 type callbackOrderWireRecorder struct {
 	writer io.Writer
 
-	mu       sync.Mutex
-	messages []json.RawMessage
+	mu      sync.Mutex
+	records []callbackOrderWireRecord
+}
+
+type callbackOrderWireRecord struct {
+	message json.RawMessage
+	label   string
+}
+
+func (*callbackOrderWireRecorder) Close() error { return nil }
+
+func (r *callbackOrderWireRecorder) Reset() {
+	r.mu.Lock()
+	r.records = nil
+	r.mu.Unlock()
 }
 
 // Write records successful agent-to-client frames before the next frame can be
@@ -537,7 +864,7 @@ func (r *callbackOrderWireRecorder) Write(p []byte) (int, error) {
 	line := bytes.TrimSpace(p)
 	if len(line) > 0 {
 		r.mu.Lock()
-		r.messages = append(r.messages, append(json.RawMessage(nil), line...))
+		r.records = append(r.records, callbackOrderWireRecord{message: append(json.RawMessage(nil), line...)})
 		r.mu.Unlock()
 	}
 
@@ -548,11 +875,18 @@ func (r *callbackOrderWireRecorder) Order(t *testing.T) []string {
 	t.Helper()
 
 	r.mu.Lock()
-	messages := append([]json.RawMessage(nil), r.messages...)
+	records := append([]callbackOrderWireRecord(nil), r.records...)
 	r.mu.Unlock()
 
-	order := make([]string, 0, len(messages))
-	for _, message := range messages {
+	order := make([]string, 0, len(records))
+	actionTools := make(map[string]string)
+	for _, record := range records {
+		if record.label != "" {
+			order = append(order, record.label)
+
+			continue
+		}
+		message := record.message
 		var envelope struct {
 			Method string          `json:"method"`
 			Params json.RawMessage `json:"params"`
@@ -563,6 +897,30 @@ func (r *callbackOrderWireRecorder) Order(t *testing.T) []string {
 		case acp.ClientMethodSessionUpdate:
 			var notification acp.SessionNotification
 			require.NoError(t, json.Unmarshal(envelope.Params, &notification))
+			if lifecycleEnvelope, ok := notification.Meta[lifecycle.MetaKey].(map[string]any); ok {
+				event := requireAnyMap(t, lifecycleEnvelope["event"])
+				switch event["type"] {
+				case string(lifecycle.EventActionUpdate):
+					action := requireAnyMap(t, event["action"])
+					actionID, _ := action["actionId"].(string)
+					toolCallID, _ := action["toolCallId"].(string)
+					if toolCallID != "" {
+						actionTools[actionID] = toolCallID
+					} else {
+						toolCallID = actionTools[actionID]
+					}
+					state, _ := action["state"].(string)
+					order = append(order, "action:"+toolCallID+":"+state)
+				case string(lifecycle.EventStateUpdate):
+					state, stateOK := event["state"].(string)
+					require.True(t, stateOK)
+					order = append(order, "foreground:"+state)
+				default:
+					order = append(order, "session_update")
+				}
+
+				continue
+			}
 			switch {
 			case notification.Update.ToolCall != nil:
 				order = append(order, "tool_call:"+string(notification.Update.ToolCall.ToolCallId))
@@ -574,7 +932,9 @@ func (r *callbackOrderWireRecorder) Order(t *testing.T) []string {
 		case acp.ClientMethodSessionRequestPermission:
 			var request acp.RequestPermissionRequest
 			require.NoError(t, json.Unmarshal(envelope.Params, &request))
-			order = append(order, "permission:"+string(request.ToolCall.ToolCallId))
+			toolCallID := string(request.ToolCall.ToolCallId)
+			actionTools[actionIDFromLifecycleMeta(t, request.Meta)] = toolCallID
+			order = append(order, "permission:"+toolCallID)
 		case acp.ClientMethodElicitationCreate:
 			var request acp.UnstableCreateElicitationRequest
 			require.NoError(t, json.Unmarshal(envelope.Params, &request))
@@ -586,11 +946,22 @@ func (r *callbackOrderWireRecorder) Order(t *testing.T) []string {
 			}
 			route, _ := meta[routeMetaKey].(map[string]any)
 			toolCallID, _ := route["toolCallId"].(string)
+			actionTools[actionIDFromLifecycleMeta(t, meta)] = toolCallID
 			order = append(order, "elicitation:"+toolCallID)
 		}
 	}
 
 	return order
+}
+
+func actionIDFromLifecycleMeta(t *testing.T, meta map[string]any) string {
+	t.Helper()
+	correlation := requireAnyMap(t, meta[lifecycle.MetaKey])
+	action := requireAnyMap(t, correlation["action"])
+	actionID, _ := action["actionId"].(string)
+	require.NotEmpty(t, actionID)
+
+	return actionID
 }
 
 func newCallbackOrderWireSession(
@@ -609,13 +980,13 @@ func newCallbackOrderWireSession(
 	})
 
 	agent := NewAgent()
+	wire := &callbackOrderWireRecorder{writer: agentToClientWriter}
 	wireClient := &callbackOrderWireClient{permissionOption: permissionOption}
 	peer := acp.NewClientSideConnection(wireClient, clientToAgentWriter, agentToClientReader)
-	wire := &callbackOrderWireRecorder{writer: agentToClientWriter}
 	local := newLocalAgentConnection(agent, wire, clientToAgentReader)
 	agent.setConnection(local)
 
-	_, err := peer.Initialize(t.Context(), acp.InitializeRequest{ClientCapabilities: acp.ClientCapabilities{
+	_, err := peer.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOfferMeta(1), ClientCapabilities: acp.ClientCapabilities{
 		Elicitation: &acp.ElicitationCapabilities{
 			Form: &acp.ElicitationFormCapabilities{},
 			Url:  &acp.ElicitationUrlCapabilities{},
@@ -631,7 +1002,14 @@ func newCallbackOrderWireSession(
 		model:           "sonnet",
 		permissionRules: map[string]string{},
 	}
+	stream := session.lifecycleStream()
+	require.NoError(t, stream.incarnate(t.Context()))
+	_, err = stream.dispatch(t.Context(), lifecycle.Submission{
+		SubmissionID: "wire-submission", ClientNonce: "wire-client",
+	}, permissionControlTurnNonce, func() error { return nil })
+	require.NoError(t, err)
 	turnCtx := activatePermissionControlTurn(t, session, permissionControlTurnNonce)
+	wire.Reset()
 
 	return session, wire, turnCtx
 }
@@ -644,14 +1022,19 @@ func TestPermissionCallbacksPublishExactPendingToolOnACPWire(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, claude.BehaviorAllow, decision.Behavior)
-		require.Equal(t, []string{"tool_call:bash-wire", "permission:bash-wire"}, wire.Order(t))
+		require.Equal(t, []string{
+			"tool_call:bash-wire", "permission:bash-wire", "action:bash-wire:pending",
+			"foreground:requires_action", "action:bash-wire:accepted", "foreground:running",
+		}, wire.Order(t))
 
 		updates := mapper.MessageToUpdatesWithOptions(&claude.AssistantMessage{
 			Content: []claude.ContentBlock{claude.ToolUseBlock{ID: "bash-wire", Name: "Bash", Input: map[string]any{jsonFieldCommand: "true"}}},
 		}, mapper.ToolUpdateOptions{ToolUses: make(map[string]claude.ToolUseBlock)})
 		require.NoError(t, session.emitUpdates(turnCtx, updates))
 		require.Equal(t, []string{
-			"tool_call:bash-wire", "permission:bash-wire", "tool_call_update:bash-wire",
+			"tool_call:bash-wire", "permission:bash-wire", "action:bash-wire:pending",
+			"foreground:requires_action", "action:bash-wire:accepted", "foreground:running",
+			"tool_call_update:bash-wire",
 		}, wire.Order(t))
 	})
 
@@ -663,13 +1046,75 @@ func TestPermissionCallbacksPublishExactPendingToolOnACPWire(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, claude.BehaviorAllow, decision.Behavior)
 		require.Equal(t, []string{
-			"tool_call:exit-wire", "permission:exit-wire", "session_update",
+			"tool_call:exit-wire", "permission:exit-wire", "action:exit-wire:pending",
+			"foreground:requires_action", "session_update", "action:exit-wire:accepted", "foreground:running",
 		}, wire.Order(t))
 
 		updates := mapper.MessageToUpdatesWithOptions(&claude.AssistantMessage{
 			Content: []claude.ContentBlock{claude.ToolUseBlock{ID: "exit-wire", Name: exitPlanModeTool, Input: map[string]any{"plan": "ship"}}},
 		}, mapper.ToolUpdateOptions{ToolUses: make(map[string]claude.ToolUseBlock)})
 		require.NoError(t, session.emitUpdates(turnCtx, updates))
-		require.Equal(t, "tool_call_update:exit-wire", wire.Order(t)[3])
+		require.Equal(t, "tool_call_update:exit-wire", wire.Order(t)[7])
 	})
+}
+
+func TestConcurrentPermissionAndElicitationPreservePerActionWireOrder(t *testing.T) {
+	session, wire, permissionCtx := newCallbackOrderWireSession(t, permissionAllowOnce)
+	session.agent.options.ConcurrencyLimits.MaxConcurrentClientCalls = 2
+
+	elicitationCtx, finishElicitation := admitControlCallbackForTest(
+		t, session, t.Context(), permissionControlTurnNonce,
+	)
+	defer finishElicitation()
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	go func() {
+		<-start
+		_, err := session.handlePermission(permissionCtx, claude.PermissionRequest{
+			ToolName: "Write", ToolUseID: "permission-race",
+			Input: map[string]any{"file_path": "/tmp/race", "content": "x"},
+		})
+		errs <- err
+	}()
+	go func() {
+		<-start
+		_, err := session.createFormElicitation(elicitationCtx, session.agent.connection(), claude.ElicitationRequest{
+			Mode:      claude.ElicitationModeForm,
+			ToolUseID: "elicitation-race",
+			Message:   "Approve?",
+			RequestedSchema: map[string]any{
+				"type": "object", "properties": map[string]any{"approved": map[string]any{"type": "boolean"}},
+			},
+		})
+		errs <- err
+	}()
+	close(start)
+	require.NoError(t, <-errs)
+	require.NoError(t, <-errs)
+
+	order := wire.Order(t)
+	requireOrderedLabels := func(labels ...string) {
+		t.Helper()
+
+		previous := -1
+		for _, label := range labels {
+			index := slices.Index(order, label)
+			require.Greater(t, index, previous, "%q must follow its action's preceding wire fact in %v", label, order)
+			previous = index
+		}
+	}
+
+	requireOrderedLabels(
+		"tool_call:permission-race",
+		"permission:permission-race",
+		"action:permission-race:pending",
+		"action:permission-race:accepted",
+	)
+	requireOrderedLabels(
+		"tool_call:elicitation-race",
+		"elicitation:elicitation-race",
+		"action:elicitation-race:pending",
+		"action:elicitation-race:accepted",
+	)
 }

@@ -163,7 +163,7 @@ func newProviderAuth(agent *Agent) *providerAuth {
 
 	ledger, err := newAuthLedger(agent.options)
 	if err != nil {
-		agent.log.Warn("provider auth surface is unavailable", slog.String(jsonFieldError, err.Error()))
+		agent.log.Warn("provider auth surface is unavailable", slog.String("stage", "provider_auth_configuration"))
 
 		return nil
 	}

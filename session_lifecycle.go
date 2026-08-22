@@ -16,10 +16,94 @@ import (
 var sessionInterruptTimeout = 5 * time.Second
 var sessionRemoveAll = os.RemoveAll
 
+// errSessionCloseUnsettled marks a close its settlement barrier never admitted.
+// Such a close tore nothing down and settled nothing, so the id keeps its live
+// session and a later caller takes the barrier again.
+var errSessionCloseUnsettled = errors.New("await the in-flight Claude turn")
+
+// sessionCloseUnsettledError is the wire answer for that close. Nothing failed
+// internally: the boundary was never reached, and the truthful report is that
+// this close settled nothing and may be taken again.
+//
+// Which answer that is depends on why the barrier wait ended. A wait the caller
+// cancelled is the caller's own $/cancel_request coming back, so the raw error
+// travels undressed and the dispatcher answers the one code a withdrawn request
+// has: -32800. Any other expiry is a retryable refusal of a well-formed request,
+// which is the family's invalid-request idiom, and its message carries the
+// barrier-wait error rather than anything the native process said.
+func sessionCloseUnsettledError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
+
+	return acp.NewInvalidRequest(map[string]any{
+		jsonFieldError:   "claude_session_close_unsettled",
+		jsonFieldMessage: "session close did not reach its settlement barrier",
+	})
+}
+
+// sessionDeleteUnsettledError is the wire answer for a delete whose teardown
+// never took the session's settlement barrier. That is the same unreached
+// boundary session/close reports, so it is answered the same way and for the
+// same reason: nothing failed internally, the teardown simply never ran, and the
+// next delete takes the barrier again. A caller that withdrew its own request
+// gets the raw error and the -32800 that goes with it; any other expiry is the
+// family's invalid-request idiom, naming itself.
+//
+// It names itself apart from close because the two refusals do not report the
+// same state. A refused close settled nothing at all and its id still names a
+// live session; a refused delete already wrote its durable tombstone and already
+// hid the id, so the deletion the host asked for has happened and only the
+// teardown behind it is still owed.
+//
+// Anything else the teardown reports travels unchanged. A containment or cleanup
+// failure is a real internal failure and keeps the answer it earned.
+func sessionDeleteUnsettledError(err error) error {
+	if !errors.Is(err, errSessionCloseUnsettled) {
+		return err
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
+
+	return acp.NewInvalidRequest(map[string]any{
+		jsonFieldError:   "claude_session_delete_unsettled",
+		jsonFieldMessage: "session delete teardown did not reach its settlement barrier",
+	})
+}
+
+// sessionDeleteTombstoneError is the wire answer for a delete whose durable
+// tombstone never landed. It names itself apart from the unsettled-teardown
+// refusal because the two report opposite states: that one has already deleted
+// the session and owes only the teardown, while this one deleted nothing at all —
+// the id still names whatever it named, it is still listable, loadable and
+// resumable, and the host's next delete starts from the beginning.
+//
+// A caller that withdrew its own request still gets -32800, because a request
+// nobody is waiting for has no other honest answer; what the name buys is that
+// the -32800 a host does see carries which of the two happened, rather than
+// leaving it to assume the deletion went through.
+func sessionDeleteTombstoneError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("claude_session_delete_untombstoned: %w", err)
+	}
+
+	return newSafeRequestFailure(acp.NewInternalError(map[string]any{
+		jsonFieldError:   "claude_session_delete_untombstoned",
+		jsonFieldMessage: "session delete tombstone failed",
+	}), err)
+}
+
 // finalizeSessionRuntimeResources returns admissions only after the selected
 // containment boundary completes. An incomplete boundary retains both the
 // native admission and every adapter-owned scratch root because escaped work
 // may still be using them. Other close errors do not obscure completion.
+//
+// A close passes the session's own once-guarded releases, so a close that failed
+// a rung and is taken again returns each admission exactly once across both
+// attempts: the one an earlier attempt already returned is inert here. A start
+// that unwinds before acquiring one passes nothing for it.
 func finalizeSessionRuntimeResources(
 	runtimeErr error,
 	nativeRelease func(),
@@ -58,18 +142,33 @@ func finalizeSessionRuntimeResources(
 	return errors.Join(runtimeErr, mcpRemoveErr, imageRemoveErr, materializedRemoveErr)
 }
 
-func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
-	turn := s.turnQueue()
+// releaseNativeRootOnce returns the session's native-root admission and takes it
+// off the session. A close that failed a rung of its boundary is taken again, so
+// the release is consumed where it runs: an admission returned twice would credit
+// the host's pool for work it never admitted.
+func (s *agentSession) releaseNativeRootOnce() {
+	s.mu.Lock()
+	release := s.nativeRootRelease
+	s.nativeRootRelease = nil
+	s.mu.Unlock()
 
-	select {
-	case turn <- struct{}{}:
-		s.afterTurnSlotAcquired(1)
+	if release != nil {
+		release()
+	}
+}
 
-		return func() { <-turn }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-		return nil, backpressureError("session_prompt")
+// releaseScratchRootOnce returns the session's scratch reservation and takes it
+// off the session, for the same reason and with the same exactly-once guarantee
+// across a retried close. A close whose deletions failed never reaches it, so the
+// reservation survives for the close that does complete them.
+func (s *agentSession) releaseScratchRootOnce() {
+	s.mu.Lock()
+	release := s.scratchRootRelease
+	s.scratchRootRelease = nil
+	s.mu.Unlock()
+
+	if release != nil {
+		release()
 	}
 }
 
@@ -78,68 +177,31 @@ func (s *agentSession) acquireTurn(ctx context.Context) (func(), error) {
 // answered with backpressure and retried, while close is about to tear the
 // native process out from under whatever holds the slot and therefore has to
 // wait for it. The caller's context bounds the wait.
+//
+// A free slot is taken before the caller's context is consulted at all, so an
+// expired caller loses the barrier only to a turn that really holds it. Offering
+// both to one select would let an already-cancelled close of a quiescent session
+// report an in-flight turn that does not exist.
 func (s *agentSession) acquireClosingTurn(ctx context.Context) (func(), error) {
 	turn := s.turnQueue()
 
 	select {
 	case turn <- struct{}{}:
-		s.afterTurnSlotAcquired(1)
+		return func() { <-turn }, nil
+	default:
+	}
 
+	select {
+	case turn <- struct{}{}:
 		return func() { <-turn }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
-func (s *agentSession) acquireExclusiveTurn(ctx context.Context) (func(), error) {
-	turn := s.turnQueue()
-
-	capacity := cap(turn)
-	if capacity <= 0 {
-		capacity = 1
-	}
-
-	acquired := 0
-	for acquired < capacity {
-		select {
-		case turn <- struct{}{}:
-			acquired++
-			s.afterTurnSlotAcquired(acquired)
-		case <-ctx.Done():
-			for ; acquired > 0; acquired-- {
-				<-turn
-			}
-
-			return nil, ctx.Err()
-		default:
-			select {
-			case <-ctx.Done():
-				for ; acquired > 0; acquired-- {
-					<-turn
-				}
-
-				return nil, ctx.Err()
-			default:
-			}
-
-			for ; acquired > 0; acquired-- {
-				<-turn
-			}
-
-			return nil, backpressureError("session_prompt")
-		}
-	}
-
-	return func() {
-		for ; acquired > 0; acquired-- {
-			<-turn
-		}
-	}, nil
-}
-
-func (s *agentSession) afterTurnSlotAcquired(acquired int) {
-	if s.turnAcquiredHook != nil {
-		s.turnAcquiredHook(acquired)
+func releaseTurnPrefix(turn chan struct{}, count int) {
+	for range count {
+		<-turn
 	}
 }
 
@@ -275,7 +337,16 @@ func (s *agentSession) relaunchClient(
 	}
 
 	var previousCloseErr error
+
 	if client != nil {
+		var retirementErr error
+
+		if incarnation := s.currentNativeIncarnation(); incarnation != nil && incarnation.client == client {
+			s.pumpServeMu.Lock()
+			_, retirementErr = s.endExactNativeIncarnationLocked(ctx, incarnation)
+			s.pumpServeMu.Unlock()
+		}
+
 		previousCloseErr = client.Close()
 		if errors.Is(previousCloseErr, claude.ErrProcessContainmentIncomplete) {
 			s.mu.Lock()
@@ -284,6 +355,10 @@ func (s *agentSession) relaunchClient(
 			s.recordContainmentError(previousCloseErr)
 
 			return fmt.Errorf("complete previous Claude containment boundary: %w", previousCloseErr)
+		}
+
+		if retirementErr != nil {
+			return errors.Join(retirementErr, previousCloseErr)
 		}
 	}
 
@@ -303,6 +378,8 @@ func (s *agentSession) relaunchClient(
 	}
 
 	relaunched := s.agent.newClaudeClient(s.agent.log, opts)
+	relaunched.SetControlHandlerAdmission(s.admitControlCallback)
+
 	if err := relaunched.Start(ctx); err != nil {
 		return s.cleanupFailedRelaunch(err, relaunched, nativeRelease, previousCloseErr)
 	}
@@ -331,7 +408,23 @@ func (s *agentSession) relaunchClient(
 
 	s.client = relaunched
 	s.nativeRootRelease = nativeRelease
+	// The replacement process ran command discovery of its own, so the catalog
+	// this session advertises is the one that process actually serves. Keeping the
+	// catalog the retired process reported would advertise commands nothing is
+	// left to route.
+	s.availableCommands = relaunched.InitializeInfo().Commands
 	s.mu.Unlock()
+
+	// The snapshot is restated rather than diffed. A full replacement is what the
+	// host is owed after a discovery run, an explicit empty one included: silence
+	// after a relaunch and "this process has no commands" are different facts, and
+	// a host cannot tell a catalog that survived the relaunch from one that never
+	// arrived. The process is live either way — only the notification failed — so
+	// the failure travels to the caller and the next successful emission restates
+	// the catalog.
+	if emitErr := s.emitAvailableCommandsUpdate(ctx, true); emitErr != nil {
+		return errors.Join(previousCloseErr, emitErr)
+	}
 
 	return previousCloseErr
 }
@@ -372,26 +465,62 @@ func (s *agentSession) Cancel(ctx context.Context) (err error) {
 }
 
 // cancelRouted validates the active turn and keeps its native interrupt fenced
-// from turn completion and admission of the next turn.
+// from turn completion and admission of the next turn. The lifecycle key never
+// rides session/cancel: it fails the cancel closed before any native interrupt,
+// and the cancel is never applied. Being a notification, the refusal is
+// wire-silent.
+//
+// The route is validated first. This surface carries both reserved objects, and
+// the route is the authenticator: it decides whether the caller is addressing
+// the turn that is actually running, which precedes the placement rule about
+// where a family literal may ride. A cancel carrying both an invalid route and
+// the lifecycle key therefore reports the route, and never one of two verdicts
+// chosen by whichever check an implementation happened to run first.
+//
+// Authentication is unconditional. There is no turn state under which a cancel
+// skips the route: an idle session has no active nonce for a caller to name, so
+// nothing authorizes native interrupt and the request fails closed with no
+// native side effect at all — no interrupt, no pending-interaction resolution,
+// and no native client close.
+//
+// A repeat is idempotent, and only after it has been judged like any other
+// frame. The route still authenticates it and the reserved key still refuses it,
+// because both verdicts are about the frame rather than about how much of the
+// turn is left to cancel; what a second authenticated cancel of the same turn
+// does not do is act. The first one already resolved the pending interactions
+// and completed the containment boundary, so acting again would interrupt a
+// process this session has already closed and answer a request that succeeded
+// with the failure that re-issue produced.
 func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) error {
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
 
+	route, err := parseInboundTurnRoute(meta)
+	if err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	activeNonce := s.turnNonce
 	active := s.cancel != nil && activeNonce != ""
+	applied := s.cancelledNonce != "" && s.cancelledNonce == route.turnNonce
 	s.mu.Unlock()
 
-	if active {
-		route, err := parseInboundTurnRoute(meta)
-		if err != nil {
-			return err
-		}
-
-		if route.turnNonce != activeNonce {
-			return unsupportedField(routeMetaKey)
-		}
+	if !active || route.turnNonce != activeNonce {
+		return unsupportedField(routeMetaKey)
 	}
+
+	if err := rejectLifecycleMeta(meta); err != nil {
+		return err
+	}
+
+	if applied {
+		return nil
+	}
+
+	s.mu.Lock()
+	s.cancelledNonce = route.turnNonce
+	s.mu.Unlock()
 
 	return s.cancelNative(ctx)
 }
@@ -427,7 +556,24 @@ func (s *agentSession) cancelNative(ctx context.Context) (err error) {
 	}
 
 	var closeErr error
+
 	if active {
+		incarnation := s.currentNativeIncarnation()
+
+		if incarnation != nil {
+			incarnation.expectedStop.Store(true)
+		}
+
+		if incarnation != nil {
+			if incarnation.failed.Load() {
+				<-incarnation.mirrorReady
+			} else {
+				s.pumpServeMu.Lock()
+				s.nativePumpHandle().stopReceivingExact(incarnation)
+				s.pumpServeMu.Unlock()
+			}
+		}
+
 		closeErr = s.closeNativeClient(client)
 	}
 
@@ -476,13 +622,6 @@ func (s *agentSession) closeNativeClient(client *claude.Client) error {
 	return closeErr
 }
 
-func (s *agentSession) currentTurnNonce() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.turnNonce
-}
-
 // cancelPendingInteractions marks the turn cancelled and resolves any pending
 // permission and elicitation requests as cancelled. Callers invoke this before
 // native abort so outstanding client requests are answered cancelled first.
@@ -495,6 +634,31 @@ func (s *agentSession) cancelPendingInteractions(markTurnCancelled bool) {
 	permissionCancels := s.cancelPermissionRequestsLocked()
 	elicitationCancels := s.cancelElicitationRequestsLocked()
 	s.mu.Unlock()
+
+	for _, cancel := range permissionCancels {
+		cancel()
+	}
+
+	for _, cancel := range elicitationCancels {
+		cancel()
+	}
+}
+
+// cancelPendingInteractionsExact resolves only host requests causally owned by
+// expected. The callback ownership primitive makes registration atomic with
+// this selection: once expected is marked failed, a later registration cancels
+// itself instead of entering either map after this snapshot.
+func (s *agentSession) cancelPendingInteractionsExact(expected *nativeIncarnation) {
+	if expected == nil {
+		return
+	}
+
+	s.callbackOwnershipMu.Lock()
+	s.mu.Lock()
+	permissionCancels := s.cancelPermissionRequestsExactLocked(expected)
+	elicitationCancels := s.cancelElicitationRequestsExactLocked(expected)
+	s.mu.Unlock()
+	s.callbackOwnershipMu.Unlock()
 
 	for _, cancel := range permissionCancels {
 		cancel()
@@ -527,25 +691,105 @@ func (s *agentSession) cancelElicitationRequestsLocked() []context.CancelFunc {
 	return elicitationCancels
 }
 
-// Close closes the underlying Claude process and memoizes the terminal result.
-// A second caller blocks until the first finishes and observes that same
-// result; teardown, native signalling and the active-session accounting all run
-// exactly once.
-func (s *agentSession) Close(ctx context.Context) (err error) {
-	s.closeOnce.Do(func() {
-		s.closeErr = s.close(ctx)
-	})
+func (s *agentSession) cancelPermissionRequestsExactLocked(expected *nativeIncarnation) []context.CancelFunc {
+	permissionCancels := make([]context.CancelFunc, 0, len(s.permissionCancel))
+	for id, entry := range s.permissionCancel {
+		if entry.owner.incarnation != expected || entry.owner.route == "" {
+			continue
+		}
 
-	return s.closeErr
+		cancel := entry.fail
+		if cancel == nil {
+			cancel = entry.cancel
+		}
+
+		permissionCancels = append(permissionCancels, cancel)
+
+		delete(s.permissionCancel, id)
+	}
+
+	return permissionCancels
+}
+
+func (s *agentSession) cancelElicitationRequestsExactLocked(expected *nativeIncarnation) []context.CancelFunc {
+	elicitationCancels := make([]context.CancelFunc, 0, len(s.elicitationCancel))
+	for id, entry := range s.elicitationCancel {
+		if entry.owner.incarnation != expected || entry.owner.route == "" {
+			continue
+		}
+
+		cancel := entry.fail
+		if cancel == nil {
+			cancel = entry.cancel
+		}
+
+		elicitationCancels = append(elicitationCancels, cancel)
+
+		delete(s.elicitationCancel, id)
+	}
+
+	return elicitationCancels
+}
+
+// Close closes the underlying Claude process and memoizes a boundary that
+// completed. A second caller blocks until the first finishes and observes that
+// same result.
+//
+// Only a completed boundary is memoized. A close its settlement barrier never
+// admitted tore nothing down, and a close that reached the boundary and failed a
+// rung of it still owes that rung: neither has a terminal result to hand a later
+// caller, so both leave the session closable and the next caller takes the
+// boundary again under a context of its own. Each rung stands on its own once —
+// the native signalling, the durable commit, the stream fence, and each returned
+// admission are all guarded where they run, so a retry re-attempts what is still
+// owed and repeats nothing that already happened.
+func (s *agentSession) Close(ctx context.Context) error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+
+	if s.closeSettled {
+		return nil
+	}
+
+	if err := s.close(ctx); err != nil {
+		return err
+	}
+
+	s.closeSettled = true
+
+	return nil
 }
 
 // beginClose latches the terminal close state before any teardown runs, so a
 // prompt, relaunch, registry refresh or reuse that is deciding whether to start
 // native work sees the close that is about to remove the process it would use.
-func (s *agentSession) beginClose() {
+func (s *agentSession) beginClose() []<-chan struct{} {
+	s.producers.seal()
+	s.callbackOwnershipMu.Lock()
+	defer s.callbackOwnershipMu.Unlock()
+
 	s.mu.Lock()
 	s.closing = true
 	s.mu.Unlock()
+
+	waits := make([]<-chan struct{}, 0, len(s.callbackAdmissions))
+	for admission := range s.callbackAdmissions {
+		waits = append(waits, admission.done)
+	}
+
+	return waits
+}
+
+func awaitControlCallbacks(ctx context.Context, waits []<-chan struct{}) error {
+	for _, done := range waits {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %w", errSessionCloseUnsettled, ctx.Err())
+		}
+	}
+
+	return nil
 }
 
 // isClosing reports the terminal close state.
@@ -563,15 +807,17 @@ func closedSessionError() error {
 	return unknownSessionError()
 }
 
-// awaitQuietTurn is the bounded close barrier. Close holds the returned release
-// until it finishes, so the teardown runs with no turn in flight.
-func (s *agentSession) awaitQuietTurn(ctx context.Context) (func(), error) {
-	waitCtx, stopWaiting := context.WithTimeout(ctx, s.closeTurnTimeout())
-	defer stopWaiting()
-
-	releaseTurn, err := s.acquireClosingTurn(waitCtx)
+// awaitSettledTurn is the close barrier, and it is the full-settlement latch. A
+// turn releases the session's turn slot only after its own settlement has
+// finished — its containment boundary, its durable commit, and its terminal
+// lifecycle event — so acquiring that slot is what proves there is nothing left
+// to settle. The caller's context is the only bound: a deadline here would tear
+// the process out from under a commit that is still landing, which is the exact
+// thing waiting for the turn prevents.
+func (s *agentSession) awaitSettledTurn(ctx context.Context) (func(), error) {
+	releaseTurn, err := s.acquireClosingTurn(ctx)
 	if err != nil {
-		return func() {}, fmt.Errorf("await the in-flight Claude turn: %w", err)
+		return func() {}, fmt.Errorf("%w: %w", errSessionCloseUnsettled, err)
 	}
 
 	return releaseTurn, nil
@@ -585,9 +831,22 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 		defer func() { finish(err) }()
 	}
 
-	s.beginClose()
+	callbackWaits := s.beginClose()
+	s.settleEstablishment(closedSessionError())
+
+	if s.agent != nil {
+		err = errors.Join(err, s.agent.interruptActiveHostWrite())
+	}
 
 	s.cancelPendingInteractions(true)
+
+	if callbackErr := awaitControlCallbacks(ctx, callbackWaits); callbackErr != nil {
+		return callbackErr
+	}
+
+	if producerErr := s.producers.closeAndWait(ctx); producerErr != nil {
+		return fmt.Errorf("%w: %w", errSessionCloseUnsettled, producerErr)
+	}
 
 	// Pending provider-auth flows are cancelled after pending input is resolved
 	// and before the native interrupt, so a flow is never abandoned to a
@@ -605,21 +864,36 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 	}
 
 	// The barrier runs before the native teardown rather than after it: closing
-	// the process under a turn that is still reading from it is the very thing
-	// waiting for that turn prevents. The wait is real and bounded, so a busy
-	// session is waited for instead of being answered with backpressure.
-	releaseTurn, err := s.awaitQuietTurn(ctx)
+	// the process under a turn that is still settling is the very thing waiting
+	// for that turn prevents. The wait is real, so a busy session is waited for
+	// instead of being answered with backpressure.
+	//
+	// An abandoned wait ends the close right here. A turn is still holding the
+	// slot, so nothing below may run: the teardown would tear the process out from
+	// under a commit that is still landing, and the settlement below states
+	// quiescence, which is the one fact a session with a live turn cannot state.
+	releaseTurn, err := s.awaitSettledTurn(ctx)
+	if err != nil {
+		return err
+	}
+
 	defer releaseTurn()
 
-	err = errors.Join(err, s.client.Close())
+	s.pumpServeMu.Lock()
+	s.nativePumpHandle().expectStopCurrent()
+	closeErr := s.client.Close()
+	err = errors.Join(err, closeErr, s.settleSessionClose(ctx, closeErr))
+	s.pumpServeMu.Unlock()
+
+	s.stopNativePump()
 
 	err = finalizeSessionRuntimeResources(
 		err,
-		s.nativeRootRelease,
+		s.releaseNativeRootOnce,
 		s.mcpConfigDir,
 		s.imageScratchDir,
 		s.materialized,
-		s.scratchRootRelease,
+		s.releaseScratchRootOnce,
 	)
 
 	if s.agent != nil {
@@ -630,16 +904,50 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 	return err
 }
 
+// settleSessionClose runs the close-fenced settlement in the order the contract
+// fixes. The containment boundary has just completed, so: stop the reader that
+// served the contained process, terminalize what the session still owns —
+// including the terminal idle a still-open turn receives — commit the resumable
+// snapshot behind those transitions, state the quiescence fact that completed
+// proof produced, and fence the session.
+//
+// The terminal transitions precede the commit because they report how work the
+// proof already contained ended, which is true whatever the store then does with
+// it; a host told nothing would be left projecting live actions behind a session
+// that is over. The commit failing is still a failed close, and it leaves the
+// quiescence fact unstated: that fact certifies the boundary, and a boundary whose
+// snapshot the store does not hold is exactly the one nothing may certify.
+//
+// A boundary that did not complete terminalizes nothing, commits nothing new, and
+// states no fact — a set of activities the adapter has just proved it cannot
+// contain must not be declared terminal — and the stream is fenced regardless.
+func (s *agentSession) settleSessionClose(ctx context.Context, closeErr error) error {
+	var dataFailure *claude.ControllerDataError
+	if errors.Is(closeErr, claude.ErrProcessContainmentIncomplete) ||
+		(errors.As(closeErr, &dataFailure) && dataFailure.Kind == claude.ControllerDataTeardownAbort) {
+		s.nativePumpHandle().stopReceiving()
+		s.lifecycleStream().abandonIncarnation()
+		s.lifecycleStream().fenceClose()
+
+		return nil
+	}
+
+	return s.settleDrainedSession(ctx, s.nativePumpHandle().drainReceiving(ctx))
+}
+
+func (s *agentSession) settleDrainedSession(ctx context.Context, drainErr error) error {
+	if drainErr != nil {
+		s.lifecycleStream().abandonIncarnation()
+		s.lifecycleStream().fenceClose()
+
+		return drainErr
+	}
+
+	return s.lifecycleStream().settleClose(ctx, s.commitSessionMirror)
+}
+
 func (s *agentSession) recordContainmentError(err error) {
 	if s.agent != nil {
 		s.agent.recordContainmentError(err)
 	}
-}
-
-func (s *agentSession) closeTurnTimeout() time.Duration {
-	if s.closeTurnWait > 0 {
-		return s.closeTurnWait
-	}
-
-	return defaultSessionCloseTurnWait
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,13 +22,16 @@ func TestClientReceiveSurfacesLastError(t *testing.T) {
 	require.NoError(t, client.Start(context.Background()))
 	t.Cleanup(func() { _ = client.Close() })
 
-	boom := &ProcessExitError{ExitCode: 1, StderrTail: "boom", Err: errors.New("signal: killed")}
-	transport.errs <- boom
+	boom := &ProcessExitError{ExitCode: 1}
+	transport.sendError(boom)
+	close(transport.events)
 
 	msg, err := client.Receive(context.Background())
 	require.Nil(t, msg)
 	require.ErrorIs(t, err, ErrProcessExited)
-	require.ErrorIs(t, err, boom)
+	var exit *ProcessExitError
+	require.ErrorAs(t, err, &exit)
+	require.Equal(t, 1, exit.ExitCode)
 }
 
 func TestProcessExitErrorIs(t *testing.T) {
@@ -37,6 +39,72 @@ func TestProcessExitErrorIs(t *testing.T) {
 
 	require.True(t, errors.Is(&ProcessExitError{}, ErrProcessExited))
 	require.False(t, errors.Is(&ProcessExitError{}, ErrClientClosed))
+}
+
+func TestClosedTransportErrorPreservesRecognizedJoinedCausesWithoutOpaqueText(t *testing.T) {
+	t.Parallel()
+
+	const secret = "provider-secret-terminal-cause"
+	err := closedTransportError(errors.Join(
+		context.Canceled,
+		errClaudeStdoutRead,
+		&ProcessExitError{ExitCode: 23},
+		errors.New(secret),
+	))
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, errClaudeStdoutRead)
+	require.ErrorIs(t, err, ErrProcessExited)
+	var exit *ProcessExitError
+	require.ErrorAs(t, err, &exit)
+	require.Equal(t, 23, exit.ExitCode)
+	require.NotContains(t, err.Error(), secret)
+}
+
+func TestClosedTransportErrorClassifiesEveryTerminalBoundary(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, closedTransportError(nil))
+
+	dataFailure := &ControllerDataError{Kind: ControllerDataTeardownAbort}
+	classified := closedTransportError(dataFailure)
+	var classifiedData *ControllerDataError
+	require.ErrorAs(t, classified, &classifiedData)
+	require.Equal(t, dataFailure.Kind, classifiedData.Kind)
+	require.NotSame(t, dataFailure, classifiedData)
+
+	bareExit := closedTransportError(ErrProcessExited)
+	require.ErrorIs(t, bareExit, ErrProcessExited)
+	var concreteExit *ProcessExitError
+	require.False(t, errors.As(bareExit, &concreteExit))
+
+	const opaque = "opaque-provider-failure"
+	opaqueFailure := closedTransportError(errors.New(opaque))
+	require.Error(t, opaqueFailure)
+	require.NotContains(t, opaqueFailure.Error(), opaque)
+
+	tests := []struct {
+		name  string
+		err   error
+		class string
+	}{
+		{name: "none", class: transportClassNone},
+		{name: "canceled", err: context.Canceled, class: transportClassCanceled},
+		{name: "deadline", err: context.DeadlineExceeded, class: transportClassDeadline},
+		{name: "containment", err: ErrProcessContainmentIncomplete, class: transportClassContainment},
+		{name: "process exit", err: ErrProcessExited, class: "process_exit"},
+		{name: "stdout panic", err: errClaudeStdoutReaderPanic, class: "stdout_panic"},
+		{name: "stdout read", err: errClaudeStdoutRead, class: "stdout_read"},
+		{name: "response write", err: errControlResponseWrite, class: "response_write"},
+		{name: "transport", err: errClaudeTransportFailure, class: transportClassFailure},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, test.class, transportErrorClass(test.err))
+		})
+	}
 }
 
 func TestClientAlive(t *testing.T) {
@@ -54,40 +122,25 @@ func TestClientAlive(t *testing.T) {
 
 	// The native process dies: the controller stops and the client is no longer
 	// alive, so callers can relaunch lazily.
-	transport.errs <- &ProcessExitError{ExitCode: 1, Err: errors.New("boom")}
+	transport.sendError(&ProcessExitError{ExitCode: 1})
+	close(transport.events)
 	require.Eventually(t, func() bool { return !client.Alive() }, time.Second, 5*time.Millisecond)
 
 	require.NoError(t, client.Close())
 	require.False(t, client.Alive())
 }
 
-func TestProcessTransportStderrTailBounded(t *testing.T) {
+func TestProcessTransportProcessExitErrorExcludesOpaqueCause(t *testing.T) {
 	t.Parallel()
 
 	transport := &ProcessTransport{}
-	for i := range stderrTailLines + 10 {
-		transport.appendStderr("line-" + strconv.Itoa(i))
-	}
-
-	lines := strings.Split(transport.StderrTail(), "\n")
-	require.Len(t, lines, stderrTailLines)
-	require.Equal(t, "line-"+strconv.Itoa(stderrTailLines+9), lines[len(lines)-1])
-}
-
-func TestProcessTransportProcessExitErrorPlainCause(t *testing.T) {
-	t.Parallel()
-
-	transport := &ProcessTransport{}
-	transport.appendStderr("disk full")
-
-	err := transport.processExitError(errors.New("write: broken pipe"))
+	sentinel := "provider-secret-exit-cause"
+	err := transport.processExitError(errors.New(sentinel))
 
 	var exit *ProcessExitError
 	require.ErrorAs(t, err, &exit)
 	require.Equal(t, -1, exit.ExitCode)
-	require.Equal(t, "disk full", exit.StderrTail)
-	require.Contains(t, err.Error(), "write: broken pipe")
-	require.Contains(t, err.Error(), "disk full")
+	require.NotContains(t, err.Error(), sentinel)
 }
 
 func TestProcessTransportMalformedLineLogged(t *testing.T) {
@@ -98,7 +151,7 @@ func TestProcessTransportMalformedLineLogged(t *testing.T) {
 		stdout: io.NopCloser(strings.NewReader("{bad\n{\"type\":\"assistant\"}\n")),
 	}
 
-	messages, errs := transport.Messages(context.Background())
+	messages, errs := splitEventsForTest(transport.Events(context.Background()))
 
 	var got []map[string]any
 	for msg := range messages {
@@ -120,12 +173,9 @@ func TestControllerSendRequestSurfacesStopCause(t *testing.T) {
 	controller := NewController(slog.New(slog.DiscardHandler), transport)
 	startControllerForTest(t, controller, context.Background())
 
-	exit := &ProcessExitError{
-		ExitCode:   1,
-		StderrTail: "No conversation found with session ID: 11111111-1111-4111-8111-111111111111",
-		Err:        errors.New("exit status 1"),
-	}
-	transport.errs <- exit
+	exit := &ProcessExitError{ExitCode: 1}
+	transport.sendError(exit)
+	close(transport.events)
 
 	select {
 	case <-controller.Done():
@@ -136,8 +186,7 @@ func TestControllerSendRequestSurfacesStopCause(t *testing.T) {
 	_, err := controller.SendRequest(context.Background(), "initialize", nil, time.Second)
 	require.ErrorContains(t, err, "claude control controller stopped")
 	require.ErrorIs(t, err, ErrProcessExited)
-	require.ErrorIs(t, err, exit)
-	require.Contains(t, err.Error(), "No conversation found with session ID")
+	require.NotContains(t, err.Error(), "No conversation found with session ID")
 }
 
 func TestControllerSendRequestStopWithoutCause(t *testing.T) {
@@ -147,7 +196,7 @@ func TestControllerSendRequestStopWithoutCause(t *testing.T) {
 	controller := NewController(slog.New(slog.DiscardHandler), transport)
 	startControllerForTest(t, controller, context.Background())
 
-	close(transport.incoming)
+	close(transport.events)
 
 	select {
 	case <-controller.Done():
@@ -159,35 +208,13 @@ func TestControllerSendRequestStopWithoutCause(t *testing.T) {
 	require.EqualError(t, err, "claude control controller stopped")
 }
 
-func TestControllerDrainErrorsRecordsQueuedCause(t *testing.T) {
-	t.Parallel()
-
-	controller := NewController(slog.New(slog.DiscardHandler), newFakeTransport())
-
-	errs := make(chan error, 3)
-	errs <- nil
-	errs <- errors.New("first")
-	errs <- errors.New("second")
-	close(errs)
-
-	controller.drainErrors(context.Background(), errs)
-	require.EqualError(t, controller.LastError(), "first")
-
-	empty := NewController(slog.New(slog.DiscardHandler), newFakeTransport())
-	empty.drainErrors(context.Background(), make(chan error))
-	require.NoError(t, empty.LastError())
-}
-
-// The transport queues the exit cause and then closes both channels, so the
-// router can observe either the closed message channel or the queued error
-// first. Both orders must keep the cause.
-func TestControllerRecordsCauseWhenMessageChannelClosesFirst(t *testing.T) {
+func TestControllerRecordsOrderedTerminalCause(t *testing.T) {
 	t.Parallel()
 
 	for range 32 {
 		transport := newFakeTransport()
-		transport.errs <- &ProcessExitError{ExitCode: 1, Err: errors.New("exit status 1")}
-		close(transport.incoming)
+		transport.sendError(&ProcessExitError{ExitCode: 1})
+		close(transport.events)
 
 		controller := NewController(slog.New(slog.DiscardHandler), transport)
 		startControllerForTest(t, controller, context.Background())

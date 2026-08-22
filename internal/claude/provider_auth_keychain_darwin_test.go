@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -29,7 +30,7 @@ func TestRemoveAuthKeychainItemsRemovesEveryItemUnderABoundedCall(t *testing.T) 
 	}
 
 	require.NoError(t, RemoveAuthKeychainItems(t.Context(), "/tmp/cfg", "operator", Options{}))
-	require.Len(t, calls, 4)
+	require.Len(t, calls, 2)
 	require.Equal(t, "delete-generic-password", calls[0][0])
 	require.Equal(t, "-a", calls[0][3])
 	require.Equal(t, "operator", calls[0][4])
@@ -311,6 +312,19 @@ func TestContainedAuthKeychainToolFailureBranches(t *testing.T) {
 	_, code, err := runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, options)
 	require.NoError(t, err)
 	require.Equal(t, 51, code)
+}
+
+func TestContainedAuthKeychainToolRefusesAVanishedExecutable(t *testing.T) {
+	original := ordinaryLookPath
+	t.Cleanup(func() { ordinaryLookPath = original })
+
+	ordinaryLookPath = func(string, []string) (string, error) {
+		return filepath.Join(t.TempDir(), "security"), nil
+	}
+
+	options := Options{OrdinaryEnvironment: map[string]string{envSearchPath: "/usr/bin:/bin"}}
+	_, _, err := runContainedAuthKeychainTool(t.Context(), []string{"list-keychains"}, options)
+	require.ErrorContains(t, err, "stat executable")
 }
 
 func TestAuthKeychainToolsReportALaunchFailureAsOne(t *testing.T) {

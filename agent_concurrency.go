@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	defaultMaxActiveSessions        = 32
-	defaultMaxConcurrentClientCalls = 16
+	defaultMaxActiveSessions = 32
+	defaultMaxClientCalls    = 16
 
 	// sessionTurnCapacity fixes per-session prompt admission to a single
 	// in-flight turn. Claude turn state (cancel handle, turn id) is
@@ -18,6 +18,10 @@ const (
 	// session_prompt backpressure; the capacity is not configurable.
 	sessionTurnCapacity = 1
 )
+
+type clientCallPermitContextKey struct{}
+
+type clientCallPermit struct{ agent *Agent }
 
 func validateConcurrencyLimits(limits ConcurrencyLimits) error {
 	if limits.MaxActiveSessions < 0 {
@@ -49,10 +53,14 @@ func (a *Agent) maxConcurrentClientCalls() int {
 		return a.options.ConcurrencyLimits.MaxConcurrentClientCalls
 	}
 
-	return defaultMaxConcurrentClientCalls
+	return defaultMaxClientCalls
 }
 
 func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
+	if permit, _ := ctx.Value(clientCallPermitContextKey{}).(*clientCallPermit); permit != nil && permit.agent == a {
+		return func() {}, nil
+	}
+
 	a.mu.Lock()
 	if a.clientCalls == nil {
 		a.clientCalls = make(chan struct{}, a.maxConcurrentClientCalls())
@@ -61,19 +69,33 @@ func (a *Agent) acquireClientCall(ctx context.Context) (func(), error) {
 	calls := a.clientCalls
 	a.mu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return nil, ctx.Err()
+	}
+
 	select {
 	case calls <- struct{}{}:
 		return func() { <-calls }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	default:
 		return nil, backpressureError("client_calls")
 	}
 }
 
+// acquireCallbackClientCall admits one native callback into the outbound-call
+// arbiter and returns the causal context its nested host calls share. The one
+// admitted callback owns the arbiter while its nested host request completes.
+func (a *Agent) acquireCallbackClientCall(ctx context.Context) (context.Context, func(), error) {
+	release, err := a.acquireClientCall(ctx)
+	if err != nil {
+		return ctx, func() {}, err
+	}
+
+	return context.WithValue(ctx, clientCallPermitContextKey{}, &clientCallPermit{agent: a}), release, nil
+}
+
 func backpressureError(limit string) *acp.RequestError {
 	return acp.NewInvalidRequest(map[string]any{
 		jsonFieldError: "backpressure",
-		"limit":        limit,
+		jsonFieldLimit: limit,
 	})
 }

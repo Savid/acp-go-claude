@@ -13,16 +13,12 @@ import (
 
 func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {
 	var releases int
-	var processDelta int64
 	var snapshot int
 	var stage RuntimeStartupStage
 	var containment RuntimeContainmentMode
 	hooks := instrumentRuntimeResourceHooks(RuntimeResourceHooks{
 		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
 			return func() { releases++ }, nil
-		},
-		ObserveProcess: func(_ context.Context, _ RuntimeProcessKind, delta int64) {
-			processDelta += delta
 		},
 		ObserveProcessSnapshot: func(_ context.Context, _ RuntimeProcessKind, count int) {
 			snapshot = count
@@ -39,11 +35,9 @@ func TestRuntimeObservationHooksComposeExactLifetimes(t *testing.T) {
 	release()
 	require.Equal(t, 1, releases)
 
-	observeRuntimeProcess(t.Context(), hooks, RuntimeProcessHomeLockSupervisor, 2)
 	observeRuntimeProcessSnapshot(t.Context(), hooks, RuntimeProcessProviderDescendant, 3)
 	observeRuntimeStartupStage(t.Context(), hooks, RuntimeResourceRuntime, RuntimeStartupReadiness, time.Now(), nil)
 	hooks.ObserveContainment(t.Context(), RuntimeContainmentBestEffort)
-	require.Equal(t, int64(2), processDelta)
 	require.Equal(t, 3, snapshot)
 	require.Equal(t, RuntimeStartupReadiness, stage)
 	require.Equal(t, RuntimeContainmentBestEffort, containment)

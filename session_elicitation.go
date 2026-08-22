@@ -8,6 +8,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/savid/acp-go-claude/internal/observer"
 )
@@ -23,6 +24,8 @@ const (
 
 type elicitationRequestCancel struct {
 	cancel context.CancelFunc
+	fail   context.CancelFunc
+	owner  lifecycleInteractionOwner
 }
 
 // questionsSolicitSecret reports whether the native harness marked any question
@@ -85,10 +88,17 @@ func secretSchemaMarker(property map[string]any) bool {
 // registerElicitation wraps ctx in a tracked cancellable context so that
 // session/cancel and teardown can resolve a pending elicitation as cancelled
 // instead of leaving it dangling until the native control-handler timeout.
-func (s *agentSession) registerElicitation(ctx context.Context) (context.Context, context.CancelFunc) {
-	elicitationCtx, cancel := context.WithCancel(ctx)
-	entry := &elicitationRequestCancel{cancel: cancel}
+func (s *agentSession) registerElicitation(
+	ctx context.Context,
+	owner lifecycleInteractionOwner,
+) (context.Context, context.CancelFunc) {
+	elicitationCtx, cancelCause := context.WithCancelCause(ctx)
+	cancel := func() { cancelCause(context.Canceled) }
+	fail := func() { cancelCause(errExactInteractionContainment) }
+	entry := &elicitationRequestCancel{cancel: cancel, fail: fail, owner: owner}
 
+	s.callbackOwnershipMu.Lock()
+	ownerCurrent := owner.incarnation == nil || s.currentNativeIncarnation() == owner.incarnation
 	s.mu.Lock()
 	if s.elicitationCancel == nil {
 		s.elicitationCancel = make(map[int64]*elicitationRequestCancel)
@@ -96,11 +106,20 @@ func (s *agentSession) registerElicitation(ctx context.Context) (context.Context
 
 	s.elicitationSeq++
 	id := s.elicitationSeq
-	s.elicitationCancel[id] = entry
+	ownerFailed := owner.incarnation != nil && owner.incarnation.failed.Load()
+	closing := s.closing
+
+	if !ownerFailed && ownerCurrent && !closing {
+		s.elicitationCancel[id] = entry
+	}
+
 	turnCancelled := s.turnCancelled
 	s.mu.Unlock()
+	s.callbackOwnershipMu.Unlock()
 
-	if turnCancelled {
+	if ownerFailed || !ownerCurrent {
+		fail()
+	} else if turnCancelled || closing {
 		cancel()
 	}
 
@@ -163,36 +182,57 @@ func (s *agentSession) handleAskUserQuestion(
 	}
 
 	scope := elicitationScope{
-		SessionID: s.id, TurnNonce: s.currentTurnNonce(), ToolCallID: acp.ToolCallId(request.ToolUseID),
-	}
-	if emitErr := s.emitPendingToolCall(
-		ctx,
-		askUserQuestionTool,
-		request.ToolUseID,
-		mapper.ToolTitle(askUserQuestionTool, request.Input),
-		request.Input,
-		request.Raw,
-	); emitErr != nil {
-		return claude.PermissionDecision{}, emitErr
+		SessionID: s.id, TurnNonce: turnNonceFromContext(ctx), ToolCallID: acp.ToolCallId(request.ToolUseID),
 	}
 
-	elicitationCtx, finishElicitation := s.registerElicitation(ctx)
+	action, err := s.beginLifecycleAction(ctx, lifecycle.ActionElicitation)
+	if err != nil {
+		return claude.PermissionDecision{}, err
+	}
+
+	elicitationCtx, finishElicitation := s.registerElicitation(ctx, action.interactionOwner())
 	defer finishElicitation()
+
+	actionState := lifecycle.ActionFailed
+
+	defer func() {
+		if resolveErr := action.resolve(ctx, actionState); resolveErr != nil && err == nil {
+			decision, err = claude.PermissionDecision{}, resolveErr
+		}
+	}()
+
+	emitPending := func() error {
+		return s.emitPendingToolCall(
+			ctx,
+			askUserQuestionTool,
+			request.ToolUseID,
+			mapper.ToolTitle(askUserQuestionTool, request.Input),
+			request.Input,
+			request.Raw,
+		)
+	}
+
+	wireAdmission, err := action.prepareWireAdmission(ctx, emitPending)
+	if err != nil {
+		return claude.PermissionDecision{}, err
+	}
 
 	resp, err := conn.CreateElicitation(elicitationCtx, acp.UnstableCreateElicitationRequest{
 		Form: &acp.UnstableCreateElicitationForm{
 			Message:         askUserQuestionMessage(questions),
 			Mode:            claude.ElicitationModeForm,
 			RequestedSchema: askUserQuestionSchema(questions),
-			Meta: map[string]any{
+			Meta: withLifecycleMeta(map[string]any{
 				claudeMetaKey: map[string]any{
 					"toolName":  askUserQuestionTool,
 					acpFieldRaw: request.Raw,
 				},
-			},
+			}, action.meta()),
 		},
-	}, scope)
+	}, scope, wireAdmission)
 	if err != nil {
+		actionState = interactionActionState(elicitationCtx, elicitationActionState(resp, err))
+
 		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
 			return claude.PermissionDecision{
 				Behavior:  claude.BehaviorDeny,
@@ -203,6 +243,15 @@ func (s *agentSession) handleAskUserQuestion(
 
 		return claude.PermissionDecision{}, err
 	}
+
+	if !action.responseOwnerCurrent() {
+		return claude.PermissionDecision{
+			Behavior: claude.BehaviorDeny,
+			Message:  "AskUserQuestion response belongs to a retired native incarnation",
+		}, nil
+	}
+
+	actionState = interactionActionState(elicitationCtx, elicitationActionState(resp, nil))
 
 	if resp.Accept == nil {
 		return claude.PermissionDecision{
@@ -489,7 +538,7 @@ func (s *agentSession) createFormElicitation(
 	ctx context.Context,
 	conn agentClient,
 	request claude.ElicitationRequest,
-) (claude.ElicitationResponse, error) {
+) (response claude.ElicitationResponse, formErr error) {
 	// The schema is inspected before the pending tool call publishes the native
 	// input and before the form is built, so a credential-soliciting form is
 	// declined without ever reaching the client.
@@ -497,30 +546,57 @@ func (s *agentSession) createFormElicitation(
 		return claude.ElicitationResponse{Action: claude.ElicitationActionDecline}, nil
 	}
 
+	action, err := s.beginLifecycleAction(ctx, lifecycle.ActionElicitation)
+	if err != nil {
+		return claude.ElicitationResponse{}, err
+	}
+
+	elicitationCtx, finishElicitation := s.registerElicitation(ctx, action.interactionOwner())
+	defer finishElicitation()
+
+	actionState := lifecycle.ActionFailed
+
+	defer func() {
+		if resolveErr := action.resolve(ctx, actionState); resolveErr != nil && formErr == nil {
+			response, formErr = claude.ElicitationResponse{}, resolveErr
+		}
+	}()
+
+	var emitPending func() error
 	if request.ToolUseID != "" {
-		if err := s.emitPendingToolCall(ctx, "MCP elicitation", request.ToolUseID, request.Message, request.Raw, request.Raw); err != nil {
-			return claude.ElicitationResponse{}, err
+		emitPending = func() error {
+			return s.emitPendingToolCall(ctx, "MCP elicitation", request.ToolUseID, request.Message, request.Raw, request.Raw)
 		}
 	}
 
-	elicitationCtx, finishElicitation := s.registerElicitation(ctx)
-	defer finishElicitation()
+	wireAdmission, err := action.prepareWireAdmission(ctx, emitPending)
+	if err != nil {
+		return claude.ElicitationResponse{}, err
+	}
 
 	resp, err := conn.CreateElicitation(elicitationCtx, acp.UnstableCreateElicitationRequest{
 		Form: &acp.UnstableCreateElicitationForm{
 			Message:         request.Message,
 			Mode:            claude.ElicitationModeForm,
 			RequestedSchema: elicitationSchema(request.RequestedSchema),
-			Meta:            s.elicitationMeta(request),
+			Meta:            withLifecycleMeta(s.elicitationMeta(request), action.meta()),
 		},
-	}, s.elicitationScope(request))
+	}, s.elicitationScope(ctx, request), wireAdmission)
 	if err != nil {
+		actionState = interactionActionState(elicitationCtx, elicitationActionState(resp, err))
+
 		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
 			return claude.ElicitationResponse{Action: claude.ElicitationActionCancel}, nil
 		}
 
 		return claude.ElicitationResponse{}, err
 	}
+
+	if !action.responseOwnerCurrent() {
+		return claude.ElicitationResponse{Action: claude.ElicitationActionDecline}, nil
+	}
+
+	actionState = interactionActionState(elicitationCtx, elicitationActionState(resp, nil))
 
 	return claudeElicitationResponse(resp), nil
 }
@@ -529,7 +605,7 @@ func (s *agentSession) createURLElicitation(
 	ctx context.Context,
 	conn agentClient,
 	request claude.ElicitationRequest,
-) (claude.ElicitationResponse, error) {
+) (response claude.ElicitationResponse, urlErr error) {
 	elicitationID := request.ElicitationID
 	if elicitationID == "" {
 		id, err := newUUID()
@@ -540,14 +616,33 @@ func (s *agentSession) createURLElicitation(
 		elicitationID = id
 	}
 
+	action, err := s.beginLifecycleAction(ctx, lifecycle.ActionElicitation)
+	if err != nil {
+		return claude.ElicitationResponse{}, err
+	}
+
+	elicitationCtx, finishElicitation := s.registerElicitation(ctx, action.interactionOwner())
+	defer finishElicitation()
+
+	actionState := lifecycle.ActionFailed
+
+	defer func() {
+		if resolveErr := action.resolve(ctx, actionState); resolveErr != nil && urlErr == nil {
+			response, urlErr = claude.ElicitationResponse{}, resolveErr
+		}
+	}()
+
+	var emitPending func() error
 	if request.ToolUseID != "" {
-		if err := s.emitPendingToolCall(ctx, "MCP elicitation", request.ToolUseID, request.Message, request.Raw, request.Raw); err != nil {
-			return claude.ElicitationResponse{}, err
+		emitPending = func() error {
+			return s.emitPendingToolCall(ctx, "MCP elicitation", request.ToolUseID, request.Message, request.Raw, request.Raw)
 		}
 	}
 
-	elicitationCtx, finishElicitation := s.registerElicitation(ctx)
-	defer finishElicitation()
+	wireAdmission, err := action.prepareWireAdmission(ctx, emitPending)
+	if err != nil {
+		return claude.ElicitationResponse{}, err
+	}
 
 	resp, err := conn.CreateElicitation(elicitationCtx, acp.UnstableCreateElicitationRequest{
 		Url: &acp.UnstableCreateElicitationUrl{
@@ -555,16 +650,24 @@ func (s *agentSession) createURLElicitation(
 			Message:       request.Message,
 			Mode:          claude.ElicitationModeURL,
 			Url:           request.URL,
-			Meta:          s.elicitationMeta(request),
+			Meta:          withLifecycleMeta(s.elicitationMeta(request), action.meta()),
 		},
-	}, s.elicitationScope(request))
+	}, s.elicitationScope(ctx, request), wireAdmission)
 	if err != nil {
+		actionState = interactionActionState(elicitationCtx, elicitationActionState(resp, err))
+
 		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
 			return claude.ElicitationResponse{Action: claude.ElicitationActionCancel}, nil
 		}
 
 		return claude.ElicitationResponse{}, err
 	}
+
+	if !action.responseOwnerCurrent() {
+		return claude.ElicitationResponse{Action: claude.ElicitationActionDecline}, nil
+	}
+
+	actionState = interactionActionState(elicitationCtx, elicitationActionState(resp, nil))
 
 	return claudeElicitationResponse(resp), nil
 }
@@ -586,8 +689,15 @@ func (s *agentSession) elicitationMeta(request claude.ElicitationRequest) map[st
 	return map[string]any{claudeMetaKey: meta}
 }
 
-func (s *agentSession) elicitationScope(request claude.ElicitationRequest) elicitationScope {
-	scope := elicitationScope{SessionID: s.id, TurnNonce: s.currentTurnNonce()}
+// elicitationScope routes one outbound elicitation by the route the inbound
+// callback authenticated with, never by whichever turn the session happens to be
+// running. A callback that carries no route names no turn to answer on, and the
+// request is refused rather than routed through a turn that never asked for it.
+func (s *agentSession) elicitationScope(
+	ctx context.Context,
+	request claude.ElicitationRequest,
+) elicitationScope {
+	scope := elicitationScope{SessionID: s.id, TurnNonce: turnNonceFromContext(ctx)}
 	if request.ToolUseID != "" {
 		scope.ToolCallID = acp.ToolCallId(request.ToolUseID)
 	}

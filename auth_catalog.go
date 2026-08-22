@@ -104,6 +104,35 @@ var pinnedAuthCatalog = func() map[string][]authCatalogMethod {
 	}
 }
 
+// offeredCatalog is the catalog this configuration advertises. HideAuth
+// withdraws the Claude subscription sign-in: the entry is neither published nor
+// recorded as this generation's, so a host that keeps subscription login out of
+// the adapter cannot reach it through any leg — authorize resolves method ids
+// against the catalog the generation published, and an unpublished id is not
+// one of them. The other methods carry their own credential and stand.
+func (p *providerAuth) offeredCatalog() map[string][]authCatalogMethod {
+	catalog := pinnedAuthCatalog()
+	if !p.agent.options.HideAuth {
+		return catalog
+	}
+
+	for providerID, methods := range catalog {
+		offered := make([]authCatalogMethod, 0, len(methods))
+
+		for _, method := range methods {
+			if method.ID == authMethodLogin {
+				continue
+			}
+
+			offered = append(offered, method)
+		}
+
+		catalog[providerID] = offered
+	}
+
+	return catalog
+}
+
 // methods enumerates the catalog and mints the generation naming this exact
 // result. A method id means nothing outside the generation that produced it, so
 // authorize must present the token back.
@@ -122,7 +151,7 @@ func (p *providerAuth) methods(_ context.Context, params json.RawMessage) (any, 
 		return nil, sessionErr
 	}
 
-	catalog := pinnedAuthCatalog()
+	catalog := p.offeredCatalog()
 
 	entries, err := publishAuthCatalog(catalog)
 	if err != nil {

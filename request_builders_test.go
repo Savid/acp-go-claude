@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
 
@@ -267,4 +269,41 @@ func TestRawMessageConfigBranches(t *testing.T) {
 	marker, replaced := rawEventMarker(map[string]any{"bad": func() {}})
 	require.True(t, replaced)
 	require.Equal(t, rawEventReasonUnserializable, marker[rawEventFieldReason])
+}
+
+// TestBuildersRefuseAFamilyReservedCallerLiteral pins the one place a
+// reserved-literal collision can arise on a family-built request. Caller
+// metadata is the host's own namespace: a map naming a family literal is the
+// host guessing at an envelope this adapter stamps, and merging it or dropping
+// it would each leave the host believing the opposite of what shipped. The set
+// is closed and written out, so a key outside it is ordinary host metadata and
+// passes through.
+func TestBuildersRefuseAFamilyReservedCallerLiteral(t *testing.T) {
+	t.Parallel()
+
+	for _, literal := range []string{
+		routeMetaKey,
+		mediaEnvelopeMetaKey,
+		handoffMetaKey,
+		lifecycle.MetaKey,
+	} {
+		t.Run(literal, func(t *testing.T) {
+			t.Parallel()
+
+			meta := map[string]any{literal: map[string]any{"version": 1}}
+
+			require.PanicsWithValue(t,
+				"WithSessionMeta: caller metadata used the family-reserved key "+strconv.Quote(literal),
+				func() { WithSessionMeta(meta) })
+			require.PanicsWithValue(t,
+				"WithListSessionsMeta: caller metadata used the family-reserved key "+strconv.Quote(literal),
+				func() { WithListSessionsMeta(meta) })
+		})
+	}
+
+	require.NotPanics(t, func() {
+		host := map[string]any{"acp-go.dev-ish": true, claudeMetaKey: map[string]any{}}
+		require.Equal(t, host, NewSessionRequest("/repo", WithSessionMeta(host)).Meta)
+		require.Equal(t, host, ListSessionsRequest(WithListSessionsMeta(host)).Meta)
+	}, "a key outside the closed set is ordinary host metadata")
 }

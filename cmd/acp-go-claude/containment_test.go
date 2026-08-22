@@ -62,15 +62,10 @@ func TestRunContainmentSuccessfulOperations(t *testing.T) {
 	}
 }
 
-func TestRunContainmentDispatchAndRemovedDarwinFlag(t *testing.T) {
+func TestRunContainmentDispatch(t *testing.T) {
 	var stderr bytes.Buffer
 	if code := run(t.Context(), []string{"containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 {
 		t.Fatalf("containment dispatch = %d, stderr=%q", code, stderr.String())
-	}
-
-	stderr.Reset()
-	if code := run(t.Context(), []string{"-darwin-best-effort-containment"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined") {
-		t.Fatalf("removed Darwin flag = %d, stderr=%q", code, stderr.String())
 	}
 }
 

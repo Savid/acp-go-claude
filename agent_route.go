@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 const (
@@ -20,6 +21,20 @@ const (
 type inboundTurnRoute struct{ turnNonce string }
 
 type turnRouteContextKey struct{}
+
+type controlCallbackAdmissionContextKey struct{}
+
+// controlCallbackAdmission is the exact ownership reservation made when the
+// native controller presents a captured callback route. Autonomous reservations
+// name their pump incarnation; prompt-owned callbacks carry nil there because
+// their foreground turn is already the causal owner.
+type controlCallbackAdmission struct {
+	session     *agentSession
+	route       string
+	incarnation *nativeIncarnation
+	autonomous  bool
+	done        chan struct{}
+}
 
 var routeRandRead = rand.Read
 
@@ -132,27 +147,157 @@ func turnNonceFromContext(ctx context.Context) string {
 	return turnNonce
 }
 
-// activeControlCallbackContext accepts only a callback admitted for the exact
-// active prompt turn. The callback context owns its captured nonce; this never
-// consults the session nonce as a fallback and therefore cannot rebind an old
-// callback to a newer turn.
+func controlCallbackAdmissionFromContext(ctx context.Context) *controlCallbackAdmission {
+	if ctx == nil {
+		return nil
+	}
+
+	admission, _ := ctx.Value(controlCallbackAdmissionContextKey{}).(*controlCallbackAdmission)
+
+	return admission
+}
+
+// admitControlCallback linearizes the route the native client captured against
+// prompt dispatch. A callback that wins installs an exact ownership reservation
+// before its handler continues. A prompt that wins changes the stream owner and
+// rotates the autonomous route before releasing the same primitive, so the old
+// capture is refused here and can never become live again after prompt handoff.
+func (s *agentSession) admitControlCallback(
+	ctx context.Context,
+	nonce string,
+) (context.Context, func(), bool) {
+	stream := s.lifecycleStream()
+
+	if !s.awaitEstablishmentRoute(ctx, nonce) {
+		return ctx, func() {}, false
+	}
+
+	s.callbackOwnershipMu.Lock()
+
+	expected, admitted := s.callbackOwner(stream, nonce)
+
+	if admitted && expected.incarnation != nil &&
+		(expected.incarnation.failed.Load() || !s.nativePumpHandle().serves(expected.incarnation)) {
+		admitted = false
+	}
+
+	if !admitted {
+		s.callbackOwnershipMu.Unlock()
+
+		return ctx, func() {}, false
+	}
+
+	permitCtx, releasePermit, permitErr := s.agent.acquireCallbackClientCall(ctx)
+	if permitErr != nil {
+		s.callbackOwnershipMu.Unlock()
+
+		return ctx, func() {}, false
+	}
+
+	ctx = permitCtx
+
+	admission := &controlCallbackAdmission{
+		session:     s,
+		route:       nonce,
+		incarnation: expected.incarnation,
+		autonomous:  expected.autonomous,
+		done:        make(chan struct{}),
+	}
+	if s.callbackAdmissions == nil {
+		s.callbackAdmissions = make(map[*controlCallbackAdmission]struct{})
+	}
+
+	s.callbackAdmissions[admission] = struct{}{}
+	s.callbackOwnershipMu.Unlock()
+
+	ctx = withTurnRoute(ctx, nonce)
+	ctx = context.WithValue(ctx, controlCallbackAdmissionContextKey{}, admission)
+
+	var once sync.Once
+
+	finish := func() {
+		once.Do(func() {
+			s.callbackOwnershipMu.Lock()
+			delete(s.callbackAdmissions, admission)
+			s.callbackOwnershipMu.Unlock()
+			close(admission.done)
+			releasePermit()
+		})
+	}
+
+	return ctx, finish, true
+}
+
+// callbackOwner resolves a captured route while callbackOwnershipMu excludes a
+// prompt dispatch. The lifecycle stream is authoritative when negotiated; a
+// connection without lifecycle envelopes uses the published prompt route and
+// the exact autonomous incarnation.
+func (s *agentSession) callbackOwner(
+	stream *sessionStream,
+	nonce string,
+) (controlCallbackOwner, bool) {
+	if nonce == "" {
+		return controlCallbackOwner{}, false
+	}
+
+	s.mu.Lock()
+	closing := s.closing
+	s.mu.Unlock()
+
+	if closing {
+		return controlCallbackOwner{}, false
+	}
+
+	if stream != nil {
+		return stream.callbackOwner(nonce)
+	}
+
+	s.mu.Lock()
+	promptOwner := s.cancel != nil && s.turnNonce == nonce
+	s.mu.Unlock()
+
+	if promptOwner {
+		return controlCallbackOwner{incarnation: s.currentNativeIncarnation()}, true
+	}
+
+	incarnation := s.autonomousOwner(nonce)
+	if incarnation == nil || incarnation.failed.Load() {
+		return controlCallbackOwner{}, false
+	}
+
+	return controlCallbackOwner{incarnation: incarnation, autonomous: true}, true
+}
+
+func (s *agentSession) hasControlCallbackLocked() bool {
+	return len(s.callbackAdmissions) != 0
+}
+
+// activeControlCallbackContext accepts only the exact admission installed by the
+// native controller. A route value alone is never authority: tests and production
+// enter through admitControlCallback and carry its registered reservation here.
 func (s *agentSession) activeControlCallbackContext(ctx context.Context) (context.Context, bool) {
 	if ctx == nil || ctx.Err() != nil {
 		return ctx, false
 	}
 
-	callbackNonce := turnNonceFromContext(ctx)
-
-	s.mu.Lock()
-	activeNonce := s.turnNonce
-	active := s.cancel != nil && activeNonce != ""
-	s.mu.Unlock()
-
-	if !active || callbackNonce == "" || callbackNonce != activeNonce {
+	admission := controlCallbackAdmissionFromContext(ctx)
+	if admission == nil || admission.session != s || admission.route == "" {
 		return ctx, false
 	}
 
-	return withTurnRoute(ctx, activeNonce), true
+	s.callbackOwnershipMu.Lock()
+	defer s.callbackOwnershipMu.Unlock()
+
+	if _, live := s.callbackAdmissions[admission]; !live {
+		return ctx, false
+	}
+
+	owner, live := s.callbackOwner(s.lifecycleStream(), admission.route)
+	if !live || owner.incarnation != admission.incarnation || owner.autonomous != admission.autonomous {
+		return ctx, false
+	}
+
+	return ctx, true
 }
 
 func turnRouteMetaFromContext(ctx context.Context) map[string]any {

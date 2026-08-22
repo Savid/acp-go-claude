@@ -309,7 +309,7 @@ func (o *Observer) StartACP(ctx context.Context, meta map[string]any, method str
 		if errType := ErrorType(result.Err); errType != "" {
 			allAttrs = append(allAttrs, attribute.String(attrErrorType, errType))
 
-			span.RecordError(result.Err)
+			span.RecordError(errors.New(errType))
 			span.SetStatus(codes.Error, errType)
 		} else {
 			span.SetStatus(codes.Ok, "")
@@ -415,7 +415,7 @@ func (o *Observer) StartSpan(ctx context.Context, name string, attrs ...attribut
 		if errType := ErrorType(err); errType != "" {
 			extra = append(extra, attribute.String(attrErrorType, errType))
 
-			span.RecordError(err)
+			span.RecordError(errors.New(errType))
 			span.SetStatus(codes.Error, errType)
 		} else {
 			span.SetStatus(codes.Ok, "")
@@ -494,7 +494,7 @@ func (o *Observer) StartPermission(ctx context.Context, toolName string, mode st
 		if errType := ErrorType(result.Err); errType != "" {
 			finalAttrs = append(finalAttrs, attribute.String(attrErrorType, errType))
 
-			span.RecordError(result.Err)
+			span.RecordError(errors.New(errType))
 			span.SetStatus(codes.Error, errType)
 		} else {
 			span.SetStatus(codes.Ok, "")
@@ -540,7 +540,7 @@ func (o *Observer) StartElicitation(ctx context.Context) (context.Context, func(
 		if errType := ErrorType(result.Err); errType != "" {
 			finalAttrs = append(finalAttrs, attribute.String(attrErrorType, errType))
 
-			span.RecordError(result.Err)
+			span.RecordError(errors.New(errType))
 			span.SetStatus(codes.Error, errType)
 		} else {
 			span.SetStatus(codes.Ok, "")

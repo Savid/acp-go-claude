@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/stretchr/testify/require"
 )
 
@@ -345,42 +346,43 @@ func TestRequestBuildersContract(t *testing.T) {
 }
 
 func TestConcurrencyLimitValidation(t *testing.T) {
-	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}))
-	_, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
-	require.Error(t, err)
-}
+	for _, limits := range []ConcurrencyLimits{
+		{MaxActiveSessions: -1},
+		{MaxConcurrentClientCalls: -1},
+	} {
+		agent := NewAgent(WithConcurrencyLimits(limits))
 
-func TestClientCallConcurrencyLimit(t *testing.T) {
-	t.Parallel()
+		var constructionErr *acp.RequestError
+		require.ErrorAs(t, agent.configurationError(), &constructionErr)
+		require.Equal(t, -32602, constructionErr.Code)
 
-	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
-	release, err := agent.acquireClientCall(context.Background())
-	require.NoError(t, err)
-
-	_, err = agent.acquireClientCall(context.Background())
-	require.Error(t, err)
-
-	release()
-	release, err = agent.acquireClientCall(context.Background())
-	require.NoError(t, err)
-	release()
+		_, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
+		var initializeErr *acp.RequestError
+		require.ErrorAs(t, err, &initializeErr)
+		require.Equal(t, -32602, initializeErr.Code)
+	}
 }
 
 func TestCancelDuringPromptBypassesClientCallLimit(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: 1}))
+	agent := NewAgent()
 	transport := newAutoControlTransport()
 	client := claude.NewClient(nil, claude.Options{InitializeTimeout: time.Second}, transport)
 	require.NoError(t, client.Start(ctx))
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
 
+	_, cancelTurn := context.WithCancel(ctx)
+	defer cancelTurn()
+
 	agent.mu.Lock()
 	agent.sessions["session-1"] = &agentSession{
-		agent:  agent,
-		id:     "session-1",
-		client: client,
+		agent:     agent,
+		id:        "session-1",
+		client:    client,
+		cancel:    cancelTurn,
+		turnNonce: "turn-1",
 	}
 	agent.mu.Unlock()
 
@@ -388,7 +390,7 @@ func TestCancelDuringPromptBypassesClientCallLimit(t *testing.T) {
 	require.NoError(t, err)
 	defer release()
 
-	raw, err := json.Marshal(acp.CancelNotification{SessionId: "session-1"})
+	raw, err := json.Marshal(CancelRequest("session-1", "turn-1"))
 	require.NoError(t, err)
 
 	conn := &localAgentConnection{agent: agent}
@@ -428,8 +430,33 @@ func (t *autoControlTransport) Send(_ context.Context, payload any) error {
 	return nil
 }
 
-func (t *autoControlTransport) Messages(context.Context) (<-chan map[string]any, <-chan error) {
-	return t.incoming, t.errs
+func (t *autoControlTransport) Events(ctx context.Context) <-chan claude.TransportEvent {
+	events := make(chan claude.TransportEvent)
+	go func() {
+		defer close(events)
+		for {
+			select {
+			case msg, ok := <-t.incoming:
+				if !ok {
+					return
+				}
+				events <- claude.TransportEvent{Message: msg}
+			case err, ok := <-t.errs:
+				if !ok {
+					return
+				}
+				events <- claude.TransportEvent{Err: err}
+
+				return
+			case <-ctx.Done():
+				events <- claude.TransportEvent{Err: ctx.Err()}
+
+				return
+			}
+		}
+	}()
+
+	return events
 }
 
 func (t *autoControlTransport) Close() error {
@@ -462,6 +489,9 @@ func TestSetSessionModeUnsupported(t *testing.T) {
 	var reqErr *acp.RequestError
 	require.ErrorAs(t, err, &reqErr)
 	require.Equal(t, -32601, reqErr.Code)
+
+	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{Meta: lifecycleKeyMeta()})
+	requireRequestError(t, err, -32602, lifecycle.MetaPath)
 }
 
 func TestValidateMCPServersRejectsSSEAndACP(t *testing.T) {

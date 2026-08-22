@@ -89,6 +89,8 @@ providers.
 
 - ACP session lifecycle: create, prompt, cancel, close, list, load, resume, and
   extension-based fork.
+- Negotiated lifecycle streams with prompt/action correlation and close-fenced
+  durable settlement.
 - Claude stream-json subprocess management and control-protocol handling.
 - Prompt streaming for messages, thoughts, tool calls, tool results, plans,
   usage, and session metadata.

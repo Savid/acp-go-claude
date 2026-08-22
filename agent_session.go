@@ -31,6 +31,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/new")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
+	if lifecycleErr := rejectLifecycleMeta(params.Meta); lifecycleErr != nil {
+		return acp.NewSessionResponse{}, lifecycleErr
+	}
+
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
@@ -56,7 +60,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		McpServers:            params.McpServers,
 		MetaOptions:           metaOptions,
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
-	}, nil)
+	})
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
@@ -74,6 +78,10 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (resp acp.ResumeSessionResponse, err error) {
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/resume")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
+
+	if lifecycleErr := rejectLifecycleMeta(params.Meta); lifecycleErr != nil {
+		return acp.ResumeSessionResponse{}, lifecycleErr
+	}
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
@@ -94,7 +102,9 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		RawMessages:           rawMessageConfigFromMeta(params.Meta),
 	}
 	if session := a.activeSessionForStart(params.SessionId, start); session != nil {
-		session.emitCurrentUsageUpdate(ctx)
+		if updateErr := session.emitCurrentUsageUpdate(ctx); updateErr != nil {
+			return acp.ResumeSessionResponse{}, updateErr
+		}
 
 		resp = acp.ResumeSessionResponse{
 			Meta:          sessionReuseResponseMeta(session, metaOptions.ProviderAuth),
@@ -115,7 +125,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 	start.StoreEntries = storeEntries
 
-	session, err := a.startAndStoreSession(ctx, params.SessionId, start, nil)
+	session, err := a.startAndStoreSession(ctx, params.SessionId, start)
 	if err != nil {
 		if missingClaudeSessionError(err) {
 			return acp.ResumeSessionResponse{}, unknownSessionError()
@@ -124,7 +134,9 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	session.emitCurrentUsageUpdate(ctx)
+	if err := session.emitCurrentUsageUpdate(ctx); err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
 
 	resp = acp.ResumeSessionResponse{
 		Meta:          sessionResponseMeta(session),
@@ -138,6 +150,10 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (resp acp.LoadSessionResponse, err error) {
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/load")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
+
+	if lifecycleErr := rejectLifecycleMeta(params.Meta); lifecycleErr != nil {
+		return acp.LoadSessionResponse{}, lifecycleErr
+	}
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
 	if err != nil {
@@ -171,8 +187,18 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	session := a.activeSessionForStart(params.SessionId, start)
 	startedSession := false
 
+	// A live session whose incarnation this adapter had to contain resumes
+	// nothing. The transcript this load would replay continues a projection the
+	// host has already been told has a hole in it, and the process behind that
+	// incarnation is gone or going.
+	if session != nil {
+		if failureErr := session.autonomousFailureError(); failureErr != nil {
+			return acp.LoadSessionResponse{}, failureErr
+		}
+	}
+
 	if session == nil {
-		session, err = a.startAndStoreSession(ctx, params.SessionId, start, nil)
+		session, err = a.startAndStoreSession(ctx, params.SessionId, start)
 		if err != nil {
 			if missingClaudeSessionError(err) {
 				return acp.LoadSessionResponse{}, unknownSessionError()
@@ -192,7 +218,9 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, replayErr
 	}
 
-	session.emitCurrentUsageUpdate(ctx)
+	if err := session.emitCurrentUsageUpdate(ctx); err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
 
 	resp = acp.LoadSessionResponse{
 		Meta:          sessionLoadResponseMeta(session, metaOptions.ProviderAuth, startedSession),
@@ -207,6 +235,10 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/list")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
 
+	if lifecycleErr := rejectLifecycleMeta(params.Meta); lifecycleErr != nil {
+		return acp.ListSessionsResponse{}, lifecycleErr
+	}
+
 	if validationErr := validateOptionalAbsolutePath("cwd", params.Cwd); validationErr != nil {
 		return acp.ListSessionsResponse{}, validationErr
 	}
@@ -215,6 +247,13 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 
 	activeSessions := make(map[acp.SessionId]*agentSession, len(a.sessions))
 	for id, session := range a.sessions {
+		// A tombstoned id is hidden from the moment its tombstone is durable,
+		// whatever teardown that delete still owes. A deleted session is
+		// wire-indistinguishable from one that never existed.
+		if a.isDeletedLocked(id) {
+			continue
+		}
+
 		if !sessionMatchesListFilters(session, params) {
 			continue
 		}
@@ -299,39 +338,85 @@ func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) (err 
 }
 
 // CloseSession closes a Claude session process and removes it from the active map.
+//
+// Removal follows the completed boundary rather than the request. A close the
+// settlement barrier never admitted contained nothing and settled nothing; a
+// close that reached the boundary and failed a rung of it still owes that rung.
+// Either way the id keeps the session it names, so whatever is still running
+// behind it stays addressable and the next close retakes the boundary — dropping
+// the id would leave the host holding the only name for work this adapter has
+// just failed to finish.
+//
+// The whole close is session.Close and nothing before it. A native interrupt
+// hoisted ahead of it would run rung 5 of the shutdown ladder before rungs 1
+// through 4 — the pending input the ladder resolves first, and the provider-auth
+// flows it cancels before any teardown, would both be answered by a process that
+// was already torn down — and it would tear that process down before the session
+// stopped accepting prompts, leaving a window in which a racing prompt relaunches
+// exactly what the close just contained. Close already cancels the turn context
+// itself, and the turn it wakes runs its own containment on the way out.
 func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (resp acp.CloseSessionResponse, err error) {
 	ctx, finish := a.observe.StartACP(ctx, params.Meta, "session/close")
 	defer func() { finish(observer.ACPResult{Err: err}) }()
+
+	if lifecycleErr := rejectLifecycleMeta(params.Meta); lifecycleErr != nil {
+		return acp.CloseSessionResponse{}, lifecycleErr
+	}
 
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
 	}
 
-	_ = session.Cancel(ctx)
 	closeErr := session.Close(ctx)
 	a.recordContainmentError(closeErr)
 
-	a.dropSession(ctx, params.SessionId, session)
+	if errors.Is(closeErr, errSessionCloseUnsettled) {
+		return acp.CloseSessionResponse{}, sessionCloseUnsettledError(closeErr)
+	}
 
 	if closeErr != nil {
 		return acp.CloseSessionResponse{}, closeErr
 	}
 
+	a.dropSession(ctx, params.SessionId, session)
+
 	return acp.CloseSessionResponse{}, nil
 }
 
-// UnstableDeleteSession implements ACP session/delete.
+// UnstableDeleteSession implements ACP session/delete. The durable tombstone is
+// written first and the id is hidden with it, before anything is torn down: a
+// crash anywhere below then leaves a session that is already deleted everywhere a
+// host can see it, rather than one that is half torn down and still listable.
+// Nothing recreates the row afterwards, because a write to a tombstoned key lands
+// on nothing — the final mirror commit the teardown below runs included.
+//
+// Teardown follows, serialized behind the session's own settlement barrier, and
+// its errors are reported only from here: the tombstone is already durable and
+// the id already hidden, so a partial cleanup is a retry the next list, load,
+// resume, or delete takes, not a reason to keep naming a deleted session.
+//
+// A teardown the barrier never admitted is that same unreached boundary
+// session/close reports, and it is answered the same way rather than as an
+// internal failure — under its own name, because a refused delete has already
+// deleted the session and only owes the teardown.
 func (a *Agent) UnstableDeleteSession(
 	ctx context.Context,
 	params acp.UnstableDeleteSessionRequest,
 ) (acp.UnstableDeleteSessionResponse, error) {
-	if err := a.sessionStore().Delete(ctx, SessionKey{SessionID: string(params.SessionId)}); err != nil {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
 
 	a.mu.Lock()
 	session := a.sessions[params.SessionId]
+	a.mu.Unlock()
+
+	if err := a.sessionStore().Delete(ctx, SessionKey{SessionID: string(params.SessionId)}); err != nil {
+		return acp.UnstableDeleteSessionResponse{}, sessionDeleteTombstoneError(err)
+	}
+
+	a.mu.Lock()
 	a.deleted[params.SessionId] = struct{}{}
 	a.deleteCachedPermissionRulesLocked(params.SessionId)
 	a.mu.Unlock()
@@ -339,12 +424,22 @@ func (a *Agent) UnstableDeleteSession(
 	var cleanupErr error
 
 	if session != nil {
-		_ = session.Cancel(ctx)
-		if err := session.Close(ctx); err != nil {
-			cleanupErr = errors.Join(cleanupErr, err)
+		// The teardown is the session's own close ladder and nothing hoisted ahead
+		// of it, for the reason CloseSession states: rung 5 never runs before rungs
+		// 1 through 4, and nothing tears the native process down before the session
+		// has stopped admitting the prompt that would relaunch it.
+		closeErr := session.Close(ctx)
+		if closeErr != nil {
+			cleanupErr = errors.Join(cleanupErr, closeErr)
 		}
 
-		a.dropSession(ctx, params.SessionId, session)
+		// The instance leaves the active map once its close settled. A close the
+		// barrier never admitted settled nothing and memoized nothing, so that
+		// instance stays for the next delete to retry; the tombstone above already
+		// hides it from every request that could address it meanwhile.
+		if !errors.Is(closeErr, errSessionCloseUnsettled) {
+			a.dropSession(ctx, params.SessionId, session)
+		}
 	}
 
 	if err := deleteNativeTranscript(ctx, a.options.Home, string(params.SessionId)); err != nil {
@@ -354,15 +449,25 @@ func (a *Agent) UnstableDeleteSession(
 	if cleanupErr != nil {
 		a.recordContainmentError(cleanupErr)
 
-		return acp.UnstableDeleteSessionResponse{}, cleanupErr
+		return acp.UnstableDeleteSessionResponse{}, sessionDeleteUnsettledError(cleanupErr)
 	}
 
 	return acp.UnstableDeleteSessionResponse{}, nil
 }
 
+// session resolves one session-scoped request to its live instance. A tombstoned
+// id resolves to nothing whatever the active map still holds: delete hides the id
+// the moment its tombstone is durable, and a deleted session is
+// wire-indistinguishable from one that never existed. An instance whose teardown
+// has not finished stays in the map so a later delete can retry it, but no
+// request addresses it again.
 func (a *Agent) session(sessionID acp.SessionId) (*agentSession, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	if a.isDeletedLocked(sessionID) {
+		return nil, unknownSessionError()
+	}
 
 	session := a.sessions[sessionID]
 	if session == nil {
@@ -428,23 +533,32 @@ func (a *Agent) dropSession(ctx context.Context, sessionID acp.SessionId, sessio
 	}
 }
 
+// removeSession closes one session and then evicts it. The close runs first
+// because it is what proves there is nothing left behind the id: a close its
+// settlement barrier never admitted leaves the session in the map, still
+// addressable, rather than dropping the handle to work that is still running.
+// Close latches the session's terminal state before its own teardown, so every
+// door is already refused while the eviction is pending.
 func (a *Agent) removeSession(ctx context.Context, sessionID acp.SessionId, session *agentSession) {
-	a.dropSession(ctx, sessionID, session)
-
 	if session != nil {
 		if err := session.Close(ctx); err != nil {
 			a.recordContainmentError(err)
-			a.log.DebugContext(ctx, "close removed Claude session failed", slog.String(jsonFieldError, err.Error()))
+			a.log.DebugContext(ctx, "close removed Claude session failed", slog.String("class", safeErrorClass(err)))
+
+			if errors.Is(err, errSessionCloseUnsettled) {
+				return
+			}
 		}
 	}
+
+	a.dropSession(ctx, sessionID, session)
 }
 
 // ensureOpen answers the admission check every entry point runs, and answers it
-// already shaped for the wire so the two refusals stay apart: a closed agent
-// cannot accept the request at all (-32600), while a refused construction
-// option is the embedding host's fault (-32603). Returning the bare sentinel for
-// one branch and a structured verdict for the other invites a caller to coerce
-// both into a single code and flatten the configuration payload into prose.
+// already shaped for the wire so the refusals stay apart: a closed agent cannot
+// accept the request at all (-32600), a negative concurrency limit is invalid
+// params (-32602), and an unusable runtime boundary is the embedding host's
+// internal construction failure (-32603).
 func (a *Agent) ensureOpen() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -456,57 +570,101 @@ func (a *Agent) ensureOpen() error {
 	return a.configurationError()
 }
 
-// configurationError reports the options this agent was built with as refused,
-// as an internal error: the caller's params are fine, the embedding host built
-// an agent that cannot serve them. Every entry point answers it, not only
-// initialize: an in-process host that drives the agent directly may never call
-// initialize, and an agent whose limits or read root were rejected must not
-// serve a turn under them. The joined prose is the whole payload because no
-// single wire field is at fault for an operator to be pointed at.
+// configurationError reports refused construction options at every entry point.
+// Negative public concurrency fields retain their normative invalid-params
+// verdict; runtime configuration failures remain internal because the caller's
+// method params did not cause them. An in-process host may never call initialize,
+// so neither class is allowed to serve work through another door.
 func (a *Agent) configurationError() error {
-	err := errors.Join(a.activeLimitErr, a.configurationErr)
-	if err == nil {
-		return nil
+	if a.activeLimitErr != nil {
+		return acp.NewInvalidParams(map[string]any{jsonFieldError: a.activeLimitErr.Error()})
 	}
 
-	return acp.NewInternalError(map[string]any{jsonFieldError: err.Error()})
+	if a.configurationErr != nil {
+		return acp.NewInternalError(map[string]any{jsonFieldError: a.configurationErr.Error()})
+	}
+
+	return nil
 }
 
+// storeStartedSession publishes one freshly started instance under its id, and
+// it is the only place an id becomes live. Every reason the id may not be
+// published is re-read here, under the lock, after the slow native start: the
+// admission checks the entry points ran happen before a process launch that
+// takes as long as it takes, so a decision made there is only a guess by the
+// time there is something to install.
+//
+// A tombstone is the reason that guess is load-bearing. Delete writes it and
+// hides the id, then tears down whatever the map held; an install that read the
+// tombstone before it landed would register a live native session behind it,
+// where session, load, resume, and close all answer unknown-session and nothing
+// the host can send would ever reach it again. Registration is refused
+// instead, the instance nothing will ever name is torn down here, and the caller
+// is told what every other door tells it.
 func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) error {
 	a.mu.Lock()
 	if a.closed {
 		a.deleteCachedPermissionRulesLocked(session.id)
 		a.mu.Unlock()
 
-		if err := session.Close(ctx); err != nil {
-			a.recordContainmentError(err)
-			a.log.DebugContext(ctx, "close rejected Claude session failed", slog.String(jsonFieldError, err.Error()))
-		}
+		return a.closeRejectedSession(ctx, session, "agent_closed", errAgentClosed)
+	}
 
-		return errAgentClosed
+	if a.isDeletedLocked(session.id) {
+		a.deleteCachedPermissionRulesLocked(session.id)
+		a.mu.Unlock()
+
+		return a.closeRejectedSession(ctx, session, "session_deleted", unknownSessionError())
 	}
 
 	previous := a.sessions[session.id]
 	if previous == nil && len(a.sessions) >= a.maxActiveSessions() {
 		a.mu.Unlock()
 
-		if err := session.Close(ctx); err != nil {
-			a.recordContainmentError(err)
-			a.log.DebugContext(ctx, "close backpressured Claude session failed", slog.String(jsonFieldError, err.Error()))
+		return a.closeRejectedSession(ctx, session, "active_sessions", backpressureError("active_sessions"))
+	}
+
+	if previous != nil {
+		a.mu.Unlock()
+
+		// The replaced instance settles before its id names the replacement. An
+		// instance the map no longer holds is one nothing can ever close, so a close
+		// the settlement barrier did not admit refuses the install rather than
+		// orphaning a live incarnation, and the durable commit of the instance on its
+		// way out lands before the one taking its place can write the same row.
+		if err := a.closeReplacedSession(ctx, session, previous); err != nil {
+			return err
 		}
 
-		return backpressureError("active_sessions")
+		a.mu.Lock()
+
+		if a.closed {
+			a.deleteCachedPermissionRulesLocked(session.id)
+			a.mu.Unlock()
+
+			// The agent closed while the replaced instance was settling, so this id
+			// names nothing: the settled instance leaves the map and the replacement
+			// that would have taken its place is torn down.
+			a.dropSession(ctx, session.id, previous)
+
+			return a.closeRejectedSession(ctx, session, "agent_closed", errAgentClosed)
+		}
+
+		if a.isDeletedLocked(session.id) {
+			a.deleteCachedPermissionRulesLocked(session.id)
+			a.mu.Unlock()
+
+			// A delete landed while the replaced instance was settling. The tombstone
+			// is durable, so the settled instance leaves the map and the replacement
+			// is torn down rather than installed behind it.
+			a.dropSession(ctx, session.id, previous)
+
+			return a.closeRejectedSession(ctx, session, "session_deleted", unknownSessionError())
+		}
 	}
 
 	a.sessions[session.id] = session
 	a.mu.Unlock()
-
-	if previous != nil {
-		if err := previous.Close(ctx); err != nil {
-			a.recordContainmentError(err)
-			a.log.WarnContext(ctx, "close replaced Claude session failed", slog.String(jsonFieldError, err.Error()))
-		}
-	}
 
 	// This is the one place an id becomes live, so it is where the provider-auth
 	// close mark is cleared: session/close drops an id without tombstoning it and
@@ -524,11 +682,59 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) 
 	return nil
 }
 
+// closeRejectedSession tears down a session the map refused and answers with the
+// refusal itself. The session never became addressable, so its close failure is
+// recorded and logged rather than reported: the caller asked for admission, and
+// admission is what was denied.
+//
+// That teardown is detached from the caller's cancellation. No id names this
+// session, so no later close can reach it — a caller that has already given up
+// must not be what decides whether the process it launched is contained. No turn
+// can hold a session that was never published, so the barrier is free.
+func (a *Agent) closeRejectedSession(
+	ctx context.Context,
+	session *agentSession,
+	reason string,
+	refusal error,
+) error {
+	ctx = context.WithoutCancel(ctx)
+
+	if err := session.Close(ctx); err != nil {
+		a.recordContainmentError(err)
+		a.log.DebugContext(ctx, "close unadmitted Claude session failed",
+			slog.String(jsonFieldReason, reason),
+			slog.String("class", safeErrorClass(err)),
+		)
+	}
+
+	return refusal
+}
+
+// closeReplacedSession settles the instance a same-id install is replacing. A
+// close its settlement barrier did not admit leaves live native work behind an id
+// that is about to name something else, so that install is refused and the
+// replacement is torn down instead: the replaced instance keeps the id, stays
+// addressable, and can still be closed.
+func (a *Agent) closeReplacedSession(ctx context.Context, session *agentSession, previous *agentSession) error {
+	closeErr := previous.Close(ctx)
+	if closeErr == nil {
+		return nil
+	}
+
+	a.recordContainmentError(closeErr)
+	a.log.WarnContext(ctx, "close replaced Claude session failed", slog.String("class", safeErrorClass(closeErr)))
+
+	if !errors.Is(closeErr, errSessionCloseUnsettled) {
+		return nil
+	}
+
+	return a.closeRejectedSession(ctx, session, "replaced_session_unsettled", sessionCloseUnsettledError(closeErr))
+}
+
 func (a *Agent) startAndStoreSession(
 	ctx context.Context,
 	id acp.SessionId,
 	start sessionStart,
-	afterStart func(*agentSession),
 ) (*agentSession, error) {
 	if err := a.beginSessionConstruction(); err != nil {
 		return nil, err
@@ -540,8 +746,8 @@ func (a *Agent) startAndStoreSession(
 		return nil, err
 	}
 
-	if afterStart != nil {
-		afterStart(session)
+	if start.ForkSession {
+		session.persistPermissionRules(ctx)
 	}
 
 	if err := a.storeStartedSession(ctx, session); err != nil {
@@ -591,7 +797,16 @@ func (a *Agent) activeSessionForStart(id acp.SessionId, start sessionStart) *age
 
 	a.mu.Lock()
 	session := a.sessions[id]
+	deleted := a.isDeletedLocked(id)
 	a.mu.Unlock()
+
+	// A tombstoned id names nothing whatever the map still holds. Delete leaves an
+	// instance behind its tombstone when the teardown it owes has not finished, so
+	// reuse reads the tombstone rather than the map and never hands a deleted
+	// session back to a host that asked to load or resume it.
+	if deleted {
+		return nil
+	}
 
 	if session == nil || session.fingerprint != fingerprint {
 		return nil
@@ -867,7 +1082,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		SettingsFile:            settingsFileArg,
 		InitializeTimeout:       a.options.InitializeTimeout,
 		ControlHandlerTimeout:   a.options.ControlHandlerTimeout,
-		ControlHandlerContext:   withTurnRoute,
 		ObserveStartupStage: func(stageCtx context.Context, stage string, elapsed time.Duration, stageErr error) {
 			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
 			if observe != nil {
@@ -932,7 +1146,21 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	options.HookHandler = session.handleHookCallback
 	session.clientOptions = options
 	session.canRelaunch = true
+
 	session.client = a.newClaudeClient(a.log, options)
+	if _, local := a.connection().(*localAgentConnection); local {
+		if installErr := session.installEstablishmentGate(session.client); installErr != nil {
+			return nil, installErr
+		}
+
+		defer func() {
+			if err != nil {
+				session.settleEstablishment(err)
+			}
+		}()
+	}
+
+	session.client.SetControlHandlerAdmission(session.admitControlCallback)
 
 	nativeRelease, err = acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
 	if err != nil {
@@ -970,7 +1198,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	settingsKnown := true
 
 	if err != nil {
-		a.log.DebugContext(ctx, "get Claude settings failed", slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "get Claude settings failed", slog.String("stage", "settings_read"))
 
 		settings = &claude.SettingsSnapshot{}
 		settingsKnown = false
@@ -1129,6 +1357,14 @@ func (a *Agent) isDeleted(sessionID acp.SessionId) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	return a.isDeletedLocked(sessionID)
+}
+
+// isDeletedLocked reports the durable tombstone every path that hands out, or
+// installs, an instance for this id has to consult. Delete writes the tombstone
+// and hides the id in one critical section, so reading it under the same lock is
+// what makes "this id names nothing" a fact rather than a stale observation.
+func (a *Agent) isDeletedLocked(sessionID acp.SessionId) bool {
 	_, ok := a.deleted[sessionID]
 
 	return ok
@@ -1136,7 +1372,8 @@ func (a *Agent) isDeleted(sessionID acp.SessionId) bool {
 
 func (a *Agent) retryDeleteNativeTranscript(ctx context.Context, sessionID acp.SessionId) {
 	if err := deleteNativeTranscript(ctx, a.options.Home, string(sessionID)); err != nil {
-		a.log.DebugContext(ctx, "retry delete native Claude transcript failed", slog.String(acpFieldSessionID, string(sessionID)), slog.String(jsonFieldError, err.Error()))
+		a.log.DebugContext(ctx, "retry delete native Claude transcript failed",
+			slog.String(acpFieldSessionID, string(sessionID)), slog.String("class", safeErrorClass(err)))
 	}
 }
 
@@ -1238,7 +1475,7 @@ func firstStoreUserPrompt(entry map[string]any) string {
 }
 
 func sessionMatchesListFilters(session *agentSession, params acp.ListSessionsRequest) bool {
-	if params.Cwd != nil && *params.Cwd != session.cwd {
+	if params.Cwd != nil && *params.Cwd != "" && *params.Cwd != session.cwd {
 		return false
 	}
 

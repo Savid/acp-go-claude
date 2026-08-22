@@ -25,6 +25,73 @@ Initialize advertises capability descriptors under `_meta.claude`:
 Initialize also advertises reserved envelopes separately from the Claude
 namespace:
 
+The fourth reserved envelope, `acp-go.dev/lifecycle`, is negotiated from an
+`initialize` offer containing `versions` rather than advertised
+unconditionally, and its placement is the exact inverse of the envelopes below.
+When version 1 intersects and the `Serve` output supports close or write-deadline
+interruption, the negotiated `acp-go.dev/lifecycle` answer is placed on
+`InitializeResponse._meta` — the response's own top-level `_meta` — and never on
+`agentCapabilities._meta`, where the reserved envelopes below ride, nor under
+`_meta.claude`. A non-interruptible output still serves ordinary ACP traffic but
+omits the lifecycle answer. The answer reports the active containment proof
+class, `updatesOutsidePrompt: true`, and `activityKinds: []`. No offer, no
+intersection, or no interruptible carrier omits the answer. Whole-tree
+quiescence is available only with authoritative Linux process isolation; other
+configurations advertise no quiescence proof class.
+
+`activityKinds` is empty because no captured native trace proves the stable
+identity and parentage required for a lifecycle activity. Native task frames
+still map to ordinary typed tool-call updates, and background work still opens
+agent-origin turns; neither is promoted into a fabricated activity registry.
+
+### Work between prompts
+
+Claude's process outlives every prompt it serves, so work that continues after
+`session/prompt` returns still reaches the host. Each such excursion is one
+fresh agent-origin lifecycle turn: `state_update{state: "running", cause:
+"activity"}` naming a turn no `prompt_accepted` introduced, then ordinary
+`session/update` content in native order, then `state_update{state: "idle"}`
+carrying that turn's outcome. The excursion's durable prefix is committed before
+that idle, so the terminal event only ever reports what the store already holds.
+
+Exactly one turn holds the foreground at a time, and an open excursion is not
+pre-empted. Background activity being live refuses nothing, but a prompt that
+arrives while an agent-origin turn is actually open is answered `-32600` with
+`{"error":"backpressure","limit":"session_foreground"}` before it is dispatched:
+it leaves no `prompt_accepted` and writes no frame to the harness, and the
+excursion keeps its pending permission or elicitation owned and live. Once the
+native terminal settles that excursion, the retried prompt runs as a turn of its
+own.
+
+A task keeps the route of the prompt that started it. Every later frame that
+names the task — raw frames, typed tool updates, notifications, and their usage —
+stays on that route even when another prompt owns the foreground. A result whose
+`origin.kind` is `task-notification` names no task: the harness origin carries a
+kind alone, so its usage and cost ride the foreground that read it, it retires
+no task correlation, and it never ends the prompt or agent-origin excursion
+currently reading native traffic. One task may notify any number of times inside
+one excursion. Settlement waits for an ordinary native result or system idle.
+
+Permissions and elicitations raised after native initialization but before a
+successful `session/new`, `session/load`, `session/resume`, or `session/fork`
+response write are retained on a provisional exact route. They reach the host
+only after the full response write succeeds and the session's autonomous route
+and lifecycle snapshot have been published.
+
+Permissions and elicitations the harness raises after a prompt returns are
+owned by the agent-origin turn of the excursion they belong to. A callback whose route names
+no live owner — a retired prompt's, or one from an ended incarnation — announces
+no action and carries no correlation value, whatever state the stream is in.
+
+Because `updatesOutsidePrompt` is advertised, a between-prompt frame this
+adapter has already consumed is never dropped. If its mapping, its ACP
+emission, its lifecycle event, or its durable prefix fails, the incarnation that
+produced it is contained: pending permissions and elicitations are answered, the
+native process is closed behind the reader, no further content is emitted on
+that stream, and later `session/prompt` or `session/load` addressed to that same
+incarnation is answered `-32603` naming `claude_autonomous_stream_failed`. A
+relaunched process opens a new incarnation and clears the refusal.
+
 ```json
 {"acp-go.dev/route":{"versions":[1]}}
 ```
@@ -82,10 +149,15 @@ that declaration, verifies the size and digest, and then applies the same gates
 an embedded image passes. See
 [Models and config](/docs/features/models-config).
 
-Every `session/prompt` and every cancellation of an active turn MUST carry
-exactly `_meta["acp-go.dev/route"] = {"version":1,"turnNonce":"..."}`.
+Every `session/prompt` and every `session/cancel` MUST carry exactly
+`_meta["acp-go.dev/route"] = {"version":1,"turnNonce":"..."}`.
 Missing, extra, wrong-typed, unsupported-version, and stale values are rejected.
 The nonce is fresh and unguessable for each turn and is at most 4096 bytes.
+A cancel is authenticated on every turn state, never only while a turn runs: a
+session with no active turn holds no nonce that can authorize one, so its cancel
+is refused with no native effect at all — Claude is not interrupted, pending
+permission and elicitation requests are untouched, and the native process stays
+open.
 
 Every live-turn `session/update` and `_claude/rawEvent` notification carries the
 same exact `{version, turnNonce}` object in its notification `_meta`; raw-event
@@ -96,7 +168,33 @@ Outbound form and URL elicitation requests preserve their native metadata and
 add a route object containing `version`, `sessionId`, `turnNonce`, and exactly
 one of `toolCallId` or `requestId`. A native request that already owns the
 reserved key is rejected rather than overwritten. Permission requests remain
-correlated by their structural ACP session and tool-call fields.
+correlated by their structural ACP session and tool-call fields. While lifecycle
+version 1 is negotiated, prompts additionally carry submission correlation and
+permission and elicitation requests carry action correlation under
+`_meta["acp-go.dev/lifecycle"]`. Lifecycle events use only identity-only
+`session_info_update` notifications as carriers.
+
+While that key is negotiated, no native work exists that the stream cannot
+describe. A native process is announced by its incarnation's opening snapshot
+before the adapter starts reading it, and a snapshot the host never received
+contains that process instead of leaving it running. A prompt frame is written
+only once the stream can announce its acceptance, so a stream that already lost
+an event refuses the turn before the harness sees it; if a lifecycle event fails
+after the harness has taken the frame, the turn it opened is contained before the
+prompt's error returns.
+
+The lifecycle key is refused on `session/new`, `session/load`, `session/resume`,
+`session/cancel`, `session/close`, `session/delete`, `session/list`, both
+`session/set_config_option` variants, `session/set_mode`, `authenticate`,
+`logout`, `_claude/session/fork`, `_claude/rateLimits`, and every
+`_claude/auth/*` method. Refusals name `_meta["acp-go.dev/lifecycle"]`, except
+on `session/cancel`, where the route is the authenticator and is validated
+first: an absent or malformed route, a nonce that no longer names the running
+turn, and a session with no active turn are each refused naming
+`_meta["acp-go.dev/route"]`, and only a cancel whose route names the running
+turn is refused for the lifecycle key it carries. Either verdict refuses before
+interrupting Claude. The route nonce authenticates admission to the current
+session turn, while the lifecycle value supplies submission and action identity.
 
 ## Session options
 

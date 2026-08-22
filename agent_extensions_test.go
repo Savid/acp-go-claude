@@ -33,6 +33,22 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
 	requireExactUnsupportedField(t, err, jsonFieldCwd)
 
+	// The tombstoned parent still holds a LIVE registered instance — the exact
+	// window where teardown is owed after the tombstone — so only the
+	// tombstone fence, not the missing-store path, can refuse this fork.
+	agent.mu.Lock()
+	agent.deleted["tombstoned-parent"] = struct{}{}
+	agent.sessions["tombstoned-parent"] = &agentSession{
+		agent:           agent,
+		id:              "tombstoned-parent",
+		permissionRules: map[string]string{"Read": claude.BehaviorAllow},
+	}
+	agent.mu.Unlock()
+	raw, err = json.Marshal(ForkSessionRequest("tombstoned-parent", cwd))
+	require.NoError(t, err)
+	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
+	requireUnknownSession(t, err)
+
 	raw, err = json.Marshal(ForkSessionRequest("parent", cwd, WithSessionMCPServers(acp.McpServer{Sse: &acp.McpServerSseInline{Name: "sse"}})))
 	require.NoError(t, err)
 	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
@@ -132,16 +148,13 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	emitConn, ok := emitFail.connection().(*recordingAgentClient)
 	require.True(t, ok)
 	emitConn.sessionUpdateErr = errors.New("update failed")
-	respAny, err := emitFail.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
-	require.NoError(t, err)
-	resp, ok := respAny.(acp.UnstableForkSessionResponse)
-	require.True(t, ok)
-	require.NotEmpty(t, resp.SessionId)
+	_, err = emitFail.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
+	require.ErrorContains(t, err, "update failed")
 
 	success := newForkTestAgent(t, nil)
-	respAny, err = success.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
+	respAny, err := success.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
 	require.NoError(t, err)
-	resp, ok = respAny.(acp.UnstableForkSessionResponse)
+	resp, ok := respAny.(acp.UnstableForkSessionResponse)
 	require.True(t, ok)
 	require.NotEmpty(t, resp.SessionId)
 	require.NotEmpty(t, resp.ConfigOptions)
@@ -530,7 +543,7 @@ func TestClosedAgentRejectsDirectNativeConstructionAdmissions(t *testing.T) {
 
 	_, err := agent.handleRateLimits(t.Context(), nil)
 	require.ErrorIs(t, err, errAgentClosed)
-	_, err = agent.startAndStoreSession(t.Context(), "closed", sessionStart{}, nil)
+	_, err = agent.startAndStoreSession(t.Context(), "closed", sessionStart{})
 	require.ErrorIs(t, err, errAgentClosed)
 
 	session := &agentSession{agent: agent, id: "closed", client: deadClaudeClient(t, nil), canRelaunch: true}

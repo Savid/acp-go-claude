@@ -192,10 +192,8 @@ func ReadAuthKeychainCredential(ctx context.Context, configDir string, user stri
 	return nil, failures
 }
 
-// RemoveAuthKeychainItems removes both of a config dir's items, across both
-// reachable name shapes. Native logout already removes what it knows about;
-// this closes the case where the legacy API-key item survives it, which would
-// leave a usable credential behind.
+// RemoveAuthKeychainItems removes a config dir's current composite credential
+// item across both reachable name shapes.
 func RemoveAuthKeychainItems(ctx context.Context, configDir string, user string, options Options) error {
 	var failures error
 

@@ -1,9 +1,17 @@
 package claude
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"strings"
+)
+
+const (
+	transportClassNone        = "none"
+	transportClassCanceled    = "canceled"
+	transportClassDeadline    = "deadline"
+	transportClassContainment = "containment"
+	transportClassFailure     = "transport"
 )
 
 var (
@@ -19,45 +27,144 @@ var (
 	ErrSessionNotFound = errors.New("claude session not found")
 	// ErrQueryClosed indicates Claude closed a query before producing a response.
 	ErrQueryClosed = errors.New("claude query closed")
+
+	errClaudeTransportFailure   = errors.New("claude transport failed")
+	errClaudePayloadMarshal     = errors.New("claude transport payload encoding failed")
+	errClaudeStdinWrite         = errors.New("claude stdin write failed")
+	errClaudeStdoutRead         = errors.New("claude stdout reader failed")
+	errClaudeStdoutReaderPanic  = errors.New("claude stdout reader panicked")
+	errControlHandlerPanic      = errors.New("claude control handler panicked")
+	errControlHandlerFailure    = errors.New("claude control handler failed")
+	errControlResponseWrite     = errors.New("claude control response write failed")
+	errClaudeControlRequestFail = errors.New("claude control request failed")
 )
 
-// ProcessExitError describes an unexpected Claude subprocess exit and preserves
-// the real cause: the exit status and a tail of the process stderr. It is the
-// error surfaced when the Claude process dies mid-turn so the ACP client sees
-// the true cause instead of a fixed placeholder.
+// ControllerDataFailureKind identifies how the controller stopped delivering
+// frames already admitted from the native source.
+type ControllerDataFailureKind string
+
+const (
+	// ControllerDataOverflow means the controller's bounded admitted-frame queue
+	// filled before the consumer advanced it.
+	ControllerDataOverflow ControllerDataFailureKind = "overflow"
+	// ControllerDataTeardownAbort means deliberate client teardown interrupted
+	// delivery. Source EOF never uses this cause and always drains completely.
+	ControllerDataTeardownAbort ControllerDataFailureKind = "teardown_abort"
+)
+
+// ControllerDataError is a secret-safe typed controller generation failure.
+// It carries classification only; native frames and provider error text never
+// enter its rendering.
+type ControllerDataError struct {
+	Kind ControllerDataFailureKind
+}
+
+func (e *ControllerDataError) Error() string {
+	return "claude controller data delivery failed: " + string(e.Kind)
+}
+
+// transportFailure keeps the exact causal identity available to errors.Is
+// while rendering only the adapter-owned transport classification. In
+// particular, provider, filesystem, and payload text carried by cause never
+// becomes part of a returned or logged error string.
+type classifiedTransportError struct{ cause error }
+
+func (e *classifiedTransportError) Error() string { return errClaudeTransportFailure.Error() }
+
+func (e *classifiedTransportError) Unwrap() []error {
+	return []error{errClaudeTransportFailure, e.cause}
+}
+
+// ProcessExitError describes an unexpected Claude subprocess exit using only
+// the closed status classification safe to expose outside the transport.
 type ProcessExitError struct {
 	// ExitCode is the process exit status, or -1 when it cannot be determined.
 	ExitCode int
-	// StderrTail holds the last lines the process emitted on stderr.
-	StderrTail string
-	// Err is the underlying wait error.
-	Err error
 }
 
-// Error renders the exit status, wait error, and stderr tail as one string.
+// Error renders only the process status. Provider stderr and wait error bodies
+// are deliberately not retained or returned.
 func (e *ProcessExitError) Error() string {
-	var b strings.Builder
-
-	b.WriteString("claude exited")
-
 	if e.ExitCode >= 0 {
-		fmt.Fprintf(&b, " with status %d", e.ExitCode)
+		return fmt.Sprintf("claude exited with status %d", e.ExitCode)
 	}
 
-	if e.Err != nil {
-		fmt.Fprintf(&b, ": %v", e.Err)
-	}
-
-	if tail := strings.TrimSpace(e.StderrTail); tail != "" {
-		fmt.Fprintf(&b, "; stderr: %s", tail)
-	}
-
-	return b.String()
+	return ErrProcessExited.Error()
 }
-
-// Unwrap exposes the underlying wait error.
-func (e *ProcessExitError) Unwrap() error { return e.Err }
 
 // Is reports the error as an ErrProcessExited so callers can classify process
 // death without depending on the concrete type.
 func (e *ProcessExitError) Is(target error) bool { return target == ErrProcessExited }
+
+func closedTransportError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	closed := make([]error, 0, 8)
+
+	var dataFailure *ControllerDataError
+	if errors.As(err, &dataFailure) {
+		closed = append(closed, &ControllerDataError{Kind: dataFailure.Kind})
+	}
+
+	for _, recognized := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		ErrProcessContainmentIncomplete,
+		ErrClientClosed,
+		ErrClientNotStarted,
+		ErrMessageStreamClosed,
+		errClaudeTransportFailure,
+		errClaudePayloadMarshal,
+		errClaudeStdinWrite,
+		errClaudeStdoutRead,
+		errClaudeStdoutReaderPanic,
+		errControlHandlerPanic,
+		errControlHandlerFailure,
+		errControlResponseWrite,
+		errClaudeControlRequestFail,
+	} {
+		if errors.Is(err, recognized) {
+			closed = append(closed, recognized)
+		}
+	}
+
+	if errors.Is(err, ErrProcessExited) {
+		var exit *ProcessExitError
+		if errors.As(err, &exit) {
+			closed = append(closed, &ProcessExitError{ExitCode: exit.ExitCode})
+		} else {
+			closed = append(closed, ErrProcessExited)
+		}
+	}
+
+	if len(closed) == 0 {
+		return &classifiedTransportError{cause: err}
+	}
+
+	return errors.Join(closed...)
+}
+
+func transportErrorClass(err error) string {
+	switch {
+	case err == nil:
+		return transportClassNone
+	case errors.Is(err, context.Canceled):
+		return transportClassCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return transportClassDeadline
+	case errors.Is(err, ErrProcessContainmentIncomplete):
+		return transportClassContainment
+	case errors.Is(err, ErrProcessExited):
+		return "process_exit"
+	case errors.Is(err, errClaudeStdoutReaderPanic):
+		return "stdout_panic"
+	case errors.Is(err, errClaudeStdoutRead):
+		return "stdout_read"
+	case errors.Is(err, errControlResponseWrite):
+		return "response_write"
+	default:
+		return transportClassFailure
+	}
+}

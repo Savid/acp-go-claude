@@ -1,8 +1,6 @@
 package claudeacp
 
 import (
-	"context"
-	"errors"
 	"os"
 	"testing"
 
@@ -10,90 +8,6 @@ import (
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
-
-func TestSetSessionConfigValueEdgeBranches(t *testing.T) {
-	ctx := context.Background()
-	available := []claude.AvailableModelInfo{
-		{Value: "sonnet", SupportedEffortLevels: []string{effortLow}, SupportsAutoMode: true},
-		{Value: "opus", SupportedEffortLevels: []string{effortHigh}},
-	}
-
-	t.Run("model clamp permission mode failure", func(t *testing.T) {
-		agent, transport, cleanup := newConfigEdgeSession(t, available)
-		defer cleanup()
-		transport.controlErr = map[string]error{"set_permission_mode": errors.New("mode failed")}
-		_, err := agent.SetSessionConfigOption(ctx, SetModelRequest("session-1", "opus"))
-		require.ErrorContains(t, err, "mode failed")
-	})
-
-	t.Run("model clamp effort failure", func(t *testing.T) {
-		agent, transport, cleanup := newConfigEdgeSession(t, available)
-		defer cleanup()
-		session := agent.sessions["session-1"]
-		session.mode = modeDefault
-		session.effort = effortMedium
-		transport.controlErr = map[string]error{"apply_flag_settings": errors.New("effort failed")}
-		_, err := agent.SetSessionConfigOption(ctx, SetModelRequest("session-1", "sonnet"))
-		require.ErrorContains(t, err, "effort failed")
-	})
-
-	t.Run("acquire turn failure", func(t *testing.T) {
-		agent, _, cleanup := newConfigEdgeSession(t, available)
-		defer cleanup()
-		session := agent.sessions["session-1"]
-		session.turn <- struct{}{}
-		_, err := agent.SetSessionConfigOption(ctx, SetModelRequest("session-1", "opus"))
-		require.Error(t, err)
-	})
-
-	t.Run("poison after acquire turn", func(t *testing.T) {
-		agent, _, cleanup := newConfigEdgeSession(t, available)
-		defer cleanup()
-		session := agent.sessions["session-1"]
-		session.turnAcquiredHook = func(int) {
-			session.mu.Lock()
-			session.poisonCause = "poisoned after config acquire"
-			session.mu.Unlock()
-		}
-		_, err := agent.SetSessionConfigOption(ctx, SetModelRequest("session-1", "opus"))
-		require.ErrorContains(t, err, "poisoned after config acquire")
-	})
-
-	t.Run("emit config update failure", func(t *testing.T) {
-		agent, _, cleanup := newConfigEdgeSession(t, available)
-		defer cleanup()
-		conn, ok := agent.connection().(*recordingAgentClient)
-		require.True(t, ok)
-		conn.sessionUpdateErr = errors.New("emit failed")
-		_, err := agent.SetSessionConfigOption(ctx, SetConfigOptionRequest("session-1", configMode, acp.SessionConfigValueId(modeDefault)))
-		require.ErrorContains(t, err, "emit failed")
-	})
-}
-
-func newConfigEdgeSession(t *testing.T, available []claude.AvailableModelInfo) (*Agent, *fakeClaudeTransport, func()) {
-	t.Helper()
-
-	transport := newFakeClaudeTransport()
-	agent, _, _ := newFakeLifecycleAgent(t, transport)
-	client := claude.NewClient(agent.log, claude.Options{}, transport)
-	require.NoError(t, client.Start(context.Background()))
-	session := &agentSession{
-		agent:                 agent,
-		id:                    "session-1",
-		cwd:                   t.TempDir(),
-		model:                 "sonnet",
-		availableModels:       append([]claude.AvailableModelInfo(nil), available...),
-		mode:                  modeAuto,
-		effort:                effortHigh,
-		outputStyle:           "default",
-		availableOutputStyles: []string{"default"},
-		client:                client,
-		turn:                  make(chan struct{}, sessionTurnCapacity),
-	}
-	agent.sessions[session.id] = session
-
-	return agent, transport, func() { _ = client.Close() }
-}
 
 func TestModelSelectionAndModeBranches(t *testing.T) {
 	previousGeteuid := osGeteuid

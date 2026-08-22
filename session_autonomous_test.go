@@ -472,7 +472,14 @@ func TestBetweenPromptWorkOpensOneAgentOriginTurn(t *testing.T) {
 		"the excursion settles exactly once")
 }
 
-func TestTaskNotificationResultKeepsExcursionOpenUntilEveryTrackedTaskFinishes(t *testing.T) {
+// TestTaskNotificationResultSettlesTheExcursionItRead pins the between-prompt
+// terminal against the harness's real emission order: each notification's
+// autonomous turn ends on a result whose origin is `{"kind":"task-notification"}`
+// and nothing follows that result until further work. A result that arrives
+// before any excursion is open ends nothing; the one that arrives with the
+// excursion open settles it, whether or not another tracked task is still live —
+// background liveness is not a foreground.
+func TestTaskNotificationResultSettlesTheExcursionItRead(t *testing.T) {
 	session, transport, conn, cleanup := newNegotiatedPromptFlowSession(t)
 	defer cleanup()
 
@@ -497,29 +504,34 @@ func TestTaskNotificationResultKeepsExcursionOpenUntilEveryTrackedTaskFinishes(t
 	})
 	require.Zero(t, countLifecycleEvents(t, conn, before,
 		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity)),
-		"one task-notification result cannot end an excursion with another task active")
+		"a result read before any excursion was open ends nothing")
 	require.Len(t, agentTurnIDs(t, conn, before), 1)
 
 	pushNativeFrames(transport,
 		namedTaskNotificationFrame("task-2"),
 		taskNotificationResultFrame(),
-		resultFrame(),
 	)
 	awaitLifecycleEvent(t, conn, transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity))
+	idle, _, found := findLifecycleEvent(t, conn, before,
+		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity))
+	require.True(t, found)
+	require.Equal(t, "success", idle["outcome"],
+		"the task-notification result settles the open excursion even with a task still tracked")
 	require.Equal(t, 1, countLifecycleEvents(t, conn, before,
 		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity)))
-	require.Len(t, agentTurnIDs(t, conn, before), 1,
-		"delayed task continuation stays in the original agent-origin turn")
+	require.Len(t, agentTurnIDs(t, conn, before), 1)
+	require.Nil(t, session.excursion, "nothing holds the foreground after the settle")
 }
 
-// TestStackedTaskNotificationsSettleOneExcursion is the incident: one task
-// fires two notifications, each runs its own autonomous API turn, and the first
-// turn's excursion is still open when the second notification's user turn
-// starts. Both replies reach the host under the one agent-origin turn, the
-// id-less task-notification results end nothing, a transcript-mirror batch that
-// journals the autonomous turn into the prompt-written file is store state, and
-// the excursion settles successfully on the harness idle.
-func TestStackedTaskNotificationsSettleOneExcursion(t *testing.T) {
+// TestStackedTaskNotificationsSettleOneExcursionEach is the incident: one task
+// fires two notifications, each runs its own autonomous API turn, and each turn
+// ends on a result whose origin is `{"kind":"task-notification"}` — the only
+// terminal the harness emits between prompts. Each notification's reply reaches
+// the host under its own settled agent-origin turn, a transcript-mirror batch
+// that journals the autonomous turn into the prompt-written file is store state,
+// and the foreground is free for the next prompt as soon as the last result is
+// read.
+func TestStackedTaskNotificationsSettleOneExcursionEach(t *testing.T) {
 	session, transport, conn, cleanup := newNegotiatedPromptFlowSession(t)
 	defer cleanup()
 
@@ -570,17 +582,17 @@ func TestStackedTaskNotificationsSettleOneExcursion(t *testing.T) {
 		taskNotificationResultFrame(),
 	)
 
-	awaitAgentUpdates(t, conn, func() bool {
-		_, found := sentinelNotificationIndex(t, conn, "SENTINEL-STACKED-REPLY-1")
+	awaitLifecycleEvent(t, conn, transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity))
+	firstIdle, firstIdleIndex, found := findLifecycleEvent(t, conn, before,
+		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity))
+	require.True(t, found, "the first notification's result settles its excursion")
+	require.Equal(t, "success", firstIdle["outcome"])
+	replyOneIndex, found := sentinelNotificationIndex(t, conn, "SENTINEL-STACKED-REPLY-1")
+	require.True(t, found)
+	require.Less(t, replyOneIndex, firstIdleIndex, "the reply precedes its own terminal idle")
 
-		return found
-	})
-	require.Zero(t, countLifecycleEvents(t, conn, before,
-		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity)),
-		"the excursion is still open when the second notification's turn starts")
-
-	// The second notification of the same task arrives while the first
-	// autonomous turn's excursion is still open.
+	// The second notification of the same task arrives after the first
+	// autonomous turn settled, and runs as a fresh agent-origin turn.
 	replyTwo := assistantFrame("SENTINEL-STACKED-REPLY-2")
 	replyTwo["uuid"] = "notification-assistant-2"
 	pushNativeFrames(transport,
@@ -596,23 +608,21 @@ func TestStackedTaskNotificationsSettleOneExcursion(t *testing.T) {
 		},
 		replyTwo,
 		taskNotificationResultFrame(),
-		systemIdleFrame(),
 	)
 
-	awaitLifecycleEvent(t, conn, transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity))
-
-	idle, _, found := findLifecycleEvent(t, conn, before,
-		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity))
-	require.True(t, found)
-	require.Equal(t, "success", idle["outcome"], "stacked notifications end the excursion as a success")
+	awaitAgentUpdates(t, conn, func() bool {
+		return countLifecycleEvents(t, conn, before,
+			transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity)) == 2
+	})
 
 	_, found = sentinelNotificationIndex(t, conn, "SENTINEL-STACKED-REPLY-2")
 	require.True(t, found, "the second autonomous reply reaches the host")
 
-	require.Len(t, agentTurnIDs(t, conn, before), 1, "both notification turns share one excursion")
-	require.Equal(t, 1, countLifecycleEvents(t, conn, before,
+	require.Len(t, agentTurnIDs(t, conn, before), 2,
+		"each notification's autonomous turn is its own settled agent-origin turn")
+	require.Equal(t, 2, countLifecycleEvents(t, conn, before,
 		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity)),
-		"the excursion settles exactly once")
+		"each excursion settles exactly once")
 
 	incarnation := session.currentNativeIncarnation()
 	require.NotNil(t, incarnation)
@@ -1424,6 +1434,51 @@ func TestAutonomousSystemIdleFrameSettlesBehindItsOwnContent(t *testing.T) {
 		"the terminal idle is the excursion's last word")
 }
 
+// TestTaskNotificationResultTerminalizesTheDelayedExcursion is the monitor
+// incident: a prompt arms a background task and settles; the task fires later;
+// the harness wakes, narrates, and closes that autonomous turn with a result
+// whose origin is `{"kind":"task-notification"}` — and then emits nothing else.
+// That result must settle the excursion: the narration ends in a terminal idle
+// with a success outcome, and the next prompt runs instead of being refused by
+// a foreground nothing will ever release.
+func TestTaskNotificationResultTerminalizesTheDelayedExcursion(t *testing.T) {
+	session, transport, conn, cleanup := newNegotiatedPromptFlowSession(t)
+	defer cleanup()
+
+	transport.queryMsgs = []map[string]any{taskStartedFrame(), resultFrame()}
+
+	_, err := session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "arming-turn", "arm the monitor"))
+	require.NoError(t, err)
+
+	beforeExcursion := len(conn.Updates())
+
+	pushNativeFrames(transport,
+		taskNotificationFrame(),
+		assistantFrame(autonomousAssistantSentinel),
+		taskNotificationResultFrame(),
+	)
+
+	awaitLifecycleEvent(t, conn, transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity))
+
+	idle, idleIndex, found := findLifecycleEvent(t, conn, beforeExcursion,
+		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity))
+	require.True(t, found, "the task-notification result settles the excursion")
+	require.Equal(t, "success", idle["outcome"])
+	require.Equal(t, "end_turn", idle["stopReason"])
+	require.Equal(t, 1, countLifecycleEvents(t, conn, beforeExcursion,
+		transitionMatcher(lifecycle.ForegroundIdle, lifecycle.CauseActivity)))
+
+	sentinelIndex, found := sentinelNotificationIndex(t, conn, autonomousAssistantSentinel)
+	require.True(t, found)
+	require.Less(t, sentinelIndex, idleIndex, "the narration precedes its terminal idle")
+
+	// The foreground is free again: the next prompt runs instead of being
+	// refused with a session_foreground backpressure error.
+	transport.queryMsgs = []map[string]any{resultFrame()}
+	_, err = session.Prompt(t.Context(), lifecyclePromptRequest(session.id, "follow-up", "and now?"))
+	require.NoError(t, err, "prompt C proceeds once the delayed excursion settled")
+}
+
 func TestSessionCloseJoinsQueuedAutonomousRetirementSupervisor(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
@@ -1787,11 +1842,13 @@ func TestAutonomousFrameAndSettlementEdgeStates(t *testing.T) {
 	require.Equal(t, "opus", session.excursion.lastAssistantModel)
 	require.True(t, session.excursion.streamKnown)
 
-	session.excursion = &agentExcursion{turnID: "task-turn"}
-	require.NoError(t, session.settleExcursion(t.Context(), &claude.ResultMessage{
+	taskSession, _, taskStream, _ := openAutonomousMapTestExcursion(t)
+	require.NoError(t, taskSession.settleExcursion(t.Context(), &claude.ResultMessage{
 		Origin: map[string]any{"kind": originKindTaskNotification},
 	}, mapper.ToolUpdateOptions{}))
-	require.NotNil(t, session.excursion)
+	require.Nil(t, taskSession.excursion,
+		"a task-notification result is the excursion's native terminal")
+	require.Empty(t, taskStream.agentTurnID())
 
 	require.NoError(t, stream.incarnate(t.Context()))
 	session.setAutonomousRoute("settlement-route", nil)

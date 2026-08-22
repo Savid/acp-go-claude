@@ -527,6 +527,12 @@ func (s *agentSession) observeExcursionFrame(ctx context.Context, msg claude.Mes
 // provider failure the harness reported ends the turn as failed rather than as a
 // success nothing stands behind.
 //
+// A task-notification result settles the excursion like any other result. It is
+// the only terminal the harness emits for a notification's autonomous turn —
+// nothing follows it until further work opens a new turn — so a settlement that
+// declined it would hold the turn open, and the foreground with it, for the rest
+// of the incarnation.
+//
 // The settlement runs in the order the contract fixes for every cycle this
 // adapter closes: the native terminal has already arrived, the durable prefix
 // commits next, and only what the store provably holds is what the terminal idle
@@ -547,10 +553,6 @@ func (s *agentSession) settleExcursion(
 			ctx, s.resultUsageUpdates(result, nil, excursion.lastAssistantModel),
 		); err != nil {
 			return err
-		}
-
-		if resultOriginKind(result) == originKindTaskNotification {
-			return nil
 		}
 	}
 

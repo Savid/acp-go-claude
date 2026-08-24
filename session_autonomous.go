@@ -588,7 +588,7 @@ func (s *agentSession) settleExcursion(
 // but an open excursion is a turn holding the one foreground this session has,
 // and it may own a permission or an elicitation the host has not answered yet.
 //
-// Nothing is pre-empted. Cancelling that turn would report a cycle as ended while
+// Nothing is preempted. Cancelling that turn would report a cycle as ended while
 // the native work behind it runs on, and terminalizing its pending action would
 // answer a request nobody answered. The excursion stays owned and live, its
 // native terminal settles it, and the retry proceeds against an idle foreground.

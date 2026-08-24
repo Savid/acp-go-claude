@@ -55,7 +55,7 @@ carrying that turn's outcome. The excursion's durable prefix is committed before
 that idle, so the terminal event only ever reports what the store already holds.
 
 Exactly one turn holds the foreground at a time, and an open excursion is not
-pre-empted. Background activity being live refuses nothing, but a prompt that
+preempted. Background activity being live refuses nothing, but a prompt that
 arrives while an agent-origin turn is actually open is answered `-32600` with
 `{"error":"backpressure","limit":"session_foreground"}` before it is dispatched:
 it leaves no `prompt_accepted` and writes no frame to the harness, and the

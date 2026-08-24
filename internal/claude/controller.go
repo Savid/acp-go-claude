@@ -22,7 +22,6 @@ const (
 	maxConcurrentControlHandlers = 64
 	defaultControlHandlerTimeout = 5 * time.Minute
 	controllerDataBuffer         = 1024
-	controllerDataDrainTimeout   = 100 * time.Millisecond
 )
 
 type controlHandler func(context.Context, *ControlRequest) (map[string]any, error)
@@ -58,28 +57,32 @@ type Controller struct {
 	handlersMu     sync.RWMutex
 	handlers       map[string]controlHandler
 	handlerSem     chan struct{}
+	handlerWG      sync.WaitGroup
 	handlerTimeout time.Duration
+	fatal          chan error
 
-	dataIn   chan map[string]any
-	dataStop chan struct{}
-	dataDone chan struct{}
-	messages chan map[string]any
-	done     chan struct{}
-	once     sync.Once
+	dataIn    chan map[string]any
+	dataSlots chan struct{}
+	dataAbort chan struct{}
+	abortOnce sync.Once
+	dataDone  chan struct{}
+	messages  chan map[string]any
+	done      chan struct{}
+	once      sync.Once
 
 	lastErrMu sync.Mutex
 	lastErr   error
 }
 
-// setLastError records the transport error that stopped routing so Receive can
-// surface the real cause instead of a bare stream-closed sentinel.
-func (c *Controller) setLastError(err error) {
-	c.lastErrMu.Lock()
-	defer c.lastErrMu.Unlock()
-
-	if c.lastErr == nil {
-		c.lastErr = err
+func (c *Controller) joinLastError(err error) {
+	closed := closedTransportError(err)
+	if closed == nil {
+		return
 	}
+
+	c.lastErrMu.Lock()
+	c.lastErr = errors.Join(c.lastErr, closed)
+	c.lastErrMu.Unlock()
 }
 
 // LastError returns the transport error that stopped routing, if any.
@@ -103,8 +106,10 @@ func NewController(log *slog.Logger, transport Transport) *Controller {
 		handlers:       make(map[string]controlHandler),
 		handlerSem:     make(chan struct{}, maxConcurrentControlHandlers),
 		handlerTimeout: defaultControlHandlerTimeout,
+		fatal:          make(chan error, 1),
 		dataIn:         make(chan map[string]any, controllerDataBuffer),
-		dataStop:       make(chan struct{}),
+		dataSlots:      make(chan struct{}, controllerDataBuffer),
+		dataAbort:      make(chan struct{}),
 		dataDone:       make(chan struct{}),
 		messages:       make(chan map[string]any, 64),
 		done:           make(chan struct{}),
@@ -113,43 +118,96 @@ func NewController(log *slog.Logger, transport Transport) *Controller {
 
 // Start begins routing messages from the transport.
 func (c *Controller) Start(ctx context.Context) {
-	messages, errs := c.transport.Messages(ctx)
+	producerCtx, cancelProducer := context.WithCancel(ctx)
+	events := c.transport.Events(producerCtx)
 
 	go c.pumpDataMessages()
 
 	go func() {
-		defer c.recoverRouter(ctx)
-		defer c.stop()
-		defer c.closeDataPump()
+		var terminal error
+
+		abortData := false
+		stopProducer := false
+
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				terminal = errors.Join(terminal, errClaudeTransportFailure)
+				abortData = true
+				stopProducer = true
+
+				handleClaudeGoroutinePanic(ctx, c.log, "controller router", nil, recovered)
+			}
+
+			cancelProducer()
+
+			if stopProducer {
+				closed := make(chan error, 1)
+				go func() { closed <- c.transport.Close() }()
+
+				for range events {
+				}
+
+				terminal = errors.Join(terminal, <-closed)
+			}
+
+			c.handlerWG.Wait()
+
+			if abortData {
+				c.AbortData()
+			}
+			// Publish the terminal classification before the data channel can close,
+			// so a receiver observing ordered drain completion also observes the
+			// exact cause for this generation.
+			c.joinLastError(terminal)
+			close(c.dataIn)
+			<-c.dataDone
+			c.once.Do(func() { close(c.done) })
+		}()
 
 		for {
 			select {
-			case msg, ok := <-messages:
+			case event, ok := <-events:
 				if !ok {
-					c.drainErrors(ctx, errs)
+					if cause := context.Cause(ctx); cause != nil {
+						terminal = errors.Join(terminal, cause,
+							&ControllerDataError{Kind: ControllerDataTeardownAbort})
+						abortData = true
+						stopProducer = true
+					}
 
 					return
 				}
 
-				if !c.route(ctx, msg) {
+				if event.Err != nil {
+					terminal = event.Err
+					stopProducer = true
+
+					c.log.DebugContext(ctx, "claude transport error",
+						slog.String("class", transportErrorClass(event.Err)))
+
 					return
 				}
-			case err, ok := <-errs:
-				if ok && err != nil {
-					c.setLastError(err)
-					c.log.DebugContext(ctx, "claude transport error", slog.String(keyError, err.Error()))
+
+				if err := c.route(producerCtx, event.Message); err != nil {
+					terminal = err
+					stopProducer = true
+
+					return
 				}
+			case fatal := <-c.fatal:
+				terminal = errors.Join(terminal, fatal)
+				stopProducer = true
 
-				c.drainMessages(ctx, messages)
-
-				return
-			case <-ctx.Done():
-				return
-			case <-c.done:
 				return
 			}
 		}
 	}()
+}
+
+// AbortData interrupts delivery of the admitted data prefix when its consumer
+// cannot complete the shutdown boundary.
+func (c *Controller) AbortData() {
+	c.abortOnce.Do(func() { close(c.dataAbort) })
 }
 
 // Done closes when routing stops.
@@ -157,10 +215,11 @@ func (c *Controller) Done() <-chan struct{} {
 	return c.done
 }
 
-func (c *Controller) stop() {
-	c.once.Do(func() {
-		close(c.done)
-	})
+func (c *Controller) submitFatal(cause error) {
+	select {
+	case c.fatal <- cause:
+	default:
+	}
 }
 
 // RegisterHandler registers an incoming control-request handler. Handlers must
@@ -221,7 +280,7 @@ func (c *Controller) SendRequest(
 		RequestID: id,
 		Request:   reqPayload,
 	}); err != nil {
-		return nil, err
+		return nil, closedTransportError(err)
 	}
 
 	if timeout <= 0 {
@@ -251,8 +310,8 @@ func (c *Controller) SendRequest(
 
 // controllerStoppedError reports a control request that outlived its
 // controller. The bare stop says only that routing ended, so the transport
-// cause — the Claude exit status and its stderr tail — is attached whenever the
-// router recorded one.
+// cause is attached only after the router has reduced it to a closed status or
+// stage classification.
 func controllerStoppedError(cause error) error {
 	if cause == nil {
 		return errors.New("claude control controller stopped")
@@ -262,109 +321,53 @@ func controllerStoppedError(cause error) error {
 }
 
 func controlRequestError(subtype string, msg string) error {
-	err := fmt.Errorf("claude control request %q failed: %s", subtype, msg)
 	switch {
 	case strings.Contains(msg, "No conversation found with session ID"):
-		return fmt.Errorf("%w: %w", ErrSessionNotFound, err)
+		return errors.Join(ErrSessionNotFound, errClaudeControlRequestFail)
 	case strings.Contains(msg, "Query closed before response received"):
-		return fmt.Errorf("%w: %w", ErrQueryClosed, err)
+		return errors.Join(ErrQueryClosed, errClaudeControlRequestFail)
 	default:
-		return err
+		return errClaudeControlRequestFail
 	}
 }
 
-// drainErrors records a transport error that was queued before the message
-// channel closed. The transport publishes the process exit cause and then
-// closes both channels, so a router that observed the closed message channel
-// first would otherwise discard the only report of why Claude stopped.
-func (c *Controller) drainErrors(ctx context.Context, errs <-chan error) {
-	for {
-		select {
-		case err, ok := <-errs:
-			if !ok {
-				return
-			}
-
-			if err != nil {
-				c.setLastError(err)
-				c.log.DebugContext(ctx, "claude transport error", slog.String(keyError, err.Error()))
-			}
-		default:
-			return
-		}
-	}
-}
-
-func (c *Controller) drainMessages(ctx context.Context, messages <-chan map[string]any) {
-	for {
-		select {
-		case msg, ok := <-messages:
-			if !ok {
-				return
-			}
-
-			if !c.route(ctx, msg) {
-				return
-			}
-		case <-ctx.Done():
-			return
-		default:
-			return
-		}
-	}
-}
-
-func (c *Controller) route(ctx context.Context, msg map[string]any) bool {
+func (c *Controller) route(ctx context.Context, msg map[string]any) error {
 	msgType, _ := msg[keyType].(string)
 	switch msgType {
 	case controlResponseType:
 		c.routeResponse(msg)
 
-		return true
+		return nil
 	case controlRequestType:
 		c.routeRequest(ctx, msg)
 
-		return true
+		return nil
 	default:
 		return c.routeData(ctx, msg)
 	}
 }
 
-func (c *Controller) routeData(ctx context.Context, msg map[string]any) bool {
+func (c *Controller) routeData(ctx context.Context, msg map[string]any) error {
 	select {
 	case <-ctx.Done():
-		return false
-	case <-c.done:
-		return false
-	case <-c.dataStop:
-		return false
+		return errors.Join(context.Cause(ctx), &ControllerDataError{Kind: ControllerDataTeardownAbort})
 	default:
 	}
 
 	select {
-	case c.dataIn <- msg:
-		return true
+	case c.dataSlots <- struct{}{}:
 	default:
 		c.log.DebugContext(ctx, "claude data message queue full")
-		_ = c.transport.Close()
 
-		return false
+		return &ControllerDataError{Kind: ControllerDataOverflow}
 	}
-}
 
-func (c *Controller) closeDataPump() {
-	close(c.dataIn)
+	// The router is the sole producer, and a slot remains held until the frame is
+	// delivered to the consumer. The bounded admission count therefore includes
+	// the pump's in-flight frame and cannot vary with scheduler timing.
+	c.dataIn <- msg
 
-	timer := time.NewTimer(controllerDataDrainTimeout)
-	defer timer.Stop()
-
-	select {
-	case <-c.dataDone:
-		return
-	case <-timer.C:
-		close(c.dataStop)
-		<-c.dataDone
-	}
+	return nil
 }
 
 func (c *Controller) pumpDataMessages() {
@@ -374,7 +377,8 @@ func (c *Controller) pumpDataMessages() {
 	for msg := range c.dataIn {
 		select {
 		case c.messages <- msg:
-		case <-c.dataStop:
+			<-c.dataSlots
+		case <-c.dataAbort:
 			return
 		}
 	}
@@ -383,8 +387,9 @@ func (c *Controller) pumpDataMessages() {
 func (c *Controller) routeRequest(ctx context.Context, msg map[string]any) {
 	select {
 	case c.handlerSem <- struct{}{}:
+		c.handlerWG.Add(1)
 		go func() {
-			defer c.recoverControlRequest(ctx)
+			defer c.handlerWG.Done()
 			defer func() { <-c.handlerSem }()
 
 			c.handleRequest(ctx, msg)
@@ -392,19 +397,6 @@ func (c *Controller) routeRequest(ctx context.Context, msg map[string]any) {
 	default:
 		c.rejectRequest(ctx, msg, "too many in-flight Claude control requests")
 	}
-}
-
-func (c *Controller) recoverRouter(ctx context.Context) {
-	handleClaudeGoroutinePanic(ctx, c.log, "controller router", func(any) {
-		_ = c.transport.Close()
-	}, recover())
-}
-
-func (c *Controller) recoverControlRequest(ctx context.Context) {
-	handleClaudeGoroutinePanic(ctx, c.log, "control request handler", func(any) {
-		c.stop()
-		_ = c.transport.Close()
-	}, recover())
 }
 
 func (c *Controller) routeResponse(msg map[string]any) {
@@ -432,8 +424,9 @@ func (c *Controller) rejectRequest(ctx context.Context, msg map[string]any, mess
 		responseSubtypeError: message,
 	}
 
-	if err := c.transport.Send(ctx, ControlResponse{Type: controlResponseType, Response: response}); err != nil {
-		c.log.DebugContext(ctx, "send control response failed", slog.String(keyError, err.Error()))
+	if err := c.sendControlResponse(ctx, response); err != nil {
+		c.log.DebugContext(ctx, "send control response failed", slog.String("class", transportErrorClass(err)))
+		c.submitFatal(err)
 	}
 }
 
@@ -449,6 +442,7 @@ func (c *Controller) handleRequest(ctx context.Context, msg map[string]any) {
 	var (
 		payload map[string]any
 		err     error
+		wait    = func() {}
 	)
 
 	if handler == nil {
@@ -459,22 +453,39 @@ func (c *Controller) handleRequest(ctx context.Context, msg map[string]any) {
 			RequestID: requestID,
 			Request:   request,
 		}
-		payload, err = c.runHandler(ctx, subtype, handler, req)
+		payload, wait, err = c.runHandler(ctx, subtype, handler, req)
 	}
 
 	response := map[string]any{keyRequestID: requestID}
 	if err != nil {
 		response[keySubtype] = responseSubtypeError
-		response[responseSubtypeError] = err.Error()
+		response[responseSubtypeError] = controlHandlerWireError(err)
 	} else {
 		response[keySubtype] = responseSubtypeSuccess
 		response[keyResponse] = payload
 	}
 
-	sendErr := c.transport.Send(ctx, ControlResponse{Type: controlResponseType, Response: response})
+	sendErr := c.sendControlResponse(ctx, response)
 	if sendErr != nil {
-		c.log.DebugContext(ctx, "send control response failed", slog.String(keyError, sendErr.Error()))
+		c.log.DebugContext(ctx, "send control response failed", slog.String("class", transportErrorClass(sendErr)))
+		c.submitFatal(sendErr)
 	}
+
+	wait()
+}
+
+func (c *Controller) sendControlResponse(ctx context.Context, response map[string]any) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errControlResponseWrite
+		}
+	}()
+
+	if err := c.transport.Send(ctx, ControlResponse{Type: controlResponseType, Response: response}); err != nil {
+		return errors.Join(errControlResponseWrite, closedTransportError(err))
+	}
+
+	return nil
 }
 
 func (c *Controller) runHandler(
@@ -482,16 +493,21 @@ func (c *Controller) runHandler(
 	subtype string,
 	handler controlHandler,
 	req *ControlRequest,
-) (map[string]any, error) {
+) (map[string]any, func(), error) {
 	handlerCtx, cancel := context.WithTimeout(ctx, c.handlerTimeout)
 	defer cancel()
 
 	resultCh := make(chan controlHandlerResult, 1)
 
+	workerDone := make(chan struct{})
+
 	go func() {
+		defer close(workerDone)
 		defer func() {
-			if recovered := recover(); recovered != nil {
-				resultCh <- controlHandlerResult{err: fmt.Errorf("handler panic: %v", recovered)}
+			if recover() != nil {
+				c.submitFatal(errControlHandlerPanic)
+
+				resultCh <- controlHandlerResult{err: errControlHandlerPanic}
 			}
 		}()
 
@@ -499,19 +515,49 @@ func (c *Controller) runHandler(
 		resultCh <- controlHandlerResult{payload: payload, err: err}
 	}()
 
-	// Timing out frees the controller semaphore and returns a response; a handler
-	// that ignores handlerCtx may still keep its own goroutine alive.
+	// The timeout fixes the wire response time. The caller retains the controller
+	// permit until workerDone, so a handler that ignores cancellation still counts
+	// against the true worker bound.
 	select {
 	case result := <-resultCh:
-		return result.payload, result.err
+		if result.err != nil {
+			return nil, func() {}, closedControlHandlerError(result.err)
+		}
+
+		return result.payload, func() {}, nil
 	case <-handlerCtx.Done():
 		c.log.DebugContext(
 			ctx,
 			"claude control request handler timed out or canceled",
-			slog.String(keySubtype, subtype),
-			slog.String(keyError, handlerCtx.Err().Error()),
+			slog.String("stage", "handler_wait"),
 		)
 
-		return nil, fmt.Errorf("claude control request handler %q timed out or canceled: %w", subtype, handlerCtx.Err())
+		return nil, func() { <-workerDone }, closedControlHandlerError(handlerCtx.Err())
+	}
+}
+
+func closedControlHandlerError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, errControlHandlerPanic):
+		return errControlHandlerPanic
+	default:
+		return errControlHandlerFailure
+	}
+}
+
+func controlHandlerWireError(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "control request handler canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "control request handler timed out"
+	case errors.Is(err, errControlHandlerPanic):
+		return errControlHandlerPanic.Error()
+	default:
+		return errControlHandlerFailure.Error()
 	}
 }

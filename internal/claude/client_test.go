@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime"
 	"testing"
 	"time"
 
@@ -12,6 +13,12 @@ import (
 )
 
 type controlTurnTestContextKey struct{}
+
+func admitControlCallbacksForTest(client *Client) {
+	client.SetControlHandlerAdmission(func(ctx context.Context, _ string) (context.Context, func(), bool) {
+		return ctx, func() {}, true
+	})
+}
 
 func startClientForTest(t *testing.T, client *Client) {
 	t.Helper()
@@ -82,37 +89,163 @@ func TestClientCloseIsIdempotent(t *testing.T) {
 	require.Equal(t, 1, transport.closeCalls())
 }
 
+func TestClientCloseBoundsBlockedAdmittedPrefixAndReportsAbort(t *testing.T) {
+	transport := newFakeTransport()
+	client := NewClient(nil, Options{}, transport)
+
+	go autoRespondInitialize(transport)
+	require.NoError(t, client.Start(context.Background()))
+
+	controller := client.activeController()
+	for index := range cap(controller.messages) + 1 {
+		transport.sendMessage(map[string]any{"type": "assistant", "index": index})
+	}
+	require.Eventually(t, func() bool {
+		return len(controller.messages) == cap(controller.messages)
+	}, time.Second, time.Millisecond)
+
+	started := time.Now()
+	err := client.Close()
+	require.ErrorContains(t, err, string(ControllerDataTeardownAbort))
+	require.Less(t, time.Since(started), 6*time.Second)
+	select {
+	case <-controller.Done():
+	default:
+		t.Fatal("controller did not join after bounded admitted-prefix abort")
+	}
+}
+
+func TestClientCloseWaitsForRouterAfterResponsePanicAndDataDrain(t *testing.T) {
+	transport := newFakeTransport()
+	client := NewClient(slog.New(slog.DiscardHandler), Options{}, transport)
+	runCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	controller := NewController(client.log, clientControllerTransport{
+		Transport: transport,
+		close:     client.closeTransport,
+	})
+	controller.Start(runCtx)
+	client.stateMu.Lock()
+	client.controller = controller
+	client.cancel = cancel
+	client.stateMu.Unlock()
+
+	for index := range cap(controller.messages) {
+		controller.messages <- map[string]any{"type": "blocked", "number": index}
+	}
+	transport.sendMessage(map[string]any{"type": "assistant", "number": cap(controller.messages)})
+	transport.mu.Lock()
+	transport.panicSend = true
+	transport.mu.Unlock()
+	transport.sendMessage(map[string]any{
+		keyType:      controlRequestType,
+		keyRequestID: "panic-response",
+		keyRequest:   map[string]any{keySubtype: "missing"},
+	})
+	<-transport.closeSig
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- client.Close() }()
+	for !client.isClosed() {
+		select {
+		case <-t.Context().Done():
+			t.Fatal("context ended before Client.Close entered its wait")
+		default:
+			runtime.Gosched()
+		}
+	}
+
+	select {
+	case closeErr := <-closeDone:
+		require.NoError(t, closeErr)
+		t.Fatal("Client.Close returned before the router joined its admitted data prefix")
+	default:
+	}
+	select {
+	case <-controller.Done():
+		t.Fatal("router published Done before the admitted data prefix drained")
+	default:
+	}
+
+	for range cap(controller.messages) + 1 {
+		<-controller.Messages()
+	}
+	require.NoError(t, <-closeDone)
+	select {
+	case <-controller.Done():
+	default:
+		t.Fatal("Client.Close returned before controller Done")
+	}
+	require.ErrorIs(t, controller.LastError(), errControlResponseWrite)
+}
+
 func TestClientControlCallbackContextSnapshotsExactQueryTurn(t *testing.T) {
 	t.Parallel()
 
 	handledTurn := ""
 	client := NewClient(nil, Options{
-		ControlHandlerContext: func(ctx context.Context, turnNonce string) context.Context {
-			return context.WithValue(ctx, controlTurnTestContextKey{}, turnNonce)
-		},
 		PermissionHandler: func(ctx context.Context, _ PermissionRequest) (PermissionDecision, error) {
 			handledTurn, _ = ctx.Value(controlTurnTestContextKey{}).(string)
 
 			return PermissionDecision{Behavior: BehaviorAllow}, nil
 		},
 	}, newFakeTransport())
+	client.SetControlHandlerAdmission(func(ctx context.Context, turnNonce string) (context.Context, func(), bool) {
+		return context.WithValue(ctx, controlTurnTestContextKey{}, turnNonce), func() {}, true
+	})
 
 	require.NoError(t, client.Query(t.Context(), "turn-old", "old prompt"))
 	_, err := client.handleCanUseTool(t.Context(), &ControlRequest{Request: map[string]any{}})
 	require.NoError(t, err)
 	require.Equal(t, "turn-old", handledTurn)
-	oldCallbackCtx := client.controlHandlerContext(t.Context())
+	oldCallbackCtx, finishOld, admitted := client.controlHandlerContext(t.Context())
+	require.True(t, admitted)
+	finishOld()
 	require.Equal(t, "turn-old", oldCallbackCtx.Value(controlTurnTestContextKey{}))
 
 	require.NoError(t, client.Query(t.Context(), "turn-current", "current prompt"))
-	client.EndQuery("turn-old")
-	currentCallbackCtx := client.controlHandlerContext(t.Context())
+	client.HandOffQuery("turn-old", "")
+	currentCallbackCtx, finishCurrent, admitted := client.controlHandlerContext(t.Context())
+	require.True(t, admitted)
+	finishCurrent()
 	require.Equal(t, "turn-current", currentCallbackCtx.Value(controlTurnTestContextKey{}))
 	require.Equal(t, "turn-old", oldCallbackCtx.Value(controlTurnTestContextKey{}))
 
-	client.EndQuery("turn-current")
-	outsideCtx := client.controlHandlerContext(t.Context())
-	require.Nil(t, outsideCtx.Value(controlTurnTestContextKey{}))
+	client.AdoptControlRoute("turn-adopted")
+	adoptedCtx, finishAdopted, admitted := client.controlHandlerContext(t.Context())
+	require.True(t, admitted)
+	finishAdopted()
+	require.Equal(t, "turn-adopted", adoptedCtx.Value(controlTurnTestContextKey{}))
+
+	client.HandOffQuery("turn-adopted", "")
+	outsideCtx, finishOutside, admitted := client.controlHandlerContext(t.Context())
+	require.True(t, admitted)
+	finishOutside()
+	require.Equal(t, "", outsideCtx.Value(controlTurnTestContextKey{}))
+}
+
+func TestClientControlCallbackAdmissionRejectionFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(nil, Options{}, newFakeTransport())
+	client.SetControlHandlerAdmission(func(ctx context.Context, _ string) (context.Context, func(), bool) {
+		return ctx, func() {}, false
+	})
+
+	permission, err := client.handleCanUseTool(t.Context(), &ControlRequest{Request: map[string]any{
+		"input": map[string]any{"path": "/tmp/a"},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, BehaviorDeny, permission[keyBehavior])
+
+	elicitation, err := client.handleElicitation(t.Context(), &ControlRequest{Request: map[string]any{}})
+	require.NoError(t, err)
+	require.Equal(t, ElicitationActionDecline, elicitation["action"])
+
+	hook, err := client.handleHookCallback(t.Context(), &ControlRequest{Request: map[string]any{}})
+	require.NoError(t, err)
+	require.Equal(t, false, hook["continue"])
 }
 
 func TestClientStartErrors(t *testing.T) {
@@ -183,7 +316,8 @@ func TestClientStartLogsTransportCloseError(t *testing.T) {
 
 	var logs bytes.Buffer
 	transport := newFakeTransport()
-	transport.closeErr = errors.New("close failed")
+	const sentinel = "opaque-close-failure"
+	transport.closeErr = errors.New(sentinel)
 	client := NewClient(
 		slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Options{InitializeTimeout: time.Millisecond},
@@ -196,7 +330,8 @@ func TestClientStartLogsTransportCloseError(t *testing.T) {
 	require.True(t, transport.isClosed())
 	require.Contains(t, logs.String(), "close Claude transport failed")
 	require.Contains(t, logs.String(), "initialize failed")
-	require.Contains(t, logs.String(), "close failed")
+	require.NotContains(t, logs.String(), sentinel)
+	require.NotContains(t, err.Error(), sentinel)
 }
 
 func TestClientCapturesInitializeInfo(t *testing.T) {
@@ -276,7 +411,8 @@ func TestClientRefreshInitializeInfo(t *testing.T) {
 	require.Equal(t, info.Commands, client.InitializeInfo().Commands)
 
 	stopped := client.activeController()
-	stopped.stop()
+	require.NoError(t, client.closeTransport())
+	<-stopped.Done()
 	_, err = client.RefreshInitializeInfo(context.Background())
 	require.ErrorContains(t, err, "refresh claude control initialize")
 
@@ -304,6 +440,7 @@ func TestClientStartRegistersHooks(t *testing.T) {
 			},
 		},
 	}, transport)
+	admitControlCallbacksForTest(client)
 
 	go autoRespondInitialize(transport)
 	startClientForTest(t, client)
@@ -340,18 +477,18 @@ func TestClientReceive(t *testing.T) {
 	go autoRespondInitialize(transport)
 	startClientForTest(t, client)
 
-	transport.incoming <- map[string]any{
+	transport.sendMessage(map[string]any{
 		"type": "assistant",
 		"message": map[string]any{
 			"content": []any{map[string]any{"type": "text", "text": "hello"}},
 		},
-	}
+	})
 
 	msg, err := client.Receive(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, MessageTypeAssistant, msg.ClaudeType())
 
-	transport.incoming <- map[string]any{"type": "assistant"}
+	transport.sendMessage(map[string]any{"type": "assistant"})
 
 	_, err = client.Receive(context.Background())
 	require.Error(t, err)
@@ -362,7 +499,7 @@ func TestClientReceive(t *testing.T) {
 	_, err = client.Receive(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 
-	close(transport.incoming)
+	close(transport.events)
 	_, err = client.Receive(context.Background())
 	require.Error(t, err)
 }
@@ -386,11 +523,12 @@ func TestClientHandlesPermissionRequest(t *testing.T) {
 			return PermissionDecision{Behavior: BehaviorAllow, UpdatedInput: request.Input}, nil
 		},
 	}, transport)
+	admitControlCallbacksForTest(client)
 
 	go autoRespondInitialize(transport)
 	startClientForTest(t, client)
 
-	transport.incoming <- map[string]any{
+	transport.sendMessage(map[string]any{
 		"type":       "control_request",
 		"request_id": "perm-1",
 		"request": map[string]any{
@@ -407,7 +545,7 @@ func TestClientHandlesPermissionRequest(t *testing.T) {
 				},
 			},
 		},
-	}
+	})
 
 	require.Eventually(t, func() bool {
 		return len(transport.sentPayloads()) >= 2
@@ -482,19 +620,22 @@ func TestClientControlMethodSendErrors(t *testing.T) {
 	go autoRespondInitialize(transport)
 	startClientForTest(t, client)
 
-	sendErr := errors.New("send failed")
+	const sentinel = "opaque-send-failure"
+	sendErr := errors.New(sentinel)
 	transport.sendErr = sendErr
 
-	require.ErrorIs(t, client.Interrupt(context.Background()), sendErr)
-	require.ErrorIs(t, client.SetPermissionMode(context.Background(), "plan"), sendErr)
-	require.ErrorIs(t, client.SetModel(context.Background(), "claude-test"), sendErr)
-	require.ErrorIs(t, client.ApplyFlagSettings(context.Background(), map[string]any{"x": true}), sendErr)
+	require.ErrorIs(t, client.Interrupt(context.Background()), errClaudeTransportFailure)
+	require.ErrorIs(t, client.SetPermissionMode(context.Background(), "plan"), errClaudeTransportFailure)
+	require.ErrorIs(t, client.SetModel(context.Background(), "claude-test"), errClaudeTransportFailure)
+	require.ErrorIs(t, client.ApplyFlagSettings(context.Background(), map[string]any{"x": true}), errClaudeTransportFailure)
 
 	_, err := client.GetSettings(context.Background())
-	require.ErrorIs(t, err, sendErr)
+	require.ErrorIs(t, err, errClaudeTransportFailure)
+	require.NotContains(t, err.Error(), sentinel)
 
 	_, err = client.GetContextUsage(context.Background())
-	require.ErrorIs(t, err, sendErr)
+	require.ErrorIs(t, err, errClaudeTransportFailure)
+	require.NotContains(t, err.Error(), sentinel)
 }
 
 func TestClientControlMethodsBeforeStart(t *testing.T) {
@@ -571,7 +712,35 @@ func TestClientUnsupportedElicitation(t *testing.T) {
 	require.Equal(t, "decline", payload["action"])
 }
 
-func TestClientHandleCanUseToolFallbacks(t *testing.T) {
+func TestClientConfiguredCallbackDefaultsRemainFailClosed(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(nil, Options{}, newFakeTransport())
+	admitControlCallbacksForTest(client)
+
+	permission, err := client.handleCanUseTool(t.Context(), &ControlRequest{Request: map[string]any{
+		"input": map[string]any{"path": "/tmp/current"},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, BehaviorDeny, permission[keyBehavior])
+	require.Equal(t, "permission handler is not configured", permission[keyMessage])
+
+	elicitation, err := client.handleElicitation(t.Context(), &ControlRequest{Request: map[string]any{}})
+	require.NoError(t, err)
+	require.Equal(t, ElicitationActionDecline, elicitation["action"])
+
+	hook, err := client.handleHookCallback(t.Context(), &ControlRequest{Request: map[string]any{}})
+	require.NoError(t, err)
+	require.Equal(t, true, hook["continue"])
+
+	client.SetControlHandlerAdmission(nil)
+	permission, err = client.handleCanUseTool(t.Context(), &ControlRequest{Request: map[string]any{}})
+	require.NoError(t, err)
+	require.Equal(t, BehaviorDeny, permission[keyBehavior])
+	require.Equal(t, "permission callback no longer has a live owner", permission[keyMessage])
+}
+
+func TestClientHandleCanUseToolRequiresAdmission(t *testing.T) {
 	t.Parallel()
 
 	client := NewClient(nil, Options{}, newFakeTransport())
@@ -583,7 +752,7 @@ func TestClientHandleCanUseToolFallbacks(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, BehaviorDeny, payload[keyBehavior])
-	require.Equal(t, "permission handler is not configured", payload[keyMessage])
+	require.Equal(t, "permission callback no longer has a live owner", payload[keyMessage])
 
 	handlerErr := errors.New("permission failed")
 	client = NewClient(nil, Options{
@@ -591,6 +760,7 @@ func TestClientHandleCanUseToolFallbacks(t *testing.T) {
 			return PermissionDecision{}, handlerErr
 		},
 	}, newFakeTransport())
+	admitControlCallbacksForTest(client)
 	_, err = client.handleCanUseTool(context.Background(), &ControlRequest{Request: map[string]any{}})
 	require.ErrorIs(t, err, handlerErr)
 	require.ErrorContains(t, err, "permission handler")
@@ -613,11 +783,12 @@ func TestClientHandlesElicitationRequest(t *testing.T) {
 			}, nil
 		},
 	}, transport)
+	admitControlCallbacksForTest(client)
 
 	go autoRespondInitialize(transport)
 	startClientForTest(t, client)
 
-	transport.incoming <- map[string]any{
+	transport.sendMessage(map[string]any{
 		"type":       "control_request",
 		"request_id": "elicitation-1",
 		"request": map[string]any{
@@ -633,7 +804,7 @@ func TestClientHandlesElicitationRequest(t *testing.T) {
 				},
 			},
 		},
-	}
+	})
 
 	require.Eventually(t, func() bool {
 		return len(transport.sentPayloads()) >= 2
@@ -663,11 +834,12 @@ func TestClientHandlesHookCallback(t *testing.T) {
 			return HookResponse{Continue: true}, nil
 		},
 	}, transport)
+	admitControlCallbacksForTest(client)
 
 	go autoRespondInitialize(transport)
 	startClientForTest(t, client)
 
-	transport.incoming <- map[string]any{
+	transport.sendMessage(map[string]any{
 		"type":       "control_request",
 		"request_id": "hook-1",
 		"request": map[string]any{
@@ -681,7 +853,7 @@ func TestClientHandlesHookCallback(t *testing.T) {
 				"tool_response":   map[string]any{"filePath": "/tmp/a.go"},
 			},
 		},
-	}
+	})
 
 	require.Eventually(t, func() bool {
 		return len(transport.sentPayloads()) >= 2
@@ -705,6 +877,7 @@ func TestClientElicitationHandlerError(t *testing.T) {
 			return ElicitationResponse{}, handlerErr
 		},
 	}, newFakeTransport())
+	admitControlCallbacksForTest(client)
 
 	_, err := client.handleElicitation(context.Background(), &ControlRequest{Request: map[string]any{}})
 	require.ErrorIs(t, err, handlerErr)
@@ -721,6 +894,7 @@ func TestClientElicitationHandlerReceivesContext(t *testing.T) {
 			return ElicitationResponse{}, ctx.Err()
 		},
 	}, newFakeTransport())
+	admitControlCallbacksForTest(client)
 
 	_, err := client.handleElicitation(ctx, &ControlRequest{Request: map[string]any{}})
 	require.ErrorIs(t, err, context.Canceled)
@@ -744,13 +918,13 @@ func TestParseInitializeInfoDefaults(t *testing.T) {
 	require.Empty(t, parseInitializeInfo(nil).Models)
 }
 
-func TestClientHookCallbackFallbacks(t *testing.T) {
+func TestClientHookCallbackRequiresAdmission(t *testing.T) {
 	t.Parallel()
 
 	client := NewClient(nil, Options{}, newFakeTransport())
 	payload, err := client.handleHookCallback(context.Background(), &ControlRequest{Request: map[string]any{}})
 	require.NoError(t, err)
-	require.Equal(t, true, payload["continue"])
+	require.Equal(t, false, payload["continue"])
 	require.Equal(t, false, HookResponse{}.toPayload()["continue"])
 
 	handlerErr := errors.New("hook failed")
@@ -759,6 +933,7 @@ func TestClientHookCallbackFallbacks(t *testing.T) {
 			return HookResponse{}, handlerErr
 		},
 	}, newFakeTransport())
+	admitControlCallbacksForTest(client)
 	_, err = client.handleHookCallback(context.Background(), &ControlRequest{Request: map[string]any{}})
 	require.ErrorIs(t, err, handlerErr)
 }
@@ -778,14 +953,14 @@ func autoRespondInitializeWithResponse(transport *fakeTransport, response map[st
 
 		req, ok := payloads[0].(ControlRequest)
 		if ok {
-			transport.incoming <- map[string]any{
+			transport.sendMessage(map[string]any{
 				"type": "control_response",
 				"response": map[string]any{
 					"subtype":    "success",
 					"request_id": req.RequestID,
 					"response":   response,
 				},
-			}
+			})
 		}
 
 		return
@@ -809,14 +984,14 @@ func respondToControlRequestAfter(transport *fakeTransport, subtype string, afte
 				continue
 			}
 
-			transport.incoming <- map[string]any{
+			transport.sendMessage(map[string]any{
 				keyType: controlResponseType,
 				keyResponse: map[string]any{
 					keySubtype:   responseSubtypeSuccess,
 					keyRequestID: req.RequestID,
 					keyResponse:  response,
 				},
-			}
+			})
 
 			return
 		}
@@ -855,8 +1030,11 @@ func (t startErrorTransport) Send(context.Context, any) error {
 	return nil
 }
 
-func (t startErrorTransport) Messages(context.Context) (<-chan map[string]any, <-chan error) {
-	return nil, nil
+func (t startErrorTransport) Events(context.Context) <-chan TransportEvent {
+	events := make(chan TransportEvent)
+	close(events)
+
+	return events
 }
 
 func (t startErrorTransport) Close() error {

@@ -32,30 +32,22 @@ var authKeychainServicePrefixes = []string{"Claude Code", "Claude Code-custom-oa
 // absence.
 var authKeychainAbsentExitCodes = []int{36, 44}
 
-// AuthKeychainItems lists every item a config dir may own. There are two items
-// per config dir — the OAuth credential and a legacy API key — across both
-// name shapes, because either may be present and removing only the first leaves
-// a usable credential behind.
+// AuthKeychainItems lists the current composite credential item a config dir may
+// own across both reachable name shapes.
 func AuthKeychainItems(configDir string, user string) []AuthKeychainItem {
 	hash := authKeychainHash(configDir)
 	account := authKeychainAccount(user)
-	items := make([]AuthKeychainItem, 0, len(authKeychainServicePrefixes)*2)
+	items := make([]AuthKeychainItem, 0, len(authKeychainServicePrefixes))
 
 	for _, prefix := range authKeychainServicePrefixes {
-		items = append(items,
-			AuthKeychainItem{Service: prefix + "-credentials-" + hash, Account: account},
-			AuthKeychainItem{Service: prefix + "-" + hash, Account: account},
-		)
+		items = append(items, AuthKeychainItem{Service: prefix + "-credentials-" + hash, Account: account})
 	}
 
 	return items
 }
 
 // AuthKeychainCredentialItems lists the items that may hold a config dir's
-// composite OAuth credential blob, across both reachable name shapes. The
-// legacy API-key item is excluded: it never holds the composite credential,
-// so a read that consulted it would hand a bare key to a caller expecting the
-// blob.
+// composite OAuth credential blob, across both reachable name shapes.
 func AuthKeychainCredentialItems(configDir string, user string) []AuthKeychainItem {
 	hash := authKeychainHash(configDir)
 	account := authKeychainAccount(user)

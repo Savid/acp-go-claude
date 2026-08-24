@@ -18,6 +18,84 @@ func TestTurnRouteContextStampsNotifications(t *testing.T) {
 	require.Nil(t, turnRouteMetaFromContext(nilContext))
 }
 
+func TestControlCallbackOwnerEdgeStates(t *testing.T) {
+	require.Nil(t, controlCallbackAdmissionFromContext(context.TODO()))
+	var nilContext context.Context
+	require.Nil(t, controlCallbackAdmissionFromContext(nilContext))
+
+	session := &agentSession{agent: NewAgent()}
+	_, live := session.callbackOwner(nil, "")
+	require.False(t, live)
+
+	session.closing = true
+	_, live = session.callbackOwner(nil, "route")
+	require.False(t, live)
+	session.closing = false
+
+	_, cancel := context.WithCancel(t.Context())
+	session.cancel = cancel
+	session.turnNonce = "prompt-route"
+	owner, live := session.callbackOwner(nil, "prompt-route")
+	require.True(t, live)
+	require.Nil(t, owner.incarnation)
+	cancel()
+
+	incarnation := &nativeIncarnation{}
+	session.setAutonomousRoute("autonomous-route", incarnation)
+	owner, live = session.callbackOwner(nil, "autonomous-route")
+	require.True(t, live)
+	require.Same(t, incarnation, owner.incarnation)
+	require.True(t, owner.autonomous)
+
+	incarnation.failed.Store(true)
+	_, live = session.callbackOwner(nil, "autonomous-route")
+	require.False(t, live)
+
+	callbackCtx, finish, admitted := session.admitControlCallback(t.Context(), "autonomous-route")
+	require.False(t, admitted)
+	require.Equal(t, t.Context(), callbackCtx)
+	finish()
+	session.stopNativePump()
+}
+
+func TestControlCallbackAdmissionRechecksTheServingIncarnation(t *testing.T) {
+	session, _, stream := newLifecycleStreamTestSession(t)
+	require.NoError(t, stream.incarnate(t.Context()))
+
+	incarnation := &nativeIncarnation{}
+	session.setAutonomousRoute("retired-route", incarnation)
+	turnID, err := stream.openAgentTurn(t.Context(), "retired-route")
+	require.NoError(t, err)
+	require.NotEmpty(t, turnID)
+
+	_, finish, admitted := session.admitControlCallback(t.Context(), "retired-route")
+	require.False(t, admitted)
+	finish()
+}
+
+func TestFullClientCallCapacityRejectsBeforeRouteRotation(t *testing.T) {
+	session, _, _, cleanup := newNegotiatedPromptFlowSession(t)
+	defer cleanup()
+	session.agent.options.ConcurrencyLimits.MaxConcurrentClientCalls = 1
+	require.NoError(t, session.serveNativePump(t.Context(), session.currentClient()))
+
+	route := session.autonomousRoute()
+	incarnation := session.currentNativeIncarnation()
+	callbackCtx, finishA, admitted := session.admitControlCallback(t.Context(), route)
+	require.True(t, admitted)
+
+	_, finishB, accepted := session.admitControlCallback(t.Context(), route)
+	require.False(t, accepted, "a full client-call capacity returns backpressure without waiting")
+	finishB()
+
+	require.True(t, session.rotateAutonomousRoute(incarnation, "successor-route"))
+	_, active := session.activeControlCallbackContext(callbackCtx)
+	require.False(t, active)
+	finishA()
+	_, active = session.activeControlCallbackContext(callbackCtx)
+	require.False(t, active)
+}
+
 func TestRouteEnvelopeHardCutover(t *testing.T) {
 	route, err := parseInboundTurnRoute(turnRouteMeta("turn-1"))
 	require.NoError(t, err)
@@ -32,6 +110,14 @@ func TestRouteEnvelopeHardCutover(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, boundaryNonce, boundary.turnNonce)
 	require.False(t, routeVersionIsOne("1"))
+
+	generated, err := stampRouteMeta(nil, elicitationScope{SessionID: "s", TurnNonce: "t"})
+	require.NoError(t, err)
+	generatedRoute, ok := generated[routeMetaKey].(map[string]any)
+	require.True(t, ok)
+	generatedRequestID, ok := generatedRoute["requestId"].(string)
+	require.True(t, ok)
+	require.Len(t, generatedRequestID, 32)
 
 	for _, meta := range []map[string]any{
 		nil,

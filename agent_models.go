@@ -13,7 +13,14 @@ import (
 // SetSessionMode exists only because github.com/coder/acp-go-sdk's generated
 // Agent interface still requires it. Remove this when the upstream SDK drops
 // session/set_mode; the local ACP dispatcher intentionally does not route it.
-func (a *Agent) SetSessionMode(context.Context, acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+// The reserved lifecycle key is still refused by its own path first: a family
+// literal is never foreign, so it is answered as the invalid parameter it is
+// rather than swallowed by the method's absence.
+func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+	if err := rejectLifecycleMeta(params.Meta); err != nil {
+		return acp.SetSessionModeResponse{}, err
+	}
+
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
@@ -27,11 +34,19 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	// at all is unreachable from JSON; an in-process caller can still build it,
 	// and there "value" is the member it left out.
 	if params.Boolean != nil {
+		if err := rejectLifecycleMeta(params.Boolean.Meta); err != nil {
+			return acp.SetSessionConfigOptionResponse{}, err
+		}
+
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldType)
 	}
 
 	if params.ValueId == nil {
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
+	}
+
+	if err := rejectLifecycleMeta(params.ValueId.Meta); err != nil {
+		return acp.SetSessionConfigOptionResponse{}, err
 	}
 
 	return a.setSessionConfigValue(ctx, params.ValueId)
@@ -46,25 +61,17 @@ func (a *Agent) setSessionConfigValue(
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
 
-	if poisonErr := session.poisonedError(); poisonErr != nil {
-		return acp.SetSessionConfigOptionResponse{}, poisonErr
-	}
-
 	switch params.ConfigId {
 	case configModel, configMode, configOutputStyle, configEffort:
 	default:
 		return acp.SetSessionConfigOptionResponse{}, unsupportedField("configId")
 	}
 
-	releaseTurn, err := session.acquireTurn(ctx)
+	releaseTurn, err := session.acquirePromptTurn(ctx, false)
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
 	defer releaseTurn()
-
-	if poisonErr := session.poisonedError(); poisonErr != nil {
-		return acp.SetSessionConfigOptionResponse{}, poisonErr
-	}
 
 	switch params.ConfigId {
 	case configModel:
@@ -120,7 +127,7 @@ func (a *Agent) setSessionConfigValue(
 	options := sessionConfigOptions(session)
 	updates := []acp.SessionUpdate{{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: options}}}
 
-	if err := session.emitOptionalUpdates(ctx, updates); err != nil {
+	if err := session.emitUpdates(ctx, updates); err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
 

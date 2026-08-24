@@ -3,11 +3,14 @@ package claudeacp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
+	"testing"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/stretchr/testify/require"
 )
 
 type extensionNotification struct {
@@ -120,10 +123,103 @@ type recordingAgentClient struct {
 	sessionUpdateErr error
 	updateCalls      int
 	failUpdateAfter  int
+	updateSignal     chan struct{}
+}
+
+// gatedSessionUpdateClient stops exactly one selected session update at a test
+// barrier. Later updates pass through normally, so a close can prove it retained
+// the carrier until a post-response producer finished and still complete its
+// own terminal publications afterward.
+type gatedSessionUpdateClient struct {
+	*recordingAgentClient
+	gateMu  sync.Mutex
+	calls   int
+	blockAt int
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newGatedSessionUpdateClient(blockAt int) *gatedSessionUpdateClient {
+	return &gatedSessionUpdateClient{
+		recordingAgentClient: newRecordingAgentClient(),
+		blockAt:              blockAt,
+		entered:              make(chan struct{}),
+		release:              make(chan struct{}),
+	}
+}
+
+func (c *gatedSessionUpdateClient) SessionUpdate(
+	ctx context.Context,
+	notification acp.SessionNotification,
+) error {
+	c.gateMu.Lock()
+	c.calls++
+	blocked := c.calls == c.blockAt
+	if blocked {
+		close(c.entered)
+	}
+	c.gateMu.Unlock()
+
+	if blocked {
+		select {
+		case <-c.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return c.recordingAgentClient.SessionUpdate(ctx, notification)
 }
 
 func newRecordingAgentClient() *recordingAgentClient {
-	return &recordingAgentClient{done: make(chan struct{})}
+	return &recordingAgentClient{done: make(chan struct{}), updateSignal: make(chan struct{}, 1)}
+}
+
+// admitControlCallbackForTest enters callback code through the same exact
+// reservation production installs in the Claude client. Call finish when the
+// handler returns so prompt final admission observes the real callback lifetime.
+func admitControlCallbackForTest(
+	t *testing.T,
+	session *agentSession,
+	ctx context.Context,
+	route string,
+) (context.Context, func()) {
+	t.Helper()
+
+	admittedCtx, finish, admitted := session.admitControlCallback(ctx, route)
+	require.True(t, admitted, "test callback route must have an exact live owner")
+
+	return admittedCtx, finish
+}
+
+func handlePermissionThroughAdmissionForTest(
+	t *testing.T,
+	session *agentSession,
+	ctx context.Context,
+	route string,
+	request claude.PermissionRequest,
+) (claude.PermissionDecision, error) {
+	t.Helper()
+
+	admittedCtx, finish := admitControlCallbackForTest(t, session, ctx, route)
+	defer finish()
+
+	return session.handlePermission(admittedCtx, request)
+}
+
+func handleElicitationThroughAdmissionForTest(
+	t *testing.T,
+	session *agentSession,
+	ctx context.Context,
+	route string,
+	request claude.ElicitationRequest,
+) (claude.ElicitationResponse, error) {
+	t.Helper()
+
+	admittedCtx, finish := admitControlCallbackForTest(t, session, ctx, route)
+	defer finish()
+
+	return session.handleElicitation(admittedCtx, request)
 }
 
 func (c *recordingAgentClient) Done() <-chan struct{} {
@@ -138,19 +234,33 @@ func (c *recordingAgentClient) CreateElicitation(
 	ctx context.Context,
 	request acp.UnstableCreateElicitationRequest,
 	_ elicitationScope,
+	action actionWireAdmission,
 ) (acp.UnstableCreateElicitationResponse, error) {
+	if err := action.publishPending(); err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
+
+	c.mu.Lock()
+	c.elicitations = append(c.elicitations, request)
+	c.mu.Unlock()
+
+	if err := action.observeWrite(ctx, actionWireIdentity{
+		method:    acp.ClientMethodElicitationCreate,
+		requestID: "test-elicitation-" + action.actionID,
+	}); err != nil {
+		return acp.UnstableCreateElicitationResponse{}, err
+	}
 	if c.elicitErr != nil {
 		return acp.UnstableCreateElicitationResponse{}, c.elicitErr
 	}
 	if c.elicitResponse != nil {
-		c.mu.Lock()
-		c.elicitations = append(c.elicitations, request)
-		c.mu.Unlock()
-
 		return *c.elicitResponse, nil
 	}
 
-	return c.UnstableCreateElicitation(ctx, request)
+	resp := acp.NewUnstableCreateElicitationResponseAccept()
+	resp.Accept.Content = map[string]any{"ok": true}
+
+	return resp, nil
 }
 
 func (c *recordingAgentClient) UnstableCompleteElicitation(
@@ -173,9 +283,20 @@ func (c *recordingAgentClient) Completions() []acp.UnstableCompleteElicitationNo
 }
 
 func (c *recordingAgentClient) RequestPermission(
-	_ context.Context,
+	ctx context.Context,
 	request acp.RequestPermissionRequest,
+	action actionWireAdmission,
 ) (acp.RequestPermissionResponse, error) {
+	if err := action.publishPending(); err != nil {
+		return acp.RequestPermissionResponse{}, err
+	}
+
+	if err := action.observeWrite(ctx, actionWireIdentity{
+		method:    acp.ClientMethodSessionRequestPermission,
+		requestID: "test-permission-" + action.actionID,
+	}); err != nil {
+		return acp.RequestPermissionResponse{}, err
+	}
 	if c.permissionErr != nil {
 		return acp.RequestPermissionResponse{}, c.permissionErr
 	}
@@ -190,6 +311,13 @@ func (c *recordingAgentClient) RequestPermission(
 }
 
 func (c *recordingAgentClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	// The pinned SDK refuses to send a notification whose context is already done,
+	// so this double refuses too: a test that delivered an update under a cancelled
+	// context would prove nothing about the real transport.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	c.mu.Lock()
 	c.updateCalls++
 	failAfter := c.failUpdateAfter
@@ -201,13 +329,46 @@ func (c *recordingAgentClient) SessionUpdate(ctx context.Context, notification a
 			return c.sessionUpdateErr
 		}
 
-		return c.recordingClient.SessionUpdate(ctx, notification)
+		return c.recordUpdate(ctx, notification)
 	}
 	if c.sessionUpdateErr != nil {
 		return c.sessionUpdateErr
 	}
 
-	return c.recordingClient.SessionUpdate(ctx, notification)
+	return c.recordUpdate(ctx, notification)
+}
+
+func (c *recordingAgentClient) recordUpdate(
+	ctx context.Context,
+	notification acp.SessionNotification,
+) error {
+	if err := c.recordingClient.SessionUpdate(ctx, notification); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	if c.updateSignal == nil {
+		c.updateSignal = make(chan struct{}, 1)
+	}
+	signal := c.updateSignal
+	c.mu.Unlock()
+	select {
+	case signal <- struct{}{}:
+	default:
+	}
+
+	return nil
+}
+
+func (c *recordingAgentClient) UpdatesChanged() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.updateSignal == nil {
+		c.updateSignal = make(chan struct{}, 1)
+	}
+
+	return c.updateSignal
 }
 
 func (c *recordingAgentClient) NotifyExtension(_ context.Context, method string, params any) error {
@@ -235,14 +396,19 @@ type fakeClaudeTransport struct {
 	closeErr error
 	sendErr  error
 
-	initialize map[string]any
-	settings   map[string]any
-	context    map[string]any
-	controlErr map[string]error
-	queryMsgs  []map[string]any
-	onQuery    func()
-	sent       []any
-	closeCalls int
+	initialize  map[string]any
+	settings    map[string]any
+	context     map[string]any
+	controlErr  map[string]error
+	queryMsgs   []map[string]any
+	queryCount  int
+	onQuery     func()
+	onSend      func(any)
+	sent        []any
+	closeCalls  int
+	sentSignal  chan struct{}
+	closeSignal chan struct{}
+	closeOnce   sync.Once
 
 	messages chan map[string]any
 	errs     chan error
@@ -294,8 +460,10 @@ func newFakeClaudeTransport() *fakeClaudeTransport {
 				"usage":       map[string]any{"input_tokens": 1, "output_tokens": 2},
 			},
 		},
-		messages: make(chan map[string]any, 64),
-		errs:     make(chan error, 4),
+		messages:    make(chan map[string]any, 64),
+		errs:        make(chan error, 4),
+		sentSignal:  make(chan struct{}, 1),
+		closeSignal: make(chan struct{}),
 	}
 }
 
@@ -310,14 +478,35 @@ func (t *fakeClaudeTransport) Send(_ context.Context, payload any) error {
 
 	t.mu.Lock()
 	t.sent = append(t.sent, payload)
+	if t.sentSignal == nil {
+		t.sentSignal = make(chan struct{}, 1)
+	}
+	sentSignal := t.sentSignal
 	t.mu.Unlock()
+	select {
+	case sentSignal <- struct{}{}:
+	default:
+	}
+	if t.onSend != nil {
+		t.onSend(payload)
+	}
 
 	switch msg := payload.(type) {
 	case claude.ControlRequest:
 		t.respond(msg)
 	case map[string]any:
 		if msg["type"] == claude.MessageTypeUser {
-			for _, queryMsg := range t.queryMsgs {
+			t.mu.Lock()
+			t.queryCount++
+			queryCount := t.queryCount
+			queryMsgs := append([]map[string]any(nil), t.queryMsgs...)
+			t.mu.Unlock()
+			for _, queryMsg := range queryMsgs {
+				if queryCount > 1 && queryMsg["uuid"] == "33333333-3333-4333-8333-333333333333" {
+					cloned := cloneAnyMap(queryMsg)
+					cloned["uuid"] = fmt.Sprintf("33333333-3333-4333-8333-%012d", queryCount)
+					queryMsg = cloned
+				}
 				t.messages <- queryMsg
 			}
 			if t.onQuery != nil {
@@ -327,6 +516,17 @@ func (t *fakeClaudeTransport) Send(_ context.Context, payload any) error {
 	}
 
 	return nil
+}
+
+func (t *fakeClaudeTransport) SentChanged() <-chan struct{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.sentSignal == nil {
+		t.sentSignal = make(chan struct{}, 1)
+	}
+
+	return t.sentSignal
 }
 
 func (t *fakeClaudeTransport) respond(req claude.ControlRequest) {
@@ -364,8 +564,40 @@ func (t *fakeClaudeTransport) respond(req claude.ControlRequest) {
 	}
 }
 
-func (t *fakeClaudeTransport) Messages(context.Context) (<-chan map[string]any, <-chan error) {
-	return t.messages, t.errs
+func (t *fakeClaudeTransport) Events(ctx context.Context) <-chan claude.TransportEvent {
+	events := make(chan claude.TransportEvent)
+	go func() {
+		defer close(events)
+		messages, errs := t.messages, t.errs
+		for messages != nil || errs != nil {
+			select {
+			case msg, ok := <-messages:
+				if !ok {
+					messages = nil
+
+					continue
+				}
+				events <- claude.TransportEvent{Message: msg}
+			case err, ok := <-errs:
+				if !ok {
+					errs = nil
+
+					continue
+				}
+				events <- claude.TransportEvent{Err: err}
+
+				return
+			case <-ctx.Done():
+				events <- claude.TransportEvent{Err: ctx.Err()}
+
+				return
+			case <-t.closeSignal:
+				return
+			}
+		}
+	}()
+
+	return events
 }
 
 func (t *fakeClaudeTransport) Close() error {
@@ -373,6 +605,7 @@ func (t *fakeClaudeTransport) Close() error {
 	defer t.mu.Unlock()
 
 	t.closeCalls++
+	t.closeOnce.Do(func() { close(t.closeSignal) })
 
 	return t.closeErr
 }

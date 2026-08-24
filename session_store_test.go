@@ -59,6 +59,17 @@ func TestInMemorySessionStoreBranches(t *testing.T) {
 	require.Len(t, summaries, 2)
 	require.Equal(t, "other", summaries[0].SessionID)
 
+	// Two sessions stamped in the same millisecond fall back to their ids, so the
+	// listing is stable however close together the writes landed.
+	store.mu.Lock()
+	store.updatedAt[SessionKey{SessionID: "s"}] = 7
+	store.updatedAt[SessionKey{SessionID: "other"}] = 7
+	store.mu.Unlock()
+
+	summaries, err = store.ListSessions(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{"other", "s"}, []string{summaries[0].SessionID, summaries[1].SessionID})
+
 	require.EqualError(t, store.Replace(ctx, SessionKey{}, nil), "session id is required")
 	require.Error(t, store.Replace(ctx, SessionKey{SessionID: "s", Subpath: "sub"}, nil))
 	require.Error(t, store.Replace(ctx, SessionKey{SessionID: "s"}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "other"}}}))
@@ -91,6 +102,82 @@ func TestInMemorySessionStoreBranches(t *testing.T) {
 
 	require.Nil(t, cloneStoreEntries(nil))
 	require.Nil(t, cloneStoreEntry(nil))
+}
+
+// TestInMemorySessionStoreReplaceNeverResurrectsATombstone pins that a delete is
+// final against the one writer that rewrites a whole session. The teardown a
+// delete runs behind its own tombstone still commits the session mirror, and that
+// commit is a Replace: were it to clear the tombstone it never wrote, the id the
+// host was told is gone would be listable and loadable again.
+func TestInMemorySessionStoreReplaceNeverResurrectsATombstone(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &InMemorySessionStore{}
+	main := SessionKey{SessionID: "s"}
+	sub := SessionKey{SessionID: "s", Subpath: "sub/a.jsonl"}
+
+	require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{[]byte(`{"a":1}`)}))
+	require.NoError(t, store.Delete(ctx, main))
+
+	require.NoError(t, store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
+		{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"d":4}`)}},
+	}))
+
+	entries, err := store.Load(ctx, main)
+	require.NoError(t, err)
+	require.Empty(t, entries, "a tombstoned key holds nothing a later replace wrote")
+
+	subEntries, err := store.Load(ctx, sub)
+	require.NoError(t, err)
+	require.Empty(t, subEntries, "the tombstone cascades to every subpath of the deleted session")
+
+	subkeys, err := store.ListSubkeys(ctx, main)
+	require.NoError(t, err)
+	require.Empty(t, subkeys)
+
+	summaries, err := store.ListSessions(ctx)
+	require.NoError(t, err)
+	require.Empty(t, summaries, "a deleted session is never listable again")
+}
+
+// TestInMemorySessionStoreReplaceRefusesDuplicateKeys pins the one answer a
+// generation that names a key twice gets. A generation states what each key
+// holds, so a set stating two things about one key states neither; resolving it
+// by keeping whichever replacement arrived last would durably commit an order
+// the caller never expressed. The refusal names the duplicate and lands before
+// anything is written, so the previous generation is still exactly what the
+// store holds.
+func TestInMemorySessionStoreReplaceRefusesDuplicateKeys(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &InMemorySessionStore{}
+	main := SessionKey{SessionID: "s"}
+	sub := SessionKey{SessionID: "s", Subpath: "sub/a.jsonl"}
+
+	require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{[]byte(`{"a":1}`)}))
+
+	require.EqualError(t, store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
+		{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
+		{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"d":4}`)}},
+	}), `duplicate replacement key {SessionID:s Subpath:sub/a.jsonl}`)
+
+	require.EqualError(t, store.Replace(ctx, main, []SessionStoreReplacement{
+		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
+		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
+	}), `duplicate replacement key {SessionID:s Subpath:}`)
+
+	entries, err := store.Load(ctx, main)
+	require.NoError(t, err)
+	require.Equal(t, []SessionStoreEntry{[]byte(`{"a":1}`)}, entries,
+		"a refused generation writes nothing, so the committed one still stands")
+
+	subkeys, err := store.ListSubkeys(ctx, main)
+	require.NoError(t, err)
+	require.Empty(t, subkeys, "the key named twice is not created by the call that named it twice")
 }
 
 func TestInMemorySessionStoreReplaceEmptyEntrySurvives(t *testing.T) {

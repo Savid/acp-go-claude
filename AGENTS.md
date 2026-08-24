@@ -29,6 +29,8 @@ details live in `internal/`.
   MCP config, modes, models, and updates.
 - **Session state** (`internal/permissions`, `internal/transcript`): session
   permission persistence and Claude transcript discovery/replay.
+- **Lifecycle protocol** (`internal/lifecycle`, `testdata/lifecycle`): strict
+  envelope decoding, reduction, emission, negotiation, and canonical vectors.
 - **Live tests** (`integration`): integration tests that launch the real local
   `claude` CLI.
 - **Docs** (`docs/`, `docs.json`): Mintlify guide. Update alongside public API,
@@ -84,6 +86,11 @@ home.
 - Keep shared code next to the domain it serves; avoid generic catch-all
   packages such as `utils`, `helpers`, or `common`.
 - Follow existing package patterns before introducing new abstractions.
+- Advertise lifecycle facts only when the configured boundary proves them.
+- Settle a prompt in native-terminal, containment, durable-commit,
+  terminal-event order. At the close boundary the terminal events come first
+  instead: terminalize what the session still owns, then commit, then state the
+  quiescence fact, then fence.
 
 ## Ask Before
 
@@ -104,6 +111,8 @@ Unless explicitly requested, ask before:
 - Run `golangci-lint run ./...` before considering work complete.
 - Live integration tests launch the actual `claude` binary from `PATH`.
 - Unit tests may use in-memory transports.
+- Keep every canonical lifecycle vector byte-identical and unedited.
+- Reduce emitted lifecycle events through the same reducer used by the vectors.
 - Local helper processes in integration tests are MCP servers with deterministic
   responses.
 - Keep live prompts deterministic with exact sentinel replies, and assert the

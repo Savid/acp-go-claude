@@ -2,9 +2,8 @@ package claudeacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,7 +20,6 @@ func TestSessionUpdateEmitAndInfoHelpers(t *testing.T) {
 	session := &agentSession{agent: agent, id: "session-1", cwd: "/tmp/project", additionalDirectories: []string{"/tmp/extra"}}
 	require.NoError(t, session.emitUpdates(context.Background(), nil))
 	require.ErrorIs(t, session.emitUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}), errACPConnectionNotAttached)
-	require.NoError(t, session.emitOptionalUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}))
 
 	conn := newRecordingAgentClient()
 	agent.setConnection(conn)
@@ -35,7 +33,7 @@ func TestSessionUpdateEmitAndInfoHelpers(t *testing.T) {
 	require.Equal(t, "message-1", identityClaudeMeta["messageId"])
 
 	conn.sessionUpdateErr = errors.New("update failed")
-	require.ErrorContains(t, session.emitOptionalUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}), "update failed")
+	require.ErrorContains(t, session.emitUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}), "update failed")
 	conn.sessionUpdateErr = nil
 
 	require.NoError(t, session.emitLiveSessionInfoUpdate(context.Background(), []acp.ContentBlock{acp.TextBlock("  hello   world  ")}))
@@ -51,7 +49,6 @@ func TestSessionUpdateEmitAndInfoHelpers(t *testing.T) {
 
 	agent.closed = true
 	require.ErrorIs(t, session.emitUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}), errAgentClosed)
-	require.NoError(t, session.emitOptionalUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}))
 }
 
 func TestAvailableCommandUpdateHelperBranches(t *testing.T) {
@@ -107,8 +104,8 @@ func TestPoisonBranches(t *testing.T) {
 	}
 
 	err := session.poison(ctx, "first cause")
-	require.ErrorContains(t, err, "first cause")
-	require.ErrorContains(t, session.poisonedError(), "first cause")
+	require.ErrorContains(t, err, "native session invariant failed")
+	require.ErrorContains(t, session.poisonedError(), "native session invariant failed")
 	select {
 	case <-cancelled:
 	default:
@@ -116,10 +113,12 @@ func TestPoisonBranches(t *testing.T) {
 	}
 
 	err = session.poison(ctx, "second cause")
-	require.ErrorContains(t, err, "first cause")
+	require.ErrorContains(t, err, "native session invariant failed")
 
 	nilAgent := &agentSession{id: "session-2"}
-	require.ErrorContains(t, nilAgent.poison(ctx, "nil agent cause"), "nil agent cause")
+	err = nilAgent.poison(ctx, "nil agent cause")
+	require.ErrorContains(t, err, "native session invariant failed")
+	require.NotContains(t, err.Error(), "nil agent cause")
 }
 
 func TestPoisonBeforeAdvertisementEmitsNoCommandUpdate(t *testing.T) {
@@ -131,7 +130,7 @@ func TestPoisonBeforeAdvertisementEmitsNoCommandUpdate(t *testing.T) {
 	session := &agentSession{agent: agent, id: "session-1"}
 
 	err := session.poison(context.Background(), "native reset before advertisement")
-	require.ErrorContains(t, err, "native reset before advertisement")
+	require.ErrorContains(t, err, "native session invariant failed")
 	require.Empty(t, availableCommandUpdates(conn.Updates()))
 }
 
@@ -140,22 +139,30 @@ func TestRawAndUsageUpdateHelpers(t *testing.T) {
 
 	agent := NewAgent()
 	session := &agentSession{agent: agent, id: "session-1", rawMessages: rawMessageConfig{All: true}}
-	session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}})
+	require.Error(t, session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
 	conn := newRecordingAgentClient()
 	agent.setConnection(conn)
-	session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}})
+	require.NoError(t, session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
 	require.Len(t, conn.Extensions(), 1)
 	require.Equal(t, RawEventMethod, conn.Extensions()[0].method)
 
-	// A raw-event emit failure never aborts the turn: it returns nil and is
-	// recorded on the internal observer hook.
+	// Raw delivery is optional: failure is observed, consumes no sequence, and a
+	// later raw event reuses that exact sequence.
 	conn.extensionErr = errors.New("extension failed")
-	session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}})
+	require.NoError(t, session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
 	conn.extensionErr = nil
+	require.NoError(t, session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
+	require.Len(t, conn.Extensions(), 2)
+	var first, second map[string]any
+	require.NoError(t, json.Unmarshal(conn.Extensions()[0].params, &first))
+	require.NoError(t, json.Unmarshal(conn.Extensions()[1].params, &second))
+	firstSequence, firstOK := first[rawEventFieldSequence].(float64)
+	require.True(t, firstOK)
+	require.Equal(t, firstSequence+1, second[rawEventFieldSequence])
 	// Oversized events are emitted as a marker (consuming a sequence), never dropped.
 	before := len(conn.Extensions())
 	huge := &claude.SystemMessage{Raw: map[string]any{"type": "system", "data": strings.Repeat("x", rawEventMaxBytes)}}
-	session.emitRawClaudeMessage(context.Background(), huge)
+	require.NoError(t, session.emitRawClaudeMessage(context.Background(), huge))
 	require.Len(t, conn.Extensions(), before+1)
 
 	require.Equal(t, "", resultOriginKind(nil))
@@ -205,12 +212,12 @@ func TestSessionUpdateEdgeBranches(t *testing.T) {
 	agent := NewAgent()
 	session := &agentSession{agent: agent, id: "session-1", cwd: "/tmp/project", contextWindowSize: 100}
 
-	require.NoError(t, session.emitOptionalUpdates(ctx, nil))
+	require.NoError(t, session.emitUpdates(ctx, nil))
 	info := session.sessionInfo("session-1")
 	require.Equal(t, "session-1", *info.Title)
 	session.rawMessages = rawMessageConfig{All: true}
 	agent.closed = true
-	session.emitRawClaudeMessage(ctx, &claude.SystemMessage{Raw: map[string]any{"type": "system"}})
+	require.Error(t, session.emitRawClaudeMessage(ctx, &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
 	agent.closed = false
 
 	cloned := cloneUsage(&acp.Usage{CachedWriteTokens: acp.Ptr(1), ThoughtTokens: acp.Ptr(2)})
@@ -218,21 +225,19 @@ func TestSessionUpdateEdgeBranches(t *testing.T) {
 	*cloned.ThoughtTokens = 4
 	require.Equal(t, 1, *cloneUsage(&acp.Usage{CachedWriteTokens: acp.Ptr(1)}).CachedWriteTokens)
 
-	transcript := filepath.Join(t.TempDir(), "transcript.jsonl")
-	require.NoError(t, os.WriteFile(transcript, []byte(`{"type":"assistant","message":{"content":"done"}}`+"\n"), 0o600))
 	conn := newRecordingAgentClient()
 	agent.setConnection(conn)
-	require.NoError(t, session.replayTranscript(ctx, transcript))
+	require.NoError(t, session.replayTranscriptEntries(ctx, []SessionStoreEntry{
+		json.RawMessage(`{"type":"assistant","message":{"content":"done"}}`),
+	}))
 	require.NotEmpty(t, conn.Updates())
-	require.Error(t, session.replayTranscript(ctx, filepath.Join(t.TempDir(), "missing.jsonl")))
 
-	truncatedTranscript := filepath.Join(t.TempDir(), "truncated.jsonl")
-	var lines strings.Builder
-	for range 10001 {
-		lines.WriteString(`{"type":"user","message":{"content":"hello"}}` + "\n")
+	overCap := make([]SessionStoreEntry, 10001)
+	for index := range overCap {
+		overCap[index] = json.RawMessage(`{"type":"user","message":{"content":"hello"}}`)
 	}
-	require.NoError(t, os.WriteFile(truncatedTranscript, []byte(lines.String()), 0o600))
-	require.NoError(t, session.replayTranscript(ctx, truncatedTranscript))
+
+	require.NoError(t, session.replayTranscriptEntries(ctx, overCap))
 
 	agent.clientCapabilities.Elicitation = nil
 	require.NoError(t, session.emitElicitationComplete(ctx, &claude.SystemMessage{Raw: map[string]any{"elicitation_id": "e1"}}))
@@ -260,4 +265,14 @@ func TestSessionUpdateEdgeBranches(t *testing.T) {
 		},
 	}}, mapper.ToolUpdateOptions{ToolUses: map[string]claude.ToolUseBlock{"tool-2": {ID: "tool-2", Name: "Edit"}}})
 	require.ErrorContains(t, err, "hook update failed")
+}
+
+func TestSessionUpdateCloseAndPoisonEdges(t *testing.T) {
+	closing := &agentSession{agent: NewAgent(), closing: true}
+	require.Error(t, closing.emitAvailableCommandsUpdate(t.Context(), true))
+
+	cancelled := false
+	poisoned := &agentSession{cancel: func() { cancelled = true }}
+	require.Error(t, poisoned.poison(t.Context(), "native invariant"))
+	require.True(t, cancelled)
 }

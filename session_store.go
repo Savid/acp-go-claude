@@ -142,6 +142,14 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 			return fmt.Errorf("replacement session id %q does not match main session id %q", replacement.Key.SessionID, main.SessionID)
 		}
 
+		// Two replacements naming one key are refused before anything is written.
+		// A generation states what each key holds, so a set that states two things
+		// about the same key states neither, and resolving it by keeping whichever
+		// arrived last would durably commit an order the caller never expressed.
+		if _, duplicate := next[replacement.Key]; duplicate {
+			return fmt.Errorf("duplicate replacement key %+v", replacement.Key)
+		}
+
 		if replacement.Key == main {
 			mainCount++
 		}
@@ -157,6 +165,14 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	defer s.mu.Unlock()
 
 	s.ensure()
+
+	// A tombstone is final. Replace rewrites the whole session, so it would
+	// otherwise clear a tombstone it never wrote and resurrect a row the host was
+	// already told is gone — including from the final mirror commit a delete's own
+	// teardown runs behind it.
+	if s.isTombstonedLocked(main) {
+		return nil
+	}
 
 	for key := range s.entries {
 		if key.SessionID == main.SessionID {

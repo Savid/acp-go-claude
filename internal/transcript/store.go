@@ -26,6 +26,10 @@ const (
 	maxReplayUpdates = 10000
 	maxTitleLength   = 256
 
+	// replaySource names what replay read, for the log line that reports rows it
+	// could not decode.
+	replaySource = "session store"
+
 	entryTypeAssistant = "assistant"
 	entryTypeAITitle   = "ai-title"
 	entryTypeResult    = "result"
@@ -71,7 +75,6 @@ var (
 type transcriptFile interface {
 	io.Closer
 	io.Reader
-	io.Seeker
 }
 
 // Store reads Claude Code's local transcript files.
@@ -118,21 +121,11 @@ func (s Store) Find(ctx context.Context, sessionID string, cwd string) (*Session
 	return nil, os.ErrNotExist
 }
 
-// ReplayUpdates converts a saved transcript into ACP session updates.
-func ReplayUpdates(path string) ([]acp.SessionUpdate, bool, error) {
-	file, err := storeOpen(path)
-	if err != nil {
-		return nil, false, fmt.Errorf("open transcript: %w", err)
-	}
-
-	defer file.Close()
-
-	return replayUpdates(path, file)
-}
-
 // ReplayEntries converts store-authoritative transcript rows into ACP session
-// updates without consulting Claude's local transcript cache.
-func ReplayEntries(entries []json.RawMessage) ([]acp.SessionUpdate, bool, error) {
+// updates. The rows are the session store's own and already in memory, so
+// replay opens nothing and the only outcome besides the updates is whether the
+// cap cut them short.
+func ReplayEntries(entries []json.RawMessage) ([]acp.SessionUpdate, bool) {
 	var transcript bytes.Buffer
 
 	for _, entry := range entries {
@@ -145,18 +138,17 @@ func ReplayEntries(entries []json.RawMessage) ([]acp.SessionUpdate, bool, error)
 		transcript.WriteByte('\n')
 	}
 
-	return replayUpdates("session store", bytes.NewReader(transcript.Bytes()))
+	return replayUpdates(transcript.Bytes())
 }
 
-func replayUpdates(source string, reader io.ReadSeeker) ([]acp.SessionUpdate, bool, error) {
-	transcriptToolUses, err := collectTranscriptToolUses(reader)
-	if err != nil {
-		return nil, false, fmt.Errorf("read transcript tool uses: %w", err)
-	}
-
-	if _, seekErr := reader.Seek(0, io.SeekStart); seekErr != nil {
-		return nil, false, fmt.Errorf("rewind transcript: %w", seekErr)
-	}
+// replayUpdates reads the rows twice: once to learn every tool use they carry,
+// so a result may precede the use it answers, and once to emit. Neither pass
+// reports a read failure, because held bytes have none, and the only refusal
+// the emitting handler raises is the cap the second result reports. A row is a
+// whole stored value rather than a file tail, so a row that will not decode is
+// counted and skipped and never treated as torn.
+func replayUpdates(rows []byte) ([]acp.SessionUpdate, bool) {
+	transcriptToolUses := collectTranscriptToolUses(rows)
 
 	var updates []acp.SessionUpdate
 
@@ -169,14 +161,10 @@ func replayUpdates(source string, reader io.ReadSeeker) ([]acp.SessionUpdate, bo
 
 	skippedLines := 0
 
-	err = readTranscriptLines(reader, func(line transcriptLine) error {
+	_ = readTranscriptLines(bytes.NewReader(rows), func(line transcriptLine) error {
 		entry, skipped := decodeLine(line.Text)
 		if skipped {
 			skippedLines++
-
-			if line.Final {
-				logTornTranscriptLine(source, line.Offset)
-			}
 		}
 
 		if entry == nil {
@@ -204,19 +192,15 @@ func replayUpdates(source string, reader io.ReadSeeker) ([]acp.SessionUpdate, bo
 		return nil
 	})
 
-	logSkippedTranscriptLines(source, skippedLines)
+	logSkippedTranscriptLines(replaySource, skippedLines)
 
-	if err != nil && !errors.Is(err, errReplayTruncated) {
-		return nil, false, fmt.Errorf("read transcript: %w", err)
-	}
-
-	return updates, truncated, nil
+	return updates, truncated
 }
 
-func collectTranscriptToolUses(reader io.Reader) (map[string]claude.ToolUseBlock, error) {
+func collectTranscriptToolUses(rows []byte) map[string]claude.ToolUseBlock {
 	toolUses := make(map[string]claude.ToolUseBlock)
 
-	if err := readTranscriptLines(reader, func(line transcriptLine) error {
+	_ = readTranscriptLines(bytes.NewReader(rows), func(line transcriptLine) error {
 		entry, ok := decodeLineQuiet(line.Text)
 		if !ok {
 			return nil
@@ -225,11 +209,9 @@ func collectTranscriptToolUses(reader io.Reader) (map[string]claude.ToolUseBlock
 		collectEntryToolUses(entry, toolUses)
 
 		return nil
-	}); err != nil {
-		return nil, err
-	}
+	})
 
-	return toolUses, nil
+	return toolUses
 }
 
 func decodeLineQuiet(line string) (map[string]any, bool) {
@@ -543,7 +525,7 @@ func decodeLine(line string) (map[string]any, bool) {
 
 	var entry map[string]any
 	if err := json.Unmarshal([]byte(line), &entry); err != nil {
-		slog.Default().Debug("skip invalid Claude transcript line", slog.String(keyError, err.Error()))
+		slog.Default().Debug("skip invalid Claude transcript line", slog.String("stage", "transcript_decode"))
 
 		return nil, true
 	}
@@ -551,16 +533,16 @@ func decodeLine(line string) (map[string]any, bool) {
 	return entry, false
 }
 
-func logSkippedTranscriptLines(path string, count int) {
+func logSkippedTranscriptLines(_ string, count int) {
 	if count == 0 {
 		return
 	}
 
-	slog.Default().Warn("skipped malformed Claude transcript lines", slog.String("path", path), slog.Int("count", count))
+	slog.Default().Warn("skipped malformed Claude transcript lines", slog.Int("count", count))
 }
 
-func logTornTranscriptLine(path string, offset int64) {
-	slog.Default().Warn("skipped torn Claude transcript final line", slog.String("path", path), slog.Int64("byte_offset", offset))
+func logTornTranscriptLine(_ string, _ int64) {
+	slog.Default().Warn("skipped torn Claude transcript final line", slog.String("stage", "transcript_final_line"))
 }
 
 func visibleEntry(entry map[string]any) bool {

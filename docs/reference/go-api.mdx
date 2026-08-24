@@ -48,7 +48,7 @@ accidentally release the quarantined admission.
 | `WithSeedFiles` | Write files into the resolved config dir before launch (requires `WithHome`). |
 | `WithSessionStore` | Replace the default in-memory session authority with a host store. |
 | `WithSessionStoreLoadTimeout` | Bound store reads used during restore and listing. |
-| `WithConcurrencyLimits` | Cap active sessions and concurrent client calls. |
+| `WithConcurrencyLimits` | Cap active sessions and concurrent outbound client calls. Zero fields use defaults of 32 sessions and 16 client calls; a full client-call limit returns `client_calls` backpressure. |
 | `WithImageLimits` | Set decoded-byte policy limits for image input and output. |
 | `WithTurnTimeout` | Bound one prompt turn; expiry fails the turn with cause `timeout` (default: no deadline). |
 | `WithRuntimeResourceHooks` | Let an embedding host admit native roots and reserve adapter scratch roots before they are created. |
@@ -87,7 +87,7 @@ different explicit home fails construction validation.
 | --- | --- |
 | `WithClaudeDefaultPermissionMode` | Initial permission mode for new sessions. |
 | `WithClaudeDefaultSystemPrompt` | Default system prompt. |
-| `WithClaudeHideAuth` | Suppress Claude subscription terminal auth methods. |
+| `WithClaudeHideAuth` | Withdraw the Claude subscription sign-in from the advertised auth catalog. |
 | `WithClaudeBareMode` | Launch Claude with `--bare`. |
 | `WithClaudeSettingSources` | Select Claude filesystem setting sources (`--setting-sources`). |
 | `WithClaudeSettingsFile` | Load a settings overlay via `--settings` (requires `WithHome`). |
@@ -125,9 +125,11 @@ Request builders: `TextPromptRequest`, `CallForkSession`, `WithSessionRawEvents`
 `PromptRequest(sessionID, turnNonce, blocks...)` and
 `TextPromptRequest(sessionID, turnNonce, text)` require a fresh, unguessable
 nonce of at most 4096 bytes for every turn. Use the same nonce with
-`CancelRequest(sessionID, turnNonce)` while that turn is active. A blank nonce
-or one larger than 4096 bytes leaves the builder's route metadata nil, so the
-receiving agent rejects the request or cancellation fail-closed.
+`CancelRequest(sessionID, turnNonce)` while that turn is active; a cancel naming
+any other nonce, or one sent to a session running no turn at all, is refused
+before Claude is interrupted. A blank nonce or one larger than 4096 bytes leaves
+the builder's route metadata nil, so the receiving agent rejects the request or
+cancellation fail-closed.
 
 `RuntimeResourceHooks` has `AcquireNativeRoot`, `ReserveScratchRoot`,
 `ObserveProcess`, `ObserveProcessSnapshot`, `ObserveStartupStage`, and

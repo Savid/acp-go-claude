@@ -12,8 +12,7 @@ import "context"
 //
 // Windows carries the same composite store Darwin does, over Credential
 // Manager, and no item-name shape for it is pinned here: removal on Windows is
-// whatever native logout performs, so a legacy item that survives it survives
-// disconnect too.
+// whatever native logout performs.
 func RemoveAuthKeychainItems(_ context.Context, _ string, _ string, _ Options) error {
 	return nil
 }

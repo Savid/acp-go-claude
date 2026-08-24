@@ -151,19 +151,68 @@ JSON-RPC code **`-32603`** with a `data` object:
 | --- | --- |
 | `error` | `claude_turn_failed` |
 | `cause` | one of the causes below |
-| `message` | the real native cause text (never a placeholder) |
+| `message` | a stable adapter-owned classification with no provider-controlled text |
 
 The `cause` vocabulary:
 
 | Cause | Meaning |
 | --- | --- |
-| `process_exit` | The Claude process died; `message` carries the real exit status and a stderr tail. |
+| `process_exit` | The Claude process died; `message` carries only the exit status. |
 | `transport` | Stream close, malformed frame, or client-lifecycle break. |
 | `provider` | Claude reported an error in its result frame (including auth failures). |
 | `timeout` | A `WithTurnTimeout` deadline expired; the selected native containment boundary completed before settlement. |
 
-Provider failures additionally include the result `subtype`, and may include an
-`errors` array and an `errorKind`.
+Provider failures expose only the fixed `claude provider turn failed` message;
+provider subtype and payload fields are not copied onto the wire.
+
+`session/close` has one refusal of its own. It settles behind the session's
+settlement barrier, so a caller whose wait for the in-flight turn ends before that
+turn releases the session is told the close settled nothing. Which answer that is
+depends on why the wait ended:
+
+| Wait ended by | Answer |
+| --- | --- |
+| The caller cancelling its own request | `-32800` `Request cancelled` |
+| Any other expiry, such as a deadline | `-32600` `Invalid request` with `{"error":"claude_session_close_unsettled","message":<barrier wait error>}` |
+
+Neither is `-32603`: nothing failed internally, the containment boundary was
+simply never reached. Nothing was contained, no quiescence was stated, and the id
+still names its live session — the next close settles it. The `message` carries
+the barrier-wait error, not anything the native process reported. A same-id load,
+resume, or fork over an instance whose close settled nothing is refused the same
+way.
+
+A close that reached the boundary and failed a rung of it keeps the id too, and
+returns the failure it earned. The id stops resolving only behind a close that
+completed every rung it owed, so the next `session/close` retakes the boundary
+rather than repeating an answer.
+
+`session/delete` runs the other way round. It writes its durable tombstone first
+and hides the id with it, and only then cancels, closes, and cleans up. A
+teardown that does not finish is reported as the delete's error, but the
+tombstone is already durable and the session is already hidden from
+`session/list`, `session/load`, `session/resume`, and every other session-scoped
+method; the instance stays held so the next `session/delete` finishes what the
+first started. No write behind a tombstone recreates the row, and nothing is
+installed behind one either: a `session/load` or `session/resume` whose native
+process finished starting after the tombstone landed is refused with the
+unknown-session error and torn down, rather than registered under an id no host
+could address again.
+
+Delete's teardown meets the same settlement barrier, so it has the same refusal
+under a name of its own:
+
+| Wait ended by | Answer |
+| --- | --- |
+| The caller cancelling its own request | `-32800` `Request cancelled` |
+| Any other expiry, such as a deadline | `-32600` `Invalid request` with `{"error":"claude_session_delete_unsettled","message":<barrier wait error>}` |
+
+It is named apart from `claude_session_close_unsettled` because it reports a
+different state. A refused close settled nothing and its id still names a live
+session; a refused delete already deleted the session — the tombstone is durable
+and the id is hidden — and owes only the teardown, which the next
+`session/delete` takes. Any other teardown failure, such as a containment or
+cleanup error, is a real internal failure and is still answered `-32603`.
 
 An image output the adapter will not ship — `invalid_base64`, `not_a_raster`,
 `media_type_mismatch`, `missing_file`, `path_not_allowed`, or `too_large` — is

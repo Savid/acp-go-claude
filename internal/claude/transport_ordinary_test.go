@@ -67,14 +67,14 @@ exit 0
 		return err == nil
 	}, 10*time.Second, 5*time.Millisecond)
 
-	messages, errs := transport.Messages(context.Background())
+	messages, errs := splitEventsForTest(transport.Events(context.Background()))
 
 	seen := make([]map[string]any, 0, ordinaryTransportLines+1)
 	for message := range messages {
 		seen = append(seen, message)
 	}
 
-	transportErrs := make([]error, 0, transportErrorBuffer)
+	var transportErrs []error
 	for err := range errs {
 		transportErrs = append(transportErrs, err)
 	}

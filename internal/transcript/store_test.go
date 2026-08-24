@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,6 +19,17 @@ import (
 )
 
 const testSessionID = "11111111-1111-4111-8111-111111111111"
+
+// replayLines replays rows the way the session store hands them over: whole
+// stored values, one per row.
+func replayLines(lines ...string) ([]acp.SessionUpdate, bool) {
+	rows := make([]json.RawMessage, 0, len(lines))
+	for _, line := range lines {
+		rows = append(rows, json.RawMessage(line))
+	}
+
+	return ReplayEntries(rows)
+}
 
 func TestStoreListFindAndReplay(t *testing.T) {
 	t.Parallel()
@@ -45,8 +55,12 @@ func TestStoreListFindAndReplay(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, path, found.Path)
 
-	updates, truncated, err := ReplayUpdates(path)
-	require.NoError(t, err)
+	updates, truncated := replayLines(
+		`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","sessionId":"11111111-1111-4111-8111-111111111111","timestamp":"2026-05-14T00:00:00Z","message":{"content":"hello"}}`,
+		`{"type":"ai-title","sessionId":"11111111-1111-4111-8111-111111111111","aiTitle":"Greeting"}`,
+		`{"type":"assistant","uuid":"33333333-3333-4333-8333-333333333333","cwd":"/repo","sessionId":"11111111-1111-4111-8111-111111111111","timestamp":"2026-05-14T00:00:01Z","message":{"content":[{"type":"text","text":"hi"}]}}`,
+		`{"type":"result","subtype":"success","total_cost_usd":0.25,"usage":{"input_tokens":8,"output_tokens":3,"cache_read_input_tokens":2},"modelUsage":{"claude-test":{"contextWindow":200000}}}`,
+	)
 	require.False(t, truncated)
 	require.Len(t, updates, 4)
 	require.Equal(t, "hello", updates[0].UserMessageChunk.Content.Text.Text)
@@ -64,12 +78,11 @@ func TestStoreListFindAndReplay(t *testing.T) {
 func TestReplayEntriesUsesStoreRows(t *testing.T) {
 	t.Parallel()
 
-	updates, truncated, err := ReplayEntries([]json.RawMessage{
+	updates, truncated := ReplayEntries([]json.RawMessage{
 		json.RawMessage(`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":"stored prompt"}}`),
 		json.RawMessage(`   `),
 		json.RawMessage(`{"type":"assistant","uuid":"33333333-3333-4333-8333-333333333333","cwd":"/repo","message":{"content":[{"type":"text","text":"stored answer"}]}}`),
 	})
-	require.NoError(t, err)
 	require.False(t, truncated)
 	require.Len(t, updates, 2)
 	require.Equal(t, "stored prompt", updates[0].UserMessageChunk.Content.Text.Text)
@@ -321,16 +334,12 @@ func TestStoreUsesConfigDirEnvironment(t *testing.T) {
 func TestReplaySkipsInvalidAndHiddenEntries(t *testing.T) {
 	t.Parallel()
 
-	home := t.TempDir()
-	path := writeTestTranscript(t, home, "/repo", testSessionID, []string{
+	updates, truncated := replayLines(
 		`not-json`,
 		`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","isMeta":true,"message":{"content":"hidden"}}`,
 		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","message":{"content":[{"type":"text","text":"visible"},{"type":"image","data":"abc"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"def"}},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"pdf"}},{"type":"tool_result","tool_use_id":"tool-1","content":"tool output"},{"type":"tool_result","tool_use_id":"tool-2","is_error":true,"content":[{"type":"text","text":"failed"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"img"}},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"doc"}},"bad"]}]}}`,
 		`{"type":"assistant","message":{"content":"done"}}`,
-	})
-
-	updates, truncated, err := ReplayUpdates(path)
-	require.NoError(t, err)
+	)
 	require.False(t, truncated)
 	require.Len(t, updates, 6)
 	require.Equal(t, "visible", updates[0].UserMessageChunk.Content.Text.Text)
@@ -353,19 +362,19 @@ func TestReplaySkipsInvalidAndHiddenEntries(t *testing.T) {
 func TestReplayStripsLocalCommandMetadata(t *testing.T) {
 	t.Parallel()
 
-	home := t.TempDir()
-	path := writeTestTranscript(t, home, "/repo", testSessionID, []string{
+	lines := []string{
 		`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":"<command-name>/model</command-name><command-message>model</command-message><command-args>opus</command-args><local-command-stdout>ok</local-command-stdout>"}}`,
 		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","cwd":"/repo","message":{"content":"<command-name>/model</command-name><local-command-stdout>ok</local-command-stdout>hi"}}`,
 		`{"type":"user","uuid":"44444444-4444-4444-8444-444444444444","cwd":"/repo","message":{"content":[{"type":"text","text":"<command-name>/model</command-name>"},{"type":"text","text":"<local-command-stdout>ok</local-command-stdout>there"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"img"}}]}}`,
-	})
+	}
+
+	path := writeTestTranscript(t, t.TempDir(), "/repo", testSessionID, lines)
 
 	session, err := readSession(path, "")
 	require.NoError(t, err)
 	require.Equal(t, "hi", *session.Info.Title)
 
-	updates, truncated, err := ReplayUpdates(path)
-	require.NoError(t, err)
+	updates, truncated := replayLines(lines...)
 	require.False(t, truncated)
 	require.Len(t, updates, 3)
 	require.Equal(t, "hi", updates[0].UserMessageChunk.Content.Text.Text)
@@ -380,14 +389,10 @@ func TestReplayStripsLocalCommandMetadata(t *testing.T) {
 func TestReplayKeepsToolUseCacheAcrossEntries(t *testing.T) {
 	t.Parallel()
 
-	home := t.TempDir()
-	path := writeTestTranscript(t, home, "/repo", testSessionID, []string{
+	updates, truncated := replayLines(
 		`{"type":"assistant","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/repo/main.go"}}]}}`,
-		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"` + "```go\\nfmt.Println(1)\\n```" + `"}]}}`,
-	})
-
-	updates, truncated, err := ReplayUpdates(path)
-	require.NoError(t, err)
+		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"`+"```go\\nfmt.Println(1)\\n```"+`"}]}}`,
+	)
 	require.False(t, truncated)
 	require.Len(t, updates, 2)
 	require.Equal(t, acp.ToolCallId("tool-1"), updates[0].ToolCall.ToolCallId)
@@ -402,14 +407,10 @@ func TestReplayKeepsToolUseCacheAcrossEntries(t *testing.T) {
 func TestReplayUsesToolUseCacheAcrossOutOfOrderEntries(t *testing.T) {
 	t.Parallel()
 
-	home := t.TempDir()
-	path := writeTestTranscript(t, home, "/repo", testSessionID, []string{
-		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"` + "```go\\nfmt.Println(1)\\n```" + `"}]}}`,
+	updates, truncated := replayLines(
+		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"`+"```go\\nfmt.Println(1)\\n```"+`"}]}}`,
 		`{"type":"assistant","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/repo/main.go"}}]}}`,
-	})
-
-	updates, truncated, err := ReplayUpdates(path)
-	require.NoError(t, err)
+	)
 	require.False(t, truncated)
 	require.Len(t, updates, 2)
 	require.Equal(t, acp.ToolCallStatusCompleted, *updates[0].ToolCallUpdate.Status)
@@ -421,30 +422,14 @@ func TestReplayUsesToolUseCacheAcrossOutOfOrderEntries(t *testing.T) {
 	require.Equal(t, "Read main.go", updates[1].ToolCall.Title)
 }
 
-func TestReplayErrors(t *testing.T) {
-	t.Parallel()
-
-	_, _, err := ReplayUpdates(filepath.Join(t.TempDir(), "missing.jsonl"))
-	require.Error(t, err)
-
-	if runtime.GOOS == "windows" {
-		return
-	}
-
-	_, _, err = ReplayUpdates(t.TempDir())
-	require.Error(t, err)
-}
-
 func TestTranscriptAcceptsLargeJSONLines(t *testing.T) {
 	t.Parallel()
 
 	large := strings.Repeat("x", 10*1024*1024+1)
-	path := writeTestTranscript(t, t.TempDir(), "/repo", testSessionID, []string{
-		`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":"` + large + `"}}`,
-	})
+	line := `{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":"` + large + `"}}`
+	path := writeTestTranscript(t, t.TempDir(), "/repo", testSessionID, []string{line})
 
-	updates, truncated, err := ReplayUpdates(path)
-	require.NoError(t, err)
+	updates, truncated := replayLines(line)
 	require.False(t, truncated)
 	require.Len(t, updates, 1)
 	require.Len(t, updates[0].UserMessageChunk.Content.Text.Text, len(large))
@@ -462,9 +447,7 @@ func TestReplayUpdatesCapsUpdateCount(t *testing.T) {
 		lines[i] = `{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":"hello"}}`
 	}
 
-	path := writeTestTranscript(t, t.TempDir(), "/repo", testSessionID, lines)
-	updates, truncated, err := ReplayUpdates(path)
-	require.NoError(t, err)
+	updates, truncated := replayLines(lines...)
 	require.True(t, truncated)
 	require.Len(t, updates, maxReplayUpdates)
 }
@@ -478,47 +461,23 @@ func TestReplayUpdatesCapsPartialEntry(t *testing.T) {
 	}
 	lines[maxReplayUpdates-1] = `{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}}`
 
-	path := writeTestTranscript(t, t.TempDir(), "/repo", testSessionID, lines)
-	updates, truncated, err := ReplayUpdates(path)
-	require.NoError(t, err)
+	updates, truncated := replayLines(lines...)
 	require.True(t, truncated)
 	require.Len(t, updates, maxReplayUpdates)
 	require.Equal(t, "first", updates[maxReplayUpdates-1].UserMessageChunk.Content.Text.Text)
 }
 
-func TestReplayUpdateReadBranches(t *testing.T) {
-	originalOpen := storeOpen
-	t.Cleanup(func() {
-		storeOpen = originalOpen
-	})
-
-	validTranscript := `{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":"hello"}}` + "\n"
-
-	storeOpen = func(string) (transcriptFile, error) {
-		return &fakeTranscriptFile{data: []byte(validTranscript), seekErr: errors.New("seek failed")}, nil
-	}
-	_, _, err := ReplayUpdates("transcript.jsonl")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "rewind transcript")
-
-	storeOpen = func(string) (transcriptFile, error) {
-		return &fakeTranscriptFile{data: []byte(validTranscript), readErrAfterSeek: errors.New("read failed")}, nil
-	}
-	_, _, err = ReplayUpdates("transcript.jsonl")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "read transcript")
-}
-
 func TestTranscriptMalformedLinesAreCounted(t *testing.T) {
 	t.Parallel()
 
-	path := writeTestTranscript(t, t.TempDir(), "/repo", testSessionID, []string{
+	lines := []string{
 		`{bad`,
 		`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":"hello"}}`,
-	})
+	}
 
-	updates, truncated, err := ReplayUpdates(path)
-	require.NoError(t, err)
+	path := writeTestTranscript(t, t.TempDir(), "/repo", testSessionID, lines)
+
+	updates, truncated := replayLines(lines...)
 	require.False(t, truncated)
 	require.Len(t, updates, 1)
 
@@ -539,11 +498,6 @@ func TestTranscriptMalformedFinalLineIsTornLine(t *testing.T) {
 		`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":"hello"}}`+"\n"+
 			`{bad`,
 	), 0o600))
-
-	updates, truncated, err := ReplayUpdates(path)
-	require.NoError(t, err)
-	require.False(t, truncated)
-	require.Len(t, updates, 1)
 
 	session, err := readSession(path, "")
 	require.NoError(t, err)
@@ -762,52 +716,6 @@ func TestTranscriptHelperEdges(t *testing.T) {
 		require.NoError(t, os.Symlink(target, link))
 		require.Equal(t, canonicalPath(target), canonicalPath(link))
 	}
-}
-
-type fakeTranscriptFile struct {
-	data             []byte
-	offset           int64
-	seekErr          error
-	readErrAfterSeek error
-	didSeek          bool
-}
-
-func (f *fakeTranscriptFile) Read(p []byte) (int, error) {
-	if f.didSeek && f.readErrAfterSeek != nil {
-		return 0, f.readErrAfterSeek
-	}
-
-	if f.offset >= int64(len(f.data)) {
-		return 0, io.EOF
-	}
-
-	n := copy(p, f.data[f.offset:])
-	f.offset += int64(n)
-
-	return n, nil
-}
-
-func (f *fakeTranscriptFile) Seek(offset int64, whence int) (int64, error) {
-	if f.seekErr != nil {
-		return 0, f.seekErr
-	}
-
-	switch whence {
-	case io.SeekStart:
-		f.offset = offset
-	case io.SeekCurrent:
-		f.offset += offset
-	case io.SeekEnd:
-		f.offset = int64(len(f.data)) + offset
-	}
-
-	f.didSeek = true
-
-	return f.offset, nil
-}
-
-func (*fakeTranscriptFile) Close() error {
-	return nil
 }
 
 func writeTestTranscript(t *testing.T, home string, cwd string, sessionID string, lines []string) string {

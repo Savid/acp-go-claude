@@ -92,7 +92,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	bare := flags.Bool("claude-bare", false, "launch Claude sessions with --bare; requires API-key or apiKeyHelper auth")
 	permissionMode := flags.String("claude-permission-mode", "", "default Claude permission mode")
 	systemPrompt := flags.String("claude-system-prompt", "", "default Claude system prompt")
-	hideClaudeAuth := flags.Bool("claude-hide-auth", false, "hide Claude subscription terminal auth methods")
+	hideClaudeAuth := flags.Bool("claude-hide-auth", false,
+		"withdraw the Claude subscription sign-in from the advertised auth catalog")
 	seedFiles := &seedFileFlag{}
 	flags.Var(seedFiles, "seed-file", "seed file written into the Claude config dir as <relpath>=<hostpath>; repeatable")
 	settingsFile := flags.String("claude-settings-file", "", "settings overlay relpath under the Claude config dir passed as --settings; requires -home")

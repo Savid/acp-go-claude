@@ -54,7 +54,7 @@ func TestWorkflowLaunchResultSuppression(t *testing.T) {
 			})
 
 			require.Len(t, updates, 1)
-			require.True(t, tracker.HasTracked())
+			require.Positive(t, tracker.Tracked())
 			require.True(t, tracker.HasActive())
 			update := updates[0].ToolCallUpdate
 			require.Equal(t, acp.ToolCallId("workflow-1"), update.ToolCallId)
@@ -140,6 +140,8 @@ func TestWorkflowTaskStartedInProgress(t *testing.T) {
 	require.Equal(t, "local_workflow", workflow[keyTaskType])
 	require.Equal(t, toolWorkflow, requireClaudeMeta(t, update.Meta)[keyToolName])
 	require.True(t, tracker.HasActive())
+	require.Equal(t, 1, tracker.Tracked())
+	require.Zero(t, (*WorkflowTracker)(nil).Tracked())
 }
 
 func TestWorkflowProgressAccumulatesTopologyByIndex(t *testing.T) {
@@ -240,7 +242,7 @@ func TestWorkflowTerminalStatuses(t *testing.T) {
 				require.Equal(t, *tt.wantStatus, *updates[0].ToolCallUpdate.Status)
 			}
 			require.Equal(t, tt.status, requireWorkflowMeta(t, updates[0].ToolCallUpdate.Meta)[keyStatus])
-			require.True(t, tracker.HasTracked())
+			require.Positive(t, tracker.Tracked())
 			require.Equal(t, tt.wantStatus == nil || *tt.wantStatus == acp.ToolCallStatusInProgress, tracker.HasActive())
 		})
 	}

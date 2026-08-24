@@ -35,6 +35,27 @@ func TestAuthMethodsEnumeratesThePinnedCatalog(t *testing.T) {
 	require.NotEqual(t, methods.Generation, second)
 }
 
+// TestHideAuthWithdrawsTheSubscriptionSignIn pins both halves of the
+// suppression: the withdrawn method is never published, and it is not
+// authorizable either, because authorize resolves ids against the catalog the
+// generation published.
+func TestHideAuthWithdrawsTheSubscriptionSignIn(t *testing.T) {
+	broker, sessionID := newAuthBroker(t, WithClaudeHideAuth(true))
+
+	result, err := broker.methods(t.Context(), authParams(t, map[string]any{"sessionId": string(sessionID)}))
+	require.NoError(t, err)
+
+	methods, ok := result.(authMethodsResult)
+	require.True(t, ok)
+	require.Equal(t, []authMethodEntry{
+		{ID: authMethodSetupToken, Type: authMethodTypeAPI, Label: authMethodSetupTokenLabel},
+		{ID: authMethodAPIKey, Type: authMethodTypeAPI, Label: authMethodAPIKeyLabel},
+	}, methods.Providers[authProviderID])
+
+	_, err = broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, methods.Generation)))
+	requireInvalidAuthField(t, err, authFieldMethod)
+}
+
 func TestAuthMethodsRejectsAddressingFailures(t *testing.T) {
 	broker, _ := newAuthBroker(t)
 

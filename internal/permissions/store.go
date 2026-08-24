@@ -182,7 +182,7 @@ func (s Store) readAll(ctx context.Context) (map[string]map[string]string, error
 
 	var all map[string]map[string]string
 	if err := json.Unmarshal(data, &all); err != nil {
-		backup, backupErr := backupCorruptPermissionRules(path)
+		_, backupErr := backupCorruptPermissionRules(path)
 		if backupErr != nil {
 			return nil, fmt.Errorf("backup corrupt permission rules after decode failure: %w", backupErr)
 		}
@@ -190,9 +190,7 @@ func (s Store) readAll(ctx context.Context) (map[string]map[string]string, error
 		slog.WarnContext(
 			ctx,
 			"ignoring corrupt permission rules",
-			slog.String("path", path),
-			slog.String("backup", backup),
-			slog.String("decode_error", err.Error()),
+			slog.String("stage", "permission_rules_decode"),
 		)
 
 		return make(map[string]map[string]string), nil

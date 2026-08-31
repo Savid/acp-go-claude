@@ -132,15 +132,11 @@ func (c *Client) Start(ctx context.Context) error {
 	// Start and initialize.
 	runCtx, cancel := context.WithCancel(context.Background())
 
-	spawnStarted := time.Now()
 	if err := c.transport.Start(runCtx); err != nil {
-		c.observeStartupStage(ctx, "spawn", spawnStarted, err)
 		cancel()
 
 		return err
 	}
-
-	c.observeStartupStage(ctx, "spawn", spawnStarted, nil)
 
 	controller := NewController(c.log, clientControllerTransport{Transport: c.transport, close: c.closeTransport})
 	controller.SetHandlerTimeout(c.options.ControlHandlerTimeout)
@@ -168,10 +164,7 @@ func (c *Client) Start(ctx context.Context) error {
 		timeout = defaultInitializeTimeout
 	}
 
-	readinessStarted := time.Now()
 	resp, err := controller.SendRequest(ctx, "initialize", map[string]any{"hooks": c.options.Hooks.toPayload()}, timeout)
-	c.observeStartupStage(ctx, "readiness", readinessStarted, err)
-
 	if err != nil {
 		cancel()
 
@@ -184,12 +177,6 @@ func (c *Client) Start(ctx context.Context) error {
 	c.setInitializeInfo(parseInitializeInfo(resp.Response[keyResponse]))
 
 	return nil
-}
-
-func (c *Client) observeStartupStage(ctx context.Context, stage string, started time.Time, err error) {
-	if c.options.ObserveStartupStage != nil {
-		c.options.ObserveStartupStage(ctx, stage, time.Since(started), err)
-	}
 }
 
 func (c *Client) closeTransportDebug(ctx context.Context, reason string) error {

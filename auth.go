@@ -138,6 +138,10 @@ type providerAuth struct {
 	retired    map[authFlowKey]map[string]struct{}
 	admissions map[authFlowKey]*authGate
 	slots      map[string]*authGate
+
+	nativeTreeMu       sync.Mutex
+	nativeTreePrepared bool
+	nativeTreeUsers    int
 }
 
 type authFlowKey struct {

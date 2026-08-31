@@ -65,7 +65,7 @@ func (p *providerAuth) nativeOptions() (claude.Options, error) {
 	// The login leg materialises its browser shim under this parent, so a
 	// scratch root that cannot be created fails the leg rather than letting a
 	// child open the operator's browser.
-	scratch, err := ensureScratchParent(p.agent.options.ScratchDir)
+	scratch, err := p.agent.ensureScratchParent()
 	if err != nil {
 		return claude.Options{}, err
 	}
@@ -75,7 +75,7 @@ func (p *providerAuth) nativeOptions() (claude.Options, error) {
 		ClaudeHome:          p.home.path,
 		Env:                 p.agent.options.Env,
 		OrdinaryEnvironment: p.agent.ordinaryEnvironment(),
-		Authority:           p.agent.claudeAuthority(),
+		Authority:           p.claudeAuthority(),
 		ScratchParent:       scratch,
 	}, nil
 }
@@ -88,9 +88,13 @@ var errAuthHomeReplaced = errors.New("claude home no longer names the consented 
 // under. It answers only while the resolved home still names the directory
 // consent was granted over: a logout plus a keystore wipe cannot be undone, and
 // a directory swapped in under the running agent was never consented to.
-func (p *providerAuth) nativeRemovalOptions() (claude.Options, error) {
+func (p *providerAuth) nativeRemovalOptions(ctx context.Context) (claude.Options, error) {
 	options, err := p.nativeOptions()
 	if err != nil {
+		return claude.Options{}, err
+	}
+
+	if err := p.reclaimIdleNativeHome(ctx); err != nil {
 		return claude.Options{}, err
 	}
 
@@ -196,7 +200,7 @@ func (p *providerAuth) readAccount(ctx context.Context) (authAccountReading, str
 // an answer rather than a failure: a home that holds nothing exits non-zero and
 // there is nothing left to remove.
 func (p *providerAuth) nativeLogout(ctx context.Context) error {
-	options, err := p.nativeRemovalOptions()
+	options, err := p.nativeRemovalOptions(ctx)
 	if err != nil {
 		return authFailed(authRemovalCause(err), authProviderID, "", "")
 	}
@@ -215,7 +219,7 @@ func (p *providerAuth) nativeLogout(ctx context.Context) error {
 // removeKeystoreItems clears the current platform credential items native
 // logout may leave behind across both reachable name shapes.
 func (p *providerAuth) removeKeystoreItems(ctx context.Context) error {
-	options, err := p.nativeRemovalOptions()
+	options, err := p.nativeRemovalOptions(ctx)
 	if err != nil {
 		return authFailed(authRemovalCause(err), authProviderID, "", "")
 	}

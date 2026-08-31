@@ -186,19 +186,6 @@ func TestAdvertisedMediaTypesAreTheOnesTheGateAccepts(t *testing.T) {
 	require.Equal(t, "invalid_media_type", details["error"])
 }
 
-func TestInitializeAdvertisesHandoffOnlyWithARoot(t *testing.T) {
-	t.Parallel()
-
-	// Absence is the actionable signal that the host's option never arrived.
-	require.NotContains(t, initializeMeta(t), handoffMetaKey)
-
-	meta := initializeMeta(t, WithInputHandoffRoot(t.TempDir()))
-	require.Equal(t, map[string]any{metaVersionKey: 1}, meta[handoffMetaKey])
-
-	// The envelope is advertised either way.
-	require.Contains(t, meta, mediaEnvelopeMetaKey)
-}
-
 func TestInputHandoffRootMustBeAbsolute(t *testing.T) {
 	t.Parallel()
 

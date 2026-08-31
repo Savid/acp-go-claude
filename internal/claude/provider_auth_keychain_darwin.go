@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"time"
 )
 
@@ -25,24 +24,12 @@ func runAuthKeychainTool(ctx context.Context, args []string, options Options) (i
 
 func runContainedAuthKeychainTool(ctx context.Context, args []string, options Options) ([]byte, int, error) {
 	options.Cwd = "/"
+	options.ClaudeHome = ""
 	output, result, err := runNativeOutput(ctx, options, "security", args)
 	if err != nil {
 		return nil, 0, err
 	}
 	return output, result.ExitCode, nil
-}
-
-func authKeychainExitCode(err error) (int, error) {
-	if err == nil {
-		return 0, nil
-	}
-
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode(), nil
-	}
-
-	return 0, err
 }
 
 // authKeychainFlagService and authKeychainFlagAccount are the platform
@@ -60,15 +47,6 @@ var authKeychainReadTool = runAuthKeychainReadTool
 
 func runAuthKeychainReadTool(ctx context.Context, args []string, options Options) ([]byte, int, error) {
 	return runContainedAuthKeychainTool(ctx, args, options)
-}
-
-func authKeychainReadResult(output []byte, err error) ([]byte, int, error) {
-	code, launchErr := authKeychainExitCode(err)
-	if code != 0 || launchErr != nil {
-		return nil, code, launchErr
-	}
-
-	return output, 0, nil
 }
 
 // ReadAuthKeychainCredential answers with the composite OAuth credential blob

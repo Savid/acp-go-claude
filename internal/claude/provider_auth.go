@@ -39,6 +39,12 @@ const authLoginURLScheme = "https"
 const authCommand = "auth"
 const authStatus = "status"
 
+const (
+	envForceHyperlink = "FORCE_HYPERLINK"
+	envCustomOAuthURL = "CLAUDE_CODE_CUSTOM_OAUTH_URL"
+	envGoTraceback    = "GOTRACEBACK"
+)
+
 // authLoginNonURLLines is the exhaustive set of whole-line patterns that
 // classify a login line carrying no authorization URL: the blank padding, and
 // the two banners the harness writes ahead of the URL. Every pattern is
@@ -91,9 +97,9 @@ var ErrAuthLoginNoURL = errors.New("claude auth login presented no authorization
 // credential store, which every child that reads or writes it must agree on.
 var authScrubbedEnvNames = []string{
 	"TERM_PROGRAM",
-	"FORCE_HYPERLINK",
-	"CLAUDE_CODE_CUSTOM_OAUTH_URL",
-	"GOTRACEBACK",
+	envForceHyperlink,
+	envCustomOAuthURL,
+	envGoTraceback,
 }
 
 // authLoginReadLimit bounds the bytes read from one login child before the
@@ -466,19 +472,27 @@ func startAuthLoginChild(options Options) (login *AuthLogin, returnErr error) {
 
 	options.PreparedEnvironment = shim.environ(environment)
 	prepared := make([]string, 0, 2)
+	unsafePreparedRoot := false
 
 	if options.Authority != nil {
 		if options.Authority.PrepareNativeTree == nil {
 			return nil, errors.Join(authorityUnavailable(options.Authority), shim.remove())
 		}
 
-		for _, root := range []string{options.ClaudeHome, shim.dir} {
+		roots := []string{shim.dir}
+		if !options.TreePrepared {
+			roots = append([]string{options.ClaudeHome}, roots...)
+		}
+
+		for _, root := range roots {
 			if root == "" {
 				continue
 			}
 
 			if prepareErr := options.Authority.PrepareNativeTree(context.Background(), root); prepareErr != nil {
-				return nil, errors.Join(fmt.Errorf("prepare claude auth login native tree: %w", prepareErr), reclaimPreparedRoots(options.Authority, prepared), shim.remove())
+				unsafePreparedRoot = true
+
+				return nil, errors.Join(fmt.Errorf("prepare claude auth login native tree: %w", prepareErr), reclaimPreparedRoots(options.Authority, prepared))
 			}
 
 			prepared = append(prepared, root)
@@ -489,6 +503,10 @@ func startAuthLoginChild(options Options) (login *AuthLogin, returnErr error) {
 
 	defer func() {
 		if login == nil {
+			if unsafePreparedRoot {
+				return
+			}
+
 			reclaimErr := reclaimPreparedRoots(options.Authority, prepared)
 
 			returnErr = errors.Join(returnErr, reclaimErr)
@@ -500,6 +518,11 @@ func startAuthLoginChild(options Options) (login *AuthLogin, returnErr error) {
 
 	process, err := startNative(context.Background(), options, options.CLIPath, []string{authCommand, "login"})
 	if err != nil {
+		if options.Authority != nil &&
+			(errors.Is(err, options.Authority.Unavailable) || errors.Is(err, options.Authority.ContainmentIncomplete)) {
+			unsafePreparedRoot = true
+		}
+
 		return nil, fmt.Errorf("start claude auth login: %w", err)
 	}
 
@@ -571,8 +594,23 @@ func (l *AuthLogin) Close() error {
 
 		cancel()
 
-		_, waitErr := l.process.Wait(context.Background())
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), authShutdownWait)
+		waitErr := l.reap(waitCtx)
+
+		cancelWait()
+
+		if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
+			waitErr = containmentIncomplete(l.options.Authority, "wait for claude auth login", waitErr)
+		} else if waitErr != nil && l.options.Authority != nil &&
+			!errors.Is(waitErr, l.options.Authority.ContainmentIncomplete) {
+			waitErr = containmentIncomplete(l.options.Authority, "wait for claude auth login", waitErr)
+		}
+
 		l.closeErr = errors.Join(revokeErr, waitErr, stdoutErr)
+		if waitErr != nil {
+			return
+		}
+
 		reclaimErr := reclaimPreparedRoots(l.options.Authority, l.prepared)
 
 		l.closeErr = errors.Join(l.closeErr, reclaimErr)
@@ -617,9 +655,11 @@ func reclaimNativeTree(authority *NativeAuthority, root string) error {
 	return nil
 }
 
-// reap collects the result of the child's own exit. That exit is already being
-// observed, and it is the only wait on this child, so the fence takes its result
-// rather than starting a second one. The bound matters because the boundary has
-// just been asked to stop the child: a boundary that reports quiescence has
-// reaped it too, so waiting past the fence's own window would be waiting on a
-// boundary that already failed and said so.
+func (l *AuthLogin) reap(ctx context.Context) error {
+	select {
+	case <-l.exitDone:
+		return l.exitErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}

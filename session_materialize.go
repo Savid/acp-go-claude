@@ -143,7 +143,7 @@ func (a *Agent) materializeStoreSessionWithEntries(
 		return noMaterializedSession()
 	}
 
-	scratchDir, err := ensureScratchParent(a.options.ScratchDir)
+	scratchDir, err := a.ensureScratchParent()
 	if err != nil {
 		return nil, err
 	}

@@ -28,10 +28,13 @@ func ensureScratchParent(dir string) (string, error) {
 	return parent, nil
 }
 
-func createImageScratchDir(dir string) (string, error) {
-	parent, err := ensureScratchParent(dir)
-	if err != nil {
-		return "", err
+func (a *Agent) ensureScratchParent() (string, error) {
+	return ensureScratchParent(a.options.ScratchDir)
+}
+
+func createImageScratchDir(parent string) (string, error) {
+	if parent == "" {
+		return "", fmt.Errorf("create image scratch dir: empty scratch parent")
 	}
 
 	path, err := imageScratchMkdirTemp(parent, "acp-go-claude-images-*")

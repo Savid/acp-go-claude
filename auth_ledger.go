@@ -369,6 +369,12 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 		return nil, sessionErr
 	}
 
+	releaseSlot, admitted := p.admitSlot(ctx)
+	if !admitted {
+		return nil, authFailed(authCauseTimeout, "", "", "")
+	}
+	defer releaseSlot()
+
 	records, err := p.ledger.list()
 	if err != nil {
 		return nil, authFailed(authCauseHarvestFailed, "", "", "")

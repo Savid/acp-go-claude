@@ -6,9 +6,16 @@ description: "Command-line flags accepted by acp-go-claude"
 `acp-go-claude` speaks ACP over stdin/stdout. Flags use Go's single-dash
 syntax.
 
+## Invocation
+
 ```sh
 acp-go-claude -path /usr/local/bin/claude -home /tmp/claude-home -model sonnet
 ```
+
+The command reads ACP requests from standard input, writes ACP responses and
+notifications to standard output, and reserves standard error for diagnostics.
+
+## Flags
 
 | Flag | Meaning |
 | --- | --- |
@@ -27,5 +34,9 @@ acp-go-claude -path /usr/local/bin/claude -home /tmp/claude-home -model sonnet
 | `-debug` | Write debug logs to stderr. |
 | `-version` | Print the adapter version and exit. |
 
+## Execution boundary
+
 The standalone command uses ordinary same-identity native execution. Hosts that
 provide a native authority embed the Go package and use `WithHostAuthority`.
+The command-line surface does not accept native-authority configuration; that
+boundary is an in-process Go API.

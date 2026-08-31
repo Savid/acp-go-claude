@@ -48,9 +48,6 @@ type Options struct {
 
 	InitializeTimeout     time.Duration
 	ControlHandlerTimeout time.Duration
-	// ObserveStartupStage receives exact spawn/readiness durations. It is
-	// observational only and must not influence startup control flow.
-	ObserveStartupStage func(context.Context, string, time.Duration, error)
 
 	PermissionHandler  PermissionHandler
 	ElicitationHandler ElicitationHandler

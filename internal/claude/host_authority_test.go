@@ -17,8 +17,13 @@ type authorityTestWriteCloser struct{ bytes.Buffer }
 
 func (*authorityTestWriteCloser) Close() error { return nil }
 
+type authorityTestCloseFunc func() error
+
+func (authorityTestCloseFunc) Write(data []byte) (int, error) { return len(data), nil }
+func (f authorityTestCloseFunc) Close() error                 { return f() }
+
 type authorityTestProcess struct {
-	stdin  *authorityTestWriteCloser
+	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr io.ReadCloser
 	wait   func(context.Context) (NativeResult, error)
@@ -133,6 +138,99 @@ func TestProcessTransportCloseUsesProtocolThenRevokeAndWait(t *testing.T) {
 	require.Equal(t, int32(1), revokeCalls.Load())
 }
 
+func TestProcessTransportCloseDeliversBufferedTerminalResultBeforeReturning(t *testing.T) {
+	priorProbe := claudeVersionProbe
+	claudeVersionProbe = func(context.Context, Options) error { return nil }
+	t.Cleanup(func() { claudeVersionProbe = priorProbe })
+
+	stdout, output := io.Pipe()
+	terminal := make(chan struct{})
+	var terminalOnce sync.Once
+	var waitCalls atomic.Int32
+	process := &authorityTestProcess{
+		stdin:  nil,
+		stdout: stdout,
+		stderr: io.NopCloser(bytes.NewReader(nil)),
+		wait: func(ctx context.Context) (NativeResult, error) {
+			waitCalls.Add(1)
+			select {
+			case <-terminal:
+				return NativeResult{}, nil
+			case <-ctx.Done():
+				return NativeResult{}, ctx.Err()
+			}
+		},
+		revoke: func(context.Context) error { return errors.New("unexpected revoke") },
+	}
+	process.stdin = authorityTestCloseFunc(func() error {
+		_, writeErr := io.WriteString(output, "{\"type\":\"result\",\"result\":\"done\"}\n")
+		closeErr := output.Close()
+		terminalOnce.Do(func() { close(terminal) })
+
+		return errors.Join(writeErr, closeErr)
+	})
+	authority := &NativeAuthority{
+		NativeEnvironment: func() map[string]string { return map[string]string{"PATH": "/native/bin"} },
+		StartNative:       func(context.Context, NativeRequest) (NativeProcess, error) { return process, nil },
+	}
+	transport := NewProcessTransport(nil, Options{CLIPath: "claude", Authority: authority})
+	require.NoError(t, transport.Start(t.Context()))
+	events := transport.Events(t.Context())
+
+	closed := make(chan error, 1)
+	go func() { closed <- transport.Close() }()
+
+	event := <-events
+	require.Equal(t, "result", event.Message["type"])
+	require.Equal(t, "done", event.Message["result"])
+	require.NoError(t, <-closed)
+	require.Equal(t, int32(1), waitCalls.Load())
+	_, ok := <-events
+	require.False(t, ok)
+}
+
+func TestProcessTransportRevokeCallerTimeoutDoesNotOverrideEventualTerminalWait(t *testing.T) {
+	priorGrace, priorShutdown := processExitGracePeriod, processShutdownWaitDelay
+	processExitGracePeriod, processShutdownWaitDelay = time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { processExitGracePeriod, processShutdownWaitDelay = priorGrace, priorShutdown })
+
+	terminal := make(chan struct{})
+	var revokeOnce sync.Once
+	process := &authorityTestProcess{
+		stdin: &authorityTestWriteCloser{}, stdout: io.NopCloser(bytes.NewReader(nil)), stderr: io.NopCloser(bytes.NewReader(nil)),
+		wait: func(ctx context.Context) (NativeResult, error) {
+			select {
+			case <-terminal:
+				return NativeResult{Revoked: true}, nil
+			case <-ctx.Done():
+				return NativeResult{}, ctx.Err()
+			}
+		},
+		revoke: func(ctx context.Context) error {
+			revokeOnce.Do(func() {
+				go func() {
+					time.Sleep(75 * time.Millisecond)
+					close(terminal)
+				}()
+			})
+			<-ctx.Done()
+
+			return ctx.Err()
+		},
+	}
+	incomplete := errors.New("containment incomplete sentinel")
+	transport := &ProcessTransport{
+		options: Options{Authority: &NativeAuthority{ContainmentIncomplete: incomplete}},
+		process: process,
+		stdin:   process.stdin,
+		stdout:  process.stdout,
+		stderr:  process.stderr,
+	}
+	err := transport.Close()
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotErrorIs(t, err, incomplete)
+}
+
 func TestRunNativeOutputPreparesRevokesWaitsAndReclaims(t *testing.T) {
 	unavailable := errors.New("unavailable sentinel")
 	incomplete := errors.New("incomplete sentinel")
@@ -196,7 +294,35 @@ func TestRunNativeOutputPreparesRevokesWaitsAndReclaims(t *testing.T) {
 	_, result, err := runNativeOutput(ctx, Options{CLIPath: "claude", ClaudeHome: "/native/home", Authority: authority}, "claude", []string{"auth", "status"})
 	require.ErrorIs(t, err, context.Canceled)
 	require.True(t, result.Revoked)
-	require.Equal(t, []string{"prepare", "start", "wait-canceled", "revoke", "wait-terminal", "reclaim"}, events)
+	require.Equal(t, []string{"prepare", "start", "revoke", "wait-terminal", "reclaim"}, events)
+}
+
+func TestRunNativeOutputRecoversStreamReaderPanics(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		stdout io.ReadCloser
+		stderr io.ReadCloser
+		want   error
+	}{
+		{name: "stdout", stdout: transportPanicReader{}, stderr: io.NopCloser(bytes.NewReader(nil)), want: errClaudeStdoutReaderPanic},
+		{name: "stderr", stdout: io.NopCloser(bytes.NewReader(nil)), stderr: transportPanicReader{}, want: errClaudeTransportFailure},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			authority := &NativeAuthority{
+				NativeEnvironment: func() map[string]string { return map[string]string{"PATH": "/native/bin"} },
+				StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+					return &authorityTestProcess{
+						stdin: &authorityTestWriteCloser{}, stdout: test.stdout, stderr: test.stderr,
+						wait:   func(context.Context) (NativeResult, error) { return NativeResult{}, nil },
+						revoke: func(context.Context) error { return nil },
+					}, nil
+				},
+			}
+
+			_, _, err := runNativeOutput(t.Context(), Options{Authority: authority, TreePrepared: true}, "claude", nil)
+			require.ErrorIs(t, err, test.want)
+		})
+	}
 }
 
 func TestManagedNativeFailuresUseConfiguredSentinel(t *testing.T) {

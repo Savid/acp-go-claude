@@ -468,6 +468,27 @@ func requireCancelledCloseRefusal(t *testing.T, ctx context.Context, err error) 
 	require.Equal(t, "Request cancelled", mapped.Message)
 }
 
+func requireExpiredCloseRefusal(t *testing.T, ctx context.Context, err error) {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, -32600, reqErr.Code)
+	require.Equal(t, "Invalid request", reqErr.Message)
+
+	data, ok := reqErr.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "claude_session_close_unsettled", data[jsonFieldError])
+	require.Equal(t, "session close did not reach its settlement barrier", data[jsonFieldMessage])
+	mapped := requestError(ctx, err)
+	require.Equal(t, -32603, mapped.Code)
+	mappedData, ok := mapped.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "request_deadline_exceeded", mappedData[jsonFieldError])
+	require.Equal(t, "deadline", mappedData["class"])
+}
+
 // TestCloseSessionKeepsAnUnsettledSessionAddressable proves removal follows the
 // settlement barrier and not the request: a close whose caller expired contained
 // nothing, so the id keeps the live session and the next close settles it.
@@ -518,8 +539,6 @@ func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
 // memoized. The next close retakes the boundary, completes the rung, and only
 // then does the id stop resolving — dropping it on the first failure would leave
 // the host holding the only name for what this adapter had not finished.
-//
-// The scratch reservation is returned exactly once, after deletion succeeds.
 func TestFailedCloseRetriesItsBoundaryOnTheNextClose(t *testing.T) {
 	previous := sessionRemoveAll
 	t.Cleanup(func() { sessionRemoveAll = previous })
@@ -533,9 +552,6 @@ func TestFailedCloseRetriesItsBoundaryOnTheNextClose(t *testing.T) {
 	require.NoError(t, os.Mkdir(mcp, 0o700))
 	session.mcpConfigDir = mcp
 
-	scratchReleases := 0
-	session.scratchRootRelease = func() { scratchReleases++ }
-
 	removeErr := errors.New("delete MCP root")
 	sessionRemoveAll = func(string) error { return removeErr }
 
@@ -545,14 +561,11 @@ func TestFailedCloseRetriesItsBoundaryOnTheNextClose(t *testing.T) {
 	held, lookupErr := agent.session(sessionID)
 	require.NoError(t, lookupErr, "a close that failed a rung of its boundary keeps its id addressable")
 	require.Same(t, session, held)
-	require.Zero(t, scratchReleases, "the reservation survives the deletion the close still owes it")
-
 	sessionRemoveAll = previous
 
 	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
 	require.NoError(t, err, "the next close retakes the boundary rather than replaying a memoized failure")
 	require.NoDirExists(t, mcp, "the rung the first close failed is the one the retry completes")
-	require.Equal(t, 1, scratchReleases)
 
 	_, lookupErr = agent.session(sessionID)
 	require.Error(t, lookupErr, "a completed boundary removes the id")
@@ -646,6 +659,22 @@ func TestDeleteSessionTombstonesBeforeItTearsAnythingDown(t *testing.T) {
 	entries, err = backing.Load(ctx, key)
 	require.NoError(t, err)
 	require.Empty(t, entries, "no write behind the tombstone recreates the row")
+}
+
+func TestManagedDeleteNeverReopensTheNativeTranscriptHome(t *testing.T) {
+	authority := newFakeHostAuthority()
+	agent := NewAgent(WithSessionStore(NewInMemorySessionStore()), WithHostAuthority(authority))
+
+	previousDelete := deleteNativeTranscript
+	t.Cleanup(func() { deleteNativeTranscript = previousDelete })
+	deleteNativeTranscript = func(context.Context, string, string) error {
+		t.Fatal("managed delete reopened the native transcript home")
+
+		return nil
+	}
+
+	_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest("managed-session"))
+	require.NoError(t, err)
 }
 
 // TestRemoveSessionEvictsOnlyASettledSession proves the internal cleanup path

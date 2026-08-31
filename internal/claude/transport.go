@@ -54,9 +54,12 @@ type ProcessTransport struct {
 	eventsStarted  bool
 	closed         bool
 	waitOnce       sync.Once
+	waitDone       chan struct{}
 	waitResult     NativeResult
 	waitErr        error
-	stderrWG       sync.WaitGroup
+	stderrDone     chan struct{}
+	stderrErr      error
+	eventsDone     chan struct{}
 	malformedLines atomic.Uint64
 }
 
@@ -84,6 +87,9 @@ func (t *ProcessTransport) Start(ctx context.Context) error {
 	t.stdin = process.Stdin()
 	t.stdout = process.Stdout()
 	t.stderr = process.Stderr()
+	t.mu.Lock()
+	t.waitDone = make(chan struct{})
+	t.mu.Unlock()
 
 	return nil
 }
@@ -140,60 +146,136 @@ func (t *ProcessTransport) Events(ctx context.Context) <-chan TransportEvent {
 	}
 
 	t.eventsStarted = true
+	t.eventsDone = make(chan struct{})
+
 	if t.stderr != nil {
-		t.stderrWG.Add(1)
-		go func() { defer t.stderrWG.Done(); t.drainStderr() }()
+		t.stderrDone = make(chan struct{})
+
+		stderrDone := t.stderrDone
+		go func() {
+			defer close(stderrDone)
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.mu.Lock()
+					t.stderrErr = errClaudeTransportFailure
+					t.mu.Unlock()
+					handleClaudeGoroutinePanic(ctx, t.log, "stderr drain", nil, recovered)
+				}
+			}()
+
+			t.drainStderr()
+		}()
 	}
+
+	eventsDone := t.eventsDone
 	t.mu.Unlock()
 
-	events := make(chan TransportEvent)
+	events := make(chan TransportEvent, 1)
 	// #nosec G118 -- terminal Wait deliberately outlives event-delivery cancellation.
 	go func() {
 		defer close(events)
+		defer close(eventsDone)
 
-		scanner := bufio.NewScanner(t.stdout)
-		scanner.Buffer(nil, maxJSONLineBytes)
-
-		deliver := true
-
-		for scanner.Scan() {
-			line := bytes.TrimSpace(scanner.Bytes())
-			if len(line) == 0 || line[0] != '{' {
-				continue
-			}
-
-			var message map[string]any
-			if err := json.Unmarshal(line, &message); err != nil {
-				t.malformedLines.Add(1)
-
-				continue
-			}
-
-			message[rawJSONInternalKey] = string(line)
-
-			if deliver {
-				select {
-				case events <- TransportEvent{Message: message}:
-				case <-ctx.Done():
-					deliver = false
-				}
-			}
-		}
-
-		terminal := scanner.Err()
+		terminal, deliver := t.scanEvents(ctx, events)
 
 		result, waitErr := t.wait(context.Background())
 		if waitErr == nil && result.ExitCode != 0 {
 			waitErr = &ProcessExitError{ExitCode: result.ExitCode}
 		}
 
-		terminal = errors.Join(terminal, waitErr)
+		t.mu.Lock()
+		stderrDone := t.stderrDone
+		stderr := t.stderr
+		t.mu.Unlock()
+
+		if stderrDone != nil {
+			select {
+			case <-stderrDone:
+			case <-time.After(nativeOutputDrainDelay):
+				terminal = errors.Join(terminal, closeNativeStream(stderr))
+
+				select {
+				case <-stderrDone:
+				case <-time.After(nativeOutputDrainDelay):
+					terminal = errors.Join(terminal, errClaudeTransportFailure)
+				}
+			}
+		}
+
+		t.mu.Lock()
+		stderrErr := t.stderrErr
+		t.mu.Unlock()
+
+		terminal = errors.Join(terminal, waitErr, stderrErr)
+
+		if ctx.Err() != nil {
+			deliver = false
+		}
+
 		if terminal != nil && deliver {
-			events <- TransportEvent{Err: terminal}
+			select {
+			case events <- TransportEvent{Err: terminal}:
+			case <-ctx.Done():
+			}
 		}
 	}()
 
 	return events
+}
+
+func (t *ProcessTransport) scanEvents(ctx context.Context, events chan<- TransportEvent) (terminal error, deliver bool) {
+	deliver = true
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			terminal = errors.Join(terminal, errClaudeStdoutReaderPanic)
+
+			handleClaudeGoroutinePanic(ctx, t.log, "stdout reader", nil, recovered)
+		}
+	}()
+
+	scanner := bufio.NewScanner(t.stdout)
+
+	initialBuffer := 64 * 1024
+	if maxJSONLineBytes < initialBuffer {
+		initialBuffer = maxJSONLineBytes
+	}
+
+	scanner.Buffer(make([]byte, 0, initialBuffer), maxJSONLineBytes)
+
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+
+		var message map[string]any
+		if err := json.Unmarshal(line, &message); err != nil {
+			count := t.malformedLines.Add(1)
+			if t.log != nil {
+				t.log.DebugContext(ctx, "skip malformed claude json line",
+					slog.Int("bytes", len(line)), slog.Uint64("malformed_lines", count))
+			}
+
+			continue
+		}
+
+		message[rawJSONInternalKey] = string(line)
+
+		if deliver {
+			select {
+			case events <- TransportEvent{Message: message}:
+			case <-ctx.Done():
+				deliver = false
+			}
+		}
+	}
+
+	if scanner.Err() != nil {
+		terminal = errClaudeStdoutRead
+	}
+
+	return terminal, deliver
 }
 
 func closedTransportEvents(err error) <-chan TransportEvent {
@@ -210,12 +292,21 @@ func (t *ProcessTransport) wait(ctx context.Context) (NativeResult, error) {
 		return NativeResult{}, nil
 	}
 
-	done := make(chan struct{})
+	t.mu.Lock()
+	if t.waitDone == nil {
+		t.waitDone = make(chan struct{})
+	}
 
-	go func() {
-		t.waitOnce.Do(func() { t.waitResult, t.waitErr = t.process.Wait(context.Background()) })
-		close(done)
-	}()
+	done := t.waitDone
+	t.mu.Unlock()
+
+	t.waitOnce.Do(func() {
+		go func() {
+			t.waitResult, t.waitErr = t.process.Wait(context.Background())
+
+			close(done)
+		}()
+	})
 
 	select {
 	case <-done:
@@ -247,7 +338,7 @@ func (t *ProcessTransport) Close() error {
 		t.closeErr = t.closeStdin()
 		if t.process != nil {
 			grace, cancelGrace := context.WithTimeout(context.Background(), processExitGracePeriod)
-			_, waitErr := t.process.Wait(grace)
+			_, waitErr := t.wait(grace)
 
 			cancelGrace()
 
@@ -257,17 +348,66 @@ func (t *ProcessTransport) Close() error {
 
 				cancelRevoke()
 
-				_, waitErr = t.process.Wait(context.Background())
+				terminalCtx, cancelTerminal := context.WithTimeout(context.Background(), processShutdownWaitDelay)
+				_, waitErr = t.wait(terminalCtx)
+
+				cancelTerminal()
+
+				if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
+					waitErr = containmentIncomplete(t.options.Authority, "wait for revoked Claude process", waitErr)
+				}
+
 				t.closeErr = errors.Join(t.closeErr, revokeErr)
+			}
+
+			if waitErr != nil && t.options.Authority != nil &&
+				!errors.Is(waitErr, t.options.Authority.ContainmentIncomplete) {
+				waitErr = containmentIncomplete(t.options.Authority, "wait for Claude process", waitErr)
 			}
 
 			t.closeErr = errors.Join(t.closeErr, waitErr)
 		}
 
-		t.stderrWG.Wait()
+		t.mu.Lock()
+		eventsDone := t.eventsDone
+		stdout := t.stdout
+		stderr := t.stderr
+		stderrDone := t.stderrDone
+		t.mu.Unlock()
+
+		if eventsDone != nil {
+			select {
+			case <-eventsDone:
+			case <-time.After(nativeOutputDrainDelay):
+				if stdout != nil {
+					t.closeErr = errors.Join(t.closeErr, closeNativeStream(stdout))
+				}
+			}
+		}
+
+		if stderr != nil {
+			t.closeErr = errors.Join(t.closeErr, closeNativeStream(stderr))
+		}
+
+		if stderrDone != nil {
+			select {
+			case <-stderrDone:
+			case <-time.After(nativeOutputDrainDelay):
+				t.closeErr = errors.Join(t.closeErr, errClaudeTransportFailure)
+			}
+		}
 	})
 
 	return t.closeErr
+}
+
+func closeNativeStream(stream io.Closer) error {
+	err := stream.Close()
+	if errors.Is(err, os.ErrClosed) {
+		return nil
+	}
+
+	return err
 }
 
 type writeDeadliner interface{ SetWriteDeadline(time.Time) error }

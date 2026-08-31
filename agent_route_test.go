@@ -156,10 +156,14 @@ func TestRouteEnvelopeHardCutover(t *testing.T) {
 	require.ErrorContains(t, err, "entropy")
 }
 
-func TestInitializeAdvertisesRouteV1(t *testing.T) {
+func TestRouteCapabilityScalar(t *testing.T) {
 	resp, err := NewAgent().Initialize(context.Background(), acp.InitializeRequest{})
 	require.NoError(t, err)
-	require.Equal(t, map[string]any{"version": 1}, resp.AgentCapabilities.Meta[routeMetaKey])
+
+	route, ok := resp.AgentCapabilities.Meta["acp-go.dev/route"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, 1, route["version"])
+	require.Len(t, route, 1)
 }
 
 func TestPromptAndActiveCancelRequireCurrentRoute(t *testing.T) {

@@ -82,7 +82,7 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 		Authority:           a.claudeAuthority(),
 	}
 	if a.options.hostAuthoritySet {
-		parent, parentErr := ensureScratchParent(a.options.ScratchDir)
+		parent, parentErr := a.ensureScratchParent()
 		if parentErr != nil {
 			return RateLimitsResponse{}, parentErr
 		}

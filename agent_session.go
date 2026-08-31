@@ -20,8 +20,7 @@ import (
 )
 
 var (
-	mapMCPServersToClaude      = mapper.MCPServersToClaude
-	sessionEnsureScratchParent = ensureScratchParent
+	mapMCPServersToClaude = mapper.MCPServersToClaude
 )
 
 // NewSession creates and starts a Claude CLI session.
@@ -894,7 +893,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		return nil, unknownSessionError()
 	}
 
-	scratchRelease, err := reserveScratchRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
+	scratchParent, err := a.ensureScratchParent()
 	if err != nil {
 		return nil, err
 	}
@@ -917,9 +916,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 			closeErr = cleanupClient.Close()
 		}
 
-		err = finalizeSessionRuntimeResources(
-			errors.Join(err, closeErr), mcpConfigDir, imageScratchDir, materialized, scratchRelease,
-		)
+		err = finalizeSessionRuntimeResources(errors.Join(err, closeErr), mcpConfigDir, imageScratchDir, materialized)
 	}()
 
 	claudeHome, err := canonicalClaudeHome(a.options.Home)
@@ -927,7 +924,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		return nil, err
 	}
 
-	imageScratchDir, err = createImageScratchDir(a.options.ScratchDir)
+	imageScratchDir, err = createImageScratchDir(scratchParent)
 	if err != nil {
 		return nil, err
 	}
@@ -979,12 +976,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	}
 
 	if materialized == nil && a.options.hostAuthoritySet {
-		parent, parentErr := sessionEnsureScratchParent(a.options.ScratchDir)
-		if parentErr != nil {
-			return nil, parentErr
-		}
-
-		isolatedHome, createErr := materializeMkdirTemp(parent, "acp-go-claude-home-*")
+		isolatedHome, createErr := materializeMkdirTemp(scratchParent, "acp-go-claude-home-*")
 		if createErr != nil {
 			return nil, fmt.Errorf("create isolated Claude home: %w", createErr)
 		}
@@ -1005,10 +997,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		return nil, err
 	}
 
-	configurationStarted := time.Now()
-	mcpConfigPath, mcpConfigDir, err := writeSessionMCPConfig(a.options.ScratchDir, mcpConfig)
-	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession, RuntimeStartupConfiguration, configurationStarted, err)
-
+	mcpConfigPath, mcpConfigDir, err := writeSessionMCPConfig(scratchParent, mcpConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -1072,13 +1061,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		SettingsFile:            settingsFileArg,
 		InitializeTimeout:       a.options.InitializeTimeout,
 		ControlHandlerTimeout:   a.options.ControlHandlerTimeout,
-		ObserveStartupStage: func(stageCtx context.Context, stage string, elapsed time.Duration, stageErr error) {
-			observe := a.options.RuntimeResourceHooks.ObserveStartupStage
-			if observe != nil {
-				observe(stageCtx, RuntimeResourceSession, RuntimeStartupStage(stage), elapsed, stageErr)
-			}
-		},
-		SessionMirror: true,
+		SessionMirror:           true,
 		Hooks: claude.Hooks{
 			claude.HookEventPostToolUse: {
 				{
@@ -1109,7 +1092,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		materialized:          materialized,
 		mcpConfigDir:          mcpConfigDir,
 		imageScratchDir:       imageScratchDir,
-		scratchRootRelease:    scratchRelease,
 		imageArtifacts:        imageArtifacts,
 		toolContent:           make(map[acp.ToolCallId][]acp.ToolCallContent),
 		emittedAgentImages:    make(map[string]struct{}),

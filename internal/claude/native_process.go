@@ -82,3 +82,11 @@ func authorityUnavailable(authority *NativeAuthority) error {
 
 	return errors.New("host authority unavailable")
 }
+
+func containmentIncomplete(authority *NativeAuthority, operation string, cause error) error {
+	if authority != nil && authority.ContainmentIncomplete != nil {
+		return fmt.Errorf("%w: %s: %w", authority.ContainmentIncomplete, operation, cause)
+	}
+
+	return fmt.Errorf("native containment incomplete: %s: %w", operation, cause)
+}

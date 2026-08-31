@@ -7,12 +7,18 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
 
 func startOrdinaryNative(executable string, arguments []string, environment []string, cwd string) (NativeProcess, error) {
-	command := exec.Command(executable, arguments...) // #nosec G702 -- ordinary mode intentionally uses the operator-selected executable.
+	resolved, err := resolveOrdinaryExecutable(executable, environment)
+	if err != nil {
+		return nil, err
+	}
+
+	command := exec.Command(resolved, arguments...) // #nosec G702 -- ordinary mode intentionally uses the statically resolved operator-selected executable.
 	command.Dir = cwd
 	command.Env = environment
 
@@ -49,6 +55,72 @@ func startOrdinaryNative(executable string, arguments []string, environment []st
 	return process, nil
 }
 
+var ordinaryGetwd = os.Getwd
+
+func resolveOrdinaryExecutable(name string, environment []string) (string, error) {
+	if strings.TrimSpace(name) == "" {
+		return "", errors.New("executable path is empty")
+	}
+
+	if filepath.Base(name) != name {
+		candidate, err := ordinaryAnchoredPath(name)
+		if err != nil {
+			return "", err
+		}
+
+		resolved, err := ordinaryExecutableCandidate(candidate, environment)
+		if err != nil {
+			return "", fmt.Errorf("resolve executable %q: %w", name, err)
+		}
+
+		return resolved, nil
+	}
+
+	for _, directory := range filepath.SplitList(ordinaryEnvironmentValue(environment, envSearchPath)) {
+		if directory == "" {
+			continue
+		}
+
+		candidate, err := ordinaryAnchoredPath(filepath.Join(directory, name))
+		if err != nil {
+			return "", err
+		}
+
+		if resolved, candidateErr := ordinaryExecutableCandidate(candidate, environment); candidateErr == nil {
+			return resolved, nil
+		}
+	}
+
+	return "", fmt.Errorf("find %s in PATH: %w", name, exec.ErrNotFound)
+}
+
+func ordinaryAnchoredPath(path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+
+	directory, err := ordinaryGetwd()
+	if err != nil {
+		return "", fmt.Errorf("anchor executable %q to the working directory: %w", path, err)
+	}
+
+	return filepath.Join(directory, path), nil
+}
+
+func ordinaryEnvironmentValue(environment []string, key string) string {
+	value := ""
+	identity := EnvironmentKey(key)
+
+	for _, entry := range environment {
+		candidate, candidateValue, ok := strings.Cut(entry, "=")
+		if ok && EnvironmentKey(candidate) == identity {
+			value = candidateValue
+		}
+	}
+
+	return value
+}
+
 type ordinaryProcess struct {
 	command     *exec.Cmd
 	stdin       io.WriteCloser
@@ -57,6 +129,7 @@ type ordinaryProcess struct {
 	waitDone    chan struct{}
 	waitResult  NativeResult
 	waitErr     error
+	revokeWon   bool
 	resultMu    sync.Mutex
 	collectOnce sync.Once
 	revokeOnce  sync.Once
@@ -71,7 +144,7 @@ func (p *ordinaryProcess) Stderr() io.ReadCloser { return p.stderr }
 func (p *ordinaryProcess) collect() {
 	err := p.command.Wait()
 	p.resultMu.Lock()
-	p.waitResult.ExitCode = p.command.ProcessState.ExitCode()
+	p.waitResult = ordinaryNativeResult(p.command.ProcessState, p.revokeWon)
 
 	var exitError *exec.ExitError
 	if errors.As(err, &exitError) {
@@ -109,17 +182,24 @@ func (p *ordinaryProcess) Revoke(ctx context.Context) error {
 			}
 
 			_ = p.stdin.Close()
-			if err := p.command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-				p.revokeErr = err
+			p.resultMu.Lock()
 
-				return
+			killErr := p.command.Process.Kill()
+			if killErr != nil {
+				p.resultMu.Unlock()
+
+				if !errors.Is(killErr, os.ErrProcessDone) {
+					p.revokeErr = killErr
+
+					return
+				}
+			} else {
+				p.revokeWon = true
+				p.resultMu.Unlock()
 			}
 
 			p.collectOnce.Do(func() { go p.collect() })
 			<-p.waitDone
-			p.resultMu.Lock()
-			p.waitResult.Revoked = true
-			p.resultMu.Unlock()
 		}()
 	})
 

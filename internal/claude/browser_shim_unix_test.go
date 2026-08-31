@@ -20,13 +20,6 @@ const testAuthorizeURL = "https://claude.com/oauth/authorize?redirect_uri=https%
 
 var errAuthTest = errors.New("auth test failure")
 
-func writeShellScript(t *testing.T, path string, contents string) string {
-	t.Helper()
-	require.NoError(t, os.WriteFile(path, []byte(contents), 0o700))
-
-	return path
-}
-
 // TestLoginNeverExecsABrowserLauncher is the whole point of the shim: a login
 // child that execs a launcher off PATH must reach a no-op, not a browser. Every
 // name the shim shadows is probed, because a desktop only has to answer one of

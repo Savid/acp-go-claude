@@ -103,9 +103,8 @@ func finalizeSessionRuntimeResources(
 	mcpConfigDir string,
 	imageScratchDir string,
 	materialized *materializedSession,
-	scratchRelease func(),
 ) error {
-	if errors.Is(runtimeErr, ErrContainmentIncomplete) {
+	if errors.Is(runtimeErr, ErrContainmentIncomplete) || errors.Is(runtimeErr, ErrHostAuthorityUnavailable) {
 		return runtimeErr
 	}
 
@@ -124,26 +123,7 @@ func finalizeSessionRuntimeResources(
 		mcpRemoveErr = sessionRemoveAll(mcpConfigDir)
 	}
 
-	if mcpRemoveErr == nil && imageRemoveErr == nil && materializedRemoveErr == nil && scratchRelease != nil {
-		scratchRelease()
-	}
-
 	return errors.Join(runtimeErr, mcpRemoveErr, imageRemoveErr, materializedRemoveErr)
-}
-
-// releaseScratchRootOnce returns the session's scratch reservation and takes it
-// off the session, for the same reason and with the same exactly-once guarantee
-// across a retried close. A close whose deletions failed never reaches it, so the
-// reservation survives for the close that does complete them.
-func (s *agentSession) releaseScratchRootOnce() {
-	s.mu.Lock()
-	release := s.scratchRootRelease
-	s.scratchRootRelease = nil
-	s.mu.Unlock()
-
-	if release != nil {
-		release()
-	}
 }
 
 // acquireClosingTurn admits close into the session's turn queue. It is the one
@@ -828,7 +808,6 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 		s.mcpConfigDir,
 		s.imageScratchDir,
 		s.materialized,
-		s.releaseScratchRootOnce,
 	)
 
 	if s.agent != nil {

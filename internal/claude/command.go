@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 const (
@@ -284,6 +286,7 @@ func semverParts(value string) [3]int {
 
 func runNativeOutput(ctx context.Context, options Options, executable string, arguments []string) (output []byte, result NativeResult, returnErr error) {
 	prepared := false
+	terminal := false
 
 	if options.Authority != nil && !options.TreePrepared && options.ClaudeHome != "" {
 		if options.Authority.PrepareNativeTree == nil {
@@ -298,40 +301,192 @@ func runNativeOutput(ctx context.Context, options Options, executable string, ar
 	}
 
 	defer func() {
-		if prepared {
+		if prepared && terminal {
 			returnErr = errors.Join(returnErr, reclaimNativeTree(options.Authority, options.ClaudeHome))
 		}
 	}()
 
 	process, err := startNative(ctx, options, executable, arguments)
 	if err != nil {
+		if prepared && !errors.Is(err, authorityUnavailable(options.Authority)) &&
+			!errors.Is(err, options.Authority.ContainmentIncomplete) {
+			terminal = true
+		}
+
 		return nil, NativeResult{}, err
 	}
 
-	_ = process.Stdin().Close()
+	stdin := process.Stdin()
+	stdout := process.Stdout()
+	stderr := process.Stderr()
+	stdinErr := stdin.Close()
 
-	var stderr bytes.Buffer
+	stdoutResult := make(chan nativeOutputRead, 1)
+	stderrDone := make(chan error, 1)
 
-	stderrDone := make(chan struct{})
+	go func() {
+		var (
+			bounded boundedNativeOutput
+			readErr error
+		)
 
-	go func() { _, _ = io.Copy(&stderr, process.Stderr()); close(stderrDone) }()
+		defer func() {
+			if recover() != nil {
+				readErr = errors.Join(readErr, errClaudeStdoutReaderPanic)
+			}
 
-	var readErr error
+			stdoutResult <- nativeOutputRead{data: bounded.Bytes(), err: errors.Join(readErr, bounded.err)}
+		}()
 
-	output, readErr = io.ReadAll(process.Stdout())
+		_, readErr = io.Copy(&bounded, stdout)
+	}()
 
-	result, waitErr := process.Wait(ctx)
-	if ctx.Err() != nil {
-		revokeErr := process.Revoke(context.Background())
-		result, waitErr = process.Wait(context.Background())
-		waitErr = errors.Join(ctx.Err(), revokeErr, waitErr)
+	go func() {
+		var readErr error
+
+		defer func() {
+			if recover() != nil {
+				readErr = errors.Join(readErr, errClaudeTransportFailure)
+			}
+
+			stderrDone <- readErr
+		}()
+
+		_, readErr = io.Copy(io.Discard, stderr)
+	}()
+
+	var (
+		terminalResult  NativeResult
+		terminalWaitErr error
+	)
+
+	waitDone := make(chan struct{})
+
+	// #nosec G118 -- the authority owns process settlement after a caller detaches.
+	go func() {
+		terminalResult, terminalWaitErr = process.Wait(context.Background())
+
+		close(waitDone)
+	}()
+
+	var waitErr error
+
+	select {
+	case <-waitDone:
+		result = terminalResult
+		waitErr = terminalWaitErr
+	case <-ctx.Done():
+		waitErr = ctx.Err()
 	}
 
-	<-stderrDone
+	if waitErr != nil {
+		revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), processShutdownWaitDelay)
+		revokeErr := process.Revoke(revokeCtx)
 
-	if readErr != nil {
-		waitErr = errors.Join(waitErr, readErr)
+		cancelRevoke()
+
+		terminalCtx, cancelTerminal := context.WithTimeout(context.Background(), processShutdownWaitDelay)
+		select {
+		case <-waitDone:
+			result = terminalResult
+
+			switch {
+			case terminalWaitErr == nil:
+				terminal = true
+			case options.Authority != nil:
+				waitErr = errors.Join(waitErr, containmentIncomplete(options.Authority, "wait for native output process", terminalWaitErr))
+			default:
+				waitErr = errors.Join(waitErr, terminalWaitErr)
+			}
+		case <-terminalCtx.Done():
+			waitErr = errors.Join(waitErr, containmentIncomplete(options.Authority, "wait for native output process", terminalCtx.Err()))
+		}
+
+		cancelTerminal()
+
+		waitErr = errors.Join(waitErr, revokeErr)
+	} else {
+		terminal = true
 	}
 
-	return output, result, waitErr
+	read := awaitNativeOutput(stdoutResult, stdout)
+	stderrErr := awaitNativeDrain(stderrDone, stderr)
+
+	return read.data, result, errors.Join(stdinErr, waitErr, read.err, stderrErr)
+}
+
+const nativeOutputMaxBytes = 10 * 1024 * 1024
+
+var nativeOutputDrainDelay = 250 * time.Millisecond
+
+type nativeOutputRead struct {
+	data []byte
+	err  error
+}
+
+type boundedNativeOutput struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+	err error
+}
+
+func (w *boundedNativeOutput) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	remaining := nativeOutputMaxBytes - w.buf.Len()
+	if remaining > 0 {
+		if len(data) < remaining {
+			remaining = len(data)
+		}
+
+		_, _ = w.buf.Write(data[:remaining])
+	}
+
+	if len(data) > remaining && w.err == nil {
+		w.err = fmt.Errorf("native output exceeds %d bytes", nativeOutputMaxBytes)
+	}
+
+	return len(data), nil
+}
+
+func (w *boundedNativeOutput) Bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return append([]byte(nil), w.buf.Bytes()...)
+}
+
+func awaitNativeOutput(done <-chan nativeOutputRead, stream io.Closer) nativeOutputRead {
+	select {
+	case result := <-done:
+		return result
+	case <-time.After(nativeOutputDrainDelay):
+		closeErr := stream.Close()
+
+		select {
+		case result := <-done:
+			result.err = errors.Join(result.err, closeErr, errors.New("native stdout remained open after terminal wait"))
+
+			return result
+		case <-time.After(nativeOutputDrainDelay):
+			return nativeOutputRead{err: errors.Join(closeErr, errors.New("native stdout did not close after terminal wait"))}
+		}
+	}
+}
+
+func awaitNativeDrain(done <-chan error, stream io.Closer) error {
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(nativeOutputDrainDelay):
+		closeErr := stream.Close()
+
+		select {
+		case err := <-done:
+			return errors.Join(err, closeErr, errors.New("native stderr remained open after terminal wait"))
+		case <-time.After(nativeOutputDrainDelay):
+			return errors.Join(closeErr, errors.New("native stderr did not close after terminal wait"))
+		}
+	}
 }

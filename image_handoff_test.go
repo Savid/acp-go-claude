@@ -16,6 +16,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHandoffCapabilityScalar(t *testing.T) {
+	t.Parallel()
+
+	require.NotContains(t, initializeMeta(t), "acp-go.dev/handoff")
+
+	meta := initializeMeta(t, WithInputHandoffRoot(t.TempDir()))
+	handoff, ok := meta["acp-go.dev/handoff"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, 1, handoff["version"])
+	require.Len(t, handoff, 1)
+}
+
 // handoffCauseMessages is the complete set of client-visible handoff messages.
 // Every one is a literal in the adapter, so nothing derived from a path, a
 // digest, a byte count, or an operating-system error can appear in a verdict.

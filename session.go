@@ -62,6 +62,7 @@ const (
 	permissionUpdateRules         = "rules"
 	permissionUpdateRuleContent   = "ruleContent"
 	permissionUpdateSession       = "session"
+	sessionCapabilityScope        = "session"
 	permissionUpdateToolName      = "toolName"
 	permissionUpdateAddDirs       = "addDirectories"
 	permissionUpdateLocalSettings = "localSettings"
@@ -249,7 +250,6 @@ type agentSession struct {
 	materialized       *materializedSession
 	mcpConfigDir       string
 	imageScratchDir    string
-	scratchRootRelease func()
 	// Started sessions always mirror transcript rows into the agent's
 	// authoritative session store.
 	mirror *sessionMirror

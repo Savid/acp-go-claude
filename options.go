@@ -1,7 +1,6 @@
 package claudeacp
 
 import (
-	"context"
 	"log/slog"
 	"time"
 
@@ -13,32 +12,7 @@ import (
 // Option configures the Claude ACP agent.
 type Option func(*Options)
 
-// RuntimeResourceKind identifies the lifecycle scope consuming a host-managed resource.
-type RuntimeResourceKind string
-
-const (
-	RuntimeResourceRuntime   RuntimeResourceKind = "runtime"
-	RuntimeResourceSession   RuntimeResourceKind = "session"
-	RuntimeResourcePrompt    RuntimeResourceKind = "prompt"
-	RuntimeResourceDiscovery RuntimeResourceKind = "discovery"
-)
-
 const privateAdapterEnvPrefix = "ACP_" + "GO_CLAUDE_INTERNAL_"
-
-type RuntimeStartupStage string
-
-const (
-	RuntimeStartupSpawn         RuntimeStartupStage = "spawn"
-	RuntimeStartupReadiness     RuntimeStartupStage = "readiness"
-	RuntimeStartupConfiguration RuntimeStartupStage = "configuration"
-	RuntimeStartupSession       RuntimeStartupStage = "session"
-)
-
-// RuntimeResourceHooks lets an embedding host enforce scratch-root limits and observe startup.
-type RuntimeResourceHooks struct {
-	ReserveScratchRoot  func(context.Context, RuntimeResourceKind) (func(), error)
-	ObserveStartupStage func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
-}
 
 // SettingSource selects one Claude Code filesystem settings source.
 type SettingSource string
@@ -153,7 +127,6 @@ type Options struct {
 	// TurnTimeout bounds one Claude prompt turn. Zero (the default) means no
 	// deadline. On expiry the turn is aborted and fails with cause "timeout".
 	TurnTimeout              time.Duration
-	RuntimeResourceHooks     RuntimeResourceHooks
 	defaultPermissionModeSet bool
 	hostAuthoritySet         bool
 }
@@ -339,13 +312,6 @@ func WithProviderAuthRoot(path string) Option {
 func WithProviderAuthDirectHome(path string) Option {
 	return func(options *Options) {
 		options.ProviderAuthDirectHome = path
-	}
-}
-
-// WithRuntimeResourceHooks installs host-facing scratch admission and startup observation hooks.
-func WithRuntimeResourceHooks(hooks RuntimeResourceHooks) Option {
-	return func(options *Options) {
-		options.RuntimeResourceHooks = hooks
 	}
 }
 

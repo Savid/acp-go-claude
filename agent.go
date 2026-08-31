@@ -117,8 +117,6 @@ func NewAgent(opts ...Option) *Agent {
 	}
 
 	observe := observer.New(observer.Config{MeterProvider: options.MeterProvider, Propagator: options.TextMapPropagator, TracerProvider: options.TracerProvider, Version: options.AgentVersion})
-	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
-
 	agent := &Agent{
 		options:          options,
 		log:              log,
@@ -397,7 +395,7 @@ func (a *Agent) capabilityMeta() map[string]any {
 			},
 			metaElicitation: map[string]any{
 				"unstable": true,
-				"scope":    string(RuntimeResourceSession),
+				"scope":    sessionCapabilityScope,
 				"tracks":   "ACP v1 elicitation",
 			},
 			"rawEvent": map[string]any{

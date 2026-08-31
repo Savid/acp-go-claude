@@ -937,7 +937,7 @@ func TestCallbackRecordsAnIncompleteFenceAfterTheFlowWasCancelled(t *testing.T) 
 	broker, sessionID := newAuthBroker(t)
 	flow := startAuthFlow(t, broker, sessionID)
 
-	seams.login.closeErr = claude.ErrProcessContainmentIncomplete
+	seams.login.closeErr = ErrContainmentIncomplete
 	seams.login.beforeClose = func() {
 		_, err := broker.cancel(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
 		require.NoError(t, err)
@@ -949,7 +949,7 @@ func TestCallbackRecordsAnIncompleteFenceAfterTheFlowWasCancelled(t *testing.T) 
 		testPastedValue,
 	)))
 	requireAuthFailed(t, err, authCauseFlowCancelled)
-	require.ErrorIs(t, broker.agent.containmentErr, claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, broker.agent.containmentErr, ErrContainmentIncomplete)
 }
 
 func TestCallbackFailsClosedOnAnUnknownNaturalExit(t *testing.T) {
@@ -974,9 +974,8 @@ func TestCallbackFailsClosedWhenItsPublishedLoginWasReplaced(t *testing.T) {
 
 	replacement := &fakeAuthLogin{seams: seams}
 	replacementHandle := &authLoginHandle{
-		login:   replacement,
-		release: func() {},
-		agent:   broker.agent,
+		login: replacement,
+		agent: broker.agent,
 	}
 	seams.login.beforeWait = func() {
 		broker.mu.Lock()
@@ -1017,7 +1016,7 @@ func TestSettleRefusesTheCredentialSlotWithoutAdmission(t *testing.T) {
 
 func TestCallbackNeverAcceptsAnIncompleteContainmentFence(t *testing.T) {
 	seams := newAuthSeams(t)
-	seams.login.closeErr = claude.ErrProcessContainmentIncomplete
+	seams.login.closeErr = ErrContainmentIncomplete
 
 	broker, sessionID := newAuthBroker(t)
 	flow := startAuthFlow(t, broker, sessionID)
@@ -1028,7 +1027,7 @@ func TestCallbackNeverAcceptsAnIncompleteContainmentFence(t *testing.T) {
 		testPastedValue,
 	)))
 	requireAuthFailed(t, err, authCauseProcess)
-	require.ErrorIs(t, broker.agent.containmentErr, claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, broker.agent.containmentErr, ErrContainmentIncomplete)
 
 	status, err := broker.status(t.Context(), authParams(t, flowParams(string(sessionID), flow.FlowID)))
 	require.NoError(t, err)
@@ -1451,9 +1450,8 @@ func TestLoginWaitReturnsOnADeadlineWithoutClosingTheChild(t *testing.T) {
 	login := &blockingAuthLogin{release: blocked}
 
 	handle := &authLoginHandle{
-		agent:   broker.agent,
-		release: func() {},
-		login:   login,
+		agent: broker.agent,
+		login: login,
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -1514,11 +1512,10 @@ func TestAuthorizeFencesALoginChildTheFlowClosedUnder(t *testing.T) {
 	authLoginBegin = func(
 		ctx context.Context,
 		options claude.Options,
-		flowGeneration *claude.DarwinGeneration,
 	) (authLoginSession, string, error) {
 		broker.closeSession(sessionID)
 
-		return begin(ctx, options, flowGeneration)
+		return begin(ctx, options)
 	}
 
 	_, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))

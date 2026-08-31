@@ -95,8 +95,7 @@ func lifecycleEventTypes(t *testing.T, conn *recordingAgentClient) []string {
 func newAuthoritativeLifecycleStreamTestSession(t *testing.T) (*agentSession, *recordingAgentClient, *sessionStream) {
 	t.Helper()
 
-	agent := NewAgent()
-	agent.containmentMode = RuntimeContainmentAuthoritative
+	agent := NewAgent(WithHostAuthority(newFakeHostAuthority()))
 	conn := newRecordingAgentClient()
 	agent.setConnection(conn)
 	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
@@ -770,8 +769,7 @@ func TestSessionStreamAnnouncementAfterFailureLatch(t *testing.T) {
 
 func TestSessionStreamCloseSettlesAuthoritativeQuiescence(t *testing.T) {
 	ctx := t.Context()
-	agent := NewAgent()
-	agent.containmentMode = RuntimeContainmentAuthoritative
+	agent := NewAgent(WithHostAuthority(newFakeHostAuthority()))
 	conn := newRecordingAgentClient()
 	agent.setConnection(conn)
 	_, err := agent.Initialize(ctx, acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
@@ -1196,8 +1194,7 @@ func agentHoldingALiveIncarnation(t *testing.T, conn agentClient) (*Agent, *sess
 	t.Helper()
 
 	ctx := t.Context()
-	agent := NewAgent()
-	agent.containmentMode = RuntimeContainmentAuthoritative
+	agent := NewAgent(WithHostAuthority(newFakeHostAuthority()))
 	agent.setConnection(conn)
 
 	_, err := agent.Initialize(ctx, acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
@@ -1328,7 +1325,7 @@ func TestCloseThatCouldNotContainStatesNothingAboutALiveIncarnation(t *testing.T
 	session, conn, stream := closeFencedSession(t, store)
 
 	session.client = claude.NewClient(nil, claude.Options{},
-		&closeErrTransport{Transport: newFakeClaudeTransport(), err: claude.ErrProcessContainmentIncomplete})
+		&closeErrTransport{Transport: newFakeClaudeTransport(), err: ErrContainmentIncomplete})
 	require.NoError(t, session.client.Start(ctx))
 
 	before := lifecycleEventTypes(t, conn)
@@ -1339,7 +1336,7 @@ func TestCloseThatCouldNotContainStatesNothingAboutALiveIncarnation(t *testing.T
 	require.False(t, live.Turns[0].Terminal)
 
 	err := session.Close(ctx)
-	require.ErrorIs(t, err, claude.ErrProcessContainmentIncomplete,
+	require.ErrorIs(t, err, ErrContainmentIncomplete,
 		"the close returns the containment failure and invents nothing beside it")
 	require.NotContains(t, err.Error(), "prefix append failed",
 		"a boundary that did not complete commits nothing new")

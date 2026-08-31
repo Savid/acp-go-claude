@@ -208,21 +208,11 @@ func TestHandleRateLimits(t *testing.T) {
 		WithExecutablePath("/usr/bin/claude-test"),
 		WithEnv(map[string]string{"CLAUDE_TEST": "1"}),
 	)
-	agent.containmentMode = RuntimeContainmentAuthoritative
-
 	var gotOptions claude.Options
 
 	reset := time.Date(2026, time.July, 9, 13, 40, 0, 0, time.UTC)
 	agent.queryRateLimits = func(_ context.Context, options claude.Options) (claude.RateLimits, error) {
 		gotOptions = options
-		generation, generationErr := options.PrepareUsageGeneration(ctx)
-		require.NoError(t, generationErr)
-		release, acquireErr := options.AcquireUsageDiscovery(ctx)
-		require.NoError(t, acquireErr)
-		options.ObserveProcessInventory(ctx, func() (int, bool) { return 0, true })
-		options.ObserveBoundaryComplete(ctx)
-		require.NoError(t, generation.Release(true))
-		release()
 
 		return claude.RateLimits{Windows: []claude.RateLimitWindow{
 			{ID: sessionWindowID, UsedPercent: 92, ResetsAt: reset},
@@ -243,11 +233,6 @@ func TestHandleRateLimits(t *testing.T) {
 	require.Equal(t, "/usr/bin/claude-test", gotOptions.CLIPath)
 	require.NotEmpty(t, gotOptions.ClaudeHome)
 	require.Equal(t, map[string]string{"CLAUDE_TEST": "1"}, gotOptions.Env)
-	require.NotNil(t, gotOptions.AcquireUsageDiscovery)
-	require.NotNil(t, gotOptions.PrepareUsageGeneration)
-	require.NotNil(t, gotOptions.ObserveProcessInventory)
-	require.NotNil(t, gotOptions.ObserveBoundaryComplete)
-
 	encoded, err := json.Marshal(resp)
 	require.NoError(t, err)
 	require.JSONEq(
@@ -507,7 +492,7 @@ func TestHandleRateLimitsContainmentFailureFencesClose(t *testing.T) {
 		close(started)
 		<-release
 
-		return claude.RateLimits{}, claude.ErrProcessContainmentIncomplete
+		return claude.RateLimits{}, ErrContainmentIncomplete
 	}
 	agent.queryRateLimitsAPI = func(context.Context, claude.RateLimitsProbe) (claude.RateLimits, error) {
 		t.Fatal("containment failure must not fall back to the direct API")
@@ -531,9 +516,9 @@ func TestHandleRateLimitsContainmentFailureFencesClose(t *testing.T) {
 	}
 
 	close(release)
-	require.ErrorIs(t, <-requestDone, ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, <-closeDone, ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-requestDone, ErrContainmentIncomplete)
+	require.ErrorIs(t, <-closeDone, ErrContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
 }
 
 func TestClosedAgentRejectsDirectNativeConstructionAdmissions(t *testing.T) {

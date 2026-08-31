@@ -78,19 +78,34 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 		CLIPath:             a.options.ExecutablePath,
 		ClaudeHome:          claudeHome,
 		Env:                 a.options.Env,
-		ProcessIsolation:    a.claudeIsolation(),
 		OrdinaryEnvironment: a.ordinaryEnvironment(),
-		DarwinBestEffort:    a.containmentMode == RuntimeContainmentBestEffort,
-		AcquireUsageDiscovery: func(discoveryCtx context.Context) (func(), error) {
-			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-		},
-		PrepareUsageGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
-			return a.prepareDiscoveryGeneration(generationCtx)
-		},
+		Authority:           a.claudeAuthority(),
 	}
-	processSnapshotSource := a.descendantProcesses.newSource()
-	claudeOptions.ObserveProcessInventory = processSnapshotSource.started
-	claudeOptions.ObserveBoundaryComplete = processSnapshotSource.completed
+	if a.options.hostAuthoritySet {
+		parent, parentErr := ensureScratchParent(a.options.ScratchDir)
+		if parentErr != nil {
+			return RateLimitsResponse{}, parentErr
+		}
+
+		root, createErr := materializeMkdirTemp(parent, "acp-go-claude-usage-*")
+		if createErr != nil {
+			return RateLimitsResponse{}, createErr
+		}
+
+		residence := &materializedSession{configDir: root}
+		defer func() { returnErr = errors.Join(returnErr, residence.Close()) }()
+
+		if copyErr := copyClaudeConfigFiles(root, claudeHome, a.resumeCredentialOptions()); copyErr != nil {
+			return RateLimitsResponse{}, copyErr
+		}
+
+		if prepareErr := residence.prepare(ctx, a.options.HostAuthority, root); prepareErr != nil {
+			return RateLimitsResponse{}, prepareErr
+		}
+
+		claudeOptions.ClaudeHome = root
+		claudeOptions.TreePrepared = true
+	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, rateLimitsProbeTimeout)
 	defer cancel()
@@ -100,7 +115,7 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 	// a broken probe must not break the extension.
 	limits, err := a.queryRateLimits(probeCtx, claudeOptions)
 	if err != nil {
-		if errors.Is(err, ErrProcessContainmentIncomplete) {
+		if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
 			return RateLimitsResponse{}, err
 		}
 

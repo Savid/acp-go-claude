@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -846,17 +845,6 @@ func parallelWhenPortableClaudeAuth(t *testing.T) {
 	}
 }
 
-// integrationContainmentOption opts the in-process agent into Darwin
-// containment, which the agent refuses to launch without. Elsewhere the option
-// is rejected, so the tier supplies it only on darwin.
-func integrationContainmentOption() claudeacp.Option {
-	if runtime.GOOS == "darwin" {
-		return claudeacp.WithDarwinBestEffortContainment()
-	}
-
-	return func(*claudeacp.Options) {}
-}
-
 func connectLiveAgent(
 	t *testing.T,
 	ctx context.Context,
@@ -920,7 +908,6 @@ func serveLiveAgentInRuntimeForTest(
 		claudeacp.WithDefaultModel(os.Getenv("ACP_GO_CLAUDE_MODEL")),
 		claudeacp.WithClaudeInitializeTimeout(30 * time.Second),
 		claudeacp.WithLogger(integrationLogger),
-		integrationContainmentOption(),
 	}
 
 	c2aR, c2aW := io.Pipe()

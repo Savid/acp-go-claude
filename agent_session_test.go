@@ -75,19 +75,6 @@ func TestLocalSessionStartSettlesEveryEstablishmentFailure(t *testing.T) {
 	_, err := agent.startSession(t.Context(), "session-install-failure", sessionStart{Cwd: t.TempDir()})
 	uuidRandom = previous
 	require.ErrorContains(t, err, "read random uuid")
-
-	rootErr := errors.New("native root refused")
-	agent = newLocalAgent(
-		WithHome(t.TempDir()),
-		WithScratchDir(t.TempDir()),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return nil, rootErr
-			},
-		}),
-	)
-	_, err = agent.startSession(t.Context(), "session-root-failure", sessionStart{Cwd: t.TempDir()})
-	require.ErrorIs(t, err, rootErr)
 }
 
 func TestResumeSessionEdgeBranches(t *testing.T) {
@@ -421,7 +408,7 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 }
 
 // newSessionForTransport builds one started session over transport, so a test can
-// observe that session's own native containment.
+// observe that session's own native process boundary.
 func newSessionForTransport(
 	t *testing.T,
 	agent *Agent,
@@ -481,31 +468,6 @@ func requireCancelledCloseRefusal(t *testing.T, ctx context.Context, err error) 
 	require.Equal(t, "Request cancelled", mapped.Message)
 }
 
-// requireExpiredCloseRefusal pins the wire answer for a barrier wait that ran out
-// without a cancel. The request was well formed and nothing failed internally: it
-// is a retryable refusal that names itself, and its message carries the
-// barrier-wait error rather than anything the native process said.
-func requireExpiredCloseRefusal(t *testing.T, ctx context.Context, err error) {
-	t.Helper()
-
-	var reqErr *acp.RequestError
-
-	require.ErrorAs(t, err, &reqErr)
-	require.Equal(t, -32600, reqErr.Code)
-	require.Equal(t, "Invalid request", reqErr.Message)
-
-	data, ok := reqErr.Data.(map[string]any)
-	require.True(t, ok, "the refusal names itself")
-	require.Equal(t, "claude_session_close_unsettled", data[jsonFieldError])
-	require.Equal(t, "session close did not reach its settlement barrier", data[jsonFieldMessage])
-	mapped := requestError(ctx, err)
-	require.Equal(t, -32603, mapped.Code)
-	mappedData, ok := mapped.Data.(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, "request_deadline_exceeded", mappedData[jsonFieldError])
-	require.Equal(t, "deadline", mappedData["class"])
-}
-
 // TestCloseSessionKeepsAnUnsettledSessionAddressable proves removal follows the
 // settlement barrier and not the request: a close whose caller expired contained
 // nothing, so the id keeps the live session and the next close settles it.
@@ -557,9 +519,7 @@ func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
 // then does the id stop resolving — dropping it on the first failure would leave
 // the host holding the only name for what this adapter had not finished.
 //
-// Each admission is still returned exactly once across both closes: the native
-// root on the close that proved containment, the scratch reservation on the
-// close that finished deleting what it reserved.
+// The scratch reservation is returned exactly once, after deletion succeeds.
 func TestFailedCloseRetriesItsBoundaryOnTheNextClose(t *testing.T) {
 	previous := sessionRemoveAll
 	t.Cleanup(func() { sessionRemoveAll = previous })
@@ -573,8 +533,7 @@ func TestFailedCloseRetriesItsBoundaryOnTheNextClose(t *testing.T) {
 	require.NoError(t, os.Mkdir(mcp, 0o700))
 	session.mcpConfigDir = mcp
 
-	nativeReleases, scratchReleases := 0, 0
-	session.nativeRootRelease = func() { nativeReleases++ }
+	scratchReleases := 0
 	session.scratchRootRelease = func() { scratchReleases++ }
 
 	removeErr := errors.New("delete MCP root")
@@ -586,7 +545,6 @@ func TestFailedCloseRetriesItsBoundaryOnTheNextClose(t *testing.T) {
 	held, lookupErr := agent.session(sessionID)
 	require.NoError(t, lookupErr, "a close that failed a rung of its boundary keeps its id addressable")
 	require.Same(t, session, held)
-	require.Equal(t, 1, nativeReleases, "containment completed, so that admission is already back")
 	require.Zero(t, scratchReleases, "the reservation survives the deletion the close still owes it")
 
 	sessionRemoveAll = previous
@@ -594,7 +552,6 @@ func TestFailedCloseRetriesItsBoundaryOnTheNextClose(t *testing.T) {
 	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
 	require.NoError(t, err, "the next close retakes the boundary rather than replaying a memoized failure")
 	require.NoDirExists(t, mcp, "the rung the first close failed is the one the retry completes")
-	require.Equal(t, 1, nativeReleases, "an admission returned twice would credit work that was never admitted")
 	require.Equal(t, 1, scratchReleases)
 
 	_, lookupErr = agent.session(sessionID)
@@ -829,6 +786,19 @@ func startedClientWithCloseError(t *testing.T, closeErr error) *claude.Client {
 	transport := newFakeClaudeTransport()
 	client := claude.NewClient(nil, claude.Options{}, &closeErrTransport{Transport: transport, err: closeErr})
 	require.NoError(t, client.Start(context.Background()))
+
+	return client
+}
+
+func deadClaudeClient(t *testing.T, closeErr error) *claude.Client {
+	t.Helper()
+	transport := newFakeClaudeTransport()
+	client := claude.NewClient(nil, claude.Options{}, &closeErrTransport{Transport: transport, err: closeErr})
+	require.NoError(t, client.Start(t.Context()))
+	transport.errs <- errors.New("process exited")
+	close(transport.errs)
+	close(transport.messages)
+	require.Eventually(t, func() bool { return !client.Alive() }, time.Second, time.Millisecond)
 
 	return client
 }
@@ -1272,95 +1242,6 @@ func TestStartSessionEdgeBranches(t *testing.T) {
 	modeApplyErrAgent, _, _ := newFakeLifecycleAgent(t, modeApplyErrTransport, WithClaudeDefaultPermissionMode("auto"))
 	_, err = modeApplyErrAgent.startSession(ctx, sessionID, sessionStart{Cwd: cwd, MetaOptions: ClaudeOptions{Model: "opus"}})
 	require.ErrorContains(t, err, "claude control request failed")
-}
-
-func TestStartSessionIsolationFailureBranches(t *testing.T) {
-	ctx := t.Context()
-	cwd := t.TempDir()
-	sessionID := acp.SessionId("34343434-3434-4434-8434-343434343434")
-	uid, gid := testIsolationIdentity()
-	isolation := ProcessIsolation{UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin"}}
-	// Every isolated branch below reaches its own seam only if the native-owned
-	// home check ahead of it passes. That check is real on Linux, so the home has
-	// to be one the isolated identity genuinely owns rather than a t.TempDir leaf.
-	isolatedOptions := []Option{WithHome(testNativeOwnedHome(t)), WithProcessIsolation(isolation)}
-
-	originalEnsure := sessionEnsureScratchParent
-	originalHandoff := sessionHandoffGeneratedNativeTree
-	originalValidate := sessionValidateNativeOwnedDirectory
-	originalMkdirTemp := materializeMkdirTemp
-	originalCopy := copyClaudeConfigFiles
-	t.Cleanup(func() {
-		sessionEnsureScratchParent = originalEnsure
-		sessionHandoffGeneratedNativeTree = originalHandoff
-		sessionValidateNativeOwnedDirectory = originalValidate
-		materializeMkdirTemp = originalMkdirTemp
-		copyClaudeConfigFiles = originalCopy
-	})
-	restore := func() {
-		sessionEnsureScratchParent = originalEnsure
-		sessionHandoffGeneratedNativeTree = originalHandoff
-		sessionValidateNativeOwnedDirectory = originalValidate
-		materializeMkdirTemp = originalMkdirTemp
-		copyClaudeConfigFiles = originalCopy
-	}
-	start := func(options []Option, request sessionStart) error {
-		agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), options...)
-		_, err := agent.startSession(ctx, sessionID, request)
-
-		return err
-	}
-	authAgent := newAuthAgent(t)
-	authAgent.setConnection(newRecordingAgentClient())
-	installFakeClaudeClient(authAgent, newFakeClaudeTransport())
-	authSession, err := authAgent.startSession(ctx, sessionID, sessionStart{Cwd: cwd})
-	require.NoError(t, err)
-	require.NoError(t, authSession.Close(ctx))
-
-	sessionValidateNativeOwnedDirectory = func(string, *ProcessIsolation) error { return errors.New("validate native home") }
-	err = start(nil, sessionStart{Cwd: cwd})
-	require.ErrorContains(t, err, "validate native home")
-	restore()
-
-	sessionEnsureScratchParent = func(string) (string, error) { return "", errors.New("isolated scratch") }
-	err = start(isolatedOptions, sessionStart{Cwd: cwd})
-	require.ErrorContains(t, err, "isolated scratch")
-	restore()
-
-	materializeMkdirTemp = func(string, string) (string, error) { return "", errors.New("isolated home") }
-	err = start(isolatedOptions, sessionStart{Cwd: cwd})
-	require.ErrorContains(t, err, "create isolated Claude home")
-	restore()
-
-	copyClaudeConfigFiles = func(string, string, claude.Options) error { return errors.New("copy isolated home") }
-	err = start(isolatedOptions, sessionStart{Cwd: cwd})
-	require.ErrorContains(t, err, "copy isolated home")
-	restore()
-
-	copyClaudeConfigFiles = func(string, string, claude.Options) error { return nil }
-	sessionHandoffGeneratedNativeTree = func(string, *ProcessIsolation) error { return errors.New("handoff isolated home") }
-	err = start(isolatedOptions, sessionStart{Cwd: cwd})
-	require.ErrorContains(t, err, "handoff isolated home")
-	restore()
-
-	handoffs := 0
-	copyClaudeConfigFiles = func(string, string, claude.Options) error { return nil }
-	sessionHandoffGeneratedNativeTree = func(string, *ProcessIsolation) error {
-		handoffs++
-		if handoffs == 2 {
-			return errors.New("handoff MCP config")
-		}
-
-		return nil
-	}
-	err = start(isolatedOptions, sessionStart{
-		Cwd: cwd,
-		McpServers: []acp.McpServer{{
-			Stdio: &acp.McpServerStdio{Name: "fixture", Command: "/bin/true"},
-		}},
-	})
-	require.ErrorContains(t, err, "handoff MCP config")
-	require.Equal(t, 2, handoffs)
 }
 
 func TestSessionCloseReportsMCPConfigRemovalError(t *testing.T) {

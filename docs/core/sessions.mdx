@@ -8,8 +8,7 @@ that process on demand, keeps it alive across prompt turns, and tears it down
 when the session closes. An MCP-bearing lifecycle first launches a provisional
 process, then replaces it once immediately before the first user turn so Claude
 rebuilds its startup-fixed MCP registry under the armed turn's authority. The
-old contained process tree is fully closed and its runtime admission released
-before the replacement is admitted, so the two roots never overlap.
+old native process reaches terminal settlement before its replacement starts.
 
 ## Lifecycle
 
@@ -115,16 +114,8 @@ and cancellation of the prompt's caller context use the same boundary.
 The next prompt lazily launches Claude with `--resume <session-id>`, so the ACP
 session remains addressable without reusing the aborted process.
 
-Linux uses an embedded subreaper supervisor and a dedicated proof descriptor;
-the proof covers descendants that escape Claude's process group or session.
-Windows rejects native launch because the mandatory Unix UID/GID identity
-boundary with empty supplementary groups is unavailable. Cross-compiling that
-refusal path does not establish runtime support. Darwin rejects launch by
-default; its explicit best-effort mode reaps the direct child and empties the
-captured original process group without claiming escaped descendants ended.
-Unsupported kernels reject launch.
-
-If the selected containment boundary does not complete, the prompt never
-reports a successful cancellation. It fails with cause `transport`, lazy
-relaunch is disabled, and the native-root admission remains quarantined for
-operator recovery.
+With `WithHostAuthority`, the host owns descendant containment. The adapter
+closes protocol stdin, waits, and then calls `Revoke` when the process does not
+exit during the grace period. If the boundary does not complete, the prompt
+never reports a successful cancellation. It fails with cause `transport`, and
+lazy relaunch plus new native session admission are disabled.

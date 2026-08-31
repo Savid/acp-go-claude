@@ -189,7 +189,7 @@ func newAuthSeams(t *testing.T) *authTestSeams {
 	removeOriginal := authKeychainRemove
 	userOriginal := authNativeUser
 
-	authLoginBegin = func(context.Context, claude.Options, *claude.DarwinGeneration) (authLoginSession, string, error) {
+	authLoginBegin = func(context.Context, claude.Options) (authLoginSession, string, error) {
 		seams.loginCalls++
 		if seams.loginErr != nil {
 			return nil, "", seams.loginErr
@@ -202,13 +202,13 @@ func newAuthSeams(t *testing.T) *authTestSeams {
 		return seams.login, seams.loginURL, nil
 	}
 
-	authStatusProbe = func(context.Context, claude.Options, *claude.DarwinGeneration) (claude.AuthAccount, int, error) {
+	authStatusProbe = func(context.Context, claude.Options) (claude.AuthAccount, int, error) {
 		seams.statusCalls++
 
 		return seams.account, seams.statusExt, seams.statusErr
 	}
 
-	authLogoutCommand = func(context.Context, claude.Options, *claude.DarwinGeneration) (int, error) {
+	authLogoutCommand = func(context.Context, claude.Options) (int, error) {
 		seams.logoutCalls++
 
 		return 0, seams.logoutErr
@@ -253,7 +253,6 @@ func newAuthAgent(t *testing.T, opts ...Option) *Agent {
 	}, opts...)
 
 	agent := NewAgent(options...)
-	agent.containmentMode = RuntimeContainmentAuthoritative
 
 	return agent
 }

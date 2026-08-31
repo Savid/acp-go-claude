@@ -1,67 +1,40 @@
 ---
 title: "Run Modes"
-description: "Choose between the standalone binary and embedding the adapter directly in your Go host"
+description: "Run the standalone ACP subprocess or embed it in a Go host"
 ---
 
-The adapter offers the same behavior through two entry points. Pick by where the
-ACP transport lives: use the standalone binary when an editor or host spawns a
-subprocess and pipes JSON-RPC over stdio, and embed `Serve` when your host owns
-the reader/writer streams directly.
+## Standalone subprocess
 
-## Standalone
-
-By default the command needs no isolation policy: native work runs as the
-identity the command already holds, root or not, on Linux, macOS, Windows,
-FreeBSD, and OpenBSD alike. That ordinary mode reports `shared_identity`, needs
-no authority directory or privileged supervisor, and publishes no
-provider-descendant inventory. Hardened standalone native mode is Linux-only and
-is selected by giving the root supervisor
-`-process-isolation-config=/absolute/path/process-isolation.json`; the strict
-file schema, account/home checks, closed environment, and explicit
-`inheritEnvironment` behavior are documented in the
-[CLI reference](/docs/reference/cli). An explicit policy is rejected on Darwin,
-Windows, FreeBSD, and OpenBSD rather than being downgraded to ordinary or
-best-effort execution.
-
-`acp-go-claude` is launched by an ACP client, which drives it over stdin/stdout.
-stdout carries ACP JSON-RPC only; diagnostics go to stderr (and `-debug` when
-present).
+`acp-go-claude` speaks ACP JSON-RPC over stdin/stdout. Diagnostics go to
+stderr. Native Claude commands run ordinarily as the command's current
+identity.
 
 ```sh
-acp-go-claude -process-isolation-config /etc/acp-go/claude-isolation.json -path /usr/local/bin/claude -home /var/lib/acp-go-claude -model sonnet
+acp-go-claude -path /usr/local/bin/claude -home /var/lib/acp-go-claude -model sonnet
 ```
 
-## Embedded
+Use `-scratch-dir` to choose the parent for adapter-owned temporary files and
+`-seed-file <relpath>=<hostpath>` to copy a file into each materialized Claude
+home before launch.
 
-`Serve` runs the agent against reader/writer streams you supply, so your host
-can back the transport with any pipe, socket, or in-memory buffer:
+## Embedded host
+
+Call `Serve` when the host owns the ACP streams. Omitting `WithHostAuthority`
+keeps the same ordinary execution behavior as the command. Supplying
+`WithHostAuthority` delegates every native launch and prepared-tree boundary to
+the host:
 
 ```go
 err := claudeacp.Serve(ctx, input, output,
-	claudeacp.WithExecutablePath("/usr/local/bin/claude"),
-	claudeacp.WithProcessIsolation(claudeacp.ProcessIsolation{UID: 20001, GID: 20001, BaseEnvironment: isolationEnvironment}),
-	claudeacp.WithHome("/tmp/claude-home"),
-	claudeacp.WithDefaultModel("sonnet"),
+	claudeacp.WithExecutablePath("claude"),
+	claudeacp.WithHome("/var/lib/acp-go-claude"),
+	claudeacp.WithHostAuthority(authority),
 )
 ```
 
-Every serve-mode flag has an option equivalent:
+The authority is mandatory once supplied. Missing methods, unusable returned
+process streams, or authority loss fail closed; no direct-launch fallback is
+attempted.
 
-| Flag | Option |
-| --- | --- |
-| `-path` | `WithExecutablePath` |
-| `-process-isolation-config` | constructs `WithProcessIsolation` |
-| `-home` | `WithHome` |
-| `-scratch-dir` | `WithScratchDir` |
-| `-model` | `WithDefaultModel` |
-| `-seed-file` | `WithSeedFiles` |
-| `-claude-settings-file` | `WithClaudeSettingsFile` |
-| `-claude-bare` | `WithClaudeBareMode` |
-| `-claude-hide-auth` | `WithClaudeHideAuth` |
-| `-claude-permission-mode` | `WithClaudeDefaultPermissionMode` |
-| `-claude-system-prompt` | `WithClaudeDefaultSystemPrompt` |
-
-Embed-only options carry no flag. Use `WithSessionStore` to replace the default
-in-memory session authority when sessions must survive the agent process, plus
-`WithTurnTimeout`, `WithConcurrencyLimits`, and the OpenTelemetry providers.
-See the [Go API reference](/docs/reference/go-api) for the full catalog.
+See [Security](/docs/operations/security) for the launch, prepare, reclaim,
+revoke, and settlement ordering.

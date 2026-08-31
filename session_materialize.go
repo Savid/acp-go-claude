@@ -36,6 +36,8 @@ var (
 type materializedSession struct {
 	configDir string
 	mainPath  string
+	authority HostAuthority
+	prepared  []string
 }
 
 func (m *materializedSession) Close() error {
@@ -43,7 +45,55 @@ func (m *materializedSession) Close() error {
 		return nil
 	}
 
-	return materializeRemoveAll(m.configDir)
+	var errs []error
+
+	for _, root := range m.prepared {
+		if err := m.authority.ReclaimNativeTree(context.Background(), root); err != nil {
+			if errors.Is(err, ErrNativeTreeBusy) || errors.Is(err, ErrHostAuthorityUnavailable) || errors.Is(err, ErrContainmentIncomplete) {
+				return err
+			}
+
+			return fmt.Errorf("%w: reclaim native tree %q: %v", ErrContainmentIncomplete, root, err)
+		}
+
+		if err := materializeRemoveAll(root); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(m.prepared) == 0 {
+		errs = append(errs, materializeRemoveAll(m.configDir))
+	}
+
+	return errors.Join(errs...)
+}
+
+func (m *materializedSession) prepare(ctx context.Context, authority HostAuthority, roots ...string) error {
+	m.authority = authority
+
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+
+		if err := authority.PrepareNativeTree(ctx, root); err != nil {
+			return err
+		}
+
+		m.prepared = append(m.prepared, root)
+	}
+
+	return nil
+}
+
+func (m *materializedSession) owns(root string) bool {
+	for _, prepared := range m.prepared {
+		if prepared == root {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (a *Agent) materializeStoreSession(
@@ -300,21 +350,8 @@ func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, options clau
 
 func (a *Agent) resumeCredentialOptions() claude.Options {
 	return claude.Options{
-		ProcessIsolation:    a.claudeIsolation(),
 		OrdinaryEnvironment: a.ordinaryEnvironment(),
-		DarwinBestEffort:    a.containmentMode == RuntimeContainmentBestEffort,
-		AcquireKeychainDiscovery: func(discoveryCtx context.Context) (func(), error) {
-			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-		},
-		// The resume keystore read runs under every launch mode, because the
-		// materialized destination never hashes to the login home's Keychain
-		// item name. The discovery generation is the admission that exists in
-		// every mode that can launch at all; the best-effort-only Darwin
-		// generation would refuse the ordinary shared-identity mode this read
-		// most commonly runs in.
-		PrepareKeychainGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
-			return a.prepareDiscoveryGeneration(generationCtx)
-		},
+		Authority:           a.claudeAuthority(),
 	}
 }
 

@@ -189,7 +189,7 @@ are covered in [Session store](/docs/features/session-store).
 
 To point Claude Code at a custom Anthropic-compatible endpoint, set the base URL
 through the environment. Claude Code reads `ANTHROPIC_BASE_URL` (and related
-`ANTHROPIC_*` variables), so pass it with `WithEnv` or `ProcessIsolation.BaseEnvironment`:
+`ANTHROPIC_*` variables), so pass it with `WithEnv`:
 
 ```go
 err := claudeacp.Serve(ctx, input, output,

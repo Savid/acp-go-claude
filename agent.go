@@ -68,7 +68,7 @@ type Agent struct {
 	log     *slog.Logger
 	observe *observer.Observer
 	// ordinaryEnv is the one-time sanitized ambient capture ordinary native
-	// launches run with when no explicit ProcessIsolation was configured.
+	// launches run with when no host authority was configured.
 	ordinaryEnv map[string]string
 
 	// Lock order: acquire mu before docsMu when both are needed. Do not call
@@ -87,16 +87,14 @@ type Agent struct {
 	permissionCache    map[acp.SessionId]map[string]string
 	activeLimitErr     error
 	configurationErr   error
-	containmentMode    RuntimeContainmentMode
 	containmentErr     error
 	constructions      sync.WaitGroup
 	closeOnce          sync.Once
 	closeErr           error
 
-	rateLimitsCacheMu   sync.Mutex
-	rateLimitsCache     rateLimitsCacheEntry
-	descendantProcesses *runtimeProcessSnapshotTracker
-	providerAuth        *providerAuth
+	rateLimitsCacheMu sync.Mutex
+	rateLimitsCache   rateLimitsCacheEntry
+	providerAuth      *providerAuth
 
 	newClaudeClient    func(*slog.Logger, claude.Options) *claude.Client
 	queryRateLimits    func(context.Context, claude.Options) (claude.RateLimits, error)
@@ -112,7 +110,6 @@ var (
 // NewAgent creates an ACP agent for Claude Code.
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
-	homeErr := normalizeStandaloneHome(&options)
 
 	log := options.Logger
 	if log == nil {
@@ -121,17 +118,6 @@ func NewAgent(opts ...Option) *Agent {
 
 	observe := observer.New(observer.Config{MeterProvider: options.MeterProvider, Propagator: options.TextMapPropagator, TracerProvider: options.TracerProvider, Version: options.AgentVersion})
 	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
-
-	mode := containmentMode(options)
-	if options.RuntimeResourceHooks.ObserveContainment != nil {
-		options.RuntimeResourceHooks.ObserveContainment(context.Background(), mode)
-	}
-
-	if mode == RuntimeContainmentBestEffort {
-		log.Warn("Darwin best-effort process containment is enabled; escaped descendants may survive, numeric PGID reuse can cause collateral signalling, marker correlation is not ownership, markers can be scrubbed, and native-root permits do not bound escaped provider work",
-			slog.String("containment", string(mode)),
-		)
-	}
 
 	agent := &Agent{
 		options:          options,
@@ -145,15 +131,12 @@ func NewAgent(opts ...Option) *Agent {
 		permissionCache:  make(map[acp.SessionId]map[string]string),
 		activeLimitErr:   validateConcurrencyLimits(options.ConcurrencyLimits),
 		configurationErr: errors.Join(
-			homeErr,
-			validateContainmentOptions(options),
+			validateHostAuthorityOptions(options),
 			validateImageLimits(options.ImageLimits),
 			validateInputHandoffRoot(options.InputHandoffRoot),
 			validateProviderAuthRoot(options),
 			validateProviderAuthDirectHome(options.ProviderAuthDirectHome),
 		),
-		containmentMode:     mode,
-		descendantProcesses: newRuntimeProcessSnapshotTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle()),
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
 			return claude.NewClient(log, options, nil)
 		},
@@ -285,6 +268,10 @@ func (a *Agent) beginSessionConstruction() error {
 		return errAgentClosed
 	}
 
+	if a.containmentErr != nil {
+		return a.containmentErr
+	}
+
 	a.constructions.Add(1)
 
 	return nil
@@ -295,7 +282,7 @@ func (a *Agent) endSessionConstruction() {
 }
 
 func (a *Agent) recordContainmentError(err error) {
-	if !errors.Is(err, claude.ErrProcessContainmentIncomplete) {
+	if !errors.Is(err, ErrContainmentIncomplete) && !errors.Is(err, ErrHostAuthorityUnavailable) {
 		return
 	}
 

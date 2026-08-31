@@ -1479,7 +1479,7 @@ func TestTaskNotificationResultTerminalizesTheDelayedExcursion(t *testing.T) {
 	require.NoError(t, err, "prompt C proceeds once the delayed excursion settled")
 }
 
-func TestSessionCloseJoinsQueuedAutonomousRetirementSupervisor(t *testing.T) {
+func TestSessionCloseJoinsQueuedAutonomousRetirementWorker(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 	session, transport, _, cleanup := newNegotiatedPromptFlowSession(t)
@@ -1489,7 +1489,7 @@ func TestSessionCloseJoinsQueuedAutonomousRetirementSupervisor(t *testing.T) {
 	incarnation := session.currentNativeIncarnation()
 	require.NotNil(t, incarnation)
 
-	// The supervisor owns a producer admission before it starts its goroutine.
+	// The worker owns a producer admission before it starts its goroutine.
 	// Parking it on the exact serve lock makes its queued lifetime deterministic.
 	session.pumpServeMu.Lock()
 	serveLocked := true
@@ -1512,10 +1512,10 @@ func TestSessionCloseJoinsQueuedAutonomousRetirementSupervisor(t *testing.T) {
 	select {
 	case closeErr := <-closeDone:
 		require.NoError(t, closeErr)
-		t.Fatal("session close returned with its retirement supervisor still queued")
+		t.Fatal("session close returned with its retirement worker still queued")
 	default:
 	}
-	require.Zero(t, transport.CloseCalls(), "carrier teardown waits behind the queued supervisor")
+	require.Zero(t, transport.CloseCalls(), "carrier teardown waits behind the queued worker")
 
 	session.pumpServeMu.Unlock()
 	serveLocked = false

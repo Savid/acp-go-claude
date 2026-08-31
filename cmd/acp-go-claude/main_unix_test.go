@@ -15,14 +15,9 @@ import (
 )
 
 func TestRunReturnsSignalCode(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	originalServe := serve
 	originalShutdown := shutdownOpenTelemetry
-	t.Cleanup(func() {
-		serve = originalServe
-		shutdownOpenTelemetry = originalShutdown
-	})
-
+	t.Cleanup(func() { serve = originalServe; shutdownOpenTelemetry = originalShutdown })
 	serve = func(ctx context.Context, _ io.Reader, _ io.Writer, _ ...claudeacp.Option) error {
 		require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
 		<-ctx.Done()
@@ -30,7 +25,6 @@ func TestRunReturnsSignalCode(t *testing.T) {
 		return ctx.Err()
 	}
 	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
-
-	code := run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
+	code := run(context.Background(), nil, bytes.NewReader(nil), io.Discard, io.Discard)
 	require.Equal(t, 128+int(syscall.SIGTERM), code)
 }

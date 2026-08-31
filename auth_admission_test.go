@@ -27,11 +27,10 @@ func countAuthLogins(t *testing.T) *atomic.Int64 {
 	authLoginBegin = func(
 		ctx context.Context,
 		options claude.Options,
-		generation *claude.DarwinGeneration,
 	) (authLoginSession, string, error) {
 		starts.Add(1)
 
-		return original(ctx, options, generation)
+		return original(ctx, options)
 	}
 
 	return starts

@@ -6,10 +6,6 @@ import (
 	"sync"
 )
 
-func acquireNativeRoot(ctx context.Context, hooks RuntimeResourceHooks, kind RuntimeResourceKind) (func(), error) {
-	return acquireRuntimeResource(ctx, hooks.AcquireNativeRoot, kind, "native root")
-}
-
 func reserveScratchRoot(ctx context.Context, hooks RuntimeResourceHooks, kind RuntimeResourceKind) (func(), error) {
 	return acquireRuntimeResource(ctx, hooks.ReserveScratchRoot, kind, "scratch root")
 }

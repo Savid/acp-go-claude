@@ -95,34 +95,18 @@ func sessionDeleteTombstoneError(err error) error {
 	}), err)
 }
 
-// finalizeSessionRuntimeResources returns admissions only after the selected
-// containment boundary completes. An incomplete boundary retains both the
-// native admission and every adapter-owned scratch root because escaped work
-// may still be using them. Other close errors do not obscure completion.
-//
-// A close passes the session's own once-guarded releases, so a close that failed
-// a rung and is taken again returns each admission exactly once across both
-// attempts: the one an earlier attempt already returned is inert here. A start
-// that unwinds before acquiring one passes nothing for it.
+// finalizeSessionRuntimeResources removes adapter-owned roots only after the
+// selected native boundary completes. An incomplete boundary retains every
+// scratch root because escaped work may still be using it.
 func finalizeSessionRuntimeResources(
 	runtimeErr error,
-	nativeRelease func(),
 	mcpConfigDir string,
 	imageScratchDir string,
 	materialized *materializedSession,
 	scratchRelease func(),
 ) error {
-	if errors.Is(runtimeErr, claude.ErrProcessContainmentIncomplete) {
+	if errors.Is(runtimeErr, ErrContainmentIncomplete) {
 		return runtimeErr
-	}
-
-	if nativeRelease != nil {
-		nativeRelease()
-	}
-
-	var mcpRemoveErr error
-	if mcpConfigDir != "" {
-		mcpRemoveErr = sessionRemoveAll(mcpConfigDir)
 	}
 
 	var imageRemoveErr error
@@ -135,26 +119,16 @@ func finalizeSessionRuntimeResources(
 		materializedRemoveErr = materialized.Close()
 	}
 
+	var mcpRemoveErr error
+	if mcpConfigDir != "" && (materialized == nil || !materialized.owns(mcpConfigDir)) {
+		mcpRemoveErr = sessionRemoveAll(mcpConfigDir)
+	}
+
 	if mcpRemoveErr == nil && imageRemoveErr == nil && materializedRemoveErr == nil && scratchRelease != nil {
 		scratchRelease()
 	}
 
 	return errors.Join(runtimeErr, mcpRemoveErr, imageRemoveErr, materializedRemoveErr)
-}
-
-// releaseNativeRootOnce returns the session's native-root admission and takes it
-// off the session. A close that failed a rung of its boundary is taken again, so
-// the release is consumed where it runs: an admission returned twice would credit
-// the host's pool for work it never admitted.
-func (s *agentSession) releaseNativeRootOnce() {
-	s.mu.Lock()
-	release := s.nativeRootRelease
-	s.nativeRootRelease = nil
-	s.mu.Unlock()
-
-	if release != nil {
-		release()
-	}
 }
 
 // releaseScratchRootOnce returns the session's scratch reservation and takes it
@@ -226,7 +200,6 @@ func (s *agentSession) ensureClientAlive(ctx context.Context) error {
 	s.mu.Lock()
 	canRelaunch := s.canRelaunch
 	client := s.client
-	nativeRelease := s.nativeRootRelease
 	s.mu.Unlock()
 
 	if !canRelaunch {
@@ -241,7 +214,7 @@ func (s *agentSession) ensureClientAlive(ctx context.Context) error {
 	opts.ResumeID = string(s.id)
 	opts.ForkSession = false
 
-	return s.relaunchClient(ctx, client, nativeRelease, opts)
+	return s.relaunchClient(ctx, client, opts)
 }
 
 // refreshMCPRegistry rebuilds Claude's fixed MCP tool registry exactly once,
@@ -255,7 +228,6 @@ func (s *agentSession) refreshMCPRegistry(ctx context.Context) error {
 	canRelaunch := s.canRelaunch
 	closing := s.closing
 	client := s.client
-	nativeRelease := s.nativeRootRelease
 	opts := s.clientOptions
 	s.mu.Unlock()
 
@@ -273,7 +245,7 @@ func (s *agentSession) refreshMCPRegistry(ctx context.Context) error {
 		return nil
 	}
 
-	if err := s.relaunchClient(ctx, client, nativeRelease, opts); err != nil {
+	if err := s.relaunchClient(ctx, client, opts); err != nil {
 		return err
 	}
 
@@ -305,14 +277,12 @@ func (s *agentSession) currentRelaunchConfig() relaunchConfig {
 	}
 }
 
-// relaunchClient replaces one completed native containment boundary without
-// ever holding two session native-root admissions at once. A failed or
-// cancelled launch is fully closed before its new admission is returned; an
-// incomplete boundary poisons relaunch permanently and retains the admission.
+// relaunchClient replaces one completed native process boundary. A failed or
+// cancelled launch is fully closed before it returns, and an incomplete
+// boundary poisons relaunch permanently.
 func (s *agentSession) relaunchClient(
 	ctx context.Context,
 	client *claude.Client,
-	nativeRelease func(),
 	opts claude.Options,
 ) (returnErr error) {
 	if s.isClosing() {
@@ -348,7 +318,7 @@ func (s *agentSession) relaunchClient(
 		}
 
 		previousCloseErr = client.Close()
-		if errors.Is(previousCloseErr, claude.ErrProcessContainmentIncomplete) {
+		if errors.Is(previousCloseErr, ErrContainmentIncomplete) {
 			s.mu.Lock()
 			s.canRelaunch = false
 			s.mu.Unlock()
@@ -362,37 +332,22 @@ func (s *agentSession) relaunchClient(
 		}
 	}
 
-	if nativeRelease != nil {
-		nativeRelease()
-	}
-
-	s.mu.Lock()
-	if s.client == client {
-		s.nativeRootRelease = nil
-	}
-	s.mu.Unlock()
-
-	nativeRelease, err := acquireNativeRoot(ctx, s.agent.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if err != nil {
-		return err
-	}
-
 	relaunched := s.agent.newClaudeClient(s.agent.log, opts)
 	relaunched.SetControlHandlerAdmission(s.admitControlCallback)
 
 	if err := relaunched.Start(ctx); err != nil {
-		return s.cleanupFailedRelaunch(err, relaunched, nativeRelease, previousCloseErr)
+		return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
 	}
 
 	if config.outputStyle != "" {
 		if err := relaunched.SetOutputStyle(ctx, config.outputStyle); err != nil {
-			return s.cleanupFailedRelaunch(err, relaunched, nativeRelease, previousCloseErr)
+			return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
 		}
 	}
 
 	if config.effort != "" {
 		if err := relaunched.SetEffort(ctx, config.effort); err != nil {
-			return s.cleanupFailedRelaunch(err, relaunched, nativeRelease, previousCloseErr)
+			return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
 		}
 	}
 
@@ -403,11 +358,10 @@ func (s *agentSession) relaunchClient(
 		// A relaunch that lost the race to close must not leave a native process
 		// behind it: the replacement is torn down and its admission returned
 		// before the refusal is answered.
-		return s.cleanupFailedRelaunch(closedSessionError(), relaunched, nativeRelease, previousCloseErr)
+		return s.cleanupFailedRelaunch(closedSessionError(), relaunched, previousCloseErr)
 	}
 
 	s.client = relaunched
-	s.nativeRootRelease = nativeRelease
 	// The replacement process ran command discovery of its own, so the catalog
 	// this session advertises is the one that process actually serves. Keeping the
 	// catalog the retired process reported would advertise commands nothing is
@@ -432,16 +386,11 @@ func (s *agentSession) relaunchClient(
 func (s *agentSession) cleanupFailedRelaunch(
 	cause error,
 	relaunched *claude.Client,
-	nativeRelease func(),
 	previousCloseErr error,
 ) error {
 	cleanupErr := errors.Join(cause, relaunched.Close())
 
-	if !errors.Is(cleanupErr, claude.ErrProcessContainmentIncomplete) {
-		if nativeRelease != nil {
-			nativeRelease()
-		}
-	} else {
+	if errors.Is(cleanupErr, ErrContainmentIncomplete) {
 		// No later path may launch another root under an admission whose
 		// selected containment boundary did not complete.
 		s.mu.Lock()
@@ -578,7 +527,7 @@ func (s *agentSession) cancelNative(ctx context.Context) (err error) {
 	}
 
 	s.mu.Lock()
-	if errors.Is(closeErr, claude.ErrProcessContainmentIncomplete) {
+	if errors.Is(closeErr, ErrContainmentIncomplete) {
 		s.turnContainmentErr = closeErr
 	} else {
 		s.turnContainmentErr = nil
@@ -597,26 +546,13 @@ func (s *agentSession) closeNativeClient(client *claude.Client) error {
 	}
 
 	closeErr := client.Close()
-	if errors.Is(closeErr, claude.ErrProcessContainmentIncomplete) {
+	if errors.Is(closeErr, ErrContainmentIncomplete) {
 		s.mu.Lock()
 		s.canRelaunch = false
 		s.mu.Unlock()
 		s.recordContainmentError(closeErr)
 
 		return closeErr
-	}
-
-	var nativeRelease func()
-
-	s.mu.Lock()
-	if s.client == client {
-		nativeRelease = s.nativeRootRelease
-		s.nativeRootRelease = nil
-	}
-	s.mu.Unlock()
-
-	if nativeRelease != nil {
-		nativeRelease()
 	}
 
 	return closeErr
@@ -889,7 +825,6 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 
 	err = finalizeSessionRuntimeResources(
 		err,
-		s.releaseNativeRootOnce,
 		s.mcpConfigDir,
 		s.imageScratchDir,
 		s.materialized,
@@ -923,7 +858,7 @@ func (s *agentSession) close(ctx context.Context) (err error) {
 // contain must not be declared terminal — and the stream is fenced regardless.
 func (s *agentSession) settleSessionClose(ctx context.Context, closeErr error) error {
 	var dataFailure *claude.ControllerDataError
-	if errors.Is(closeErr, claude.ErrProcessContainmentIncomplete) ||
+	if errors.Is(closeErr, ErrContainmentIncomplete) ||
 		(errors.As(closeErr, &dataFailure) && dataFailure.Kind == claude.ControllerDataTeardownAbort) {
 		s.nativePumpHandle().stopReceiving()
 		s.lifecycleStream().abandonIncarnation()

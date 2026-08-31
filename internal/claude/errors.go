@@ -111,7 +111,6 @@ func closedTransportError(err error) error {
 	for _, recognized := range []error{
 		context.Canceled,
 		context.DeadlineExceeded,
-		ErrProcessContainmentIncomplete,
 		ErrClientClosed,
 		ErrClientNotStarted,
 		ErrMessageStreamClosed,
@@ -154,8 +153,6 @@ func transportErrorClass(err error) string {
 		return transportClassCanceled
 	case errors.Is(err, context.DeadlineExceeded):
 		return transportClassDeadline
-	case errors.Is(err, ErrProcessContainmentIncomplete):
-		return transportClassContainment
 	case errors.Is(err, ErrProcessExited):
 		return "process_exit"
 	case errors.Is(err, errClaudeStdoutReaderPanic):

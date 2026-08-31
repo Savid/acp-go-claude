@@ -18,6 +18,31 @@ type extensionNotification struct {
 	params json.RawMessage
 }
 
+func interruptCalls(transport *fakeClaudeTransport) int {
+	calls := 0
+	for _, sent := range transport.Sent() {
+		request, ok := sent.(claude.ControlRequest)
+		if ok && request.Request["subtype"] == "interrupt" {
+			calls++
+		}
+	}
+
+	return calls
+}
+
+type closeHookTransport struct {
+	claude.Transport
+	onClose func()
+}
+
+func (t *closeHookTransport) Close() error {
+	if t.onClose != nil {
+		t.onClose()
+	}
+
+	return t.Transport.Close()
+}
+
 type recordingClient struct {
 	mu           sync.Mutex
 	updates      []acp.SessionNotification

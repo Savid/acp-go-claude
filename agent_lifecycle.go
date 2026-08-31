@@ -54,16 +54,14 @@ func (a *Agent) requireLifecycleWrites() {
 // native trace proves stable task identity and parentage, so no activity kind is
 // advertised. Background native work is still represented by agent-origin turns
 // and ordinary typed tool-call updates, without fabricating an activity registry.
-// Only the authoritative containment mode enumerates the whole
-// descendant tree, so only it proves vacancy and names the `process-containment`
-// class; ordinary same-identity execution and opted-in Darwin containment prove a
-// weaker boundary, and a weaker boundary is never promoted.
+// Only a supplied host authority owns the complete native tree, so only that
+// configuration proves vacancy and names the `process-containment` class.
 func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
 	proven := lifecycle.Negotiated{
 		UpdatesOutsidePrompt: true,
 		ActivityKinds:        []lifecycle.ActivityKind{},
 	}
-	if a.containmentMode.provesWholeTreeLifecycle() {
+	if a.options.hostAuthoritySet {
 		proven.AuthoritativeQuiescence = true
 		proven.QuiescenceSource = lifecycle.ProofClassProcessContainment
 	}

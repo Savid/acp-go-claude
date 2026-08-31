@@ -228,10 +228,8 @@ This adapter advertises no ACP auth methods, so an authentication failure is a
 `provider` failure under `-32603` — it never emits the `-32000` auth-required
 variant. A user cancel that races a timeout resolves as a successful `cancelled`
 response, not a failure. `session/cancel`, timeout expiry, and caller-context
-cancellation do not settle on a native interrupt acknowledgement alone: every
-authoritatively contained tool descendant must be proved gone. Darwin best
-effort instead requires direct-child reaping and absence of the captured
-original group; a `setsid` descendant may survive. An incomplete selected
-boundary is a `transport` failure, keeps its runtime admission quarantined, and
-cannot be lazily relaunched.
+cancellation do not settle on a native interrupt acknowledgement alone. With a
+host authority, `NativeProcess.Wait` must reach terminal settlement after the
+protocol shutdown or `Revoke`. An incomplete selected boundary is a
+`transport` failure, retains prepared trees, and cannot be lazily relaunched.
 </Note>

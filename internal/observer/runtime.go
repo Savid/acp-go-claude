@@ -2,7 +2,6 @@ package observer
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -10,33 +9,17 @@ import (
 )
 
 type runtimeObserver struct {
-	admissions  metric.Int64Counter
-	resources   metric.Int64UpDownCounter
-	processes   metric.Int64UpDownCounter
-	stages      metric.Float64Histogram
-	containment metric.Int64Gauge
-
-	mu        sync.Mutex
-	snapshots map[string]int
+	admissions metric.Int64Counter
+	resources  metric.Int64UpDownCounter
+	stages     metric.Float64Histogram
 }
 
 func newRuntimeObserver(meter metric.Meter, prefix string) *runtimeObserver {
 	return &runtimeObserver{
-		admissions:  mustInt64Counter(meter, prefix+".runtime.resource.admission.count", "Runtime resource admission decisions."),
-		resources:   mustInt64UpDownCounter(meter, prefix+".runtime.resource.active", "Live native-root permits and adapter scratch-root reservations."),
-		processes:   mustInt64UpDownCounter(meter, prefix+".runtime.process.active", "Live home-lock supervisors and proven provider descendants."),
-		stages:      mustFloat64Histogram(meter, prefix+".runtime.startup.stage.duration", "Native startup stage duration."),
-		containment: mustInt64Gauge(meter, prefix+".runtime.containment", "Selected runtime containment mode."),
-		snapshots:   make(map[string]int),
+		admissions: mustInt64Counter(meter, prefix+".runtime.resource.admission.count", "Runtime resource admission decisions."),
+		resources:  mustInt64UpDownCounter(meter, prefix+".runtime.resource.active", "Live adapter scratch-root reservations."),
+		stages:     mustFloat64Histogram(meter, prefix+".runtime.startup.stage.duration", "Native startup stage duration."),
 	}
-}
-
-func (o *Observer) ObserveRuntimeContainment(ctx context.Context, mode string) {
-	if o == nil || o.runtime == nil || mode == "" {
-		return
-	}
-
-	o.runtime.containment.Record(ctx, 1, metric.WithAttributes(attribute.String("containment", mode)))
 }
 
 func (o *Observer) RecordRuntimeResourceAdmission(ctx context.Context, resource, lifecycle, outcome string) {
@@ -57,27 +40,6 @@ func (o *Observer) AddRuntimeResource(ctx context.Context, resource string, delt
 	}
 
 	o.runtime.resources.Add(ctx, delta, metric.WithAttributes(attribute.String("runtime.resource", resource)))
-}
-
-func (o *Observer) AddRuntimeProcess(ctx context.Context, process string, delta int64) {
-	if o == nil || o.runtime == nil || delta == 0 {
-		return
-	}
-
-	o.runtime.processes.Add(ctx, delta, metric.WithAttributes(attribute.String("runtime.process", process)))
-}
-
-func (o *Observer) SetRuntimeProcess(ctx context.Context, process string, count int) {
-	if o == nil || o.runtime == nil || count < 0 {
-		return
-	}
-
-	o.runtime.mu.Lock()
-	previous := o.runtime.snapshots[process]
-	o.runtime.snapshots[process] = count
-	o.runtime.mu.Unlock()
-
-	o.AddRuntimeProcess(ctx, process, int64(count-previous))
 }
 
 func (o *Observer) ObserveRuntimeStartupStage(ctx context.Context, lifecycle, stage string, elapsed time.Duration, err error) {

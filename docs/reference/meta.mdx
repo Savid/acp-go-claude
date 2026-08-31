@@ -227,7 +227,7 @@ relative or empty entry fails the session-lifecycle request. Raw `PATH` stays
 rejected in `env`; this is the supported way to extend the child's search path.
 `CLAUDE_CONFIG_DIR`, `HOME`, and the XDG cache, config, data, runtime, and state
 root variables are also rejected in session `env`. The host-selected
-`WithHome` and trusted process-isolation base environment remain authoritative.
+`WithHome` and, when supplied, `HostAuthority.NativeEnvironment` remain authoritative.
 Every one of those names is matched the way the platform names variables: exact
 case on Unix, where `PATH` and `path` are two variables, and case-insensitively
 on Windows, where they are one.

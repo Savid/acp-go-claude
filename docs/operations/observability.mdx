@@ -16,18 +16,6 @@ with `-debug` (`WithLogger` for a custom logger). Telemetry records lifecycle
 timing, request outcomes, and counters, and by default avoids recording prompt
 text, tool inputs, tool outputs, and raw Claude event bodies.
 
-The `acp_go_claude.runtime.containment` gauge records the selected containment
-mode in its `containment` attribute: `authoritative`, `shared_identity`,
-`best_effort`, or `unavailable`. Embedded hosts receive the same selection through
-`RuntimeResourceHooks.ObserveContainment` and can query it with
-`Agent.ContainmentMode()`. Only `authoritative` publishes provider-descendant
-snapshots. Ordinary `shared_identity` execution never publishes one, including a
-zero value, because it accounts for the process the adapter started and its
-process group rather than a proven descendant set; Darwin best effort suppresses
-them for the same reason, since its process group cannot account for `setsid`
-escapees. The containment gauge is mode observation only and carries no
-process-count or quiescence meaning.
-
 ## Diagnosing turn failures
 
 A failed prompt returns a `claude_turn_failed` error whose `cause` tells you
@@ -45,9 +33,8 @@ full shape; use the `cause` to route the investigation:
 A user cancel that coincides with a `WithTurnTimeout` expiry resolves as a
 successful `cancelled` response, not a `timeout` failure. If you expect timeouts
 but see cancellations, the client is cancelling first. Both outcomes wait for
-the selected native containment boundary. A `transport` failure mentioning
-incomplete containment means the adapter retained the runtime admission and
-disabled lazy relaunch. Neither ordinary `shared_identity` execution nor Darwin
-best effort ever upgrades that boundary to a whole-tree claim; investigate
-retained records and contained processes before recovery.
+the selected native process boundary. A `transport` failure mentioning
+incomplete containment means the adapter retained prepared roots and disabled
+lazy relaunch and new native session admission. Investigate host-authority
+records and lease processes before recovery.
 </Note>

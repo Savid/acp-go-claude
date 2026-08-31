@@ -1312,11 +1312,11 @@ func TestNativePumpRetirementAbandonsIncompleteContainment(t *testing.T) {
 	session.client = client
 	require.NoError(t, session.serveNativePump(t.Context(), client))
 	incarnation := session.currentNativeIncarnation()
-	transport.closeErr = claude.ErrProcessContainmentIncomplete
+	transport.closeErr = ErrContainmentIncomplete
 
 	retired, err := session.retireExactNativeIncarnationLocked(t.Context(), incarnation)
 	require.True(t, retired)
-	require.ErrorIs(t, err, claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	stream.mu.Lock()
 	require.False(t, stream.live)
 	stream.mu.Unlock()

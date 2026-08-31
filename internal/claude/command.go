@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,33 +14,19 @@ import (
 	"strings"
 )
 
-const envClaudeCodeNested = "CLAUDECODE"
-const envSearchPath = "PATH"
-const envClaudeConfigDir = "CLAUDE_CONFIG_DIR"
-const cliArgOutputFormat = "--output-format"
+const (
+	envClaudeCodeNested     = "CLAUDECODE"
+	envSearchPath           = "PATH"
+	envClaudeConfigDir      = "CLAUDE_CONFIG_DIR"
+	envHome                 = "HOME"
+	cliArgOutputFormat      = "--output-format"
+	defaultCLIExecutable    = "claude"
+	minClaudeVersion        = "2.0.0"
+	privateAdapterEnvPrefix = "ACP_GO_CLAUDE_INTERNAL_"
+)
 
-// defaultCLIExecutable is the executable the adapter resolves when no CLI path
-// was configured. It is the executable's own identity, which is not the Darwin
-// registry vendor that happens to spell the same word.
-const defaultCLIExecutable = "claude"
-
-var commandPipe = os.Pipe
-
-// minClaudeVersion is the oldest Claude CLI the adapter supports. The adapter's
-// stream-json control protocol (bidirectional control requests, partial-message
-// streaming, session mirror, hook events) requires the Claude Code 2.x line.
-const minClaudeVersion = "2.0.0"
-
-// BuildArgs returns the Claude CLI arguments for ACP-backed interactive sessions.
 func BuildArgs(options Options) []string {
-	args := []string{
-		cliArgOutputFormat, streamJSON,
-		"--input-format", streamJSON,
-		"--include-partial-messages",
-		"--verbose",
-		"--include-hook-events",
-	}
-
+	args := []string{cliArgOutputFormat, streamJSON, "--input-format", streamJSON, "--include-partial-messages", "--verbose", "--include-hook-events"}
 	if options.SessionMirror {
 		args = append(args, "--session-mirror")
 	}
@@ -114,68 +101,55 @@ func compactJSON(value any) string {
 	return string(data)
 }
 
-// BuildEnv returns the environment for a Claude CLI process. The scrubbed
-// variables are dropped here rather than at one spawn site, because a value
-// that repoints the credential store or rewrites the child's own output bytes
-// is inherited by every child alike: a login writing the default store while
-// the residence probe describes a different one reports success about a store
-// nobody asked about.
 func BuildEnv(options Options) []string {
-	base, err := launchBaseEnvironment(options)
-	if err != nil {
+	base := options.OrdinaryEnvironment
+	if options.Authority != nil {
+		if options.Authority.NativeEnvironment == nil {
+			return nil
+		}
+
+		base = options.Authority.NativeEnvironment()
+	}
+
+	if validateEnvironmentMap(base) != nil {
 		return nil
 	}
 
-	values := make(map[string]string, len(base)+len(options.Env)+3)
-	keys := make([]string, 0, len(base)+len(options.Env)+3)
-
-	set := func(key string, value string) {
-		if EnvironmentKey(key) == EnvironmentKey(envClaudeCodeNested) || privateAdapterEnvName(key) {
+	values := make(map[string]string, len(base)+len(options.Env)+4)
+	set := func(key, value string) {
+		if EnvironmentKey(key) == EnvironmentKey(envClaudeCodeNested) || privateAdapterEnvName(key) || authScrubbedEnvKey(key) {
 			return
 		}
 
-		if authScrubbedEnvKey(key) {
-			return
-		}
-
-		nativeKey := EnvironmentKey(key)
-		if _, ok := values[nativeKey]; !ok {
-			keys = append(keys, nativeKey)
-		}
-
-		values[nativeKey] = value
+		values[EnvironmentKey(key)] = value
 	}
 
-	baseKeys := make([]string, 0, len(base))
+	keys := make([]string, 0, len(base))
 	for key := range base {
-		baseKeys = append(baseKeys, key)
+		keys = append(keys, key)
 	}
 
-	slices.Sort(baseKeys)
+	slices.Sort(keys)
 
-	for _, key := range baseKeys {
-		if EnvironmentKey(key) == EnvironmentKey(envClaudeConfigDir) {
-			continue
+	for _, key := range keys {
+		if EnvironmentKey(key) != EnvironmentKey(envClaudeConfigDir) {
+			set(key, base[key])
 		}
-
-		set(key, base[key])
 	}
 
 	set("CLAUDE_CODE_ENTRYPOINT", "acp-go-claude")
 
-	optionKeys := make([]string, 0, len(options.Env))
+	keys = keys[:0]
 	for key := range options.Env {
-		optionKeys = append(optionKeys, key)
+		keys = append(keys, key)
 	}
 
-	slices.Sort(optionKeys)
+	slices.Sort(keys)
 
-	for _, key := range optionKeys {
-		if managedRootEnvKey(key) {
-			continue
+	for _, key := range keys {
+		if !managedRootEnvKey(key) {
+			set(key, options.Env[key])
 		}
-
-		set(key, options.Env[key])
 	}
 
 	if options.ClaudeHome != "" {
@@ -187,65 +161,53 @@ func BuildEnv(options Options) []string {
 	}
 
 	if len(options.ExtraPathDirs) > 0 {
-		set(envSearchPath, prependSearchPath(
-			options.ExtraPathDirs,
-			values[EnvironmentKey(envSearchPath)],
-		))
+		set(envSearchPath, prependSearchPath(options.ExtraPathDirs, values[EnvironmentKey(envSearchPath)]))
 	}
 
-	// The absolute-entry rule belongs to the hardened policy PATH. Ordinary
-	// execution inherits the operator's own search path and is not held to it.
-	if options.ProcessIsolation != nil {
-		if err := validateProcessSearchPath(values[EnvironmentKey(envSearchPath)]); err != nil {
-			return nil
-		}
+	keys = keys[:0]
+	for key := range values {
+		keys = append(keys, key)
 	}
 
-	env := make([]string, 0, len(keys))
+	slices.Sort(keys)
+
+	environment := make([]string, 0, len(keys))
 	for _, key := range keys {
-		env = append(env, key+"="+values[key])
+		environment = append(environment, key+"="+values[key])
 	}
 
-	return env
+	return environment
 }
 
-// launchBaseEnvironment answers with the base every native environment is built
-// on. An explicit policy supplies a complete replacement base; omission carries
-// no policy at all, so the base is the sanitized ambient capture ordinary
-// same-identity execution runs with.
-func launchBaseEnvironment(options Options) (map[string]string, error) {
-	if options.ProcessIsolation == nil {
-		if err := validateEnvironmentMap(options.OrdinaryEnvironment); err != nil {
-			return nil, fmt.Errorf("validate ordinary launch environment: %w", err)
+func validateEnvironmentMap(environment map[string]string) error {
+	if environment == nil {
+		return errors.New("native environment is required")
+	}
+
+	for key, value := range environment {
+		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("invalid environment entry for %q", key)
 		}
-
-		return options.OrdinaryEnvironment, nil
 	}
 
-	if err := validateProcessIsolation(options.ProcessIsolation); err != nil {
-		return nil, err
-	}
+	return nil
+}
 
-	return options.ProcessIsolation.BaseEnvironment, nil
+func privateAdapterEnvName(key string) bool {
+	return strings.HasPrefix(EnvironmentKey(key), privateAdapterEnvPrefix)
 }
 
 func managedRootEnvKey(key string) bool {
 	switch EnvironmentKey(key) {
-	case envClaudeConfigDir, "HOME",
-		"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
+	case envClaudeConfigDir, envHome, "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
 		return true
 	default:
 		return false
 	}
 }
 
-// prependSearchPath returns a PATH value carrying dirs ahead of every entry
-// already in search, in the order given. Callers own absoluteness: a relative
-// entry here would resolve against the child's working directory.
 func prependSearchPath(dirs []string, search string) string {
-	entries := make([]string, 0, len(dirs)+1)
-	entries = append(entries, dirs...)
-
+	entries := append([]string(nil), dirs...)
 	if search != "" {
 		entries = append(entries, search)
 	}
@@ -253,250 +215,26 @@ func prependSearchPath(dirs []string, search string) string {
 	return strings.Join(entries, string(os.PathListSeparator))
 }
 
-// Discover admits the Claude executable exactly once and freezes what it found.
-// The result is an identity, not a name to look up again: every exec that
-// follows re-reads the admitted path and refuses when the file underneath it
-// changed.
-func Discover(ctx context.Context, cliPath string, options Options) (Executable, error) {
-	if err := ctx.Err(); err != nil {
-		return Executable{}, err
-	}
-
-	if _, err := launchBaseEnvironment(options); err != nil {
-		return Executable{}, err
-	}
-
-	if strings.TrimSpace(cliPath) == "" {
-		cliPath = defaultCLIExecutable
-	}
-
-	path, err := resolveLaunchExecutable(options, cliPath, BuildEnv(options))
+func validateClaudeVersion(ctx context.Context, options Options) error {
+	output, result, err := runNativeOutput(ctx, options, options.CLIPath, []string{"--version"})
 	if err != nil {
-		return Executable{}, fmt.Errorf("find claude in PATH: %w", err)
+		return fmt.Errorf("probe claude version: %w", err)
 	}
 
-	return freezeExecutable(path)
-}
-
-// validateClaudeVersion probes the Claude CLI version and fails fast when it is
-// older than minClaudeVersion. The adapter never silently downgrades to an
-// unsupported CLI.
-func validateClaudeVersion(ctx context.Context, executable Executable, options Options) error {
-	release := func() {}
-
-	if options.AcquireVersionDiscovery != nil {
-		acquired, err := options.AcquireVersionDiscovery(ctx)
-		if err != nil {
-			return fmt.Errorf("admit claude CLI version discovery: %w", err)
-		}
-
-		if acquired == nil {
-			return errors.New("admit claude CLI version discovery: nil release")
-		}
-
-		release = acquired
-	}
-
-	output, err := containedClaudeVersionOutput(ctx, executable, options)
-	if !errors.Is(err, ErrProcessContainmentIncomplete) {
-		release()
-	}
-
-	if err != nil {
-		return fmt.Errorf("check claude CLI version: %w", err)
+	if result.ExitCode != 0 {
+		return fmt.Errorf("probe claude version exited %d", result.ExitCode)
 	}
 
 	version := parseClaudeVersion(string(output))
 	if version == "" {
-		return fmt.Errorf("check claude CLI version: could not parse %q", strings.TrimSpace(string(output)))
+		return errors.New("parse claude version")
 	}
 
 	if compareSemver(version, minClaudeVersion) < 0 {
-		return fmt.Errorf("claude CLI %s is too old; need >= %s", version, minClaudeVersion)
+		return fmt.Errorf("claude version %s is older than required %s", version, minClaudeVersion)
 	}
 
 	return nil
-}
-
-func containedClaudeVersionOutput(ctx context.Context, executable Executable, options Options) (output []byte, returnErr error) {
-	var (
-		generation *DarwinGeneration
-		err        error
-	)
-
-	if options.DarwinBestEffort {
-		if options.PrepareDarwinVersionGeneration == nil {
-			return nil, fmt.Errorf("%w: Darwin version discovery generation is unavailable", ErrProcessContainmentIncomplete)
-		}
-
-		generation, err = options.PrepareDarwinVersionGeneration(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return containedClaudeOutput(ctx, executable, []string{"--version"}, options, generation, "claude version")
-}
-
-func containedClaudeOutput(
-	ctx context.Context,
-	executable Executable,
-	args []string,
-	options Options,
-	generation *DarwinGeneration,
-	operation string,
-) (output []byte, returnErr error) {
-	var err error
-
-	generationOwnedByTree := false
-	defer func() {
-		if generation != nil && !generationOwnedByTree {
-			complete := !errors.Is(returnErr, ErrProcessContainmentIncomplete)
-			returnErr = errors.Join(returnErr, generation.finish(complete))
-		}
-	}()
-
-	if verifyErr := executable.verify(); verifyErr != nil {
-		return nil, fmt.Errorf("admit %s executable: %w", operation, verifyErr)
-	}
-
-	command := processCommand(executable.Path(), args...)
-	configureProcessCommand(command)
-	command.Dir = options.Cwd
-
-	if command.Dir == "" {
-		command.Dir, err = processGetwd()
-		if err != nil {
-			return nil, fmt.Errorf("get working directory for %s: %w", operation, err)
-		}
-	}
-
-	envOptions := options
-	envOptions.Cwd = command.Dir
-
-	command.Env = BuildEnv(envOptions)
-	if command.Env == nil {
-		return nil, errors.New("build Claude process environment: invalid process isolation")
-	}
-
-	stdout, childStdout, err := commandPipe()
-	if err != nil {
-		return nil, fmt.Errorf("capture %s output: %w", operation, err)
-	}
-
-	command.Stdout = childStdout
-
-	launch, err := processPrepareContained(command, processLaunchOptions{
-		DarwinBestEffort: options.DarwinBestEffort,
-		Generation:       generation,
-		Isolation:        options.ProcessIsolation,
-	})
-	if err != nil {
-		closeErr := errors.Join(stdout.Close(), childStdout.Close())
-
-		if errors.Is(err, ErrProcessContainmentIncomplete) && options.ObserveProcessInventory != nil {
-			options.ObserveProcessInventory(ctx, unavailableProcessInventory)
-		}
-
-		return nil, errors.Join(fmt.Errorf("prepare %s containment: %w", operation, err), closeErr)
-	}
-
-	if launch.cmd.Stdout != childStdout {
-		launch.close()
-
-		closeErr := errors.Join(stdout.Close(), childStdout.Close())
-
-		return nil, errors.Join(
-			errors.New("capture "+operation+" output: containment replaced stdout"),
-			closeErr,
-		)
-	}
-
-	tree, err := processStartContained(launch)
-	if err != nil {
-		closeErr := errors.Join(stdout.Close(), childStdout.Close())
-
-		if errors.Is(err, ErrProcessContainmentIncomplete) && options.ObserveProcessInventory != nil {
-			options.ObserveProcessInventory(ctx, unavailableProcessInventory)
-		}
-
-		return nil, errors.Join(fmt.Errorf("start %s: %w", operation, err), closeErr)
-	}
-
-	generationOwnedByTree = true
-
-	childStdoutCloseErr := childStdout.Close()
-
-	stdoutClosed := false
-	defer func() {
-		if !stdoutClosed {
-			returnErr = errors.Join(returnErr, stdout.Close())
-		}
-	}()
-
-	if options.ObserveProcessInventory != nil {
-		options.ObserveProcessInventory(ctx, tree.processSnapshot)
-	}
-
-	type readResult struct {
-		data []byte
-		err  error
-	}
-
-	readDone := make(chan readResult, 1)
-
-	go func() {
-		data, readErr := io.ReadAll(stdout)
-		readDone <- readResult{data: data, err: readErr}
-	}()
-
-	var (
-		contextErr error
-		read       readResult
-	)
-
-	select {
-	case read = <-readDone:
-	case <-ctx.Done():
-		contextErr = ctx.Err()
-		stdoutCloseErr := stdout.Close()
-		stdoutClosed = true
-		containErr := processBoundaryComplete(tree, processShutdownWaitDelay)
-		waitErr := processWaitContained(tree, launch.cmd)
-		read = <-readDone
-		closeErr := processContainmentClose(tree)
-
-		observeAuxiliaryBoundaryComplete(options, containErr)
-
-		return read.data, errors.Join(
-			contextErr, read.err, waitErr, containErr, closeErr, stdoutCloseErr, childStdoutCloseErr,
-		)
-	}
-
-	waitErr := processWaitContained(tree, launch.cmd)
-	containErr := processBoundaryComplete(tree, processShutdownWaitDelay)
-	closeErr := processContainmentClose(tree)
-
-	observeAuxiliaryBoundaryComplete(options, containErr)
-
-	return read.data, errors.Join(read.err, waitErr, containErr, closeErr, childStdoutCloseErr)
-}
-
-// observeAuxiliaryBoundaryComplete reports how an auxiliary launch's boundary
-// ended. The boundary may be the ordinary one, so this says only that it
-// completed; a whole-tree claim belongs to the boundaries that can prove one.
-func observeAuxiliaryBoundaryComplete(options Options, containmentErr error) {
-	if containmentErr != nil {
-		if options.ObserveProcessInventory != nil {
-			options.ObserveProcessInventory(context.Background(), unavailableProcessInventory)
-		}
-
-		return
-	}
-
-	if options.ObserveBoundaryComplete != nil {
-		options.ObserveBoundaryComplete(context.Background())
-	}
 }
 
 var claudeVersionRE = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)
@@ -518,15 +256,14 @@ func parseClaudeVersion(output string) string {
 	return match
 }
 
-func compareSemver(left string, right string) int {
-	leftParts := semverParts(left)
-	rightParts := semverParts(right)
-
-	for i := range leftParts {
-		switch {
-		case leftParts[i] < rightParts[i]:
+func compareSemver(left, right string) int {
+	leftParts, rightParts := semverParts(left), semverParts(right)
+	for index := range leftParts {
+		if leftParts[index] < rightParts[index] {
 			return -1
-		case leftParts[i] > rightParts[i]:
+		}
+
+		if leftParts[index] > rightParts[index] {
 			return 1
 		}
 	}
@@ -538,13 +275,63 @@ func semverParts(value string) [3]int {
 	var out [3]int
 
 	parts := strings.Split(value, ".")
-	for i := range out {
-		if i >= len(parts) {
-			break
-		}
-
-		out[i], _ = strconv.Atoi(parts[i])
+	for index := 0; index < len(out) && index < len(parts); index++ {
+		out[index], _ = strconv.Atoi(parts[index])
 	}
 
 	return out
+}
+
+func runNativeOutput(ctx context.Context, options Options, executable string, arguments []string) (output []byte, result NativeResult, returnErr error) {
+	prepared := false
+
+	if options.Authority != nil && !options.TreePrepared && options.ClaudeHome != "" {
+		if options.Authority.PrepareNativeTree == nil {
+			return nil, NativeResult{}, authorityUnavailable(options.Authority)
+		}
+
+		if err := options.Authority.PrepareNativeTree(ctx, options.ClaudeHome); err != nil {
+			return nil, NativeResult{}, err
+		}
+
+		prepared = true
+	}
+
+	defer func() {
+		if prepared {
+			returnErr = errors.Join(returnErr, reclaimNativeTree(options.Authority, options.ClaudeHome))
+		}
+	}()
+
+	process, err := startNative(ctx, options, executable, arguments)
+	if err != nil {
+		return nil, NativeResult{}, err
+	}
+
+	_ = process.Stdin().Close()
+
+	var stderr bytes.Buffer
+
+	stderrDone := make(chan struct{})
+
+	go func() { _, _ = io.Copy(&stderr, process.Stderr()); close(stderrDone) }()
+
+	var readErr error
+
+	output, readErr = io.ReadAll(process.Stdout())
+
+	result, waitErr := process.Wait(ctx)
+	if ctx.Err() != nil {
+		revokeErr := process.Revoke(context.Background())
+		result, waitErr = process.Wait(context.Background())
+		waitErr = errors.Join(ctx.Err(), revokeErr, waitErr)
+	}
+
+	<-stderrDone
+
+	if readErr != nil {
+		waitErr = errors.Join(waitErr, readErr)
+	}
+
+	return output, result, waitErr
 }

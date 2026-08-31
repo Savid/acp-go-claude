@@ -34,6 +34,9 @@ func TestProcessTransportOrdinaryBoundaryDeliversEveryLine(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
+	originalProbe := claudeVersionProbe
+	claudeVersionProbe = func(context.Context, Options) error { return nil }
+	t.Cleanup(func() { claudeVersionProbe = originalProbe })
 
 	dir := t.TempDir()
 	wrote := filepath.Join(dir, "wrote")
@@ -56,8 +59,6 @@ exit 0
 	})
 
 	require.NoError(t, transport.Start(context.Background()))
-	require.NotNil(t, transport.tree.ordinary,
-		"the default selection must be the real ordinary boundary, not a test stub")
 
 	// The child has published its whole transcript and is on its way out before
 	// the reader starts, so the parent's pipe still has to hold everything.
@@ -92,7 +93,6 @@ exit 0
 	require.Equal(t, "success", final["subtype"])
 
 	require.NoError(t, transport.Close())
-	require.NotNil(t, transport.cmd.ProcessState, "the boundary still reaps the direct child exactly once")
 }
 
 // TestProcessTransportOrdinaryBoundaryStillStopsANonExitingChild proves
@@ -102,6 +102,9 @@ func TestProcessTransportOrdinaryBoundaryStillStopsANonExitingChild(t *testing.T
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
+	originalProbe := claudeVersionProbe
+	claudeVersionProbe = func(context.Context, Options) error { return nil }
+	t.Cleanup(func() { claudeVersionProbe = originalProbe })
 
 	originalGrace, originalWaitDelay := processExitGracePeriod, processShutdownWaitDelay
 	processExitGracePeriod = 20 * time.Millisecond
@@ -126,7 +129,6 @@ while :; do sleep 1; done
 	})
 
 	require.NoError(t, transport.Start(context.Background()))
-	require.NotNil(t, transport.tree.ordinary)
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(ready)
 
@@ -134,5 +136,4 @@ while :; do sleep 1; done
 	}, 10*time.Second, 5*time.Millisecond)
 
 	require.NoError(t, transport.Close())
-	require.NotNil(t, transport.cmd.ProcessState, "a child that refuses to exit is still killed and reaped")
 }

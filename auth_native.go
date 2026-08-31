@@ -29,9 +29,8 @@ type authLoginSession interface {
 var authLoginBegin = func(
 	ctx context.Context,
 	options claude.Options,
-	generation *claude.DarwinGeneration,
 ) (authLoginSession, string, error) {
-	login, authorizeURL, err := authLoginStart(ctx, options, generation)
+	login, authorizeURL, err := authLoginStart(ctx, options)
 	if err != nil {
 		return nil, "", err
 	}
@@ -48,8 +47,8 @@ var authNativeUser = func(options claude.Options) string {
 		return value
 	}
 
-	if options.ProcessIsolation != nil {
-		return options.ProcessIsolation.BaseEnvironment["USER"]
+	if options.Authority != nil && options.Authority.NativeEnvironment != nil {
+		return options.Authority.NativeEnvironment()["USER"]
 	}
 
 	return options.OrdinaryEnvironment["USER"]
@@ -75,16 +74,9 @@ func (p *providerAuth) nativeOptions() (claude.Options, error) {
 		CLIPath:             p.agent.options.ExecutablePath,
 		ClaudeHome:          p.home.path,
 		Env:                 p.agent.options.Env,
-		ProcessIsolation:    p.agent.claudeIsolation(),
 		OrdinaryEnvironment: p.agent.ordinaryEnvironment(),
+		Authority:           p.agent.claudeAuthority(),
 		ScratchParent:       scratch,
-		DarwinBestEffort:    p.agent.containmentMode == RuntimeContainmentBestEffort,
-		AcquireKeychainDiscovery: func(discoveryCtx context.Context) (func(), error) {
-			return acquireNativeRoot(discoveryCtx, p.agent.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-		},
-		PrepareKeychainGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
-			return p.agent.prepareDarwinGeneration(generationCtx, RuntimeResourceDiscovery)
-		},
 	}, nil
 }
 
@@ -120,27 +112,11 @@ func authRemovalCause(err error) string {
 	return authCauseProcess
 }
 
-// authNativeAdmission admits one native root and its fresh generation. The
-// caller owns both until the boundary it started completes.
-func (p *providerAuth) authNativeAdmission(ctx context.Context) (*claude.DarwinGeneration, func(), error) {
-	generation, err := p.agent.prepareDiscoveryGeneration(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	release, err := acquireNativeRoot(ctx, p.agent.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-	if err != nil {
-		return nil, nil, errors.Join(err, generation.Finish(true))
-	}
-
-	return generation, release, nil
-}
-
 // authNativeCause classifies a native failure without forwarding any of its
 // text. An incomplete containment boundary is never a leg answer: it is the
 // agent's own terminal condition and is recorded as one.
 func (p *providerAuth) authNativeCause(err error) string {
-	if errors.Is(err, claude.ErrProcessContainmentIncomplete) {
+	if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
 		p.agent.recordContainmentError(err)
 
 		return authCauseProcess
@@ -205,20 +181,10 @@ func (p *providerAuth) readAccount(ctx context.Context) (authAccountReading, str
 		return authAccountReading{}, authCauseProcess
 	}
 
-	generation, release, err := p.authNativeAdmission(ctx)
-	if err != nil {
-		return authAccountReading{}, p.authNativeCause(err)
-	}
-
 	probeCtx, cancel := context.WithTimeout(ctx, authNativeTimeout)
 	defer cancel()
 
-	account, code, err := authStatusProbe(probeCtx, options, generation)
-
-	if !errors.Is(err, claude.ErrProcessContainmentIncomplete) {
-		release()
-	}
-
+	account, code, err := authStatusProbe(probeCtx, options)
 	if err != nil {
 		return authAccountReading{}, p.authNativeCause(err)
 	}
@@ -235,20 +201,10 @@ func (p *providerAuth) nativeLogout(ctx context.Context) error {
 		return authFailed(authRemovalCause(err), authProviderID, "", "")
 	}
 
-	generation, release, err := p.authNativeAdmission(ctx)
-	if err != nil {
-		return authFailed(p.authNativeCause(err), authProviderID, "", "")
-	}
-
 	logoutCtx, cancel := context.WithTimeout(ctx, authNativeTimeout)
 	defer cancel()
 
-	_, err = authLogoutCommand(logoutCtx, options, generation)
-
-	if !errors.Is(err, claude.ErrProcessContainmentIncomplete) {
-		release()
-	}
-
+	_, err = authLogoutCommand(logoutCtx, options)
 	if err != nil {
 		return authFailed(p.authNativeCause(err), authProviderID, "", "")
 	}
@@ -265,7 +221,7 @@ func (p *providerAuth) removeKeystoreItems(ctx context.Context) error {
 	}
 
 	if err := authKeychainRemove(ctx, options.ClaudeHome, authNativeUser(options), options); err != nil {
-		if errors.Is(err, claude.ErrProcessContainmentIncomplete) {
+		if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
 			return authFailed(p.authNativeCause(err), authProviderID, "", "")
 		}
 
@@ -284,17 +240,8 @@ func (p *providerAuth) startLogin(ctx context.Context) (*authLoginHandle, string
 		return nil, "", authCauseProcess
 	}
 
-	generation, release, err := p.authNativeAdmission(ctx)
+	login, authorizeURL, err := authLoginBegin(ctx, options)
 	if err != nil {
-		return nil, "", p.authNativeCause(err)
-	}
-
-	login, authorizeURL, err := authLoginBegin(ctx, options, generation)
-	if err != nil {
-		if !errors.Is(err, claude.ErrProcessContainmentIncomplete) {
-			release()
-		}
-
 		if errors.Is(err, claude.ErrAuthLoginGrammar) || errors.Is(err, claude.ErrAuthLoginNoURL) {
 			p.logAuthLoginGrammar(ctx, err)
 
@@ -304,7 +251,7 @@ func (p *providerAuth) startLogin(ctx context.Context) (*authLoginHandle, string
 		return nil, "", p.authNativeCause(err)
 	}
 
-	return &authLoginHandle{login: login, release: release, agent: p.agent}, authorizeURL, ""
+	return &authLoginHandle{login: login, agent: p.agent}, authorizeURL, ""
 }
 
 // logAuthLoginGrammar records which login line the pinned whole-line grammar
@@ -327,12 +274,11 @@ func (p *providerAuth) logAuthLoginGrammar(ctx context.Context, err error) {
 	p.agent.log.DebugContext(ctx, "claude auth login line rejected by the pinned grammar", slog.String(jsonFieldLine, line))
 }
 
-// authLoginHandle pairs the login child with the native-root permit it holds.
+// authLoginHandle pairs the login child with its agent-wide terminal fence.
 // The permit is released only when the child's containment boundary completes.
 type authLoginHandle struct {
-	login   authLoginSession
-	release func()
-	agent   *Agent
+	login authLoginSession
+	agent *Agent
 }
 
 func (h *authLoginHandle) submit(value string) error {
@@ -352,18 +298,13 @@ func (h *authLoginHandle) fence() error {
 		return nil
 	}
 
-	err := h.login.Close()
-	if !errors.Is(err, claude.ErrProcessContainmentIncomplete) {
-		h.release()
-	}
-
-	return err
+	return h.login.Close()
 }
 
 // close terminates the login child. It is the flow's fence and runs on every
 // terminal transition, so a flow is never abandoned to a live child.
 func (h *authLoginHandle) close() {
-	if err := h.fence(); errors.Is(err, claude.ErrProcessContainmentIncomplete) {
+	if err := h.fence(); errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
 		h.agent.recordContainmentError(err)
 	}
 }

@@ -249,7 +249,6 @@ type agentSession struct {
 	materialized       *materializedSession
 	mcpConfigDir       string
 	imageScratchDir    string
-	nativeRootRelease  func()
 	scratchRootRelease func()
 	// Started sessions always mirror transcript rows into the agent's
 	// authoritative session store.

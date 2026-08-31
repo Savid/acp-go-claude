@@ -60,28 +60,24 @@ func TestLifecycleAnswerLandsOnTheResponseMeta(t *testing.T) {
 	require.NotContains(t, requireAnyMap(t, capMeta[claudeMetaKey]), "lifecycle")
 }
 
-// TestLifecycleAnswerIsPerConfiguration pins the truth table against the same
-// containment accessor that enforces the boundary: only the authoritative mode
-// proves whole-tree vacancy, and every configuration carries the channel outside
-// a prompt and no activity kind without captured identity/parentage evidence.
+// TestLifecycleAnswerIsPerConfiguration pins the truth table against authority
+// selection: a supplied host authority proves quiescence and ordinary execution
+// does not.
 func TestLifecycleAnswerIsPerConfiguration(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
 		name          string
-		mode          RuntimeContainmentMode
+		options       []Option
 		authoritative bool
 	}{
-		{"authoritative", RuntimeContainmentAuthoritative, true},
-		{"shared identity", RuntimeContainmentSharedIdentity, false},
-		{"best effort", RuntimeContainmentBestEffort, false},
-		{"unavailable", RuntimeContainmentUnavailable, false},
+		{"host authority", []Option{WithHostAuthority(newFakeHostAuthority())}, true},
+		{"ordinary", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			agent := NewAgent()
-			agent.containmentMode = tc.mode
+			agent := NewAgent(tc.options...)
 
 			resp, err := agent.Initialize(context.Background(), acp.InitializeRequest{
 				Meta: lifecycleOfferMeta(1),

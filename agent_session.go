@@ -20,10 +20,8 @@ import (
 )
 
 var (
-	mapMCPServersToClaude               = mapper.MCPServersToClaude
-	sessionEnsureScratchParent          = ensureScratchParent
-	sessionHandoffGeneratedNativeTree   = handoffGeneratedNativeTree
-	sessionValidateNativeOwnedDirectory = validateNativeOwnedDirectory
+	mapMCPServersToClaude      = mapper.MCPServersToClaude
+	sessionEnsureScratchParent = ensureScratchParent
 )
 
 // NewSession creates and starts a Claude CLI session.
@@ -442,8 +440,10 @@ func (a *Agent) UnstableDeleteSession(
 		}
 	}
 
-	if err := deleteNativeTranscript(ctx, a.options.Home, string(params.SessionId)); err != nil {
-		cleanupErr = errors.Join(cleanupErr, err)
+	if !a.options.hostAuthoritySet {
+		if err := deleteNativeTranscript(ctx, a.options.Home, string(params.SessionId)); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
 	}
 
 	if cleanupErr != nil {
@@ -903,7 +903,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		materialized    *materializedSession
 		mcpConfigDir    string
 		imageScratchDir string
-		nativeRelease   func()
 		cleanupClient   *claude.Client
 	)
 
@@ -919,19 +918,13 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		}
 
 		err = finalizeSessionRuntimeResources(
-			errors.Join(err, closeErr), nativeRelease, mcpConfigDir, imageScratchDir, materialized, scratchRelease,
+			errors.Join(err, closeErr), mcpConfigDir, imageScratchDir, materialized, scratchRelease,
 		)
 	}()
 
 	claudeHome, err := canonicalClaudeHome(a.options.Home)
 	if err != nil {
 		return nil, err
-	}
-
-	if claudeHome != "" {
-		if validationErr := sessionValidateNativeOwnedDirectory(claudeHome, a.options.ProcessIsolation); validationErr != nil {
-			return nil, validationErr
-		}
 	}
 
 	imageScratchDir, err = createImageScratchDir(a.options.ScratchDir)
@@ -985,7 +978,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		return nil, err
 	}
 
-	if materialized == nil && a.options.ProcessIsolation != nil {
+	if materialized == nil && a.options.hostAuthoritySet {
 		parent, parentErr := sessionEnsureScratchParent(a.options.ScratchDir)
 		if parentErr != nil {
 			return nil, parentErr
@@ -1012,12 +1005,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		return nil, err
 	}
 
-	if materialized != nil {
-		if handoffErr := sessionHandoffGeneratedNativeTree(processClaudeHome, a.options.ProcessIsolation); handoffErr != nil {
-			return nil, handoffErr
-		}
-	}
-
 	configurationStarted := time.Now()
 	mcpConfigPath, mcpConfigDir, err := writeSessionMCPConfig(a.options.ScratchDir, mcpConfig)
 	observeRuntimeStartupStage(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession, RuntimeStartupConfiguration, configurationStarted, err)
@@ -1026,9 +1013,13 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		return nil, err
 	}
 
-	if mcpConfigDir != "" {
-		if handoffErr := sessionHandoffGeneratedNativeTree(mcpConfigDir, a.options.ProcessIsolation); handoffErr != nil {
-			return nil, handoffErr
+	if a.options.hostAuthoritySet {
+		if materialized == nil {
+			return nil, ErrHostAuthorityUnavailable
+		}
+
+		if prepareErr := materialized.prepare(ctx, a.options.HostAuthority, processClaudeHome, mcpConfigDir); prepareErr != nil {
+			return nil, prepareErr
 		}
 	}
 
@@ -1056,15 +1047,14 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	}
 
 	defaultModel := firstNonEmptyString(start.MetaOptions.Model, a.options.DefaultModel)
-	processSnapshotSource := a.descendantProcesses.newSource()
-
 	options := claude.Options{
 		CLIPath:                 a.options.ExecutablePath,
 		Cwd:                     start.Cwd,
 		ClaudeHome:              processClaudeHome,
 		Env:                     env,
-		ProcessIsolation:        a.claudeIsolation(),
 		OrdinaryEnvironment:     a.ordinaryEnvironment(),
+		Authority:               a.claudeAuthority(),
+		TreePrepared:            a.options.hostAuthoritySet,
 		ExtraPathDirs:           slices.Clone(start.MetaOptions.ExtraPathDirs),
 		SessionID:               string(id),
 		ResumeID:                start.ResumeID,
@@ -1087,18 +1077,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 			if observe != nil {
 				observe(stageCtx, RuntimeResourceSession, RuntimeStartupStage(stage), elapsed, stageErr)
 			}
-		},
-		ObserveProcessInventory: processSnapshotSource.started,
-		ObserveBoundaryComplete: processSnapshotSource.completed,
-		DarwinBestEffort:        a.containmentMode == RuntimeContainmentBestEffort,
-		AcquireVersionDiscovery: func(discoveryCtx context.Context) (func(), error) {
-			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-		},
-		PrepareDarwinGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
-			return a.prepareDarwinGeneration(generationCtx, RuntimeResourceSession)
-		},
-		PrepareDarwinVersionGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
-			return a.prepareDarwinGeneration(generationCtx, RuntimeResourceDiscovery)
 		},
 		SessionMirror: true,
 		Hooks: claude.Hooks{
@@ -1162,12 +1140,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 
 	session.client.SetControlHandlerAdmission(session.admitControlCallback)
 
-	nativeRelease, err = acquireNativeRoot(ctx, a.options.RuntimeResourceHooks, RuntimeResourceSession)
-	if err != nil {
-		return nil, err
-	}
-
-	session.nativeRootRelease = nativeRelease
 	cleanupClient = session.client
 
 	startCtx, finishStart := a.observe.StartClaudeProcess(ctx, "start")
@@ -1177,11 +1149,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	if startErr != nil {
 		return nil, startErr
 	}
-
-	// The launch admitted one executable identity. Freezing it onto the session
-	// means a relaunch runs that same file rather than re-resolving the CLI path
-	// against a search path that may have changed since this session started.
-	session.clientOptions.Executable = session.client.Executable()
 
 	info := session.client.InitializeInfo()
 	availableModels := info.Models
@@ -1371,6 +1338,10 @@ func (a *Agent) isDeletedLocked(sessionID acp.SessionId) bool {
 }
 
 func (a *Agent) retryDeleteNativeTranscript(ctx context.Context, sessionID acp.SessionId) {
+	if a.options.hostAuthoritySet {
+		return
+	}
+
 	if err := deleteNativeTranscript(ctx, a.options.Home, string(sessionID)); err != nil {
 		a.log.DebugContext(ctx, "retry delete native Claude transcript failed",
 			slog.String(acpFieldSessionID, string(sessionID)), slog.String("class", safeErrorClass(err)))

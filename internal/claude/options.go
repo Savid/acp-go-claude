@@ -2,32 +2,21 @@ package claude
 
 import (
 	"context"
-	"os"
+	"io"
 	"time"
 )
 
 // Options configures one Claude CLI session.
 type Options struct {
 	CLIPath string
-	// Executable is an already-admitted native executable identity. A session
-	// freezes the identity its first launch admitted and hands it back here, so
-	// a relaunch runs that same file instead of resolving CLIPath again against
-	// a search path that may have changed underneath it.
-	Executable Executable
-	Cwd        string
+	Cwd     string
 
-	ClaudeHome string
-	Env        map[string]string
-	// ProcessIsolation is the explicitly supplied hardened Linux identity
-	// policy. Nil is not a defaulted policy: it selects ordinary same-identity
-	// execution, which applies no credential and starts no privileged
-	// supervisor.
-	ProcessIsolation *ProcessIsolation
-	// OrdinaryEnvironment is the sanitized ambient environment ordinary
-	// same-identity execution launches native processes with. It is read only
-	// while ProcessIsolation is nil, and it is an ordinary runtime value rather
-	// than an isolation policy.
+	ClaudeHome          string
+	Env                 map[string]string
 	OrdinaryEnvironment map[string]string
+	Authority           *NativeAuthority
+	TreePrepared        bool
+	PreparedEnvironment []string
 	// ExtraPathDirs are absolute directories prepended, in order, to the child's
 	// PATH. They shadow every inherited entry, so an executable named here wins
 	// over the one the operator's PATH would otherwise resolve.
@@ -62,35 +51,6 @@ type Options struct {
 	// ObserveStartupStage receives exact spawn/readiness durations. It is
 	// observational only and must not influence startup control flow.
 	ObserveStartupStage func(context.Context, string, time.Duration, error)
-	// ObserveProcessInventory registers a live contained tree and a function
-	// that returns its current exact absolute process count when the platform
-	// backend can prove one.
-	ObserveProcessInventory func(context.Context, func() (int, bool))
-	// ObserveBoundaryComplete reports that the selected process boundary
-	// completed. Only the authoritative backend makes that a whole-tree claim;
-	// every other boundary reports only its documented direct-child or original-
-	// group guarantee.
-	ObserveBoundaryComplete func(context.Context)
-	// DarwinBestEffort selects the explicitly limited process-group backend.
-	DarwinBestEffort bool
-	// Generation identifies one fresh wrapper-owned native launch root.
-	Generation *DarwinGeneration
-	// PrepareDarwinGeneration allocates one fresh generation after discovery
-	// succeeds and immediately before the native launch is prepared.
-	PrepareDarwinGeneration func(context.Context) (*DarwinGeneration, error)
-	// AcquireVersionDiscovery admits the separate native root used to run
-	// claude --version. Its release remains held if that boundary is incomplete.
-	AcquireVersionDiscovery func(context.Context) (func(), error)
-	// PrepareDarwinVersionGeneration allocates the fresh Darwin generation for
-	// the separately admitted claude --version root.
-	PrepareDarwinVersionGeneration func(context.Context) (*DarwinGeneration, error)
-	// AcquireUsageDiscovery admits the native root used by claude /usage.
-	AcquireUsageDiscovery func(context.Context) (func(), error)
-	// PrepareUsageGeneration reserves the fresh scratch generation used by
-	// claude /usage on every supported containment backend.
-	PrepareUsageGeneration    func(context.Context) (*DarwinGeneration, error)
-	AcquireKeychainDiscovery  func(context.Context) (func(), error)
-	PrepareKeychainGeneration func(context.Context) (*DarwinGeneration, error)
 
 	PermissionHandler  PermissionHandler
 	ElicitationHandler ElicitationHandler
@@ -100,21 +60,35 @@ type Options struct {
 	Hooks         Hooks
 }
 
-// ProcessIsolation selects the explicit hardened Linux identity boundary and
-// supplies its credential and complete environment base.
-type ProcessIdentityLockCapability interface {
-	Duplicate() (*os.File, error)
+type NativeRequest struct {
+	Executable       string
+	Arguments        []string
+	Environment      []string
+	WorkingDirectory string
 }
 
-type ProcessIsolation struct {
-	UID                      uint32
-	GID                      uint32
-	BaseEnvironment          map[string]string
-	StandaloneOwnerID        string
-	StandaloneStateRoot      string
-	IdentityLock             ProcessIdentityLockCapability `json:"-"`
-	AuthorityDomain          ProcessIdentityLockCapability `json:"-"`
-	identityAuthorityAdopted bool
+type NativeProcess interface {
+	Stdin() io.WriteCloser
+	Stdout() io.ReadCloser
+	Stderr() io.ReadCloser
+	Wait(context.Context) (NativeResult, error)
+	Revoke(context.Context) error
+}
+
+type NativeResult struct {
+	ExitCode int
+	Signal   int
+	Revoked  bool
+}
+
+type NativeAuthority struct {
+	Unavailable           error
+	ContainmentIncomplete error
+	TreeBusy              error
+	NativeEnvironment     func() map[string]string
+	PrepareNativeTree     func(context.Context, string) error
+	ReclaimNativeTree     func(context.Context, string) error
+	StartNative           func(context.Context, NativeRequest) (NativeProcess, error)
 }
 
 const HookEventPostToolUse = "PostToolUse"

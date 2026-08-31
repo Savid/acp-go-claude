@@ -65,8 +65,8 @@ func nativeTurnFailure(err error) error {
 		return turnFailureError(failureCauseProcessExit, claude.ErrProcessExited.Error())
 	}
 
-	if errors.Is(err, claude.ErrProcessContainmentIncomplete) {
-		return turnFailureError(failureCauseTransport, claude.ErrProcessContainmentIncomplete.Error())
+	if errors.Is(err, ErrContainmentIncomplete) {
+		return turnFailureError(failureCauseTransport, ErrContainmentIncomplete.Error())
 	}
 
 	return turnFailureError(failureCauseTransport, nativeTransportFailureMessage)
@@ -165,7 +165,7 @@ func (s *agentSession) settlePromptTurn(
 
 	if timedOut {
 		abortErr := s.cancelNative(ctx)
-		if errors.Is(abortErr, claude.ErrProcessContainmentIncomplete) {
+		if errors.Is(abortErr, ErrContainmentIncomplete) {
 			return acp.PromptResponse{}, nativeTurnFailure(abortErr)
 		}
 
@@ -174,7 +174,7 @@ func (s *agentSession) settlePromptTurn(
 
 	if turnCtx.Err() != nil {
 		abortErr := s.cancelNative(ctx)
-		if errors.Is(abortErr, claude.ErrProcessContainmentIncomplete) {
+		if errors.Is(abortErr, ErrContainmentIncomplete) {
 			return acp.PromptResponse{}, nativeTurnFailure(abortErr)
 		}
 

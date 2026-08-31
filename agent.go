@@ -399,7 +399,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 // a host its option never reached this adapter.
 func (a *Agent) capabilityMeta() map[string]any {
 	meta := map[string]any{
-		routeMetaKey:         map[string]any{metaVersionsKey: []int{routeVersion}},
+		routeMetaKey:         map[string]any{metaVersionKey: routeVersion},
 		mediaEnvelopeMetaKey: mediaEnvelope(a.options.ImageLimits),
 		claudeMetaKey: map[string]any{
 			"fork": map[string]any{
@@ -432,7 +432,7 @@ func (a *Agent) capabilityMeta() map[string]any {
 	}
 
 	if a.options.InputHandoffRoot != "" {
-		meta[handoffMetaKey] = map[string]any{metaVersionsKey: []int{handoffVersion}}
+		meta[handoffMetaKey] = map[string]any{metaVersionKey: handoffVersion}
 	}
 
 	// The methods array is the host's only discovery surface for which legs

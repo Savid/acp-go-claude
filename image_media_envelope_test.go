@@ -193,7 +193,7 @@ func TestInitializeAdvertisesHandoffOnlyWithARoot(t *testing.T) {
 	require.NotContains(t, initializeMeta(t), handoffMetaKey)
 
 	meta := initializeMeta(t, WithInputHandoffRoot(t.TempDir()))
-	require.Equal(t, map[string]any{metaVersionsKey: []int{1}}, meta[handoffMetaKey])
+	require.Equal(t, map[string]any{metaVersionKey: 1}, meta[handoffMetaKey])
 
 	// The envelope is advertised either way.
 	require.Contains(t, meta, mediaEnvelopeMetaKey)

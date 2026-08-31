@@ -1588,7 +1588,7 @@ func TestPostResponseHookRequestIDSurvivesARealRequestsParams(t *testing.T) {
 
 	tagged := tagPostResponseHookRequest([]byte(
 		`{"jsonrpc":"2.0","id":9,"method":"session/new","params":` +
-			`{"cwd":"/tmp/work","mcpServers":[],"_meta":{"lifecycle":{"versions":[1]}}}}`,
+			`{"cwd":"/tmp/work","mcpServers":[],"_meta":{"lifecycle":{"version":1}}}}`,
 	))
 
 	var msg struct {

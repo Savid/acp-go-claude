@@ -25,17 +25,17 @@ Initialize advertises capability descriptors under `_meta.claude`:
 Initialize also advertises reserved envelopes separately from the Claude
 namespace:
 
-The fourth reserved envelope, `acp-go.dev/lifecycle`, is negotiated from an
-`initialize` offer containing `versions` rather than advertised
+The fourth reserved envelope, `acp-go.dev/lifecycle`, is enabled by an
+`initialize` capability containing exact integer `version: 1` rather than advertised
 unconditionally, and its placement is the exact inverse of the envelopes below.
-When version 1 intersects and the `Serve` output supports close or write-deadline
-interruption, the negotiated `acp-go.dev/lifecycle` answer is placed on
+When that capability is present and the `Serve` output supports close or write-deadline
+interruption, the `acp-go.dev/lifecycle` answer is placed on
 `InitializeResponse._meta` — the response's own top-level `_meta` — and never on
 `agentCapabilities._meta`, where the reserved envelopes below ride, nor under
 `_meta.claude`. A non-interruptible output still serves ordinary ACP traffic but
 omits the lifecycle answer. The answer reports the active containment proof
-class, `updatesOutsidePrompt: true`, and `activityKinds: []`. No offer, no
-intersection, or no interruptible carrier omits the answer. Whole-tree
+class, `updatesOutsidePrompt: true`, and `activityKinds: []`. No capability or
+no interruptible carrier omits the answer. Whole-tree
 quiescence is available only with authoritative Linux process isolation; other
 configurations advertise no quiescence proof class.
 
@@ -93,7 +93,7 @@ incarnation is answered `-32603` naming `claude_autonomous_stream_failed`. A
 relaunched process opens a new incarnation and clears the refusal.
 
 ```json
-{"acp-go.dev/route":{"versions":[1]}}
+{"acp-go.dev/route":{"version":1}}
 ```
 
 ```json
@@ -122,7 +122,7 @@ an adapter bound; none of them describes what a selected model accepts, which
 stays a prompt-time result.
 
 ```json
-{"acp-go.dev/handoff":{"versions":[1]}}
+{"acp-go.dev/handoff":{"version":1}}
 ```
 
 The handoff envelope is advertised **only** when `WithInputHandoffRoot` is set.

@@ -54,7 +54,7 @@ unaffected by this rule.
 ## Route correlation
 
 The initialize response advertises
-`_meta["acp-go.dev/route"] = {"versions":[1]}`. Every emitted form or URL
+`_meta["acp-go.dev/route"] = {"version":1}`. Every emitted form or URL
 elicitation carries version 1, the owning `sessionId`, the current
 `turnNonce`, and exactly one callback correlation (`toolCallId` or
 `requestId`) under that reserved key. Existing non-reserved metadata is

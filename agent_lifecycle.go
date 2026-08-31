@@ -8,23 +8,25 @@ import (
 
 // negotiateLifecycle reads the host's `acp-go.dev/lifecycle` offer and answers
 // with the facts this connection's active configuration proved. It records the
-// answer as the contract for the whole connection: with no offer, or with no
-// common version, the key is omitted from the response and no envelope,
+// answer as the contract for the whole connection: with no capability, the key
+// is omitted from the response and no envelope,
 // correlation read, or lifecycle fact exists on the connection at all.
 func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) {
-	offer, offered, refusal := lifecycle.DecodeOffer(meta)
+	offered, refusal := lifecycle.DecodeCapability(meta)
 	if refusal != nil {
 		return nil, unsupportedField(refusal.Field)
 	}
 
-	answer, common := offer.Answer(a.provenLifecycleFacts())
-	if !offered || !common || !a.lifecycleCarrierSupported() {
+	if !offered || !a.lifecycleCarrierSupported() {
 		a.retainNegotiatedLifecycle(lifecycle.Negotiated{})
 
 		// An omitted key and an empty answer are the same wire fact: the
 		// response carries no lifecycle member at all.
 		return map[string]any{}, nil
 	}
+
+	answer := a.provenLifecycleFacts()
+	answer.Version = lifecycle.Version
 
 	a.retainNegotiatedLifecycle(answer)
 	a.requireLifecycleWrites()

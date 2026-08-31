@@ -22,35 +22,50 @@ func startOrdinaryNative(executable string, arguments []string, environment []st
 	command.Dir = cwd
 	command.Env = environment
 
-	stdin, err := command.StdinPipe()
+	childStdin, stdin, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("create native stdin: %w", err)
 	}
 
-	stdout, err := command.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	if err != nil {
+		_ = childStdin.Close()
 		_ = stdin.Close()
 
 		return nil, fmt.Errorf("create native stdout: %w", err)
 	}
 
-	stderr, err := command.StderrPipe()
+	stderr, childStderr, err := os.Pipe()
 	if err != nil {
+		_ = childStdin.Close()
 		_ = stdin.Close()
 		_ = stdout.Close()
+		_ = childStdout.Close()
 
 		return nil, fmt.Errorf("create native stderr: %w", err)
 	}
 
+	command.Stdin = childStdin
+	command.Stdout = childStdout
+	command.Stderr = childStderr
+
 	if err := command.Start(); err != nil {
+		_ = childStdin.Close()
 		_ = stdin.Close()
 		_ = stdout.Close()
+		_ = childStdout.Close()
 		_ = stderr.Close()
+		_ = childStderr.Close()
 
 		return nil, fmt.Errorf("start native process: %w", err)
 	}
 
+	_ = childStdin.Close()
+	_ = childStdout.Close()
+	_ = childStderr.Close()
+
 	process := &ordinaryProcess{command: command, stdin: stdin, stdout: stdout, stderr: stderr, waitDone: make(chan struct{}), revokeDone: make(chan struct{})}
+	process.collectOnce.Do(func() { go process.collect() })
 
 	return process, nil
 }

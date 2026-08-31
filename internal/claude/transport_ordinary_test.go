@@ -23,13 +23,8 @@ const ordinaryTransportLines = 500
 // and no explicit policy — against a CLI that writes its whole stream-json
 // transcript and exits immediately.
 //
-// This is the shape the ordinary boundary has to survive: os/exec closes the
-// parent ends of the command's own pipes inside Wait, and the transport owns
-// those pipes, so a reap begun with the child would close stdout underneath the
-// scanner. The turn would then be reported as `read claude stdout: file already
-// closed` with its result line lost, which is why the assertions below are that
-// every message arrives, the terminal result is among them, and the transport
-// error channel stays empty.
+// The assertions pin that process collection cannot close the adapter-owned
+// read ends before every buffered frame has been delivered.
 func TestProcessTransportOrdinaryBoundaryDeliversEveryLine(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")

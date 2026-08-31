@@ -677,6 +677,42 @@ func TestManagedDeleteNeverReopensTheNativeTranscriptHome(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestManagedDeleteRetainsBusyResidenceForRetry(t *testing.T) {
+	authority := newFakeHostAuthority()
+	authority.reclaim = ErrNativeTreeBusy
+	agent, _, _ := newFakeLifecycleAgent(
+		t,
+		newFakeClaudeTransport(),
+		WithSessionStore(NewInMemorySessionStore()),
+		WithHostAuthority(authority),
+	)
+	sessionID := acp.SessionId("managed-busy-delete")
+	session := newSessionForTransport(t, agent, sessionID, newFakeClaudeTransport())
+	agent.sessions[sessionID] = session
+
+	root := filepath.Join(t.TempDir(), "native")
+	session.materialized = &materializedSession{configDir: root}
+	require.NoError(t, session.materialized.prepare(t.Context(), authority, root))
+
+	_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(sessionID))
+	require.ErrorIs(t, err, ErrNativeTreeBusy)
+	agent.mu.Lock()
+	require.Same(t, session, agent.sessions[sessionID])
+	agent.mu.Unlock()
+
+	authority.reclaim = nil
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(sessionID))
+	require.NoError(t, err)
+	agent.mu.Lock()
+	require.NotContains(t, agent.sessions, sessionID)
+	agent.mu.Unlock()
+	require.Equal(t, []string{
+		"prepare:" + root,
+		"reclaim:" + root,
+		"reclaim:" + root,
+	}, authority.snapshot())
+}
+
 // TestRemoveSessionEvictsOnlyASettledSession proves the internal cleanup path
 // obeys the same rule: it closes first and evicts only once that close settled.
 func TestRemoveSessionEvictsOnlyASettledSession(t *testing.T) {

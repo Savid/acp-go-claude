@@ -38,6 +38,8 @@ type materializedSession struct {
 	mainPath  string
 	authority HostAuthority
 	prepared  []string
+	cleanup   []string
+	opaque    map[string]error
 }
 
 func (m *materializedSession) Close() error {
@@ -45,23 +47,46 @@ func (m *materializedSession) Close() error {
 		return nil
 	}
 
+	remainingCleanup := m.cleanup[:0]
+
 	var errs []error
 
-	for _, root := range m.prepared {
-		if err := m.authority.ReclaimNativeTree(context.Background(), root); err != nil {
-			if errors.Is(err, ErrNativeTreeBusy) || errors.Is(err, ErrHostAuthorityUnavailable) || errors.Is(err, ErrContainmentIncomplete) {
-				return err
-			}
-
-			return fmt.Errorf("%w: reclaim native tree %q: %v", ErrContainmentIncomplete, root, err)
-		}
-
+	for _, root := range m.cleanup {
 		if err := materializeRemoveAll(root); err != nil {
 			errs = append(errs, err)
+			remainingCleanup = append(remainingCleanup, root)
 		}
 	}
 
-	if len(m.prepared) == 0 {
+	m.cleanup = remainingCleanup
+
+	for len(m.prepared) > 0 {
+		root := m.prepared[len(m.prepared)-1]
+		if err := m.authority.ReclaimNativeTree(context.Background(), root); err != nil {
+			if errors.Is(err, ErrNativeTreeBusy) || errors.Is(err, ErrContainmentIncomplete) {
+				return errors.Join(append(errs, err)...)
+			}
+
+			return errors.Join(append(errs, fmt.Errorf("%w: reclaim native tree %q: %w", ErrContainmentIncomplete, root, err))...)
+		}
+
+		m.prepared = m.prepared[:len(m.prepared)-1]
+
+		if err := materializeRemoveAll(root); err != nil {
+			errs = append(errs, err)
+			m.cleanup = append(m.cleanup, root)
+		}
+	}
+
+	for root, cause := range m.opaque {
+		errs = append(errs, fmt.Errorf("%w: native tree %q was not prepared conclusively: %v", ErrContainmentIncomplete, root, cause))
+	}
+
+	if len(m.opaque) > 0 {
+		return errors.Join(errs...)
+	}
+
+	if len(m.cleanup) == 0 {
 		errs = append(errs, materializeRemoveAll(m.configDir))
 	}
 
@@ -77,7 +102,17 @@ func (m *materializedSession) prepare(ctx context.Context, authority HostAuthori
 		}
 
 		if err := authority.PrepareNativeTree(ctx, root); err != nil {
-			return err
+			if m.opaque == nil {
+				m.opaque = make(map[string]error)
+			}
+
+			m.opaque[root] = err
+
+			if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
+				return err
+			}
+
+			return fmt.Errorf("%w: prepare native tree %q: %v", ErrContainmentIncomplete, root, err)
 		}
 
 		m.prepared = append(m.prepared, root)
@@ -91,6 +126,16 @@ func (m *materializedSession) owns(root string) bool {
 		if prepared == root {
 			return true
 		}
+	}
+
+	for _, cleanup := range m.cleanup {
+		if cleanup == root {
+			return true
+		}
+	}
+
+	if _, opaque := m.opaque[root]; opaque {
+		return true
 	}
 
 	return false

@@ -11,12 +11,13 @@ type Options struct {
 	CLIPath string
 	Cwd     string
 
-	ClaudeHome          string
-	Env                 map[string]string
-	OrdinaryEnvironment map[string]string
-	Authority           *NativeAuthority
-	TreePrepared        bool
-	PreparedEnvironment []string
+	ClaudeHome            string
+	Env                   map[string]string
+	OrdinaryEnvironment   map[string]string
+	Authority             *NativeAuthority
+	ContainmentIncomplete error
+	TreePrepared          bool
+	PreparedEnvironment   []string
 	// ExtraPathDirs are absolute directories prepended, in order, to the child's
 	// PATH. They shadow every inherited entry, so an executable named here wins
 	// over the one the operator's PATH would otherwise resolve.

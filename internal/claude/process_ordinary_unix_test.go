@@ -36,6 +36,20 @@ func TestOrdinaryExecutableResolutionPrecedesWorkingDirectoryChange(t *testing.T
 	require.Equal(t, "adapter", string(output))
 }
 
+func TestOrdinaryWaitPreservesBufferedOutput(t *testing.T) {
+	process, err := startOrdinaryNative("/bin/sh", []string{"-c", "printf trailing"}, []string{"PATH=/usr/bin:/bin"}, t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, process.Stdin().Close())
+
+	result, err := process.Wait(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, result.ExitCode)
+
+	output, err := io.ReadAll(process.Stdout())
+	require.NoError(t, err)
+	require.Equal(t, "trailing", string(output))
+}
+
 func TestOrdinaryNativeResultPreservesNaturalAndRevokedOutcomes(t *testing.T) {
 	natural, err := startOrdinaryNative("/bin/sh", []string{"-c", "exit 7"}, []string{"PATH=/usr/bin:/bin"}, t.TempDir())
 	require.NoError(t, err)

@@ -261,3 +261,50 @@ func TestMaterializedResidenceWrapsUncertainReclaim(t *testing.T) {
 	require.NoError(t, residence.prepare(t.Context(), authority, root))
 	require.ErrorIs(t, residence.Close(), ErrContainmentIncomplete)
 }
+
+func TestMaterializedResidenceRetainsFailedPrepareWithoutPathAccess(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "native")
+	authority := newFakeHostAuthority()
+	authority.prepare = errors.New("prepare response lost")
+	residence := &materializedSession{configDir: root}
+
+	removed := false
+	originalRemove := materializeRemoveAll
+	materializeRemoveAll = func(string) error {
+		removed = true
+
+		return nil
+	}
+	t.Cleanup(func() { materializeRemoveAll = originalRemove })
+
+	require.ErrorIs(t, residence.prepare(t.Context(), authority, root), ErrContainmentIncomplete)
+	require.ErrorIs(t, residence.Close(), ErrContainmentIncomplete)
+	require.False(t, removed)
+	require.Equal(t, []string{"prepare:" + root}, authority.events)
+}
+
+func TestProviderAuthHomeReadExcludesNativePreparation(t *testing.T) {
+	authority := newFakeHostAuthority()
+	agent := NewAgent(WithHostAuthority(authority))
+	broker := &providerAuth{agent: agent, home: providerAuthHome{path: filepath.Join(t.TempDir(), "home")}}
+
+	release, err := broker.admitNativeHomeRead(t.Context())
+	require.NoError(t, err)
+
+	prepareDone := make(chan error, 1)
+	go func() {
+		prepareDone <- broker.claudeAuthority().PrepareNativeTree(t.Context(), broker.home.path)
+	}()
+
+	select {
+	case prepareErr := <-prepareDone:
+		require.Failf(t, "prepare crossed active home read", "error: %v", prepareErr)
+	default:
+	}
+
+	release()
+	require.NoError(t, <-prepareDone)
+
+	_, err = broker.admitNativeHomeRead(t.Context())
+	require.ErrorIs(t, err, ErrNativeTreeBusy)
+}

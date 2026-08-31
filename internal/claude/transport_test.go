@@ -130,6 +130,23 @@ func TestProcessTransportEventsNormalizeReaderAndExitFailures(t *testing.T) {
 	var exit *ProcessExitError
 	require.ErrorAs(t, err, &exit)
 	require.Equal(t, 7, exit.ExitCode)
+
+	transport = &ProcessTransport{
+		stdout: io.NopCloser(strings.NewReader("")),
+		process: &authorityTestProcess{
+			stdin: &authorityTestWriteCloser{}, stdout: io.NopCloser(strings.NewReader("")), stderr: io.NopCloser(strings.NewReader("")),
+			wait: func(context.Context) (NativeResult, error) {
+				return NativeResult{ExitCode: -1, Signal: 15, Revoked: true}, nil
+			},
+			revoke: func(context.Context) error { return nil },
+		},
+	}
+	_, errs = splitEventsForTest(transport.Events(t.Context()))
+	err = <-errs
+	require.ErrorAs(t, err, &exit)
+	require.Equal(t, -1, exit.ExitCode)
+	require.Equal(t, 15, exit.Signal)
+	require.True(t, exit.Revoked)
 }
 
 func TestProcessTransportEventsRecoverReaderPanics(t *testing.T) {

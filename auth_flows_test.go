@@ -841,6 +841,8 @@ func (l *delayedAuthLogin) Close() error {
 	return nil
 }
 
+func (*delayedAuthLogin) CleanupPending() bool { return false }
+
 func (l *delayedAuthLogin) wasClosed() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -1491,6 +1493,8 @@ func (l *blockingAuthLogin) Close() error {
 
 	return nil
 }
+
+func (*blockingAuthLogin) CleanupPending() bool { return false }
 
 func (l *blockingAuthLogin) closeCount() int {
 	l.mu.Lock()

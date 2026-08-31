@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -338,6 +339,73 @@ func TestManagedNativeFailuresUseConfiguredSentinel(t *testing.T) {
 	require.ErrorIs(t, err, unavailable)
 }
 
+func TestUnusableManagedProcessSettlementIsBounded(t *testing.T) {
+	priorShutdown := processShutdownWaitDelay
+	processShutdownWaitDelay = 5 * time.Millisecond
+	t.Cleanup(func() { processShutdownWaitDelay = priorShutdown })
+
+	release := make(chan struct{})
+	process := &authorityTestProcess{
+		stdin:  &authorityTestWriteCloser{},
+		stdout: nil,
+		stderr: io.NopCloser(bytes.NewReader(nil)),
+		wait: func(context.Context) (NativeResult, error) {
+			<-release
+
+			return NativeResult{}, nil
+		},
+		revoke: func(context.Context) error {
+			<-release
+
+			return nil
+		},
+	}
+	incomplete := errors.New("incomplete sentinel")
+	authority := &NativeAuthority{
+		Unavailable:           errors.New("unavailable sentinel"),
+		ContainmentIncomplete: incomplete,
+		NativeEnvironment:     func() map[string]string { return map[string]string{"PATH": "/native/bin"} },
+		StartNative:           func(context.Context, NativeRequest) (NativeProcess, error) { return process, nil },
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := startNative(context.Background(), Options{Authority: authority}, "claude", nil)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, incomplete)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("unusable managed process settlement did not honor its bound")
+	}
+
+	close(release)
+}
+
+func TestUnusableManagedProcessTerminalWaitAvoidsFalseContainmentFailure(t *testing.T) {
+	unavailable := errors.New("unavailable sentinel")
+	incomplete := errors.New("incomplete sentinel")
+	process := &authorityTestProcess{
+		stdin:  &authorityTestWriteCloser{},
+		stdout: nil,
+		stderr: io.NopCloser(bytes.NewReader(nil)),
+		wait:   func(context.Context) (NativeResult, error) { return NativeResult{}, nil },
+		revoke: func(context.Context) error { return context.DeadlineExceeded },
+	}
+	authority := &NativeAuthority{
+		Unavailable:           unavailable,
+		ContainmentIncomplete: incomplete,
+		NativeEnvironment:     func() map[string]string { return map[string]string{"PATH": "/native/bin"} },
+		StartNative:           func(context.Context, NativeRequest) (NativeProcess, error) { return process, nil },
+	}
+
+	_, err := startNative(t.Context(), Options{Authority: authority}, "claude", nil)
+	require.ErrorIs(t, err, unavailable)
+	require.NotErrorIs(t, err, incomplete)
+}
+
 func TestAuthAndUsageLaunchThroughAuthority(t *testing.T) {
 	var requests []NativeRequest
 	authority := &NativeAuthority{
@@ -416,4 +484,58 @@ func TestAuthLoginPreparesHomeAndShimBeforeAuthorityLaunch(t *testing.T) {
 	require.Len(t, events, 5)
 	require.Contains(t, events[3], "reclaim:")
 	require.Equal(t, "reclaim:"+home, events[4])
+}
+
+func TestAuthLoginRetainsPreparedRootsWhenLaterPrepareIsUncertain(t *testing.T) {
+	var events []string
+	incomplete := errors.New("incomplete sentinel")
+	authority := &NativeAuthority{
+		ContainmentIncomplete: incomplete,
+		NativeEnvironment:     func() map[string]string { return map[string]string{"PATH": "/native/bin"} },
+		PrepareNativeTree: func(_ context.Context, root string) error {
+			events = append(events, "prepare:"+root)
+			if len(events) == 2 {
+				return errors.New("prepare response lost")
+			}
+
+			return nil
+		},
+		ReclaimNativeTree: func(_ context.Context, root string) error {
+			events = append(events, "reclaim:"+root)
+
+			return nil
+		},
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			events = append(events, "start")
+
+			return nil, errors.New("unexpected start")
+		},
+	}
+
+	home := t.TempDir()
+	_, _, err := StartAuthLogin(t.Context(), Options{
+		CLIPath: "claude", ClaudeHome: home, ScratchParent: t.TempDir(), Authority: authority,
+	})
+	require.ErrorIs(t, err, incomplete)
+	require.Len(t, events, 2)
+	require.Equal(t, "prepare:"+home, events[0])
+	require.Contains(t, events[1], "prepare:")
+}
+
+func TestAuthLoginPrepareFailureRemovesOnlyTheUnpreparedShim(t *testing.T) {
+	scratch := t.TempDir()
+	incomplete := errors.New("incomplete sentinel")
+	authority := &NativeAuthority{
+		ContainmentIncomplete: incomplete,
+		NativeEnvironment:     func() map[string]string { return map[string]string{"PATH": "/native/bin"} },
+		PrepareNativeTree:     func(context.Context, string) error { return errors.New("prepare response lost") },
+	}
+
+	_, _, err := StartAuthLogin(t.Context(), Options{
+		CLIPath: "claude", ClaudeHome: t.TempDir(), ScratchParent: scratch, Authority: authority,
+	})
+	require.ErrorIs(t, err, incomplete)
+	entries, readErr := os.ReadDir(scratch)
+	require.NoError(t, readErr)
+	require.Empty(t, entries)
 }

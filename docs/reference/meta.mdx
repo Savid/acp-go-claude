@@ -35,9 +35,9 @@ interruption, the `acp-go.dev/lifecycle` answer is placed on
 `_meta.claude`. A non-interruptible output still serves ordinary ACP traffic but
 omits the lifecycle answer. The answer reports the active containment proof
 class, `updatesOutsidePrompt: true`, and `activityKinds: []`. No capability or
-no interruptible carrier omits the answer. Whole-tree
-quiescence is available only with authoritative Linux process isolation; other
-configurations advertise no quiescence proof class.
+no interruptible carrier omits the answer. Whole-tree quiescence is available
+only when a host authority owns the native tree; ordinary execution advertises
+no quiescence proof class.
 
 `activityKinds` is empty because no captured native trace proves the stable
 identity and parentage required for a lifecycle activity. Native task frames

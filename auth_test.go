@@ -39,11 +39,12 @@ type fakeAuthLogin struct {
 	// refused makes the child reject the submitted value the way the provider
 	// rejects a wrong or expired authorization code: the value crosses and the
 	// config dir is left exactly as it was.
-	refused     bool
-	submitErr   error
-	waitErr     error
-	closeErr    error
-	exitUnknown bool
+	refused        bool
+	submitErr      error
+	waitErr        error
+	closeErr       error
+	cleanupPending *bool
+	exitUnknown    bool
 	// beforeSubmit runs before the write is attempted and before the child's
 	// own lock is taken, which is where anything racing the write lands: the
 	// real child's stdin is closed by whoever terminalizes the flow, without
@@ -119,6 +120,17 @@ func (f *fakeAuthLogin) Close() error {
 	f.exited = true
 
 	return f.closeErr
+}
+
+func (f *fakeAuthLogin) CleanupPending() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.cleanupPending != nil {
+		return *f.cleanupPending
+	}
+
+	return f.closeErr != nil
 }
 
 // markExited models the child ending on its own, which the harness's

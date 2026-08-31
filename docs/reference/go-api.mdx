@@ -48,19 +48,36 @@ Omitting it selects ordinary same-identity execution.
 
 ## Common options
 
-- `WithExecutablePath`, `WithHome`, and `WithScratchDir` select native and
-  adapter-owned paths.
-- `WithEnv` applies validated environment overlays.
-- `WithDefaultModel`, `WithClaudeDefaultPermissionMode`, and
-  `WithClaudeDefaultSystemPrompt` set defaults.
-- `WithClaudeBareMode`, `WithClaudeSettingSources`, `WithClaudeSettingsFile`,
-  and `WithSeedFiles` control materialized Claude configuration.
-- `WithSessionStore` supplies durable transcript storage.
-- `WithProviderAuthRoot` enables provider-auth state when its other
-  prerequisites are satisfied.
-- `WithTracerProvider`, `WithMeterProvider`, and `WithTextMapPropagator` supply
-  host-owned telemetry components.
+| Option group | Options |
+| --- | --- |
+| Native paths and environment | `WithExecutablePath`, `WithHome`, `WithScratchDir`, `WithEnv`, `WithSeedFiles` |
+| Host boundaries | `WithHostAuthority`, `WithInputHandoffRoot` |
+| Session behavior | `WithDefaultModel`, `WithTurnTimeout`, `WithConcurrencyLimits`, `WithImageLimits` |
+| Durable sessions | `WithSessionStore`, `WithSessionStoreLoadTimeout` |
+| Provider auth | `WithProviderAuthRoot`, `WithProviderAuthDirectHome` |
+| Claude behavior | `WithClaudeDefaultPermissionMode`, `WithClaudeDefaultSystemPrompt`, `WithClaudeHideAuth`, `WithClaudeBareMode`, `WithClaudeSettingSources`, `WithClaudeSettingsFile`, `WithClaudeDirectAPI`, `WithClaudeAllowSkipPermissionsFlag`, `WithClaudeInitializeTimeout`, `WithClaudeControlHandlerTimeout` |
+| Identity and diagnostics | `WithAgentName`, `WithAgentTitle`, `WithAgentVersion`, `WithLogger` |
+| Telemetry | `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator` |
+
+`WithClaudeDirectAPI(false)` prevents the adapter itself from making the
+Anthropic fallback request used by `_claude/rateLimits`; native Claude network
+behavior is unaffected.
+
+`ConcurrencyLimits` caps active sessions and concurrent outbound client calls.
+`ImageLimits` controls decoded input and emitted output byte limits.
+
+## Requests and session storage
 
 Request builders such as `NewSessionRequest`, `TextPromptRequest`, and
 `DeleteSessionRequest` construct ACP request values with the adapter metadata
 shape.
+
+`PromptRequest(sessionID, turnNonce, blocks...)` and
+`TextPromptRequest(sessionID, turnNonce, text)` require a fresh non-empty turn
+nonce. `CancelRequest(sessionID, turnNonce)` must repeat the active turn's
+nonce; a different or absent nonce is refused before the native process is
+interrupted.
+
+The durable surface consists of `SessionStore`, `SessionStoreEntry`,
+`SessionKey`, `SessionSummary`, `SessionStoreReplacement`,
+`InMemorySessionStore`, `SessionStoreFormat`, and `SessionStoreMainSubpath`.

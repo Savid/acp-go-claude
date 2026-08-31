@@ -36,5 +36,27 @@ The authority is mandatory once supplied. Missing methods, unusable returned
 process streams, or authority loss fail closed; no direct-launch fallback is
 attempted.
 
+## Flag and option equivalents
+
+| Flag | Go option |
+| --- | --- |
+| `-path` | `WithExecutablePath` |
+| `-home` | `WithHome` |
+| `-scratch-dir` | `WithScratchDir` |
+| `-provider-auth-root` | `WithProviderAuthRoot` |
+| `-provider-auth-direct-home` | `WithProviderAuthDirectHome` |
+| `-model` | `WithDefaultModel` |
+| `-seed-file` | `WithSeedFiles` |
+| `-claude-bare` | `WithClaudeBareMode` |
+| `-claude-hide-auth` | `WithClaudeHideAuth` |
+| `-claude-permission-mode` | `WithClaudeDefaultPermissionMode` |
+| `-claude-settings-file` | `WithClaudeSettingsFile` |
+| `-claude-system-prompt` | `WithClaudeDefaultSystemPrompt` |
+
+`-debug` configures the command's logger and `-version` prints the binary
+version. Embed-only options, including `WithHostAuthority`, session stores,
+turn and concurrency limits, image limits, and telemetry providers, have no CLI
+flag.
+
 See [Security](/docs/operations/security) for the launch, prepare, reclaim,
 revoke, and settlement ordering.

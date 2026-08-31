@@ -257,8 +257,7 @@ func assertDarwinRemovalClearsPresentItems(t *testing.T, account string) {
 
 // darwinOrdinaryOptions is the launch shape a plain darwin host runs the
 // keystore legs under: ordinary same-identity execution with the ambient
-// environment as its base, no isolation policy, and no best-effort admission
-// hooks.
+// environment as its base.
 func darwinOrdinaryOptions() claude.Options {
 	return claude.Options{OrdinaryEnvironment: claude.OrdinaryEnvironment()}
 }

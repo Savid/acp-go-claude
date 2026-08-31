@@ -294,7 +294,11 @@ func runNativeOutput(ctx context.Context, options Options, executable string, ar
 		}
 
 		if err := options.Authority.PrepareNativeTree(ctx, options.ClaudeHome); err != nil {
-			return nil, NativeResult{}, err
+			if errors.Is(err, options.Authority.Unavailable) || errors.Is(err, options.Authority.ContainmentIncomplete) {
+				return nil, NativeResult{}, err
+			}
+
+			return nil, NativeResult{}, containmentIncomplete(options, "prepare native output tree", err)
 		}
 
 		prepared = true
@@ -308,11 +312,6 @@ func runNativeOutput(ctx context.Context, options Options, executable string, ar
 
 	process, err := startNative(ctx, options, executable, arguments)
 	if err != nil {
-		if prepared && !errors.Is(err, authorityUnavailable(options.Authority)) &&
-			!errors.Is(err, options.Authority.ContainmentIncomplete) {
-			terminal = true
-		}
-
 		return nil, NativeResult{}, err
 	}
 
@@ -394,12 +393,12 @@ func runNativeOutput(ctx context.Context, options Options, executable string, ar
 			case terminalWaitErr == nil:
 				terminal = true
 			case options.Authority != nil:
-				waitErr = errors.Join(waitErr, containmentIncomplete(options.Authority, "wait for native output process", terminalWaitErr))
+				waitErr = errors.Join(waitErr, containmentIncomplete(options, "wait for native output process", terminalWaitErr))
 			default:
 				waitErr = errors.Join(waitErr, terminalWaitErr)
 			}
 		case <-terminalCtx.Done():
-			waitErr = errors.Join(waitErr, containmentIncomplete(options.Authority, "wait for native output process", terminalCtx.Err()))
+			waitErr = errors.Join(waitErr, containmentIncomplete(options, "wait for native output process", terminalCtx.Err()))
 		}
 
 		cancelTerminal()

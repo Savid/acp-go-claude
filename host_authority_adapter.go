@@ -2,6 +2,8 @@ package claudeacp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -91,11 +93,23 @@ func (p *providerAuth) claudeAuthority() *claude.NativeAuthority {
 			return base.PrepareNativeTree(ctx, root)
 		}
 
+		if err := p.takeNativeHomeAccess(ctx); err != nil {
+			return err
+		}
+		defer p.releaseNativeHomeAccess()
+
 		p.nativeTreeMu.Lock()
 		defer p.nativeTreeMu.Unlock()
 
+		if p.nativeTreeOpaque != nil {
+			return errors.Join(ErrContainmentIncomplete, p.nativeTreeOpaque)
+		}
+
 		if !p.nativeTreePrepared {
 			if err := base.PrepareNativeTree(ctx, root); err != nil {
+				p.nativeTreeOpaque = err
+				p.agent.recordContainmentError(errors.Join(ErrContainmentIncomplete, err))
+
 				return err
 			}
 
@@ -111,14 +125,26 @@ func (p *providerAuth) claudeAuthority() *claude.NativeAuthority {
 			return base.ReclaimNativeTree(ctx, root)
 		}
 
+		if err := p.takeNativeHomeAccess(ctx); err != nil {
+			return err
+		}
+		defer p.releaseNativeHomeAccess()
+
 		p.nativeTreeMu.Lock()
 		defer p.nativeTreeMu.Unlock()
 
-		if !p.nativeTreePrepared || p.nativeTreeUsers <= 0 {
+		if p.nativeTreeOpaque != nil {
+			return errors.Join(ErrContainmentIncomplete, p.nativeTreeOpaque)
+		}
+
+		if !p.nativeTreePrepared {
 			return ErrContainmentIncomplete
 		}
 
-		p.nativeTreeUsers--
+		if p.nativeTreeUsers > 0 {
+			p.nativeTreeUsers--
+		}
+
 		if p.nativeTreeUsers > 0 {
 			return nil
 		}
@@ -141,8 +167,17 @@ func (p *providerAuth) reclaimIdleNativeHome(ctx context.Context) error {
 		return nil
 	}
 
+	if err := p.takeNativeHomeAccess(ctx); err != nil {
+		return err
+	}
+	defer p.releaseNativeHomeAccess()
+
 	p.nativeTreeMu.Lock()
 	defer p.nativeTreeMu.Unlock()
+
+	if p.nativeTreeOpaque != nil {
+		return errors.Join(ErrContainmentIncomplete, p.nativeTreeOpaque)
+	}
 
 	if p.nativeTreeUsers > 0 {
 		return ErrNativeTreeBusy
@@ -153,10 +188,74 @@ func (p *providerAuth) reclaimIdleNativeHome(ctx context.Context) error {
 	}
 
 	if err := base.ReclaimNativeTree(ctx, p.home.path); err != nil {
-		return err
+		if errors.Is(err, ErrNativeTreeBusy) {
+			return err
+		}
+
+		if errors.Is(err, ErrContainmentIncomplete) {
+			p.agent.recordContainmentError(err)
+
+			return err
+		}
+
+		containmentErr := fmt.Errorf("%w: reclaim provider auth home: %w", ErrContainmentIncomplete, err)
+		p.agent.recordContainmentError(containmentErr)
+
+		return containmentErr
 	}
 
 	p.nativeTreePrepared = false
 
 	return nil
+}
+
+func (p *providerAuth) takeNativeHomeAccess(ctx context.Context) error {
+	p.nativeTreeMu.Lock()
+	if p.nativeHomeAccess == nil {
+		p.nativeHomeAccess = make(chan struct{}, 1)
+		p.nativeHomeAccess <- struct{}{}
+	}
+
+	access := p.nativeHomeAccess
+	p.nativeTreeMu.Unlock()
+
+	select {
+	case <-access:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *providerAuth) releaseNativeHomeAccess() {
+	p.nativeHomeAccess <- struct{}{}
+}
+
+func (p *providerAuth) admitNativeHomeRead(ctx context.Context) (func(), error) {
+	if err := p.retryRetainedLogins(); err != nil && !errors.Is(err, ErrNativeTreeBusy) {
+		return nil, err
+	}
+
+	if err := p.takeNativeHomeAccess(ctx); err != nil {
+		return nil, err
+	}
+
+	p.nativeTreeMu.Lock()
+	opaque := p.nativeTreeOpaque
+	prepared := p.nativeTreePrepared || p.nativeTreeUsers > 0
+	p.nativeTreeMu.Unlock()
+
+	if opaque != nil {
+		p.releaseNativeHomeAccess()
+
+		return nil, errors.Join(ErrContainmentIncomplete, opaque)
+	}
+
+	if prepared {
+		p.releaseNativeHomeAccess()
+
+		return nil, ErrNativeTreeBusy
+	}
+
+	return p.releaseNativeHomeAccess, nil
 }

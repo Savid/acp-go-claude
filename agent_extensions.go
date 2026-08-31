@@ -75,11 +75,12 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 	}
 
 	claudeOptions := claude.Options{
-		CLIPath:             a.options.ExecutablePath,
-		ClaudeHome:          claudeHome,
-		Env:                 a.options.Env,
-		OrdinaryEnvironment: a.ordinaryEnvironment(),
-		Authority:           a.claudeAuthority(),
+		CLIPath:               a.options.ExecutablePath,
+		ClaudeHome:            claudeHome,
+		Env:                   a.options.Env,
+		OrdinaryEnvironment:   a.ordinaryEnvironment(),
+		Authority:             a.claudeAuthority(),
+		ContainmentIncomplete: ErrContainmentIncomplete,
 	}
 	if a.options.hostAuthoritySet {
 		parent, parentErr := a.ensureScratchParent()

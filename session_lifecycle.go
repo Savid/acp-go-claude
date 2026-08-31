@@ -104,8 +104,14 @@ func finalizeSessionRuntimeResources(
 	imageScratchDir string,
 	materialized *materializedSession,
 ) error {
-	if errors.Is(runtimeErr, ErrContainmentIncomplete) || errors.Is(runtimeErr, ErrHostAuthorityUnavailable) {
-		return runtimeErr
+	var materializedRemoveErr error
+	if materialized != nil {
+		materializedRemoveErr = materialized.Close()
+	}
+
+	boundaryErr := errors.Join(runtimeErr, materializedRemoveErr)
+	if errors.Is(boundaryErr, ErrContainmentIncomplete) || errors.Is(boundaryErr, ErrHostAuthorityUnavailable) || errors.Is(boundaryErr, ErrNativeTreeBusy) {
+		return boundaryErr
 	}
 
 	var imageRemoveErr error
@@ -113,17 +119,12 @@ func finalizeSessionRuntimeResources(
 		imageRemoveErr = sessionRemoveAll(imageScratchDir)
 	}
 
-	var materializedRemoveErr error
-	if materialized != nil {
-		materializedRemoveErr = materialized.Close()
-	}
-
 	var mcpRemoveErr error
 	if mcpConfigDir != "" && (materialized == nil || !materialized.owns(mcpConfigDir)) {
 		mcpRemoveErr = sessionRemoveAll(mcpConfigDir)
 	}
 
-	return errors.Join(runtimeErr, mcpRemoveErr, imageRemoveErr, materializedRemoveErr)
+	return errors.Join(boundaryErr, mcpRemoveErr, imageRemoveErr)
 }
 
 // acquireClosingTurn admits close into the session's turn queue. It is the one

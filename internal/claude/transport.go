@@ -179,8 +179,8 @@ func (t *ProcessTransport) Events(ctx context.Context) <-chan TransportEvent {
 		terminal, deliver := t.scanEvents(ctx, events)
 
 		result, waitErr := t.wait(context.Background())
-		if waitErr == nil && result.ExitCode != 0 {
-			waitErr = &ProcessExitError{ExitCode: result.ExitCode}
+		if waitErr == nil && (result.Revoked || result.Signal != 0 || result.ExitCode != 0) {
+			waitErr = &ProcessExitError{ExitCode: result.ExitCode, Signal: result.Signal, Revoked: result.Revoked}
 		}
 
 		t.mu.Lock()
@@ -354,7 +354,7 @@ func (t *ProcessTransport) Close() error {
 				cancelTerminal()
 
 				if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
-					waitErr = containmentIncomplete(t.options.Authority, "wait for revoked Claude process", waitErr)
+					waitErr = containmentIncomplete(t.options, "wait for revoked Claude process", waitErr)
 				}
 
 				t.closeErr = errors.Join(t.closeErr, revokeErr)
@@ -362,7 +362,7 @@ func (t *ProcessTransport) Close() error {
 
 			if waitErr != nil && t.options.Authority != nil &&
 				!errors.Is(waitErr, t.options.Authority.ContainmentIncomplete) {
-				waitErr = containmentIncomplete(t.options.Authority, "wait for Claude process", waitErr)
+				waitErr = containmentIncomplete(t.options, "wait for Claude process", waitErr)
 			}
 
 			t.closeErr = errors.Join(t.closeErr, waitErr)

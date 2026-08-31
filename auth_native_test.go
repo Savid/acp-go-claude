@@ -144,6 +144,37 @@ func TestAuthLoginHandleCurrentFence(t *testing.T) {
 	require.ErrorIs(t, handle.submit("value"), errTestRandom)
 }
 
+func TestAuthLoginHandleRetainsBusyCleanupForRetry(t *testing.T) {
+	broker, _ := newAuthBroker(t)
+	child := &fakeAuthLogin{closeErr: ErrNativeTreeBusy}
+	handle := &authLoginHandle{login: child, agent: broker.agent, owner: broker}
+
+	require.ErrorIs(t, handle.fence(), ErrNativeTreeBusy)
+	broker.mu.Lock()
+	_, retained := broker.retainedLogins[handle]
+	broker.mu.Unlock()
+	require.True(t, retained)
+
+	child.mu.Lock()
+	child.closeErr = nil
+	child.mu.Unlock()
+	require.NoError(t, broker.retryRetainedLogins())
+	broker.mu.Lock()
+	_, retained = broker.retainedLogins[handle]
+	broker.mu.Unlock()
+	require.False(t, retained)
+	require.Equal(t, 2, child.closeCount())
+
+	cleanupComplete := false
+	terminalError := &fakeAuthLogin{closeErr: ErrHostAuthorityUnavailable, cleanupPending: &cleanupComplete}
+	terminalHandle := &authLoginHandle{login: terminalError, agent: broker.agent, owner: broker}
+	require.ErrorIs(t, terminalHandle.fence(), ErrHostAuthorityUnavailable)
+	broker.mu.Lock()
+	_, retained = broker.retainedLogins[terminalHandle]
+	broker.mu.Unlock()
+	require.False(t, retained)
+}
+
 func TestProviderNativeOptionsCarryHostAuthority(t *testing.T) {
 	authority := newFakeHostAuthority()
 	broker, _ := newAuthBroker(t, WithHostAuthority(authority))
@@ -217,4 +248,15 @@ func TestProviderAuthRemovalRefusesBeforeStatWhileHomeIsPrepared(t *testing.T) {
 	require.NoError(t, native.ReclaimNativeTree(t.Context(), home))
 	_, err = broker.nativeRemovalOptions(t.Context())
 	require.NoError(t, err)
+}
+
+func TestProviderAuthRemovalClassifiesUncertainReclaim(t *testing.T) {
+	authority := newFakeHostAuthority()
+	authority.reclaim = errTestRandom
+	broker, _ := newAuthBroker(t, WithHostAuthority(authority))
+	broker.nativeTreePrepared = true
+
+	_, err := broker.nativeRemovalOptions(t.Context())
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.ErrorIs(t, broker.agent.containmentErr, ErrContainmentIncomplete)
 }

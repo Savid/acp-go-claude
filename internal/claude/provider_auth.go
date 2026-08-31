@@ -402,8 +402,10 @@ type AuthLogin struct {
 	exitResult NativeResult
 	exitErr    error
 
-	once     sync.Once
-	closeErr error
+	closeMu        sync.Mutex
+	processSettled bool
+	processErr     error
+	shimRemoved    bool
 }
 
 // AuthLoginExit is the direct login child's natural exit outcome. Zero is only
@@ -472,7 +474,31 @@ func startAuthLoginChild(options Options) (login *AuthLogin, returnErr error) {
 
 	options.PreparedEnvironment = shim.environ(environment)
 	prepared := make([]string, 0, 2)
-	unsafePreparedRoot := false
+	retainPrepared := false
+	failedRoot := ""
+
+	defer func() {
+		if login == nil {
+			if retainPrepared {
+				return
+			}
+
+			if failedRoot != "" {
+				if failedRoot != shim.dir {
+					returnErr = errors.Join(returnErr, shim.remove())
+				}
+
+				return
+			}
+
+			reclaimErr := reclaimPreparedRoots(options.Authority, prepared)
+
+			returnErr = errors.Join(returnErr, reclaimErr)
+			if reclaimErr == nil {
+				returnErr = errors.Join(returnErr, shim.remove())
+			}
+		}
+	}()
 
 	if options.Authority != nil {
 		if options.Authority.PrepareNativeTree == nil {
@@ -490,9 +516,14 @@ func startAuthLoginChild(options Options) (login *AuthLogin, returnErr error) {
 			}
 
 			if prepareErr := options.Authority.PrepareNativeTree(context.Background(), root); prepareErr != nil {
-				unsafePreparedRoot = true
+				failedRoot = root
 
-				return nil, errors.Join(fmt.Errorf("prepare claude auth login native tree: %w", prepareErr), reclaimPreparedRoots(options.Authority, prepared))
+				if errors.Is(prepareErr, options.Authority.ContainmentIncomplete) ||
+					errors.Is(prepareErr, options.Authority.Unavailable) {
+					return nil, prepareErr
+				}
+
+				return nil, containmentIncomplete(options, "prepare claude auth login native tree", prepareErr)
 			}
 
 			prepared = append(prepared, root)
@@ -501,26 +532,10 @@ func startAuthLoginChild(options Options) (login *AuthLogin, returnErr error) {
 		options.TreePrepared = true
 	}
 
-	defer func() {
-		if login == nil {
-			if unsafePreparedRoot {
-				return
-			}
-
-			reclaimErr := reclaimPreparedRoots(options.Authority, prepared)
-
-			returnErr = errors.Join(returnErr, reclaimErr)
-			if reclaimErr == nil {
-				returnErr = errors.Join(returnErr, shim.remove())
-			}
-		}
-	}()
-
 	process, err := startNative(context.Background(), options, options.CLIPath, []string{authCommand, "login"})
 	if err != nil {
-		if options.Authority != nil &&
-			(errors.Is(err, options.Authority.Unavailable) || errors.Is(err, options.Authority.ContainmentIncomplete)) {
-			unsafePreparedRoot = true
+		if options.Authority != nil {
+			retainPrepared = true
 		}
 
 		return nil, fmt.Errorf("start claude auth login: %w", err)
@@ -581,7 +596,10 @@ func (l *AuthLogin) Wait(ctx context.Context) (AuthLoginExit, error) {
 // Close terminates the login child and completes its containment boundary. It
 // is the flow's fence and is idempotent.
 func (l *AuthLogin) Close() error {
-	l.once.Do(func() {
+	l.closeMu.Lock()
+	defer l.closeMu.Unlock()
+
+	if !l.processSettled {
 		_ = l.stdin.Close()
 
 		stdoutErr := l.stdout.Close()
@@ -600,26 +618,51 @@ func (l *AuthLogin) Close() error {
 		cancelWait()
 
 		if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
-			waitErr = containmentIncomplete(l.options.Authority, "wait for claude auth login", waitErr)
+			waitErr = containmentIncomplete(l.options, "wait for claude auth login", waitErr)
 		} else if waitErr != nil && l.options.Authority != nil &&
 			!errors.Is(waitErr, l.options.Authority.ContainmentIncomplete) {
-			waitErr = containmentIncomplete(l.options.Authority, "wait for claude auth login", waitErr)
+			waitErr = containmentIncomplete(l.options, "wait for claude auth login", waitErr)
 		}
 
-		l.closeErr = errors.Join(revokeErr, waitErr, stdoutErr)
+		if waitErr == nil && (errors.Is(revokeErr, context.DeadlineExceeded) || errors.Is(revokeErr, context.Canceled)) {
+			revokeErr = nil
+		}
+
+		l.processErr = errors.Join(revokeErr, waitErr, stdoutErr)
 		if waitErr != nil {
-			return
+			return l.processErr
 		}
 
-		reclaimErr := reclaimPreparedRoots(l.options.Authority, l.prepared)
+		l.processSettled = true
+	}
 
-		l.closeErr = errors.Join(l.closeErr, reclaimErr)
-		if reclaimErr == nil {
-			l.closeErr = errors.Join(l.closeErr, l.shim.remove())
+	for len(l.prepared) > 0 {
+		index := len(l.prepared) - 1
+		if err := reclaimNativeTree(l.options.Authority, l.prepared[index]); err != nil {
+			return errors.Join(l.processErr, err)
 		}
-	})
 
-	return l.closeErr
+		l.prepared = l.prepared[:index]
+	}
+
+	if !l.shimRemoved {
+		if err := l.shim.remove(); err != nil {
+			return errors.Join(l.processErr, err)
+		}
+
+		l.shimRemoved = true
+	}
+
+	return l.processErr
+}
+
+// CleanupPending reports whether another Close call still owns a process or
+// native-tree cleanup rung.
+func (l *AuthLogin) CleanupPending() bool {
+	l.closeMu.Lock()
+	defer l.closeMu.Unlock()
+
+	return !l.processSettled || len(l.prepared) > 0 || !l.shimRemoved
 }
 
 func reclaimPreparedRoots(authority *NativeAuthority, roots []string) error {
@@ -641,12 +684,12 @@ func reclaimNativeTree(authority *NativeAuthority, root string) error {
 	}
 
 	if err := authority.ReclaimNativeTree(context.Background(), root); err != nil {
-		if errors.Is(err, authority.TreeBusy) || errors.Is(err, authority.ContainmentIncomplete) || errors.Is(err, authority.Unavailable) {
+		if errors.Is(err, authority.TreeBusy) || errors.Is(err, authority.ContainmentIncomplete) {
 			return err
 		}
 
 		if authority.ContainmentIncomplete != nil {
-			return fmt.Errorf("%w: reclaim native tree %q: %v", authority.ContainmentIncomplete, root, err)
+			return fmt.Errorf("%w: reclaim native tree %q: %w", authority.ContainmentIncomplete, root, err)
 		}
 
 		return err

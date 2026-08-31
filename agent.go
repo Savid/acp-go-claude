@@ -215,6 +215,10 @@ func (a *Agent) close() error {
 	a.deleted = make(map[acp.SessionId]struct{})
 	a.mu.Unlock()
 
+	if a.providerAuth != nil {
+		a.providerAuth.fenceLogins()
+	}
+
 	if len(sessions) > 0 {
 		a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
 	}
@@ -239,6 +243,17 @@ func (a *Agent) close() error {
 
 	closes.Wait()
 
+	var authCleanupErr error
+	if a.providerAuth != nil {
+		authCleanupErr = a.providerAuth.retryRetainedLogins()
+	}
+
+	for index, closeErr := range closeErrs {
+		if errors.Is(closeErr, ErrNativeTreeBusy) {
+			closeErrs[index] = sessions[index].Close(context.Background())
+		}
+	}
+
 	// The connection outlives the close ladders that run on it. Each session's
 	// close is the containment-proving boundary, and the terminal actions, the
 	// terminal idle and the quiescence fact it proves are the last thing this
@@ -255,7 +270,7 @@ func (a *Agent) close() error {
 		connectionErr = errors.Join(connectionErr, local.hooks.closeWrites())
 	}
 
-	return errors.Join(errors.Join(closeErrs...), containmentErr, connectionErr)
+	return errors.Join(errors.Join(closeErrs...), authCleanupErr, containmentErr, connectionErr)
 }
 
 func (a *Agent) beginSessionConstruction() error {

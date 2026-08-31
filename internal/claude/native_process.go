@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
+	"time"
 )
 
 func startNative(ctx context.Context, options Options, executable string, arguments []string) (NativeProcess, error) {
@@ -48,17 +50,98 @@ func startNative(ctx context.Context, options Options, executable string, argume
 
 		process, err := options.Authority.StartNative(ctx, request)
 		if err != nil {
-			return nil, err
+			if errors.Is(err, options.Authority.Unavailable) || errors.Is(err, options.Authority.ContainmentIncomplete) {
+				return nil, err
+			}
+
+			return nil, containmentIncomplete(options, "start native process", err)
 		}
 
-		if !validInterfaceValue(process) || !validInterfaceValue(process.Stdin()) || !validInterfaceValue(process.Stdout()) || !validInterfaceValue(process.Stderr()) {
-			return nil, authorityUnavailable(options.Authority)
+		if !validInterfaceValue(process) {
+			return nil, containmentIncomplete(options, "start native process", authorityUnavailable(options.Authority))
+		}
+
+		stdin := process.Stdin()
+		stdout := process.Stdout()
+
+		stderr := process.Stderr()
+		if !validInterfaceValue(stdin) || !validInterfaceValue(stdout) || !validInterfaceValue(stderr) {
+			return nil, settleUnusableNativeProcess(process, stdin, stdout, stderr, options)
 		}
 
 		return process, nil
 	}
 
 	return startOrdinaryNative(executable, arguments, environment, cwd)
+}
+
+func settleUnusableNativeProcess(
+	process NativeProcess,
+	stdin io.WriteCloser,
+	stdout io.ReadCloser,
+	stderr io.ReadCloser,
+	options Options,
+) error {
+	var streamErr error
+
+	for _, stream := range []io.Closer{stdin, stdout, stderr} {
+		if validInterfaceValue(stream) {
+			streamErr = errors.Join(streamErr, stream.Close())
+		}
+	}
+
+	revokeErr := boundedNativeRevoke(process, processShutdownWaitDelay)
+
+	_, waitErr := boundedNativeWait(process, processShutdownWaitDelay)
+	if waitErr == nil {
+		return errors.Join(authorityUnavailable(options.Authority), streamErr)
+	}
+
+	return containmentIncomplete(
+		options,
+		"settle unusable native process",
+		errors.Join(authorityUnavailable(options.Authority), streamErr, revokeErr, waitErr),
+	)
+}
+
+func boundedNativeRevoke(process NativeProcess, timeout time.Duration) error {
+	done := make(chan error, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	go func() { done <- process.Revoke(ctx) }()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func boundedNativeWait(process NativeProcess, timeout time.Duration) (NativeResult, error) {
+	type waitResult struct {
+		result NativeResult
+		err    error
+	}
+
+	done := make(chan waitResult, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	go func() {
+		result, err := process.Wait(ctx)
+		done <- waitResult{result: result, err: err}
+	}()
+
+	select {
+	case waited := <-done:
+		return waited.result, waited.err
+	case <-ctx.Done():
+		return NativeResult{}, ctx.Err()
+	}
 }
 
 func validInterfaceValue(value any) bool {
@@ -83,9 +166,14 @@ func authorityUnavailable(authority *NativeAuthority) error {
 	return errors.New("host authority unavailable")
 }
 
-func containmentIncomplete(authority *NativeAuthority, operation string, cause error) error {
-	if authority != nil && authority.ContainmentIncomplete != nil {
-		return fmt.Errorf("%w: %s: %w", authority.ContainmentIncomplete, operation, cause)
+func containmentIncomplete(options Options, operation string, cause error) error {
+	marker := options.ContainmentIncomplete
+	if options.Authority != nil && options.Authority.ContainmentIncomplete != nil {
+		marker = options.Authority.ContainmentIncomplete
+	}
+
+	if marker != nil {
+		return fmt.Errorf("%w: %s: %w", marker, operation, cause)
 	}
 
 	return fmt.Errorf("native containment incomplete: %s: %w", operation, cause)

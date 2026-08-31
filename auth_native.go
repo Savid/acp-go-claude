@@ -22,6 +22,7 @@ type authLoginSession interface {
 	Exited() bool
 	Wait(context.Context) (claude.AuthLoginExit, error)
 	Close() error
+	CleanupPending() bool
 }
 
 // authLoginBegin starts the login child and returns it beside the validated
@@ -40,8 +41,8 @@ var authLoginBegin = func(
 
 // authNativeUser reports the target account name the platform keystore items
 // carry. It comes only from the base environment the launch actually uses: the
-// complete policy environment under explicit isolation, and the sanitized
-// ambient capture under ordinary same-identity execution.
+// host-authority environment when supplied, and the sanitized ambient capture
+// under ordinary same-identity execution.
 var authNativeUser = func(options claude.Options) string {
 	if value := options.Env["USER"]; value != "" {
 		return value
@@ -71,12 +72,13 @@ func (p *providerAuth) nativeOptions() (claude.Options, error) {
 	}
 
 	return claude.Options{
-		CLIPath:             p.agent.options.ExecutablePath,
-		ClaudeHome:          p.home.path,
-		Env:                 p.agent.options.Env,
-		OrdinaryEnvironment: p.agent.ordinaryEnvironment(),
-		Authority:           p.claudeAuthority(),
-		ScratchParent:       scratch,
+		CLIPath:               p.agent.options.ExecutablePath,
+		ClaudeHome:            p.home.path,
+		Env:                   p.agent.options.Env,
+		OrdinaryEnvironment:   p.agent.ordinaryEnvironment(),
+		Authority:             p.claudeAuthority(),
+		ContainmentIncomplete: ErrContainmentIncomplete,
+		ScratchParent:         scratch,
 	}, nil
 }
 
@@ -255,7 +257,7 @@ func (p *providerAuth) startLogin(ctx context.Context) (*authLoginHandle, string
 		return nil, "", p.authNativeCause(err)
 	}
 
-	return &authLoginHandle{login: login, agent: p.agent}, authorizeURL, ""
+	return &authLoginHandle{login: login, agent: p.agent, owner: p}, authorizeURL, ""
 }
 
 // logAuthLoginGrammar records which login line the pinned whole-line grammar
@@ -283,6 +285,7 @@ func (p *providerAuth) logAuthLoginGrammar(ctx context.Context, err error) {
 type authLoginHandle struct {
 	login authLoginSession
 	agent *Agent
+	owner *providerAuth
 }
 
 func (h *authLoginHandle) submit(value string) error {
@@ -302,7 +305,61 @@ func (h *authLoginHandle) fence() error {
 		return nil
 	}
 
-	return h.login.Close()
+	err := h.login.Close()
+	if h.owner != nil {
+		if err != nil && h.login.CleanupPending() {
+			h.owner.retainLogin(h)
+		} else {
+			h.owner.releaseLogin(h)
+		}
+	}
+
+	return err
+}
+
+func (p *providerAuth) retainLogin(login *authLoginHandle) {
+	if p == nil || login == nil {
+		return
+	}
+
+	p.mu.Lock()
+	if p.retainedLogins == nil {
+		p.retainedLogins = make(map[*authLoginHandle]struct{})
+	}
+
+	p.retainedLogins[login] = struct{}{}
+	p.mu.Unlock()
+}
+
+func (p *providerAuth) releaseLogin(login *authLoginHandle) {
+	if p == nil || login == nil {
+		return
+	}
+
+	p.mu.Lock()
+	delete(p.retainedLogins, login)
+	p.mu.Unlock()
+}
+
+func (p *providerAuth) retryRetainedLogins() error {
+	if p == nil {
+		return nil
+	}
+
+	p.mu.Lock()
+
+	logins := make([]*authLoginHandle, 0, len(p.retainedLogins))
+	for login := range p.retainedLogins {
+		logins = append(logins, login)
+	}
+	p.mu.Unlock()
+
+	errs := make([]error, 0, len(logins))
+	for _, login := range logins {
+		errs = append(errs, login.fence())
+	}
+
+	return errors.Join(errs...)
 }
 
 // close terminates the login child. It is the flow's fence and runs on every

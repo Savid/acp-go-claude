@@ -80,11 +80,17 @@ func (e *classifiedTransportError) Unwrap() []error {
 type ProcessExitError struct {
 	// ExitCode is the process exit status, or -1 when it cannot be determined.
 	ExitCode int
+	Signal   int
+	Revoked  bool
 }
 
 // Error renders only the process status. Provider stderr and wait error bodies
 // are deliberately not retained or returned.
 func (e *ProcessExitError) Error() string {
+	if e.Revoked {
+		return "claude process was revoked"
+	}
+
 	if e.ExitCode >= 0 {
 		return fmt.Sprintf("claude exited with status %d", e.ExitCode)
 	}
@@ -132,7 +138,7 @@ func closedTransportError(err error) error {
 	if errors.Is(err, ErrProcessExited) {
 		var exit *ProcessExitError
 		if errors.As(err, &exit) {
-			closed = append(closed, &ProcessExitError{ExitCode: exit.ExitCode})
+			closed = append(closed, &ProcessExitError{ExitCode: exit.ExitCode, Signal: exit.Signal, Revoked: exit.Revoked})
 		} else {
 			closed = append(closed, ErrProcessExited)
 		}

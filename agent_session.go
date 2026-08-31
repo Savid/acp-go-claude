@@ -430,11 +430,10 @@ func (a *Agent) UnstableDeleteSession(
 			cleanupErr = errors.Join(cleanupErr, closeErr)
 		}
 
-		// The instance leaves the active map once its close settled. A close the
-		// barrier never admitted settled nothing and memoized nothing, so that
-		// instance stays for the next delete to retry; the tombstone above already
-		// hides it from every request that could address it meanwhile.
-		if !errors.Is(closeErr, errSessionCloseUnsettled) {
+		// The tombstoned instance stays registered until every cleanup rung
+		// succeeds, so a later delete can retry a busy reclaim without losing its
+		// only owner.
+		if closeErr == nil {
 			a.dropSession(ctx, params.SessionId, session)
 		}
 	}
@@ -945,6 +944,19 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		return nil, err
 	}
 
+	var releaseNativeHomeRead func()
+	if a.providerAuth != nil {
+		releaseNativeHomeRead, err = a.providerAuth.admitNativeHomeRead(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if releaseNativeHomeRead != nil {
+				releaseNativeHomeRead()
+			}
+		}()
+	}
+
 	discoverCtx, finishDiscover := a.observe.StartClaudeProcess(ctx, "discover")
 	discoveredSettings := loadDiscoveredSettings(discoverCtx, start.Cwd, claudeHome, a.log)
 
@@ -997,6 +1009,11 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		return nil, err
 	}
 
+	if releaseNativeHomeRead != nil {
+		releaseNativeHomeRead()
+		releaseNativeHomeRead = nil
+	}
+
 	mcpConfigPath, mcpConfigDir, err := writeSessionMCPConfig(scratchParent, mcpConfig)
 	if err != nil {
 		return nil, err
@@ -1043,6 +1060,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		Env:                     env,
 		OrdinaryEnvironment:     a.ordinaryEnvironment(),
 		Authority:               a.claudeAuthority(),
+		ContainmentIncomplete:   ErrContainmentIncomplete,
 		TreePrepared:            a.options.hostAuthoritySet,
 		ExtraPathDirs:           slices.Clone(start.MetaOptions.ExtraPathDirs),
 		SessionID:               string(id),

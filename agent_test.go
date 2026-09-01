@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -145,6 +146,74 @@ func TestAgentCloseSingleflightAndStickyContainment(t *testing.T) {
 	}
 	require.Equal(t, int32(1), blocked.calls.Load())
 	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
+}
+
+func TestManagedAuthorityLossFansOutToTwoLiveSessions(t *testing.T) {
+	authority := newFakeHostAuthority()
+	agent := NewAgent(
+		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
+		WithHostAuthority(authority),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	agent.setConnection(newRecordingAgentClient())
+
+	var (
+		transportsMu sync.Mutex
+		transports   []*fakeClaudeTransport
+	)
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		transport := newFakeClaudeTransport()
+		transportsMu.Lock()
+		transports = append(transports, transport)
+		transportsMu.Unlock()
+
+		return claude.NewClient(log, options, transport)
+	}
+
+	for range 2 {
+		_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		require.NoError(t, err)
+	}
+
+	// The real usage-probe path reaches HostAuthority.StartNative after its
+	// temporary residence has been prepared. Its explicit authority-loss result
+	// must fence and close both already-live managed sessions.
+	_, err := agent.handleRateLimits(t.Context(), json.RawMessage(`{}`))
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+
+	agent.mu.Lock()
+	fanoutDone := agent.authorityFanoutDone
+	agent.mu.Unlock()
+	require.NotNil(t, fanoutDone)
+	select {
+	case <-fanoutDone:
+	case <-time.After(time.Second):
+		t.Fatal("authority-loss fanout did not close both sessions")
+	}
+
+	transportsMu.Lock()
+	require.Len(t, transports, 2)
+	closed := []int{transports[0].CloseCalls(), transports[1].CloseCalls()}
+	transportsMu.Unlock()
+	require.Equal(t, []int{1, 1}, closed)
+
+	agent.mu.Lock()
+	require.Empty(t, agent.sessions)
+	firstFanout := agent.authorityFanoutDone
+	agent.mu.Unlock()
+
+	late, lateCleanup := newStartedAgentSessionForTest(t, agent, "late-construction")
+	defer lateCleanup()
+	require.ErrorIs(t, agent.storeStartedSession(t.Context(), late), ErrHostAuthorityUnavailable)
+	require.True(t, late.isClosing(), "an in-flight construction cannot publish after authority loss")
+
+	agent.recordContainmentError(ErrContainmentIncomplete)
+	agent.mu.Lock()
+	require.Equal(t, firstFanout, agent.authorityFanoutDone)
+	agent.mu.Unlock()
+	require.ErrorIs(t, agent.ensureOpen(), ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, agent.Close(), ErrHostAuthorityUnavailable)
 }
 
 func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {

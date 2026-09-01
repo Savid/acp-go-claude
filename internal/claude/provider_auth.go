@@ -534,7 +534,8 @@ func startAuthLoginChild(options Options) (login *AuthLogin, returnErr error) {
 
 	process, err := startNative(context.Background(), options, options.CLIPath, []string{authCommand, "login"})
 	if err != nil {
-		if options.Authority != nil {
+		if options.Authority != nil &&
+			(errors.Is(err, options.Authority.Unavailable) || errors.Is(err, options.Authority.ContainmentIncomplete)) {
 			retainPrepared = true
 		}
 

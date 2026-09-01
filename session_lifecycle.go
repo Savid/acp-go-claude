@@ -717,6 +717,23 @@ func (s *agentSession) isClosing() bool {
 	return s.closing
 }
 
+// fenceAuthorityFailure closes every door that can admit more work before the
+// detached agent-wide teardown begins. It deliberately does not wait for any
+// session resource: recordContainmentError may have been called by this exact
+// session while it owns one of those resources.
+func (s *agentSession) fenceAuthorityFailure() {
+	s.producers.seal()
+
+	s.mu.Lock()
+	s.closing = true
+	cancel := s.cancel
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // closedSessionError is the answer every door gives once close has begun. The
 // id is on its way out of the active map, so a caller that raced the close is
 // told what it would be told a moment later.

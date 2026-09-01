@@ -50,11 +50,10 @@ func startNative(ctx context.Context, options Options, executable string, argume
 
 		process, err := options.Authority.StartNative(ctx, request)
 		if err != nil {
-			if errors.Is(err, options.Authority.Unavailable) || errors.Is(err, options.Authority.ContainmentIncomplete) {
-				return nil, err
-			}
-
-			return nil, containmentIncomplete(options, "start native process", err)
+			// An error return from StartNative proves that no child exists. Preserve
+			// the authority's own classification so callers can distinguish a normal
+			// admission refusal from explicit authority or containment ambiguity.
+			return nil, err
 		}
 
 		if !validInterfaceValue(process) {

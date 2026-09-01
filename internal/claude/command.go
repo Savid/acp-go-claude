@@ -306,12 +306,22 @@ func runNativeOutput(ctx context.Context, options Options, executable string, ar
 
 	defer func() {
 		if prepared && terminal {
-			returnErr = errors.Join(returnErr, reclaimNativeTree(options.Authority, options.ClaudeHome))
+			if reclaimErr := reclaimNativeTree(options.Authority, options.ClaudeHome); reclaimErr != nil {
+				returnErr = errors.Join(returnErr, reclaimErr)
+			}
 		}
 	}()
 
 	process, err := startNative(ctx, options, executable, arguments)
 	if err != nil {
+		// A normal StartNative refusal proves that no child remains, so a tree
+		// prepared solely for this command can be reclaimed. Explicit authority
+		// loss or containment ambiguity does not authorize path access.
+		if prepared {
+			terminal = !errors.Is(err, options.Authority.Unavailable) &&
+				!errors.Is(err, options.Authority.ContainmentIncomplete)
+		}
+
 		return nil, NativeResult{}, err
 	}
 

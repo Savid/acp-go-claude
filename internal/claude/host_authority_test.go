@@ -298,6 +298,80 @@ func TestRunNativeOutputPreparesRevokesWaitsAndReclaims(t *testing.T) {
 	require.Equal(t, []string{"prepare", "start", "revoke", "wait-terminal", "reclaim"}, events)
 }
 
+func TestRunNativeOutputReclaimsPreparedTreeOnOrdinaryStartRefusal(t *testing.T) {
+	refusal := errors.New("native admission refused")
+	incomplete := errors.New("containment incomplete sentinel")
+	var events []string
+	authority := &NativeAuthority{
+		Unavailable:           errors.New("authority unavailable sentinel"),
+		ContainmentIncomplete: incomplete,
+		NativeEnvironment:     func() map[string]string { return map[string]string{"PATH": "/native/bin"} },
+		PrepareNativeTree: func(context.Context, string) error {
+			events = append(events, "prepare")
+
+			return nil
+		},
+		ReclaimNativeTree: func(context.Context, string) error {
+			events = append(events, "reclaim")
+
+			return nil
+		},
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			events = append(events, "start")
+
+			return nil, refusal
+		},
+	}
+
+	_, _, err := runNativeOutput(t.Context(), Options{
+		CLIPath: "claude", ClaudeHome: "/native/home", Authority: authority,
+	}, "claude", []string{"auth", "status"})
+	require.Same(t, refusal, err)
+	require.NotErrorIs(t, err, incomplete)
+	require.Equal(t, []string{"prepare", "start", "reclaim"}, events)
+}
+
+func TestRunNativeOutputRetainsPreparedTreeOnExplicitStartAmbiguity(t *testing.T) {
+	for _, name := range []string{"authority unavailable", "containment incomplete"} {
+		t.Run(name, func(t *testing.T) {
+			unavailable := errors.New("authority unavailable sentinel")
+			incomplete := errors.New("containment incomplete sentinel")
+			startErr := unavailable
+			if name == "containment incomplete" {
+				startErr = incomplete
+			}
+
+			var events []string
+			authority := &NativeAuthority{
+				Unavailable:           unavailable,
+				ContainmentIncomplete: incomplete,
+				NativeEnvironment:     func() map[string]string { return map[string]string{"PATH": "/native/bin"} },
+				PrepareNativeTree: func(context.Context, string) error {
+					events = append(events, "prepare")
+
+					return nil
+				},
+				ReclaimNativeTree: func(context.Context, string) error {
+					events = append(events, "reclaim")
+
+					return nil
+				},
+				StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+					events = append(events, "start")
+
+					return nil, startErr
+				},
+			}
+
+			_, _, err := runNativeOutput(t.Context(), Options{
+				CLIPath: "claude", ClaudeHome: "/native/home", Authority: authority,
+			}, "claude", []string{"auth", "status"})
+			require.Same(t, startErr, err)
+			require.Equal(t, []string{"prepare", "start"}, events)
+		})
+	}
+}
+
 func TestRunNativeOutputRecoversStreamReaderPanics(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -484,6 +558,49 @@ func TestAuthLoginPreparesHomeAndShimBeforeAuthorityLaunch(t *testing.T) {
 	require.Len(t, events, 5)
 	require.Contains(t, events[3], "reclaim:")
 	require.Equal(t, "reclaim:"+home, events[4])
+}
+
+func TestAuthLoginOrdinaryStartRefusalReclaimsRootsAndRemovesShim(t *testing.T) {
+	refusal := errors.New("native admission refused")
+	incomplete := errors.New("containment incomplete sentinel")
+	var events []string
+	authority := &NativeAuthority{
+		Unavailable:           errors.New("authority unavailable sentinel"),
+		ContainmentIncomplete: incomplete,
+		NativeEnvironment:     func() map[string]string { return map[string]string{"PATH": "/native/bin"} },
+		PrepareNativeTree: func(_ context.Context, root string) error {
+			events = append(events, "prepare:"+root)
+
+			return nil
+		},
+		ReclaimNativeTree: func(_ context.Context, root string) error {
+			events = append(events, "reclaim:"+root)
+
+			return nil
+		},
+		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
+			events = append(events, "start")
+
+			return nil, refusal
+		},
+	}
+	home := t.TempDir()
+	scratch := t.TempDir()
+
+	_, _, err := StartAuthLogin(t.Context(), Options{
+		CLIPath: "claude", ClaudeHome: home, ScratchParent: scratch, Authority: authority,
+	})
+	require.ErrorIs(t, err, refusal)
+	require.NotErrorIs(t, err, incomplete)
+	require.Len(t, events, 5)
+	require.Equal(t, "prepare:"+home, events[0])
+	require.Contains(t, events[1], "prepare:"+scratch)
+	require.Equal(t, "start", events[2])
+	require.Contains(t, events[3], "reclaim:"+scratch)
+	require.Equal(t, "reclaim:"+home, events[4])
+	entries, readErr := os.ReadDir(scratch)
+	require.NoError(t, readErr)
+	require.Empty(t, entries)
 }
 
 func TestAuthLoginRetainsPreparedRootsWhenLaterPrepareIsUncertain(t *testing.T) {

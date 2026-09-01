@@ -73,24 +73,25 @@ type Agent struct {
 
 	// Lock order: acquire mu before docsMu when both are needed. Do not call
 	// session or bridge close methods while holding either lock.
-	mu                 sync.Mutex
-	closed             bool
-	conn               agentClient
-	sessions           map[acp.SessionId]*agentSession
-	store              SessionStore
-	deleted            map[acp.SessionId]struct{}
-	clientCalls        chan struct{}
-	clientCapabilities acp.ClientCapabilities
-	positionEncoding   acp.PositionEncodingKind
-	lifecycle          lifecycle.Negotiated
-	lifecycleCarrier   *bool
-	permissionCache    map[acp.SessionId]map[string]string
-	activeLimitErr     error
-	configurationErr   error
-	containmentErr     error
-	constructions      sync.WaitGroup
-	closeOnce          sync.Once
-	closeErr           error
+	mu                  sync.Mutex
+	closed              bool
+	conn                agentClient
+	sessions            map[acp.SessionId]*agentSession
+	store               SessionStore
+	deleted             map[acp.SessionId]struct{}
+	clientCalls         chan struct{}
+	clientCapabilities  acp.ClientCapabilities
+	positionEncoding    acp.PositionEncodingKind
+	lifecycle           lifecycle.Negotiated
+	lifecycleCarrier    *bool
+	permissionCache     map[acp.SessionId]map[string]string
+	activeLimitErr      error
+	configurationErr    error
+	containmentErr      error
+	authorityFanoutDone chan struct{}
+	constructions       sync.WaitGroup
+	closeOnce           sync.Once
+	closeErr            error
 
 	rateLimitsCacheMu sync.Mutex
 	rateLimitsCache   rateLimitsCacheEntry
@@ -254,6 +255,18 @@ func (a *Agent) close() error {
 		}
 	}
 
+	// A first managed authority failure starts detached per-session teardown so
+	// the session that reported it never waits on its own locks. Agent shutdown
+	// joins that work before returning, keeping every owned goroutine and cleanup
+	// rung inside the Agent lifetime.
+	a.mu.Lock()
+	authorityFanoutDone := a.authorityFanoutDone
+	a.mu.Unlock()
+
+	if authorityFanoutDone != nil {
+		<-authorityFanoutDone
+	}
+
 	// The connection outlives the close ladders that run on it. Each session's
 	// close is the containment-proving boundary, and the terminal actions, the
 	// terminal idle and the quiescence fact it proves are the last thing this
@@ -303,7 +316,55 @@ func (a *Agent) recordContainmentError(err error) {
 	if a.containmentErr == nil {
 		a.containmentErr = err
 	}
+
+	if !a.options.hostAuthoritySet || a.authorityFanoutDone != nil {
+		a.mu.Unlock()
+
+		return
+	}
+
+	sessions := make(map[acp.SessionId]*agentSession, len(a.sessions))
+	for id, session := range a.sessions {
+		sessions[id] = session
+	}
+
+	done := make(chan struct{})
+	a.authorityFanoutDone = done
 	a.mu.Unlock()
+
+	go a.closeAuthorityFailedSessions(sessions, done)
+}
+
+func (a *Agent) closeAuthorityFailedSessions(sessions map[acp.SessionId]*agentSession, done chan struct{}) {
+	defer close(done)
+
+	// The reporting stack may own one session's lock. Do not touch any session
+	// until this detached fanout is running independently of that stack.
+	for _, session := range sessions {
+		session.fenceAuthorityFailure()
+	}
+
+	var closes sync.WaitGroup
+	for id, session := range sessions {
+		closes.Add(1)
+
+		go func() {
+			defer closes.Done()
+			defer recoverAgentGoroutine(context.Background(), a.log, "authority-loss session close")
+
+			closeErr := session.Close(context.Background())
+			if closeErr != nil {
+				a.log.DebugContext(context.Background(), "close authority-failed Claude session failed",
+					slog.String("class", safeErrorClass(closeErr)))
+			}
+
+			if !errors.Is(closeErr, errSessionCloseUnsettled) {
+				a.dropSession(context.Background(), id, session)
+			}
+		}()
+	}
+
+	closes.Wait()
 }
 
 func (a *Agent) setConnection(conn agentClient) {

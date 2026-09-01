@@ -296,6 +296,10 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 
 // Prompt sends a user prompt to Claude and streams ACP session updates until the turn ends.
 func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (resp acp.PromptResponse, err error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.PromptResponse{}, openErr
+	}
+
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		return acp.PromptResponse{}, err
@@ -565,6 +569,10 @@ func (a *Agent) ensureOpen() error {
 		return acp.NewInvalidRequest(map[string]any{jsonFieldError: errAgentClosed.Error()})
 	}
 
+	if a.containmentErr != nil {
+		return a.containmentErr
+	}
+
 	return a.configurationError()
 }
 
@@ -606,6 +614,18 @@ func (a *Agent) storeStartedSession(ctx context.Context, session *agentSession) 
 		a.mu.Unlock()
 
 		return a.closeRejectedSession(ctx, session, "agent_closed", errAgentClosed)
+	}
+
+	// A construction admitted before the first authority failure may finish
+	// after the fanout snapshot. Re-read the terminal authority latch at the one
+	// publication point so that late instance is contained instead of escaping
+	// behind an id the failed agent can no longer serve.
+	if a.containmentErr != nil {
+		refusal := a.containmentErr
+		a.deleteCachedPermissionRulesLocked(session.id)
+		a.mu.Unlock()
+
+		return a.closeRejectedSession(ctx, session, "authority_failed", refusal)
 	}
 
 	if a.isDeletedLocked(session.id) {

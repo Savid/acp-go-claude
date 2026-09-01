@@ -28,11 +28,14 @@ type Client struct {
 	controller *Controller
 	cancel     context.CancelFunc
 	closed     bool
-	closeOnce  sync.Once
-	closeErr   error
 
-	transportCloseOnce sync.Once
-	transportCloseErr  error
+	closeMu      sync.Mutex
+	closeFlight  *clientCloseFlight
+	closeSettled bool
+
+	transportCloseMu      sync.Mutex
+	transportCloseFlight  *clientCloseFlight
+	transportCloseSettled bool
 
 	infoMu         sync.RWMutex
 	initializeInfo InitializeInfo
@@ -40,6 +43,11 @@ type Client struct {
 	controlTurnMu    sync.RWMutex
 	controlTurnNonce string
 	controlAdmission ControlHandlerAdmission
+}
+
+type clientCloseFlight struct {
+	done chan struct{}
+	err  error
 }
 
 // InitializeInfo describes metadata returned by Claude's control initialize response.
@@ -205,13 +213,41 @@ type clientControllerTransport struct {
 func (t clientControllerTransport) Close() error { return t.close() }
 
 func (c *Client) closeTransport() error {
-	c.transportCloseOnce.Do(func() {
-		if c.transport != nil {
-			c.transportCloseErr = c.transport.Close()
-		}
-	})
+	c.transportCloseMu.Lock()
+	if c.transportCloseSettled {
+		c.transportCloseMu.Unlock()
 
-	return c.transportCloseErr
+		return nil
+	}
+
+	if flight := c.transportCloseFlight; flight != nil {
+		c.transportCloseMu.Unlock()
+		<-flight.done
+
+		return flight.err
+	}
+
+	flight := &clientCloseFlight{done: make(chan struct{})}
+	c.transportCloseFlight = flight
+	c.transportCloseMu.Unlock()
+
+	if c.transport != nil {
+		flight.err = c.transport.Close()
+	}
+
+	c.transportCloseMu.Lock()
+	if flight.err == nil {
+		c.transportCloseSettled = true
+	}
+
+	if c.transportCloseFlight == flight {
+		c.transportCloseFlight = nil
+	}
+
+	close(flight.done)
+	c.transportCloseMu.Unlock()
+
+	return flight.err
 }
 
 func (c *Client) activeController() *Controller {
@@ -587,40 +623,75 @@ func (c *Client) GetContextUsage(ctx context.Context) (*ContextUsage, error) {
 
 // Close terminates the Claude process.
 func (c *Client) Close() error {
-	c.closeOnce.Do(func() {
-		c.stateMu.Lock()
-		c.closed = true
-		cancel := c.cancel
-		controller := c.controller
-		c.stateMu.Unlock()
+	c.closeMu.Lock()
+	if c.closeSettled {
+		c.closeMu.Unlock()
 
-		if c.transport != nil {
-			c.closeErr = closedTransportError(c.closeTransport())
-		}
+		return nil
+	}
 
-		if controller != nil {
-			select {
-			case <-controller.Done():
-			case <-time.After(5 * time.Second):
-				controller.AbortData()
+	if flight := c.closeFlight; flight != nil {
+		c.closeMu.Unlock()
+		<-flight.done
 
-				if cancel != nil {
-					cancel()
-				}
+		return flight.err
+	}
 
-				<-controller.Done()
+	flight := &clientCloseFlight{done: make(chan struct{})}
+	c.closeFlight = flight
+	c.closeMu.Unlock()
 
-				c.closeErr = errors.Join(c.closeErr,
-					&ControllerDataError{Kind: ControllerDataTeardownAbort})
+	flight.err = c.closeAttempt()
+
+	c.closeMu.Lock()
+	if flight.err == nil {
+		c.closeSettled = true
+	}
+
+	if c.closeFlight == flight {
+		c.closeFlight = nil
+	}
+
+	close(flight.done)
+	c.closeMu.Unlock()
+
+	return flight.err
+}
+
+func (c *Client) closeAttempt() error {
+	c.stateMu.Lock()
+	c.closed = true
+	cancel := c.cancel
+	controller := c.controller
+	c.stateMu.Unlock()
+
+	var closeErr error
+	if c.transport != nil {
+		closeErr = closedTransportError(c.closeTransport())
+	}
+
+	if controller != nil {
+		select {
+		case <-controller.Done():
+		case <-time.After(5 * time.Second):
+			controller.AbortData()
+
+			if cancel != nil {
+				cancel()
 			}
-		}
 
-		if cancel != nil {
-			cancel()
-		}
-	})
+			<-controller.Done()
 
-	return c.closeErr
+			closeErr = errors.Join(closeErr,
+				&ControllerDataError{Kind: ControllerDataTeardownAbort})
+		}
+	}
+
+	if cancel != nil {
+		cancel()
+	}
+
+	return closeErr
 }
 
 func (c *Client) handleCanUseTool(ctx context.Context, req *ControlRequest) (map[string]any, error) {

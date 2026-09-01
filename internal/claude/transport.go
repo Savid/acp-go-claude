@@ -47,17 +47,29 @@ type ProcessTransport struct {
 	stderr  io.ReadCloser
 
 	mu             sync.Mutex
-	closeOnce      sync.Once
-	closeErr       error
 	stdinOnce      sync.Once
 	stdinErr       error
 	eventsStarted  bool
 	closed         bool
 	waitFlight     *nativeWaitFlight
+	eventsCancel   context.CancelFunc
 	stderrDone     chan struct{}
 	stderrErr      error
 	eventsDone     chan struct{}
 	malformedLines atomic.Uint64
+
+	closeMu        sync.Mutex
+	closeFlight    *transportCloseFlight
+	closeSettled   bool
+	processSettled bool
+	revokeSettled  bool
+	outputsSettled bool
+	outputErr      error
+}
+
+type transportCloseFlight struct {
+	done chan struct{}
+	err  error
 }
 
 var _ Transport = (*ProcessTransport)(nil)
@@ -144,6 +156,9 @@ func (t *ProcessTransport) Events(ctx context.Context) <-chan TransportEvent {
 
 	t.eventsStarted = true
 	t.eventsDone = make(chan struct{})
+	eventsCtx, cancelEvents := context.WithCancel(ctx)
+	t.eventsCancel = cancelEvents
+	waitFlight := t.waitFlightLocked()
 
 	if t.stderr != nil {
 		t.stderrDone = make(chan struct{})
@@ -156,7 +171,7 @@ func (t *ProcessTransport) Events(ctx context.Context) <-chan TransportEvent {
 					t.mu.Lock()
 					t.stderrErr = errClaudeTransportFailure
 					t.mu.Unlock()
-					handleClaudeGoroutinePanic(ctx, t.log, "stderr drain", nil, recovered)
+					handleClaudeGoroutinePanic(eventsCtx, t.log, "stderr drain", nil, recovered)
 				}
 			}()
 
@@ -172,10 +187,17 @@ func (t *ProcessTransport) Events(ctx context.Context) <-chan TransportEvent {
 	go func() {
 		defer close(events)
 		defer close(eventsDone)
+		defer cancelEvents()
 
-		terminal, deliver := t.scanEvents(ctx, events)
+		terminal, deliver := t.scanEvents(eventsCtx, events)
 
-		result, waitErr := t.wait(context.Background())
+		var result NativeResult
+
+		var waitErr error
+		if waitFlight != nil {
+			result, waitErr = waitFlight.wait(context.Background())
+		}
+
 		if waitErr == nil && (result.Revoked || result.Signal != 0 || result.ExitCode != 0) {
 			waitErr = &ProcessExitError{ExitCode: result.ExitCode, Signal: result.Signal, Revoked: result.Revoked}
 		}
@@ -205,14 +227,14 @@ func (t *ProcessTransport) Events(ctx context.Context) <-chan TransportEvent {
 
 		terminal = errors.Join(terminal, waitErr, stderrErr)
 
-		if ctx.Err() != nil {
+		if eventsCtx.Err() != nil {
 			deliver = false
 		}
 
 		if terminal != nil && deliver {
 			select {
 			case events <- TransportEvent{Err: terminal}:
-			case <-ctx.Done():
+			case <-eventsCtx.Done():
 			}
 		}
 	}()
@@ -285,19 +307,23 @@ func closedTransportEvents(err error) <-chan TransportEvent {
 }
 
 func (t *ProcessTransport) wait(ctx context.Context) (NativeResult, error) {
-	if t.process == nil {
+	t.mu.Lock()
+	flight := t.waitFlightLocked()
+	t.mu.Unlock()
+
+	if flight == nil {
 		return NativeResult{}, nil
 	}
 
-	t.mu.Lock()
-	if t.waitFlight == nil {
+	return flight.wait(ctx)
+}
+
+func (t *ProcessTransport) waitFlightLocked() *nativeWaitFlight {
+	if t.process != nil && t.waitFlight == nil {
 		t.waitFlight = t.newWaitFlight()
 	}
 
-	flight := t.waitFlight
-	t.mu.Unlock()
-
-	return flight.wait(ctx)
+	return t.waitFlight
 }
 
 func (t *ProcessTransport) newWaitFlight() *nativeWaitFlight {
@@ -313,7 +339,45 @@ func (t *ProcessTransport) cancelWaitFlight(cause error) (NativeResult, error) {
 		return NativeResult{}, nil
 	}
 
-	return flight.cancelAndJoin(cause)
+	return t.cancelExactWaitFlight(flight, cause)
+}
+
+func (t *ProcessTransport) cancelExactWaitFlight(flight *nativeWaitFlight, cause error) (NativeResult, error) {
+	if flight == nil {
+		return NativeResult{}, nil
+	}
+
+	result, err := flight.cancelAndJoin(cause)
+
+	t.mu.Lock()
+	if t.waitFlight == flight {
+		t.waitFlight = nil
+	}
+	t.mu.Unlock()
+
+	return result, err
+}
+
+func (t *ProcessTransport) clearExactWaitFlight(flight *nativeWaitFlight) {
+	t.mu.Lock()
+	if t.waitFlight == flight {
+		t.waitFlight = nil
+	}
+	t.mu.Unlock()
+}
+
+func (t *ProcessTransport) closeWait(ctx context.Context) (*nativeWaitFlight, NativeResult, error) {
+	t.mu.Lock()
+	flight := t.waitFlightLocked()
+	t.mu.Unlock()
+
+	if flight == nil {
+		return nil, NativeResult{}, nil
+	}
+
+	result, err := flight.wait(ctx)
+
+	return flight, result, err
 }
 
 func (t *ProcessTransport) closeStdin() error {
@@ -330,79 +394,183 @@ func (t *ProcessTransport) closeStdin() error {
 }
 
 func (t *ProcessTransport) Close() error {
-	t.closeOnce.Do(func() {
-		t.mu.Lock()
-		t.closed = true
-		t.mu.Unlock()
+	t.closeMu.Lock()
+	if t.closeSettled {
+		t.closeMu.Unlock()
 
-		t.closeErr = t.closeStdin()
-		if t.process != nil {
-			grace, cancelGrace := context.WithTimeout(context.Background(), processExitGracePeriod)
-			_, waitErr := t.wait(grace)
+		return nil
+	}
 
-			cancelGrace()
+	if flight := t.closeFlight; flight != nil {
+		t.closeMu.Unlock()
+		<-flight.done
+
+		return flight.err
+	}
+
+	flight := &transportCloseFlight{done: make(chan struct{})}
+	t.closeFlight = flight
+	t.closeMu.Unlock()
+
+	flight.err = t.closeAttempt()
+
+	t.closeMu.Lock()
+	if flight.err == nil {
+		t.closeSettled = true
+	}
+
+	if t.closeFlight == flight {
+		t.closeFlight = nil
+	}
+
+	close(flight.done)
+	t.closeMu.Unlock()
+
+	return flight.err
+}
+
+func (t *ProcessTransport) closeAttempt() error {
+	t.mu.Lock()
+	t.closed = true
+	t.mu.Unlock()
+
+	closeErr := t.closeStdin()
+	if t.process != nil && !t.processSettled {
+		grace, cancelGrace := context.WithTimeout(context.Background(), processExitGracePeriod)
+		flight, _, waitErr := t.closeWait(grace)
+
+		cancelGrace()
+
+		if waitErr != nil && (t.options.Authority != nil || errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled)) {
+			initialWaitErr := waitErr
+			terminalWon := false
 
 			if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
-				revokeErr := boundedNativeRevoke(t.process, processShutdownWaitDelay)
+				incomplete := containmentIncomplete(t.options, "wait for Claude process before revoke", waitErr)
+				_, joinedErr := t.cancelExactWaitFlight(flight, incomplete)
+				terminalWon = joinedErr == nil
+				initialWaitErr = independentWaitError(joinedErr, incomplete)
+			} else {
+				t.clearExactWaitFlight(flight)
+			}
 
-				terminalCtx, cancelTerminal := context.WithTimeout(context.Background(), processShutdownWaitDelay)
-				_, waitErr = t.wait(terminalCtx)
-
-				cancelTerminal()
-
-				if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
-					incomplete := containmentIncomplete(t.options, "wait for revoked Claude process", waitErr)
-
-					_, joinedErr := t.cancelWaitFlight(incomplete)
-					if joinedErr == nil {
-						waitErr = nil
-					} else {
-						waitErr = joinedErr
+			if terminalWon {
+				waitErr = nil
+			} else {
+				var revokeErr error
+				if !t.revokeSettled {
+					revokeErr = boundedNativeRevoke(t.process, processShutdownWaitDelay)
+					if revokeErr == nil {
+						t.revokeSettled = true
 					}
 				}
 
-				t.closeErr = errors.Join(t.closeErr, revokeErr)
-			}
+				terminalCtx, cancelTerminal := context.WithTimeout(context.Background(), processShutdownWaitDelay)
+				terminalFlight, _, terminalErr := t.closeWait(terminalCtx)
 
-			if waitErr != nil && t.options.Authority != nil &&
-				!errors.Is(waitErr, t.options.Authority.ContainmentIncomplete) {
+				cancelTerminal()
+
+				if errors.Is(terminalErr, context.DeadlineExceeded) || errors.Is(terminalErr, context.Canceled) {
+					incomplete := containmentIncomplete(t.options, "wait for revoked Claude process", terminalErr)
+					_, terminalErr = t.cancelExactWaitFlight(terminalFlight, incomplete)
+				} else if terminalErr != nil {
+					t.clearExactWaitFlight(terminalFlight)
+				}
+
+				waitErr = terminalErr
+				closeErr = errors.Join(closeErr, initialWaitErr, revokeErr)
+			}
+		}
+
+		if waitErr == nil {
+			t.processSettled = true
+		} else {
+			t.clearExactWaitFlight(flight)
+
+			if t.options.Authority != nil && !errors.Is(waitErr, t.options.Authority.ContainmentIncomplete) {
 				waitErr = containmentIncomplete(t.options, "wait for Claude process", waitErr)
 			}
-
-			t.closeErr = errors.Join(t.closeErr, waitErr)
 		}
 
-		t.mu.Lock()
-		eventsDone := t.eventsDone
-		stdout := t.stdout
-		stderr := t.stderr
-		stderrDone := t.stderrDone
-		t.mu.Unlock()
+		closeErr = errors.Join(closeErr, waitErr)
+	}
 
-		if eventsDone != nil {
-			select {
-			case <-eventsDone:
-			case <-time.After(nativeOutputDrainDelay):
-				if stdout != nil {
-					t.closeErr = errors.Join(t.closeErr, closeNativeStream(stdout))
-				}
-			}
+	return errors.Join(closeErr, t.settleOutputWorkers())
+}
+
+func independentWaitError(err error, ownedCancelCause error) error {
+	if err == nil || err == ownedCancelCause {
+		return nil
+	}
+
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var independent error
+		for _, cause := range joined.Unwrap() {
+			independent = errors.Join(independent, independentWaitError(cause, ownedCancelCause))
 		}
 
-		if stderr != nil {
-			t.closeErr = errors.Join(t.closeErr, closeNativeStream(stderr))
-		}
+		return independent
+	}
 
-		if stderrDone != nil {
-			select {
-			case <-stderrDone:
-			case <-time.After(nativeOutputDrainDelay):
-				t.closeErr = errors.Join(t.closeErr, errClaudeTransportFailure)
-			}
-		}
-	})
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return independentWaitError(wrapped.Unwrap(), ownedCancelCause)
+	}
 
-	return t.closeErr
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+
+	return err
+}
+
+func (t *ProcessTransport) settleOutputWorkers() error {
+	if t.outputsSettled {
+		return t.outputErr
+	}
+
+	t.mu.Lock()
+	eventsDone := t.eventsDone
+	eventsCancel := t.eventsCancel
+	stdout := t.stdout
+	stderr := t.stderr
+	stderrDone := t.stderrDone
+	t.mu.Unlock()
+
+	eventsJoined := eventsDone == nil
+	if eventsDone != nil {
+		select {
+		case <-eventsDone:
+			eventsJoined = true
+		case <-time.After(nativeOutputDrainDelay):
+		}
+	}
+
+	if !eventsJoined && eventsCancel != nil {
+		eventsCancel()
+	}
+
+	if stdout != nil {
+		t.outputErr = errors.Join(t.outputErr, closeNativeStream(stdout))
+	}
+
+	if stderr != nil {
+		t.outputErr = errors.Join(t.outputErr, closeNativeStream(stderr))
+	}
+
+	if eventsDone != nil && !eventsJoined {
+		<-eventsDone
+	}
+
+	if stderrDone != nil {
+		<-stderrDone
+	}
+
+	t.mu.Lock()
+	t.outputErr = errors.Join(t.outputErr, t.stderrErr)
+	t.mu.Unlock()
+	t.outputsSettled = true
+
+	return t.outputErr
 }
 
 func closeNativeStream(stream io.Closer) error {

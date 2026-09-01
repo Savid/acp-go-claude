@@ -144,7 +144,8 @@ func TestAgentCloseSingleflightAndStickyContainment(t *testing.T) {
 	for range 2 {
 		require.ErrorIs(t, <-results, ErrContainmentIncomplete)
 	}
-	require.Equal(t, int32(1), blocked.calls.Load())
+	require.Equal(t, int32(2), blocked.calls.Load(),
+		"the controller retries the failed transport rung after its forced shutdown")
 	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
 }
 

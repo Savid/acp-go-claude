@@ -64,7 +64,7 @@ func TestClientQueryAfterClose(t *testing.T) {
 	require.Empty(t, transport.sentPayloads())
 }
 
-func TestClientCloseRetainsContainmentProofFailure(t *testing.T) {
+func TestClientCloseRetriesIncompleteTransportAndMemoizesSuccess(t *testing.T) {
 	t.Parallel()
 
 	transport := newFakeTransport()
@@ -74,9 +74,9 @@ func TestClientCloseRetainsContainmentProofFailure(t *testing.T) {
 
 	require.ErrorIs(t, client.Close(), want)
 	transport.closeErr = nil
-	require.ErrorIs(t, client.Close(), want,
-		"a repeated close must not forget an earlier failed quiescence proof")
-	require.Equal(t, 1, transport.closeCalls())
+	require.NoError(t, client.Close())
+	require.NoError(t, client.Close())
+	require.Equal(t, 2, transport.closeCalls())
 }
 
 func TestClientCloseIsIdempotent(t *testing.T) {
@@ -88,6 +88,21 @@ func TestClientCloseIsIdempotent(t *testing.T) {
 	require.NoError(t, client.Close())
 	require.NoError(t, client.Close())
 	require.Equal(t, 1, transport.closeCalls())
+}
+
+func TestClientCloseObserversJoinPublishedAttempt(t *testing.T) {
+	t.Parallel()
+
+	want := errors.New("published close result")
+	done := make(chan struct{})
+	close(done)
+
+	client := NewClient(nil, Options{}, newFakeTransport())
+	client.transportCloseFlight = &clientCloseFlight{done: done, err: want}
+	require.ErrorIs(t, client.closeTransport(), want)
+
+	client.closeFlight = &clientCloseFlight{done: done, err: want}
+	require.ErrorIs(t, client.Close(), want)
 }
 
 func TestClientCloseBoundsBlockedAdmittedPrefixAndReportsAbort(t *testing.T) {

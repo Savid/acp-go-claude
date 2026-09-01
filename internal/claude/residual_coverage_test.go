@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -584,6 +585,23 @@ func TestProcessTransportEventAndCloseResidualBranches(t *testing.T) {
 
 	_, err := (&ProcessTransport{}).cancelWaitFlight(errors.New("unused"))
 	require.NoError(t, err)
+	require.NoError(t, func() error {
+		_, waitErr := (&ProcessTransport{waitFlight: residualCompletedWaitFlight(NativeResult{}, nil)}).wait(t.Context())
+
+		return waitErr
+	}())
+	_, err = (&ProcessTransport{waitFlight: residualCompletedWaitFlight(NativeResult{}, nil)}).cancelWaitFlight(errors.New("unused"))
+	require.NoError(t, err)
+	_, err = (&ProcessTransport{}).cancelExactWaitFlight(nil, errors.New("unused"))
+	require.NoError(t, err)
+	flight, _, err := (&ProcessTransport{}).closeWait(t.Context())
+	require.NoError(t, err)
+	require.Nil(t, flight)
+
+	owned := errors.New("owned cancellation")
+	require.NoError(t, independentWaitError(fmt.Errorf("wrapped: %w", context.Canceled), owned))
+	independent := errors.New("independent")
+	require.ErrorIs(t, independentWaitError(independent, owned), independent)
 
 	t.Run("stderr misses both drains", func(t *testing.T) {
 		transport := &ProcessTransport{
@@ -650,16 +668,29 @@ func TestProcessTransportEventAndCloseResidualBranches(t *testing.T) {
 		require.NoError(t, transport.Close())
 	})
 
-	t.Run("stream cleanup timeouts", func(t *testing.T) {
+	t.Run("already joined stream cleanup", func(t *testing.T) {
+		eventsDone := make(chan struct{})
+		stderrDone := make(chan struct{})
+		close(eventsDone)
+		close(stderrDone)
 		transport := &ProcessTransport{
-			eventsDone: make(chan struct{}),
+			eventsDone: eventsDone,
 			stdout:     residualReadCloser{close: func() error { return errors.New("stdout close refused") }},
 			stderr:     residualReadCloser{},
-			stderrDone: make(chan struct{}),
+			stderrDone: stderrDone,
 		}
-		err := transport.Close()
-		require.ErrorContains(t, err, "stdout close refused")
-		require.ErrorIs(t, err, errClaudeTransportFailure)
+		require.ErrorContains(t, transport.Close(), "stdout close refused")
+	})
+
+	t.Run("cancel and join blocked event worker", func(t *testing.T) {
+		eventsDone := make(chan struct{})
+		transport := &ProcessTransport{
+			eventsDone: eventsDone,
+			eventsCancel: func() {
+				close(eventsDone)
+			},
+		}
+		require.NoError(t, transport.Close())
 	})
 }
 

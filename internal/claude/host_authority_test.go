@@ -545,12 +545,18 @@ func TestProcessTransportIncompleteCloseCancelsAndJoinsExitObserver(t *testing.T
 	waitStarted := make(chan struct{})
 	var started sync.Once
 	var active atomic.Int32
+	var terminal atomic.Bool
+	var waits atomic.Int32
 	process := &authorityTestProcess{
 		stdin: &authorityTestWriteCloser{}, stdout: io.NopCloser(bytes.NewReader(nil)), stderr: io.NopCloser(bytes.NewReader(nil)),
 		wait: func(ctx context.Context) (NativeResult, error) {
+			waits.Add(1)
 			active.Add(1)
 			defer active.Add(-1)
 			started.Do(func() { close(waitStarted) })
+			if terminal.Load() {
+				return NativeResult{Revoked: true}, nil
+			}
 			<-ctx.Done()
 
 			return NativeResult{}, ctx.Err()
@@ -572,6 +578,46 @@ func TestProcessTransportIncompleteCloseCancelsAndJoinsExitObserver(t *testing.T
 	require.ErrorIs(t, event.Err, incomplete)
 	_, ok = <-events
 	require.False(t, ok)
+
+	terminal.Store(true)
+	require.NoError(t, transport.Close())
+	require.NoError(t, transport.Close(), "a successful full close must be memoized")
+	require.Equal(t, int32(3), waits.Load(), "each nonterminal flight must be retired before a fresh host Wait")
+}
+
+func TestProcessTransportIndependentWaitFailureRetriesThroughFreshTerminalProof(t *testing.T) {
+	independent := errors.New("independent wait failure")
+	var waits atomic.Int32
+	var revokes atomic.Int32
+	process := &authorityTestProcess{
+		stdin:  &authorityTestWriteCloser{},
+		stdout: io.NopCloser(bytes.NewReader(nil)),
+		stderr: io.NopCloser(bytes.NewReader(nil)),
+		wait: func(context.Context) (NativeResult, error) {
+			if waits.Add(1) == 1 {
+				return NativeResult{}, independent
+			}
+
+			return NativeResult{Revoked: true}, nil
+		},
+		revoke: func(context.Context) error {
+			revokes.Add(1)
+
+			return nil
+		},
+	}
+	transport := &ProcessTransport{
+		process: process, stdin: process.stdin, stdout: process.stdout, stderr: process.stderr,
+		options: Options{Authority: &NativeAuthority{ContainmentIncomplete: errors.New("incomplete")}},
+	}
+
+	require.ErrorIs(t, transport.Close(), independent,
+		"the first observer must retain the host's independent failure")
+	require.True(t, transport.processSettled, "the fresh Wait proved the process terminal")
+	require.NoError(t, transport.Close(), "completed settlement rungs must make the next boundary succeed")
+	require.NoError(t, transport.Close(), "full success must be memoized")
+	require.Equal(t, int32(2), waits.Load())
+	require.Equal(t, int32(1), revokes.Load())
 }
 
 func TestAuthLoginIncompleteWaitAndReclaimRemainRetryable(t *testing.T) {

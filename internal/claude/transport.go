@@ -53,10 +53,7 @@ type ProcessTransport struct {
 	stdinErr       error
 	eventsStarted  bool
 	closed         bool
-	waitOnce       sync.Once
-	waitDone       chan struct{}
-	waitResult     NativeResult
-	waitErr        error
+	waitFlight     *nativeWaitFlight
 	stderrDone     chan struct{}
 	stderrErr      error
 	eventsDone     chan struct{}
@@ -88,7 +85,7 @@ func (t *ProcessTransport) Start(ctx context.Context) error {
 	t.stdout = process.Stdout()
 	t.stderr = process.Stderr()
 	t.mu.Lock()
-	t.waitDone = make(chan struct{})
+	t.waitFlight = t.newWaitFlight()
 	t.mu.Unlock()
 
 	return nil
@@ -293,27 +290,30 @@ func (t *ProcessTransport) wait(ctx context.Context) (NativeResult, error) {
 	}
 
 	t.mu.Lock()
-	if t.waitDone == nil {
-		t.waitDone = make(chan struct{})
+	if t.waitFlight == nil {
+		t.waitFlight = t.newWaitFlight()
 	}
 
-	done := t.waitDone
+	flight := t.waitFlight
 	t.mu.Unlock()
 
-	t.waitOnce.Do(func() {
-		go func() {
-			t.waitResult, t.waitErr = t.process.Wait(context.Background())
+	return flight.wait(ctx)
+}
 
-			close(done)
-		}()
-	})
+func (t *ProcessTransport) newWaitFlight() *nativeWaitFlight {
+	return newNativeWaitFlight(t.process, containmentIncomplete(t.options, "wait for Claude process", errNativeProcessWaitPanic))
+}
 
-	select {
-	case <-done:
-		return t.waitResult, t.waitErr
-	case <-ctx.Done():
-		return NativeResult{}, ctx.Err()
+func (t *ProcessTransport) cancelWaitFlight(cause error) (NativeResult, error) {
+	t.mu.Lock()
+	flight := t.waitFlight
+	t.mu.Unlock()
+
+	if flight == nil {
+		return NativeResult{}, nil
 	}
+
+	return flight.cancelAndJoin(cause)
 }
 
 func (t *ProcessTransport) closeStdin() error {
@@ -343,10 +343,7 @@ func (t *ProcessTransport) Close() error {
 			cancelGrace()
 
 			if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
-				revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), processShutdownWaitDelay)
-				revokeErr := t.process.Revoke(revokeCtx)
-
-				cancelRevoke()
+				revokeErr := boundedNativeRevoke(t.process, processShutdownWaitDelay)
 
 				terminalCtx, cancelTerminal := context.WithTimeout(context.Background(), processShutdownWaitDelay)
 				_, waitErr = t.wait(terminalCtx)
@@ -354,7 +351,14 @@ func (t *ProcessTransport) Close() error {
 				cancelTerminal()
 
 				if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
-					waitErr = containmentIncomplete(t.options, "wait for revoked Claude process", waitErr)
+					incomplete := containmentIncomplete(t.options, "wait for revoked Claude process", waitErr)
+
+					_, joinedErr := t.cancelWaitFlight(incomplete)
+					if joinedErr == nil {
+						waitErr = nil
+					} else {
+						waitErr = joinedErr
+					}
 				}
 
 				t.closeErr = errors.Join(t.closeErr, revokeErr)

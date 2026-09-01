@@ -213,10 +213,13 @@ func TestRunNativeOutputResidualBranches(t *testing.T) {
 				stdin:  residualWriteCloser{},
 				stdout: io.NopCloser(bytes.NewReader(nil)),
 				stderr: io.NopCloser(bytes.NewReader(nil)),
-				wait: func(context.Context) (NativeResult, error) {
-					<-release
-
-					return NativeResult{}, errors.New("wait refused")
+				wait: func(ctx context.Context) (NativeResult, error) {
+					select {
+					case <-release:
+						return NativeResult{}, errors.New("wait refused")
+					case <-ctx.Done():
+						return NativeResult{}, ctx.Err()
+					}
 				},
 				revoke: func(context.Context) error {
 					close(release)
@@ -235,10 +238,13 @@ func TestRunNativeOutputResidualBranches(t *testing.T) {
 		authority.StartNative = func(context.Context, NativeRequest) (NativeProcess, error) {
 			return &authorityTestProcess{
 				stdin: residualWriteCloser{}, stdout: io.NopCloser(bytes.NewReader(nil)), stderr: io.NopCloser(bytes.NewReader(nil)),
-				wait: func(context.Context) (NativeResult, error) {
-					<-release
-
-					return NativeResult{}, nil
+				wait: func(ctx context.Context) (NativeResult, error) {
+					select {
+					case <-release:
+						return NativeResult{}, nil
+					case <-ctx.Done():
+						return NativeResult{}, ctx.Err()
+					}
 				},
 				revoke: func(context.Context) error { return nil },
 			}, nil
@@ -278,7 +284,7 @@ func TestStartAuthLoginResidualFailures(t *testing.T) {
 	_, _, err := StartAuthLogin(t.Context(), Options{ScratchParent: scratchFile})
 	require.ErrorContains(t, err, "browser launch")
 
-	_, err = startAuthLoginChild(Options{
+	_, err = startAuthLoginChild(t.Context(), Options{
 		ScratchParent: t.TempDir(),
 		Authority: &NativeAuthority{
 			NativeEnvironment: func() map[string]string { return nil },
@@ -286,7 +292,7 @@ func TestStartAuthLoginResidualFailures(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	_, err = startAuthLoginChild(Options{
+	_, err = startAuthLoginChild(t.Context(), Options{
 		ScratchParent: t.TempDir(),
 		Authority: &NativeAuthority{
 			NativeEnvironment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
@@ -295,7 +301,7 @@ func TestStartAuthLoginResidualFailures(t *testing.T) {
 	require.Error(t, err)
 
 	incomplete := errors.New("incomplete")
-	_, err = startAuthLoginChild(Options{
+	_, err = startAuthLoginChild(t.Context(), Options{
 		ClaudeHome:    "",
 		ScratchParent: t.TempDir(),
 		Authority: &NativeAuthority{
@@ -314,7 +320,7 @@ func TestStartAuthLoginResidualFailures(t *testing.T) {
 		ReclaimNativeTree:     func(context.Context, string) error { return nil },
 		StartNative:           func(context.Context, NativeRequest) (NativeProcess, error) { return nil, incomplete },
 	}
-	_, err = startAuthLoginChild(Options{ScratchParent: t.TempDir(), Authority: authority, TreePrepared: true})
+	_, err = startAuthLoginChild(t.Context(), Options{ScratchParent: t.TempDir(), Authority: authority, TreePrepared: true})
 	require.ErrorIs(t, err, incomplete)
 }
 
@@ -373,22 +379,29 @@ func TestAuthLoginStateResidualBranches(t *testing.T) {
 	}}
 	require.ErrorIs(t, login.Submit("value"), closeErr)
 
+	login = &AuthLogin{}
+	require.False(t, login.Exited())
+	exit, err := login.Wait(t.Context())
+	require.ErrorContains(t, err, "process is unavailable")
+	require.Equal(t, AuthLoginExitUnknown, exit)
+	require.ErrorContains(t, login.reap(t.Context()), "process is unavailable")
+
 	done := make(chan struct{})
 	close(done)
-	login = &AuthLogin{exitDone: done}
+	login = &AuthLogin{exitFlight: residualCompletedWaitFlight(NativeResult{}, nil)}
 	require.True(t, login.Exited())
 
-	login = &AuthLogin{exitDone: make(chan struct{})}
-	exit, err := login.Wait(residualCancelledContext())
+	login = &AuthLogin{exitFlight: &nativeWaitFlight{done: make(chan struct{})}}
+	exit, err = login.Wait(residualCancelledContext())
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, AuthLoginExitUnknown, exit)
 
-	login = &AuthLogin{exitDone: done, exitErr: errors.New("wait refused")}
+	login = &AuthLogin{exitFlight: residualCompletedWaitFlight(NativeResult{}, errors.New("wait refused"))}
 	exit, err = login.Wait(t.Context())
 	require.ErrorContains(t, err, "wait refused")
 	require.Equal(t, AuthLoginExitUnknown, exit)
 
-	login = &AuthLogin{exitDone: done, exitResult: NativeResult{ExitCode: 3}}
+	login = &AuthLogin{exitFlight: residualCompletedWaitFlight(NativeResult{ExitCode: 3}, nil)}
 	exit, err = login.Wait(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, AuthLoginExitNonzero, exit)
@@ -416,12 +429,13 @@ func TestAuthLoginCleanupResidualBranches(t *testing.T) {
 	require.ErrorIs(t, reclaimNativeTree(authority, "root"), incomplete)
 	authority.ContainmentIncomplete = nil
 	require.ErrorContains(t, reclaimNativeTree(authority, "root"), "reclaim refused")
+	authority.ContainmentIncomplete = incomplete
+	authority.ReclaimNativeTree = func(context.Context, string) error { panic("reclaim") }
+	require.ErrorIs(t, reclaimNativeTree(authority, "root"), errNativeTreeReclaimPanic)
 
-	done := make(chan struct{})
-	close(done)
-	login := &AuthLogin{exitDone: done, exitErr: errors.New("exit refused")}
+	login := &AuthLogin{exitFlight: residualCompletedWaitFlight(NativeResult{}, errors.New("exit refused"))}
 	require.ErrorContains(t, login.reap(t.Context()), "exit refused")
-	require.ErrorIs(t, (&AuthLogin{exitDone: make(chan struct{})}).reap(residualCancelledContext()), context.Canceled)
+	require.ErrorIs(t, (&AuthLogin{exitFlight: &nativeWaitFlight{done: make(chan struct{})}}).reap(residualCancelledContext()), context.Canceled)
 
 	login = &AuthLogin{
 		processSettled: true,
@@ -437,14 +451,15 @@ func TestAuthLoginCleanupResidualBranches(t *testing.T) {
 }
 
 func TestAuthLoginCloseSettlementResidualBranches(t *testing.T) {
-	done := make(chan struct{})
-	close(done)
+	previousShutdown := authShutdownWait
+	authShutdownWait = time.Millisecond
+	t.Cleanup(func() { authShutdownWait = previousShutdown })
+
 	newLogin := func(exitErr, revokeErr, stdoutErr error, authority *NativeAuthority) *AuthLogin {
 		return &AuthLogin{
-			stdin:    residualWriteCloser{},
-			stdout:   residualReadCloser{close: func() error { return stdoutErr }},
-			exitDone: done,
-			exitErr:  exitErr,
+			stdin:      residualWriteCloser{},
+			stdout:     residualReadCloser{close: func() error { return stdoutErr }},
+			exitFlight: residualCompletedWaitFlight(NativeResult{}, exitErr),
 			process: &authorityTestProcess{
 				revoke: func(context.Context) error { return revokeErr },
 			},
@@ -464,6 +479,18 @@ func TestAuthLoginCloseSettlementResidualBranches(t *testing.T) {
 
 	login = newLogin(errors.New("wait refused"), nil, nil, authority)
 	require.ErrorIs(t, login.Close(), incomplete)
+
+	login = newLogin(nil, nil, nil, nil)
+	login.exitFlight = residualCancelCompletesWaitFlight(nil)
+	require.NoError(t, login.Close())
+}
+
+func TestNativeWaitFlightResidualBranches(t *testing.T) {
+	flight := newNativeWaitFlight(&authorityTestProcess{
+		wait: func(context.Context) (NativeResult, error) { panic("wait") },
+	}, errors.New("mapped wait panic"))
+	_, err := flight.wait(t.Context())
+	require.ErrorContains(t, err, "mapped wait panic")
 }
 
 func TestNativeOutputBufferAndDrainResidualBranches(t *testing.T) {
@@ -555,6 +582,9 @@ func TestProcessTransportEventAndCloseResidualBranches(t *testing.T) {
 		processShutdownWaitDelay = previousShutdown
 	})
 
+	_, err := (&ProcessTransport{}).cancelWaitFlight(errors.New("unused"))
+	require.NoError(t, err)
+
 	t.Run("stderr misses both drains", func(t *testing.T) {
 		transport := &ProcessTransport{
 			stdout: io.NopCloser(bytes.NewReader(nil)),
@@ -581,10 +611,13 @@ func TestProcessTransportEventAndCloseResidualBranches(t *testing.T) {
 	t.Run("terminal wait timeout", func(t *testing.T) {
 		release := make(chan struct{})
 		process := &authorityTestProcess{
-			wait: func(context.Context) (NativeResult, error) {
-				<-release
-
-				return NativeResult{}, nil
+			wait: func(ctx context.Context) (NativeResult, error) {
+				select {
+				case <-release:
+					return NativeResult{}, nil
+				case <-ctx.Done():
+					return NativeResult{}, ctx.Err()
+				}
 			},
 			revoke: func(context.Context) error { return nil },
 		}
@@ -608,6 +641,15 @@ func TestProcessTransportEventAndCloseResidualBranches(t *testing.T) {
 		require.ErrorIs(t, transport.Close(), incomplete)
 	})
 
+	t.Run("terminal result wins cancellation", func(t *testing.T) {
+		process := &authorityTestProcess{
+			wait:   func(context.Context) (NativeResult, error) { return NativeResult{}, nil },
+			revoke: func(context.Context) error { return nil },
+		}
+		transport := &ProcessTransport{process: process, waitFlight: residualCancelCompletesWaitFlight(nil)}
+		require.NoError(t, transport.Close())
+	})
+
 	t.Run("stream cleanup timeouts", func(t *testing.T) {
 		transport := &ProcessTransport{
 			eventsDone: make(chan struct{}),
@@ -626,4 +668,25 @@ func residualCancelledContext() context.Context {
 	cancel()
 
 	return ctx
+}
+
+func residualCompletedWaitFlight(result NativeResult, err error) *nativeWaitFlight {
+	done := make(chan struct{})
+	close(done)
+
+	return &nativeWaitFlight{
+		done: done, cancel: func(error) {}, result: result, err: err,
+	}
+}
+
+func residualCancelCompletesWaitFlight(err error) *nativeWaitFlight {
+	done := make(chan struct{})
+
+	return &nativeWaitFlight{
+		done: done,
+		cancel: func(error) {
+			close(done)
+		},
+		err: err,
+	}
 }

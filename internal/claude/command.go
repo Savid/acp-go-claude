@@ -364,46 +364,16 @@ func runNativeOutput(ctx context.Context, options Options, executable string, ar
 		_, readErr = io.Copy(io.Discard, stderr)
 	}()
 
-	var (
-		terminalResult  NativeResult
-		terminalWaitErr error
-	)
-
-	waitDone := make(chan struct{})
-
-	// #nosec G118 -- the authority owns process settlement after a caller detaches.
-	go func() {
-		terminalResult, terminalWaitErr = process.Wait(context.Background())
-
-		close(waitDone)
-	}()
-
-	var waitErr error
-
-	select {
-	case <-waitDone:
-		result = terminalResult
-		waitErr = terminalWaitErr
-	case <-ctx.Done():
-		waitErr = ctx.Err()
-	}
-
+	result, waitErr := callNativeWait(ctx, process)
 	if waitErr != nil {
-		revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), processShutdownWaitDelay)
-		revokeErr := process.Revoke(revokeCtx)
+		revokeErr := boundedNativeRevoke(process, processShutdownWaitDelay)
 
-		cancelRevoke()
-
-		terminalCtx, cancelTerminal := context.WithTimeout(context.Background(), processShutdownWaitDelay)
-		select {
-		case <-waitDone:
+		terminalResult, terminalWaitErr := boundedNativeWait(process, processShutdownWaitDelay)
+		if terminalWaitErr == nil {
 			result = terminalResult
-			waitErr, terminal = classifyNativeOutputWait(options, waitErr, terminalWaitErr)
-		case <-terminalCtx.Done():
-			waitErr = errors.Join(waitErr, containmentIncomplete(options, "wait for native output process", terminalCtx.Err()))
 		}
 
-		cancelTerminal()
+		waitErr, terminal = classifyNativeOutputWait(options, waitErr, terminalWaitErr)
 
 		waitErr = errors.Join(waitErr, revokeErr)
 	} else {

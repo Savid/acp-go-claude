@@ -295,7 +295,7 @@ func TestRunNativeOutputPreparesRevokesWaitsAndReclaims(t *testing.T) {
 	_, result, err := runNativeOutput(ctx, Options{CLIPath: "claude", ClaudeHome: "/native/home", Authority: authority}, "claude", []string{"auth", "status"})
 	require.ErrorIs(t, err, context.Canceled)
 	require.True(t, result.Revoked)
-	require.Equal(t, []string{"prepare", "start", "revoke", "wait-terminal", "reclaim"}, events)
+	require.Equal(t, []string{"prepare", "start", "wait-canceled", "revoke", "wait-terminal", "reclaim"}, events)
 }
 
 func TestRunNativeOutputReclaimsPreparedTreeOnOrdinaryStartRefusal(t *testing.T) {
@@ -423,15 +423,21 @@ func TestUnusableManagedProcessSettlementIsBounded(t *testing.T) {
 		stdin:  &authorityTestWriteCloser{},
 		stdout: nil,
 		stderr: io.NopCloser(bytes.NewReader(nil)),
-		wait: func(context.Context) (NativeResult, error) {
-			<-release
-
-			return NativeResult{}, nil
+		wait: func(ctx context.Context) (NativeResult, error) {
+			select {
+			case <-release:
+				return NativeResult{}, nil
+			case <-ctx.Done():
+				return NativeResult{}, ctx.Err()
+			}
 		},
-		revoke: func(context.Context) error {
-			<-release
-
-			return nil
+		revoke: func(ctx context.Context) error {
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		},
 	}
 	incomplete := errors.New("incomplete sentinel")
@@ -456,6 +462,286 @@ func TestUnusableManagedProcessSettlementIsBounded(t *testing.T) {
 	}
 
 	close(release)
+}
+
+func TestBoundedNativeCallsUseHostContextsWithoutLeavingAdapterWork(t *testing.T) {
+	var waitActive atomic.Int32
+	var revokeActive atomic.Int32
+	process := &authorityTestProcess{
+		wait: func(ctx context.Context) (NativeResult, error) {
+			waitActive.Add(1)
+			defer waitActive.Add(-1)
+			<-ctx.Done()
+
+			return NativeResult{}, ctx.Err()
+		},
+		revoke: func(ctx context.Context) error {
+			revokeActive.Add(1)
+			defer revokeActive.Add(-1)
+			<-ctx.Done()
+
+			return ctx.Err()
+		},
+	}
+
+	_, err := boundedNativeWait(process, time.Millisecond)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Zero(t, waitActive.Load())
+	require.ErrorIs(t, boundedNativeRevoke(process, time.Millisecond), context.DeadlineExceeded)
+	require.Zero(t, revokeActive.Load())
+
+	panicking := &authorityTestProcess{
+		wait:   func(context.Context) (NativeResult, error) { panic("wait") },
+		revoke: func(context.Context) error { panic("revoke") },
+	}
+	_, err = boundedNativeWait(panicking, time.Second)
+	require.ErrorIs(t, err, errNativeProcessWaitPanic)
+	require.ErrorIs(t, boundedNativeRevoke(panicking, time.Second), errNativeProcessRevokePanic)
+}
+
+func TestNativeWaitFlightPreservesIndependentErrorDuringCancellation(t *testing.T) {
+	t.Run("independent host error", func(t *testing.T) {
+		started := make(chan struct{})
+		independent := errors.New("independent host wait failure")
+		process := &authorityTestProcess{wait: func(ctx context.Context) (NativeResult, error) {
+			close(started)
+			<-ctx.Done()
+
+			return NativeResult{}, independent
+		}}
+		flight := newNativeWaitFlight(process, errNativeProcessWaitPanic)
+		<-started
+
+		_, err := flight.cancelAndJoin(errors.New("cancel flight"))
+		require.ErrorIs(t, err, independent)
+	})
+
+	t.Run("context and independent host error", func(t *testing.T) {
+		started := make(chan struct{})
+		independent := errors.New("independent host wait failure")
+		cancelCause := errors.New("containment incomplete")
+		process := &authorityTestProcess{wait: func(ctx context.Context) (NativeResult, error) {
+			close(started)
+			<-ctx.Done()
+
+			return NativeResult{}, errors.Join(ctx.Err(), independent)
+		}}
+		flight := newNativeWaitFlight(process, errNativeProcessWaitPanic)
+		<-started
+
+		_, err := flight.cancelAndJoin(cancelCause)
+		require.ErrorIs(t, err, cancelCause)
+		require.ErrorIs(t, err, independent)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+}
+
+func TestProcessTransportIncompleteCloseCancelsAndJoinsExitObserver(t *testing.T) {
+	priorGrace, priorShutdown := processExitGracePeriod, processShutdownWaitDelay
+	processExitGracePeriod, processShutdownWaitDelay = time.Millisecond, time.Millisecond
+	t.Cleanup(func() { processExitGracePeriod, processShutdownWaitDelay = priorGrace, priorShutdown })
+
+	incomplete := errors.New("incomplete sentinel")
+	waitStarted := make(chan struct{})
+	var started sync.Once
+	var active atomic.Int32
+	process := &authorityTestProcess{
+		stdin: &authorityTestWriteCloser{}, stdout: io.NopCloser(bytes.NewReader(nil)), stderr: io.NopCloser(bytes.NewReader(nil)),
+		wait: func(ctx context.Context) (NativeResult, error) {
+			active.Add(1)
+			defer active.Add(-1)
+			started.Do(func() { close(waitStarted) })
+			<-ctx.Done()
+
+			return NativeResult{}, ctx.Err()
+		},
+		revoke: func(context.Context) error { return nil },
+	}
+	transport := &ProcessTransport{
+		process: process, stdin: process.stdin, stdout: process.stdout, stderr: process.stderr,
+		options: Options{Authority: &NativeAuthority{ContainmentIncomplete: incomplete}},
+	}
+	events := transport.Events(t.Context())
+	<-waitStarted
+
+	err := transport.Close()
+	require.ErrorIs(t, err, incomplete)
+	require.Zero(t, active.Load(), "Close returned with its exit observer still active")
+	event, ok := <-events
+	require.True(t, ok)
+	require.ErrorIs(t, event.Err, incomplete)
+	_, ok = <-events
+	require.False(t, ok)
+}
+
+func TestAuthLoginIncompleteWaitAndReclaimRemainRetryable(t *testing.T) {
+	priorShutdown, priorReclaim := authShutdownWait, nativeTreeReclaimWait
+	authShutdownWait, nativeTreeReclaimWait = time.Millisecond, time.Millisecond
+	t.Cleanup(func() { authShutdownWait, nativeTreeReclaimWait = priorShutdown, priorReclaim })
+
+	incomplete := errors.New("incomplete sentinel")
+	var terminal atomic.Bool
+	var active atomic.Int32
+	var waits atomic.Int32
+	var revokes atomic.Int32
+	process := &authorityTestProcess{
+		wait: func(ctx context.Context) (NativeResult, error) {
+			waits.Add(1)
+			active.Add(1)
+			defer active.Add(-1)
+			if terminal.Load() {
+				return NativeResult{Revoked: true}, nil
+			}
+
+			<-ctx.Done()
+
+			return NativeResult{}, ctx.Err()
+		},
+		revoke: func(context.Context) error {
+			if revokes.Add(1) == 2 {
+				terminal.Store(true)
+			}
+
+			return nil
+		},
+	}
+	var reclaims atomic.Int32
+	authority := &NativeAuthority{
+		ContainmentIncomplete: incomplete,
+		ReclaimNativeTree: func(ctx context.Context, _ string) error {
+			if reclaims.Add(1) == 1 {
+				<-ctx.Done()
+
+				return ctx.Err()
+			}
+
+			return nil
+		},
+	}
+	login := &AuthLogin{
+		stdin: &authorityTestWriteCloser{}, stdout: io.NopCloser(bytes.NewReader(nil)),
+		process: process, shim: &browserShim{}, options: Options{Authority: authority}, prepared: []string{"prepared-root"},
+	}
+	login.exitFlight = login.newExitFlight()
+
+	require.ErrorIs(t, login.Close(), incomplete)
+	require.Zero(t, active.Load(), "failed Close returned with its proactive Wait still active")
+	require.True(t, login.CleanupPending())
+	require.Equal(t, []string{"prepared-root"}, login.prepared)
+	require.Equal(t, int32(1), waits.Load())
+
+	require.ErrorIs(t, login.Close(), incomplete)
+	require.True(t, login.processSettled, "fresh host Wait did not rejoin the terminal result")
+	require.True(t, login.CleanupPending(), "timed-out reclaim discarded its retry rung")
+	require.Equal(t, []string{"prepared-root"}, login.prepared)
+	require.Equal(t, int32(2), waits.Load())
+
+	require.NoError(t, login.Close())
+	require.False(t, login.CleanupPending())
+	require.Empty(t, login.prepared)
+	require.Equal(t, int32(2), reclaims.Load())
+}
+
+func TestAuthLoginWaitAndExitedDoNotBlockBehindClose(t *testing.T) {
+	revokeStarted := make(chan struct{})
+	revokeRelease := make(chan struct{})
+	terminal := make(chan struct{})
+	process := &authorityTestProcess{
+		wait: func(ctx context.Context) (NativeResult, error) {
+			select {
+			case <-terminal:
+				return NativeResult{}, nil
+			case <-ctx.Done():
+				return NativeResult{}, ctx.Err()
+			}
+		},
+		revoke: func(ctx context.Context) error {
+			close(revokeStarted)
+			select {
+			case <-revokeRelease:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	}
+	login := &AuthLogin{
+		stdin: &authorityTestWriteCloser{}, stdout: io.NopCloser(bytes.NewReader(nil)),
+		process: process, shim: &browserShim{},
+	}
+	login.exitFlight = login.newExitFlight()
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- login.Close() }()
+	<-revokeStarted
+
+	exitedDone := make(chan bool, 1)
+	go func() { exitedDone <- login.Exited() }()
+	select {
+	case exited := <-exitedDone:
+		require.False(t, exited)
+	case <-time.After(time.Second):
+		close(revokeRelease)
+		t.Fatal("Exited blocked behind Close")
+	}
+
+	waitCtx, cancelWait := context.WithCancel(t.Context())
+	cancelWait()
+	waitDone := make(chan error, 1)
+	go func() {
+		_, err := login.Wait(waitCtx)
+		waitDone <- err
+	}()
+	select {
+	case err := <-waitDone:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		close(revokeRelease)
+		t.Fatal("Wait blocked behind Close")
+	}
+
+	close(terminal)
+	close(revokeRelease)
+	select {
+	case err := <-closeDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Close did not finish after the process became terminal")
+	}
+}
+
+func TestAuthLoginPrepareAndStartReceiveCallerContext(t *testing.T) {
+	type contextKey struct{}
+	ctx := context.WithValue(t.Context(), contextKey{}, "caller")
+	var prepares atomic.Int32
+	var starts atomic.Int32
+	authority := &NativeAuthority{
+		NativeEnvironment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
+		PrepareNativeTree: func(callCtx context.Context, _ string) error {
+			require.Equal(t, "caller", callCtx.Value(contextKey{}))
+			prepares.Add(1)
+
+			return nil
+		},
+		ReclaimNativeTree: func(context.Context, string) error { return nil },
+		StartNative: func(callCtx context.Context, _ NativeRequest) (NativeProcess, error) {
+			require.Equal(t, "caller", callCtx.Value(contextKey{}))
+			starts.Add(1)
+
+			return &authorityTestProcess{
+				stdin: &authorityTestWriteCloser{}, stdout: io.NopCloser(bytes.NewReader(nil)), stderr: io.NopCloser(bytes.NewReader(nil)),
+				wait:   func(context.Context) (NativeResult, error) { return NativeResult{}, nil },
+				revoke: func(context.Context) error { return nil },
+			}, nil
+		},
+	}
+	login, err := startAuthLoginChild(ctx, Options{
+		CLIPath: "claude", ClaudeHome: "/home", ScratchParent: t.TempDir(), Authority: authority,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(2), prepares.Load())
+	require.Equal(t, int32(1), starts.Load())
+	require.NoError(t, login.Close())
 }
 
 func TestUnusableManagedProcessTerminalWaitAvoidsFalseContainmentFailure(t *testing.T) {

@@ -10,6 +10,59 @@ import (
 	"time"
 )
 
+var (
+	errNativeProcessWaitPanic   = errors.New("native process wait panicked")
+	errNativeProcessRevokePanic = errors.New("native process revoke panicked")
+)
+
+// nativeWaitFlight owns one cancellable observation of a host-owned process.
+// The context stays local to its goroutine; completion publishes result and err
+// before closing done, so every waiter reads them without another lock.
+type nativeWaitFlight struct {
+	done   chan struct{}
+	cancel context.CancelCauseFunc
+	result NativeResult
+	err    error
+}
+
+func newNativeWaitFlight(process NativeProcess, panicErr error) *nativeWaitFlight {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	flight := &nativeWaitFlight{done: make(chan struct{}), cancel: cancel}
+
+	go func() {
+		defer close(flight.done)
+
+		flight.result, flight.err = callNativeWait(ctx, process)
+		if errors.Is(flight.err, errNativeProcessWaitPanic) && panicErr != nil {
+			flight.err = panicErr
+		}
+
+		if flight.err != nil && ctx.Err() != nil && errors.Is(flight.err, ctx.Err()) {
+			if cause := context.Cause(ctx); cause != nil {
+				flight.err = errors.Join(cause, flight.err)
+			}
+		}
+	}()
+
+	return flight
+}
+
+func (f *nativeWaitFlight) wait(ctx context.Context) (NativeResult, error) {
+	select {
+	case <-f.done:
+		return f.result, f.err
+	case <-ctx.Done():
+		return NativeResult{}, ctx.Err()
+	}
+}
+
+func (f *nativeWaitFlight) cancelAndJoin(cause error) (NativeResult, error) {
+	f.cancel(cause)
+	<-f.done
+
+	return f.result, f.err
+}
+
 func startNative(ctx context.Context, options Options, executable string, arguments []string) (NativeProcess, error) {
 	if executable == "" {
 		executable = defaultCLIExecutable
@@ -104,43 +157,38 @@ func settleUnusableNativeProcess(
 }
 
 func boundedNativeRevoke(process NativeProcess, timeout time.Duration) error {
-	done := make(chan error, 1)
-
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	go func() { done <- process.Revoke(ctx) }()
-
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return callNativeRevoke(ctx, process)
 }
 
 func boundedNativeWait(process NativeProcess, timeout time.Duration) (NativeResult, error) {
-	type waitResult struct {
-		result NativeResult
-		err    error
-	}
-
-	done := make(chan waitResult, 1)
-
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	go func() {
-		result, err := process.Wait(ctx)
-		done <- waitResult{result: result, err: err}
+	return callNativeWait(ctx, process)
+}
+
+func callNativeWait(ctx context.Context, process NativeProcess) (result NativeResult, err error) {
+	defer func() {
+		if recover() != nil {
+			result = NativeResult{}
+			err = errNativeProcessWaitPanic
+		}
 	}()
 
-	select {
-	case waited := <-done:
-		return waited.result, waited.err
-	case <-ctx.Done():
-		return NativeResult{}, ctx.Err()
-	}
+	return process.Wait(ctx)
+}
+
+func callNativeRevoke(ctx context.Context, process NativeProcess) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errNativeProcessRevokePanic
+		}
+	}()
+
+	return process.Revoke(ctx)
 }
 
 func validInterfaceValue(value any) bool {

@@ -78,6 +78,22 @@ func TestBuildEnvUsesAuthorityBaseAndCanonicalOverlay(t *testing.T) {
 	require.Contains(t, environment, "HOME=/host/home")
 }
 
+func TestBuildEnvRejectsUnavailableAndMalformedBases(t *testing.T) {
+	t.Parallel()
+
+	require.Nil(t, BuildEnv(Options{Authority: &NativeAuthority{}}))
+	require.Nil(t, BuildEnv(Options{OrdinaryEnvironment: nil}))
+
+	for _, environment := range []map[string]string{
+		{"": "value"},
+		{"BAD=KEY": "value"},
+		{"BAD\x00KEY": "value"},
+		{"KEY": "bad\x00value"},
+	} {
+		require.Nil(t, BuildEnv(Options{OrdinaryEnvironment: environment}))
+	}
+}
+
 func TestBuildEnvUsesOnlySelectedBaseAndProtectsManagedRoots(t *testing.T) {
 	separator := string(os.PathListSeparator)
 	environment := BuildEnv(Options{
@@ -177,4 +193,7 @@ func TestValidateClaudeVersionOrdinaryBoundary(t *testing.T) {
 
 	options.CLIPath = writeShellScript(t, filepath.Join(dir, "failure"), "#!/bin/sh\nexit 7\n")
 	require.ErrorContains(t, validateClaudeVersion(context.Background(), options), "exited 7")
+
+	options.CLIPath = filepath.Join(dir, "missing")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), options), "probe claude version")
 }

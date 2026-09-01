@@ -39,6 +39,9 @@ func TestProcessExitErrorIs(t *testing.T) {
 
 	require.True(t, errors.Is(&ProcessExitError{}, ErrProcessExited))
 	require.False(t, errors.Is(&ProcessExitError{}, ErrClientClosed))
+	require.Equal(t, "claude process was revoked", (&ProcessExitError{Revoked: true}).Error())
+	require.Equal(t, "claude exited with status 23", (&ProcessExitError{ExitCode: 23}).Error())
+	require.Equal(t, ErrProcessExited.Error(), (&ProcessExitError{ExitCode: -1}).Error())
 }
 
 func TestClosedTransportErrorPreservesRecognizedJoinedCausesWithoutOpaqueText(t *testing.T) {

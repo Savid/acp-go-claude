@@ -110,3 +110,20 @@ func TestQueryRateLimitsOrdinaryBoundary(t *testing.T) {
 	require.Len(t, limits.Windows, 3)
 	require.Equal(t, "session", limits.Windows[0].ID)
 }
+
+func TestQueryRateLimitsOrdinaryFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses shell scripts")
+	}
+
+	dir := t.TempDir()
+	options := Options{Cwd: dir, OrdinaryEnvironment: OrdinaryEnvironment()}
+
+	options.CLIPath = filepath.Join(dir, "missing")
+	_, err := QueryRateLimits(t.Context(), options)
+	require.ErrorContains(t, err, "run claude /usage")
+
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "failure"), "#!/bin/sh\nexit 17\n")
+	_, err = QueryRateLimits(t.Context(), options)
+	require.ErrorContains(t, err, "claude /usage exited 17")
+}

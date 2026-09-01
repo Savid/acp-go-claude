@@ -659,6 +659,7 @@ func residualCallbackAuthority() *callbackHostAuthority {
 	return &callbackHostAuthority{
 		environment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
 		prepare:     func(context.Context, string) error { return nil },
+		read:        func(context.Context, string, uint64) ([][]byte, error) { return nil, nil },
 		reclaim:     func(context.Context, string) error { return nil },
 		start:       func(context.Context, NativeRequest) (NativeProcess, error) { return valueNativeProcess{}, nil },
 	}

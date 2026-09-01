@@ -46,6 +46,9 @@ func (a *Agent) claudeAuthority() *claude.NativeAuthority {
 		PrepareNativeTree: func(ctx context.Context, root string) error {
 			return guardedPrepareNativeTree(authority, ctx, root)
 		},
+		ReadNativeAppendLog: func(ctx context.Context, path string, offset uint64) ([][]byte, error) {
+			return guardedReadNativeAppendLog(authority, ctx, path, offset)
+		},
 		ReclaimNativeTree: func(ctx context.Context, root string) error {
 			return guardedReclaimNativeTree(authority, ctx, root)
 		},
@@ -53,6 +56,22 @@ func (a *Agent) claudeAuthority() *claude.NativeAuthority {
 			return guardedStartNative(authority, ctx, request)
 		},
 	}
+}
+
+func guardedReadNativeAppendLog(
+	authority HostAuthority,
+	ctx context.Context,
+	path string,
+	offset uint64,
+) (entries [][]byte, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			entries = nil
+			err = fmt.Errorf("%w: read native append log callback panicked: %T", ErrHostAuthorityUnavailable, recovered)
+		}
+	}()
+
+	return authority.ReadNativeAppendLog(ctx, path, offset)
 }
 
 func guardedPrepareNativeTree(authority HostAuthority, ctx context.Context, root string) (err error) {

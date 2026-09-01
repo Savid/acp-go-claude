@@ -28,6 +28,7 @@ type fakeHostAuthority struct {
 type callbackHostAuthority struct {
 	environment func() map[string]string
 	prepare     func(context.Context, string) error
+	read        func(context.Context, string, uint64) ([][]byte, error)
 	reclaim     func(context.Context, string) error
 	start       func(context.Context, NativeRequest) (NativeProcess, error)
 }
@@ -38,6 +39,10 @@ func (a *callbackHostAuthority) NativeEnvironment() map[string]string {
 
 func (a *callbackHostAuthority) PrepareNativeTree(ctx context.Context, root string) error {
 	return a.prepare(ctx, root)
+}
+
+func (a *callbackHostAuthority) ReadNativeAppendLog(ctx context.Context, path string, offset uint64) ([][]byte, error) {
+	return a.read(ctx, path, offset)
 }
 
 func (a *callbackHostAuthority) ReclaimNativeTree(ctx context.Context, root string) error {
@@ -69,6 +74,10 @@ func (a *fakeHostAuthority) PrepareNativeTree(_ context.Context, root string) er
 	}
 
 	return a.prepare
+}
+
+func (*fakeHostAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
+	return nil, nil
 }
 
 func (a *fakeHostAuthority) ReclaimNativeTree(_ context.Context, root string) error {
@@ -117,6 +126,9 @@ func (valueHostAuthority) NativeEnvironment() map[string]string {
 	return map[string]string{"PATH": "/bin"}
 }
 func (valueHostAuthority) PrepareNativeTree(context.Context, string) error { return nil }
+func (valueHostAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
+	return nil, nil
+}
 func (valueHostAuthority) ReclaimNativeTree(context.Context, string) error { return nil }
 func (valueHostAuthority) StartNative(context.Context, NativeRequest) (NativeProcess, error) {
 	return valueNativeProcess{}, nil
@@ -276,6 +288,38 @@ func TestHostAuthorityInterfaceValidationAndUnconfiguredAdapters(t *testing.T) {
 	broker := &providerAuth{agent: NewAgent()}
 	require.Nil(t, broker.claudeAuthority())
 	require.NoError(t, broker.reclaimIdleNativeHome(t.Context()))
+}
+
+func TestHostAuthorityReadNativeAppendLogDelegatesAndGuardsPanic(t *testing.T) {
+	authority := residualCallbackAuthority()
+	callCtx := t.Context()
+	want := [][]byte{[]byte("first"), []byte("second")}
+	authority.read = func(ctx context.Context, path string, offset uint64) ([][]byte, error) {
+		require.Same(t, callCtx, ctx)
+		require.Equal(t, "/native/append.log", path)
+		require.Equal(t, uint64(17), offset)
+
+		return want, nil
+	}
+
+	wrapped := NewAgent(WithHostAuthority(authority)).claudeAuthority()
+	records, err := wrapped.ReadNativeAppendLog(callCtx, "/native/append.log", 17)
+	require.NoError(t, err)
+	require.Equal(t, want, records)
+
+	wantErr := errors.New("read refused")
+	authority.read = func(context.Context, string, uint64) ([][]byte, error) { return nil, wantErr }
+	records, err = wrapped.ReadNativeAppendLog(callCtx, "/native/append.log", 17)
+	require.Nil(t, records)
+	require.ErrorIs(t, err, wantErr)
+
+	authority.read = func(context.Context, string, uint64) ([][]byte, error) {
+		panic("read append log panic")
+	}
+	records, err = wrapped.ReadNativeAppendLog(callCtx, "/native/append.log", 17)
+	require.Nil(t, records)
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
 }
 
 func TestHostAuthorityLateEnvironmentPanicReturnsUnavailableBase(t *testing.T) {

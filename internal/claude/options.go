@@ -85,6 +85,7 @@ type NativeAuthority struct {
 	TreeBusy              error
 	NativeEnvironment     func() map[string]string
 	PrepareNativeTree     func(context.Context, string) error
+	ReadNativeAppendLog   func(context.Context, string, uint64) ([][]byte, error)
 	ReclaimNativeTree     func(context.Context, string) error
 	StartNative           func(context.Context, NativeRequest) (NativeProcess, error)
 }

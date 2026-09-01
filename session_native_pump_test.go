@@ -648,8 +648,10 @@ func TestNativePumpDeliversBackgroundTaskJournalFramesBetweenPrompts(t *testing.
 	require.NoError(t, pump.barrier(t.Context()))
 	entries, err := store.Load(t.Context(), SessionKey{SessionID: string(session.id)})
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	require.Contains(t, string(entries[0]), `"toolUseResult":{"persistent":false,"taskId":"b0qj00gmq"`)
+	require.Len(t, entries, 2)
+	_, err = unmarshalSessionConfiguration(entries[0])
+	require.NoError(t, err)
+	require.Contains(t, string(entries[1]), `"toolUseResult":{"persistent":false,"taskId":"b0qj00gmq"`)
 }
 
 func TestNativePumpAdmitsBackgroundTaskJournalFramesMidTurn(t *testing.T) {
@@ -686,8 +688,10 @@ func TestNativePumpAdmitsBackgroundTaskJournalFramesMidTurn(t *testing.T) {
 	require.NoError(t, pump.barrier(t.Context()))
 	entries, err := store.Load(t.Context(), SessionKey{SessionID: string(session.id)})
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	require.Contains(t, string(entries[0]), `"toolUseResult":{"persistent":false,"taskId":"b0qj00gmq"`)
+	require.Len(t, entries, 2)
+	_, err = unmarshalSessionConfiguration(entries[0])
+	require.NoError(t, err)
+	require.Contains(t, string(entries[1]), `"toolUseResult":{"persistent":false,"taskId":"b0qj00gmq"`)
 }
 
 func (c *gatedRawNotificationClient) NotifyExtension(ctx context.Context, method string, params any) error {
@@ -817,8 +821,10 @@ func TestNativePumpFullSinkDepartureKeepsCapturedPromptOwner(t *testing.T) {
 
 				entries, err := store.Load(t.Context(), SessionKey{SessionID: sessionID})
 				require.NoError(t, err)
-				require.Len(t, entries, 1)
-				require.Contains(t, string(entries[0]), sentinel)
+				require.Len(t, entries, 2)
+				_, err = unmarshalSessionConfiguration(entries[0])
+				require.NoError(t, err)
+				require.Contains(t, string(entries[1]), sentinel)
 			},
 		},
 	}
@@ -1056,8 +1062,10 @@ func TestNativeTurnSinkRetirementDrainsAdmittedIngressBeforeReplacement(t *testi
 
 	entries, err := store.Load(t.Context(), SessionKey{SessionID: string(session.id)})
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	require.Contains(t, string(entries[0]), "mirror-a")
+	require.Len(t, entries, 2)
+	_, err = unmarshalSessionConfiguration(entries[0])
+	require.NoError(t, err)
+	require.Contains(t, string(entries[1]), "mirror-a")
 }
 
 func TestNativeSinkRetirementProjectsNonForegroundFramesUnderTheirCapturedRoute(t *testing.T) {
@@ -1140,8 +1148,10 @@ func TestOptionalRawFailureDoesNotHoleTypedMirrorOrTerminalDelivery(t *testing.T
 		lifecycleOutcome{stopReason: lifecycle.StopReasonEndTurn, outcome: lifecycle.OutcomeSuccess}))
 	entries, err := store.Load(t.Context(), SessionKey{SessionID: string(session.id)})
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	require.Contains(t, string(entries[0]), "mirrored")
+	require.Len(t, entries, 2)
+	_, err = unmarshalSessionConfiguration(entries[0])
+	require.NoError(t, err)
+	require.Contains(t, string(entries[1]), "mirrored")
 
 	_, typed := sentinelNotificationIndex(t, conn, "typed-after-raw-failure")
 	terminal := false

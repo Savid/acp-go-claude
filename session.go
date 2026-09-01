@@ -149,6 +149,8 @@ type agentSession struct {
 	title                 string
 	updatedAt             string
 	fingerprint           string
+	configuration         sessionConfiguration
+	configurationStored   bool
 	model                 string
 	availableModels       []claude.AvailableModelInfo
 	modelOverrides        map[string]string

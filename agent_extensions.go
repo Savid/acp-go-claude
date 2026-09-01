@@ -228,6 +228,8 @@ func (a *Agent) handleForkSession(
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
+	presence := configurationPresence(params.Meta)
+
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.UnstableForkSessionResponse{}, validationErr
@@ -251,14 +253,20 @@ func (a *Agent) handleForkSession(
 	var storeEntries []SessionStoreEntry
 
 	a.mu.Lock()
-	parentActive := a.sessions[params.SessionId] != nil
+	parent := a.sessions[params.SessionId]
+	parentActive := parent != nil
 	a.mu.Unlock()
 
-	if !parentActive {
-		storeEntries, err = a.storedSessionEntries(ctx, params.SessionId)
-		if err != nil {
-			return acp.UnstableForkSessionResponse{}, err
+	if parentActive {
+		metaOptions = inheritSessionConfiguration(metaOptions, presence, parent.configuration)
+	} else {
+		stored, loadErr := a.storedSession(ctx, params.SessionId)
+		if loadErr != nil {
+			return acp.UnstableForkSessionResponse{}, loadErr
 		}
+
+		storeEntries = stored.Entries
+		metaOptions = inheritSessionConfiguration(metaOptions, presence, stored.Configuration)
 	}
 
 	session, err := a.startAndStoreSession(ctx, acp.SessionId(sessionID), sessionStart{

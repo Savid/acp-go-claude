@@ -1894,9 +1894,9 @@ func TestLoadRefusesAnExactContainedIncarnation(t *testing.T) {
 	id := acp.SessionId("contained-load")
 	cwd := t.TempDir()
 	store := NewInMemorySessionStore()
-	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, []SessionStoreEntry{
+	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"user"}`),
-	}))
+	)))
 	agent := NewAgent(WithSessionStore(store))
 	client := claude.NewClient(nil, claude.Options{}, newFakeClaudeTransport())
 	session := &agentSession{

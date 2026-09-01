@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -35,6 +36,10 @@ type sessionMirror struct {
 	store       SessionStore
 	projectsDir string
 	session     *agentSession
+
+	configurationMu      sync.Mutex
+	configuration        sessionConfiguration
+	configurationWritten bool
 }
 
 func newSessionMirror(log *slog.Logger, store SessionStore, claudeHome string, session *agentSession) *sessionMirror {
@@ -42,12 +47,18 @@ func newSessionMirror(log *slog.Logger, store SessionStore, claudeHome string, s
 		log = slog.Default()
 	}
 
-	return &sessionMirror{
+	mirror := &sessionMirror{
 		log:         log.With(slog.String("component", "session_mirror")),
 		store:       store,
 		projectsDir: filepath.Join(defaultClaudeConfigDir(claudeHome), "projects"),
 		session:     session,
 	}
+	if session != nil {
+		mirror.configuration = session.configuration
+		mirror.configurationWritten = session.configurationStored
+	}
+
+	return mirror
 }
 
 // appendFrame writes a transcript mirror frame to the session store. Callers
@@ -71,8 +82,26 @@ func (m *sessionMirror) appendFrame(ctx context.Context, frame *claude.Transcrip
 		}
 	}
 
+	if key.Subpath == SessionStoreMainSubpath && m.session != nil {
+		m.configurationMu.Lock()
+		defer m.configurationMu.Unlock()
+
+		if !m.configurationWritten {
+			configurationEntry, err := marshalSessionConfiguration(m.configuration)
+			if err != nil {
+				return err
+			}
+
+			entries = append([]SessionStoreEntry{configurationEntry}, entries...)
+		}
+	}
+
 	if err := appendMirrorEntries(ctx, m.store, *key, entries); err != nil {
 		return fmt.Errorf("%w: %w", errSessionMirrorAppend, err)
+	}
+
+	if key.Subpath == SessionStoreMainSubpath && m.session != nil {
+		m.configurationWritten = true
 	}
 
 	return nil

@@ -554,16 +554,17 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 }
 
 type sessionStart struct {
-	Cwd                   string
-	AdditionalDirectories []string
-	McpServers            []acp.McpServer
-	ResumeID              string
-	StoreEntries          []SessionStoreEntry
-	ActiveSessionResume   bool
-	ForkSession           bool
-	PermissionRules       map[string]string
-	MetaOptions           ClaudeOptions
-	RawMessages           rawMessageConfig
+	Cwd                      string
+	AdditionalDirectories    []string
+	McpServers               []acp.McpServer
+	ResumeID                 string
+	StoreEntries             []SessionStoreEntry
+	StoreConfigurationLoaded bool
+	ActiveSessionResume      bool
+	ForkSession              bool
+	PermissionRules          map[string]string
+	MetaOptions              ClaudeOptions
+	RawMessages              rawMessageConfig
 }
 
 type initialModelSelection struct {

@@ -162,9 +162,9 @@ func TestHandleForkSessionBranches(t *testing.T) {
 
 	storedParentID := acp.SessionId("22222222-2222-4222-8222-222222222222")
 	store := NewInMemorySessionStore()
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(storedParentID)}, []SessionStoreEntry{
+	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(storedParentID)}, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"user","message":{"content":"stored parent"}}`),
-	}))
+	)))
 	stored := NewAgent(WithHome(t.TempDir()), WithSessionStore(store))
 	stored.setConnection(newRecordingAgentClient())
 	installFakeClaudeClient(stored, newFakeClaudeTransport())

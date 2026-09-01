@@ -85,6 +85,9 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
+	presence := configurationPresence(params.Meta)
+	metaOptions = a.inheritActiveSessionConfiguration(params.SessionId, metaOptions, presence)
+
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.ResumeSessionResponse{}, validationErr
@@ -115,12 +118,19 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, openErr
 	}
 
-	storeEntries, storeErr := a.storedSessionEntries(ctx, params.SessionId)
+	stored, storeErr := a.storedSession(ctx, params.SessionId)
 	if storeErr != nil {
 		return acp.ResumeSessionResponse{}, storeErr
 	}
 
-	start.StoreEntries = storeEntries
+	metaOptions, err = resumeSessionConfiguration(metaOptions, presence, stored.Configuration)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+
+	start.StoreEntries = stored.Entries
+	start.StoreConfigurationLoaded = true
+	start.MetaOptions = metaOptions
 
 	session, err := a.startAndStoreSession(ctx, params.SessionId, start)
 	if err != nil {
@@ -157,6 +167,9 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, err
 	}
 
+	presence := configurationPresence(params.Meta)
+	metaOptions = a.inheritActiveSessionConfiguration(params.SessionId, metaOptions, presence)
+
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.LoadSessionResponse{}, validationErr
@@ -166,19 +179,27 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, openErr
 	}
 
-	storeEntries, err := a.storedSessionEntries(ctx, params.SessionId)
+	stored, err := a.storedSession(ctx, params.SessionId)
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
 
+	metaOptions, err = resumeSessionConfiguration(metaOptions, presence, stored.Configuration)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+
+	storeEntries := stored.Entries
+
 	start := sessionStart{
-		Cwd:                   params.Cwd,
-		McpServers:            params.McpServers,
-		AdditionalDirectories: additionalDirectories,
-		ResumeID:              string(params.SessionId),
-		StoreEntries:          storeEntries,
-		MetaOptions:           metaOptions,
-		RawMessages:           rawMessageConfigFromMeta(params.Meta),
+		Cwd:                      params.Cwd,
+		McpServers:               params.McpServers,
+		AdditionalDirectories:    additionalDirectories,
+		ResumeID:                 string(params.SessionId),
+		StoreEntries:             storeEntries,
+		StoreConfigurationLoaded: true,
+		MetaOptions:              metaOptions,
+		RawMessages:              rawMessageConfigFromMeta(params.Meta),
 	}
 
 	session := a.activeSessionForStart(params.SessionId, start)
@@ -839,6 +860,22 @@ func (a *Agent) activeSessionForStart(id acp.SessionId, start sessionStart) *age
 	return session
 }
 
+func (a *Agent) inheritActiveSessionConfiguration(
+	id acp.SessionId,
+	options ClaudeOptions,
+	presence sessionConfigurationPresence,
+) ClaudeOptions {
+	a.mu.Lock()
+	session := a.sessions[id]
+	a.mu.Unlock()
+
+	if session == nil {
+		return options
+	}
+
+	return inheritSessionConfiguration(options, presence, session.configuration)
+}
+
 func sessionStartFingerprint(start sessionStart) string {
 	servers := slices.Clone(start.McpServers)
 	slices.SortFunc(servers, func(left, right acp.McpServer) int {
@@ -1123,6 +1160,8 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		cwd:                   start.Cwd,
 		additionalDirectories: slices.Clone(start.AdditionalDirectories),
 		fingerprint:           sessionStartFingerprint(start),
+		configuration:         configurationFromOptions(start.MetaOptions),
+		configurationStored:   start.StoreConfigurationLoaded && start.ResumeID == string(id),
 		model:                 defaultModel,
 		modelOverrides:        cloneStringMap(modelOverrides),
 		mode:                  acpModeForPermission(permissionMode),
@@ -1304,25 +1343,38 @@ func mcpServerNameField(index int) string {
 	return fmt.Sprintf("mcpServers[%d].name", index)
 }
 
-func (a *Agent) storedSessionEntries(ctx context.Context, sessionID acp.SessionId) ([]SessionStoreEntry, error) {
+type storedSessionState struct {
+	Entries       []SessionStoreEntry
+	Configuration sessionConfiguration
+}
+
+func (a *Agent) storedSession(ctx context.Context, sessionID acp.SessionId) (storedSessionState, error) {
 	if a.isDeleted(sessionID) {
 		a.retryDeleteResidualNativeTranscript(ctx, sessionID)
 
-		return nil, unknownSessionError()
+		return storedSessionState{}, unknownSessionError()
 	}
 
 	entries, err := a.loadStoreEntries(ctx, a.sessionStore(), SessionKey{SessionID: string(sessionID)})
 	if err != nil {
-		return nil, err
+		return storedSessionState{}, err
 	}
 
-	if len(entries) > 0 {
-		return entries, nil
+	if len(entries) == 0 {
+		a.retryDeleteResidualNativeTranscript(ctx, sessionID)
+
+		return storedSessionState{}, unknownSessionError()
 	}
 
-	a.retryDeleteResidualNativeTranscript(ctx, sessionID)
+	configuration, err := unmarshalSessionConfiguration(entries[0])
+	if err != nil {
+		return storedSessionState{}, sessionResumeIncompatibleError(acpFieldSessionID)
+	}
 
-	return nil, unknownSessionError()
+	return storedSessionState{
+		Entries:       cloneStoreEntries(entries[1:]),
+		Configuration: configuration,
+	}, nil
 }
 
 // retryDeleteResidualNativeTranscript removes only inactive native cache state.

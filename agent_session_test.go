@@ -105,7 +105,7 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	missingTransport := newFakeClaudeTransport()
 	missingTransport.startErr = claude.ErrSessionNotFound
 	missingStore := NewInMemorySessionStore()
-	require.NoError(t, missingStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	require.NoError(t, missingStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"user"}`))))
 	missing, _, _ := newFakeLifecycleAgent(t, missingTransport, WithSessionStore(missingStore))
 	_, err = missing.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
 	requireUnknownSession(t, err)
@@ -132,14 +132,14 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, resumed.Close())
 
 	emitStore := NewInMemorySessionStore()
-	require.NoError(t, emitStore.Append(ctx, SessionKey{SessionID: "22222222-2222-4222-8222-222222222222"}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	require.NoError(t, emitStore.Append(ctx, SessionKey{SessionID: "22222222-2222-4222-8222-222222222222"}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"user"}`))))
 	emitFail, emitConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(emitStore))
 	emitConn.sessionUpdateErr = errors.New("resume update failed")
 	_, err = emitFail.ResumeSession(ctx, ResumeSessionRequest("22222222-2222-4222-8222-222222222222", cwd))
 	require.ErrorContains(t, err, "resume update failed")
 
 	backpressureStore := NewInMemorySessionStore()
-	require.NoError(t, backpressureStore.Append(ctx, SessionKey{SessionID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	require.NoError(t, backpressureStore.Append(ctx, SessionKey{SessionID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"user"}`))))
 	backpressure, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(backpressureStore), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	existing, cleanup := newStartedAgentSessionForTest(t, backpressure, "existing")
 	defer cleanup()
@@ -170,7 +170,7 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 
 	badHome := string([]byte{0})
 	badHomeStore := NewInMemorySessionStore()
-	require.NoError(t, badHomeStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	require.NoError(t, badHomeStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"user"}`))))
 	_, err = NewAgent(WithHome(badHome), WithSessionStore(badHomeStore)).LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
 	require.Error(t, err)
 
@@ -178,9 +178,9 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	requireUnknownSession(t, err)
 
 	store := NewInMemorySessionStore()
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{
-		[]byte(`{"type":"user","cwd":"` + filepath.ToSlash(cwd) + `","message":{"content":"hello"}}`),
-	}))
+	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(sessionID)}, testStoredSessionEntries(t, ClaudeOptions{},
+		[]byte(`{"type":"user","cwd":"`+filepath.ToSlash(cwd)+`","message":{"content":"hello"}}`),
+	)))
 	countedStore := &mainLoadCountingStore{SessionStore: store}
 	loaded, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(countedStore))
 	resp, err := loaded.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
@@ -203,7 +203,7 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, nativeLoaded.Close())
 
 	closedStore := NewInMemorySessionStore()
-	require.NoError(t, closedStore.Append(ctx, SessionKey{SessionID: "77777777-7777-4777-8777-777777777777"}, []SessionStoreEntry{[]byte(`{"type":"system"}`)}))
+	require.NoError(t, closedStore.Append(ctx, SessionKey{SessionID: "77777777-7777-4777-8777-777777777777"}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"system"}`))))
 	closed := NewAgent(WithHome(t.TempDir()), WithSessionStore(closedStore))
 	require.NoError(t, closed.Close())
 	_, err = closed.LoadSession(ctx, LoadSessionRequest("77777777-7777-4777-8777-777777777777", cwd))
@@ -235,25 +235,25 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(envNativePath), 0o755))
 	require.NoError(t, os.WriteFile(envNativePath, []byte("{}\n"), 0o600))
 	envSkipStore := NewInMemorySessionStore()
-	require.NoError(t, envSkipStore.Append(ctx, SessionKey{SessionID: "88888888-8888-4888-8888-888888888888"}, []SessionStoreEntry{[]byte(`{"type":"system"}`)}))
+	require.NoError(t, envSkipStore.Append(ctx, SessionKey{SessionID: "88888888-8888-4888-8888-888888888888"}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"system"}`))))
 	envSkip, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(envSkipStore), WithHome(envNativeHome))
 	_, err = envSkip.LoadSession(ctx, LoadSessionRequest("88888888-8888-4888-8888-888888888888", cwd))
 	require.NoError(t, err)
 	require.NotNil(t, envSkip.sessions["88888888-8888-4888-8888-888888888888"].materialized)
 
 	emptyUpdateStore := NewInMemorySessionStore()
-	require.NoError(t, emptyUpdateStore.Append(ctx, SessionKey{SessionID: "44444444-4444-4444-8444-444444444444"}, []SessionStoreEntry{
+	require.NoError(t, emptyUpdateStore.Append(ctx, SessionKey{SessionID: "44444444-4444-4444-8444-444444444444"}, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"system","subtype":"init"}`),
-	}))
+	)))
 	emitFail, emitConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(emptyUpdateStore))
 	emitConn.sessionUpdateErr = errors.New("load update failed")
 	_, err = emitFail.LoadSession(ctx, LoadSessionRequest("44444444-4444-4444-8444-444444444444", cwd))
 	require.ErrorContains(t, err, "load update failed")
 
 	replayErrStore := NewInMemorySessionStore()
-	require.NoError(t, replayErrStore.Append(ctx, SessionKey{SessionID: "55555555-5555-4555-8555-555555555555"}, []SessionStoreEntry{
+	require.NoError(t, replayErrStore.Append(ctx, SessionKey{SessionID: "55555555-5555-4555-8555-555555555555"}, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"user","message":{"content":"replay me"}}`),
-	}))
+	)))
 	replayErrAgent, replayErrConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(replayErrStore))
 	replayErrConn.sessionUpdateErr = errors.New("replay update failed")
 	_, err = replayErrAgent.LoadSession(ctx, LoadSessionRequest("55555555-5555-4555-8555-555555555555", cwd))
@@ -597,9 +597,9 @@ func TestDeleteSessionTombstonesBeforeItTearsAnythingDown(t *testing.T) {
 	sessionID := acp.SessionId("session-busy")
 	key := SessionKey{SessionID: string(sessionID)}
 	backing := NewInMemorySessionStore()
-	require.NoError(t, backing.Append(ctx, key, []SessionStoreEntry{
+	require.NoError(t, backing.Append(ctx, key, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"user","message":{"content":"live"}}`),
-	}))
+	)))
 
 	withdrawn, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -941,32 +941,35 @@ func TestAgentSessionHelperBranches(t *testing.T) {
 	require.NotEmpty(t, config)
 }
 
-func TestStoredSessionEntries(t *testing.T) {
+func TestStoredSession(t *testing.T) {
 	ctx := context.Background()
 	sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
 	store := NewInMemorySessionStore()
 	agent := NewAgent(WithSessionStore(store))
 
-	_, err := NewAgent().storedSessionEntries(ctx, sessionID)
+	_, err := NewAgent().storedSession(ctx, sessionID)
 	requireUnknownSession(t, err)
-	_, err = agent.storedSessionEntries(ctx, sessionID)
+	_, err = agent.storedSession(ctx, sessionID)
 	requireUnknownSession(t, err)
 
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
-	entries, err := agent.storedSessionEntries(ctx, sessionID)
+	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(sessionID)}, testStoredSessionEntries(
+		t, ClaudeOptions{Env: map[string]string{"TOKEN": "stored"}}, []byte(`{"type":"user"}`),
+	)))
+	stored, err := agent.storedSession(ctx, sessionID)
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
+	require.Len(t, stored.Entries, 1)
+	require.Equal(t, map[string]string{"TOKEN": "stored"}, stored.Configuration.Env)
 
 	agent.deleted[sessionID] = struct{}{}
 	previousDeleteNativeTranscript := deleteNativeTranscript
 	deleteNativeTranscript = func(context.Context, string, string) error { return errors.New("cleanup failed") }
 	t.Cleanup(func() { deleteNativeTranscript = previousDeleteNativeTranscript })
-	_, err = agent.storedSessionEntries(ctx, sessionID)
+	_, err = agent.storedSession(ctx, sessionID)
 	requireUnknownSession(t, err)
 	deleteNativeTranscript = previousDeleteNativeTranscript
 
 	errAgent := NewAgent(WithSessionStore(&faultSessionStore{SessionStore: NewInMemorySessionStore(), loadErr: errors.New("load failed")}))
-	_, err = errAgent.storedSessionEntries(ctx, sessionID)
+	_, err = errAgent.storedSession(ctx, sessionID)
 	require.ErrorContains(t, err, "load failed")
 }
 
@@ -1352,9 +1355,9 @@ func TestLoadSessionRacingDeleteInstallsNothingBehindTheTombstone(t *testing.T) 
 	cwd := t.TempDir()
 
 	backing := NewInMemorySessionStore()
-	require.NoError(t, backing.Append(ctx, key, []SessionStoreEntry{
+	require.NoError(t, backing.Append(ctx, key, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"user","message":{"content":"live"}}`),
-	}))
+	)))
 
 	gate := &gatedLoadStore{SessionStore: backing, entered: make(chan struct{}), release: make(chan struct{})}
 	transport := newFakeClaudeTransport()
@@ -1869,9 +1872,9 @@ func TestDeleteLandingInsideANativeStartRefusesTheInstall(t *testing.T) {
 	key := SessionKey{SessionID: string(sessionID)}
 
 	store := NewInMemorySessionStore()
-	require.NoError(t, store.Append(ctx, key, []SessionStoreEntry{
-		[]byte(`{"type":"user","cwd":"` + filepath.ToSlash(cwd) + `","message":{"content":"hello"}}`),
-	}))
+	require.NoError(t, store.Append(ctx, key, testStoredSessionEntries(t, ClaudeOptions{},
+		[]byte(`{"type":"user","cwd":"`+filepath.ToSlash(cwd)+`","message":{"content":"hello"}}`),
+	)))
 
 	transport := newFakeClaudeTransport()
 	agent, _, _ := newFakeLifecycleAgent(t, transport, WithSessionStore(store))

@@ -110,6 +110,25 @@ type fakeNativeInput struct{ bytes.Buffer }
 
 func (*fakeNativeInput) Close() error { return nil }
 
+type valueHostAuthority struct{}
+
+func (valueHostAuthority) NativeEnvironment() map[string]string {
+	return map[string]string{"PATH": "/bin"}
+}
+func (valueHostAuthority) PrepareNativeTree(context.Context, string) error { return nil }
+func (valueHostAuthority) ReclaimNativeTree(context.Context, string) error { return nil }
+func (valueHostAuthority) StartNative(context.Context, NativeRequest) (NativeProcess, error) {
+	return valueNativeProcess{}, nil
+}
+
+type valueNativeProcess struct{}
+
+func (valueNativeProcess) Stdin() io.WriteCloser                      { return &fakeNativeInput{} }
+func (valueNativeProcess) Stdout() io.ReadCloser                      { return io.NopCloser(bytes.NewReader(nil)) }
+func (valueNativeProcess) Stderr() io.ReadCloser                      { return io.NopCloser(bytes.NewReader(nil)) }
+func (valueNativeProcess) Wait(context.Context) (NativeResult, error) { return NativeResult{}, nil }
+func (valueNativeProcess) Revoke(context.Context) error               { return nil }
+
 type fakeNativeProcess struct {
 	authority *fakeHostAuthority
 	stdout    io.ReadCloser
@@ -241,6 +260,51 @@ func TestHostAuthorityContractAndNilFailClosed(t *testing.T) {
 	agent := NewAgent(WithHostAuthority(typedNil))
 	require.ErrorIs(t, agent.configurationErr, ErrHostAuthorityUnavailable)
 	require.Nil(t, agent.providerAuth)
+}
+
+func TestHostAuthorityInterfaceValidationAndUnconfiguredAdapters(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, validHostAuthority(nil))
+	require.True(t, validHostAuthority(valueHostAuthority{}))
+	require.False(t, validNativeProcess(nil))
+	require.True(t, validNativeProcess(valueNativeProcess{}))
+	require.Nil(t, (*Agent)(nil).claudeAuthority())
+	require.Nil(t, NewAgent().claudeAuthority())
+
+	broker := &providerAuth{agent: NewAgent()}
+	require.Nil(t, broker.claudeAuthority())
+	require.NoError(t, broker.reclaimIdleNativeHome(t.Context()))
+}
+
+func TestHostAuthorityLateEnvironmentPanicReturnsUnavailableBase(t *testing.T) {
+	panicEnvironment := false
+	authority := &callbackHostAuthority{
+		environment: func() map[string]string {
+			if panicEnvironment {
+				panic("late environment panic")
+			}
+
+			return map[string]string{"PATH": "/bin"}
+		},
+		prepare: func(context.Context, string) error { return nil },
+		reclaim: func(context.Context, string) error { return nil },
+		start:   func(context.Context, NativeRequest) (NativeProcess, error) { return valueNativeProcess{}, nil },
+	}
+	agent := NewAgent(WithHostAuthority(authority))
+	require.NoError(t, agent.configurationErr)
+
+	panicEnvironment = true
+	require.Nil(t, agent.claudeAuthority().NativeEnvironment())
+}
+
+func TestHostAuthorityRejectsReservedAndManagedEnvironmentKeys(t *testing.T) {
+	t.Parallel()
+
+	for _, key := range []string{privateAdapterEnvPrefix + "SECRET", "HOME", "XDG_CONFIG_HOME"} {
+		agent := NewAgent(WithEnv(map[string]string{key: "value"}))
+		require.Error(t, agent.configurationErr, key)
+	}
 }
 
 func TestHostAuthorityNativeEnvironmentPanicFailsConstructionBeforeMutation(t *testing.T) {

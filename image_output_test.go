@@ -1290,6 +1290,9 @@ func TestImageLimitConstruction(t *testing.T) {
 }
 
 func TestImageScratchDirectoryLifecycle(t *testing.T) {
+	_, err := createImageScratchDir("")
+	require.ErrorContains(t, err, "empty scratch parent")
+
 	parent := t.TempDir()
 	path, err := createImageScratchDir(parent)
 	require.NoError(t, err)

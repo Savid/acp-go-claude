@@ -78,6 +78,7 @@ func TestNativeTurnFailureClassification(t *testing.T) {
 	t.Parallel()
 
 	require.Nil(t, nativeTurnFailure(nil))
+	requireTurnFailure(t, nativeTurnFailure(context.Canceled), -32603, failureCauseTransport, context.Canceled.Error())
 	requireTurnFailure(t, nativeTurnFailure(context.DeadlineExceeded), -32603, failureCauseTransport, context.DeadlineExceeded.Error())
 	requireTurnFailure(t, nativeTurnFailure(claude.ErrProcessExited), -32603, failureCauseProcessExit, "claude exited")
 	data := requireTurnFailure(t, nativeTurnFailure(errors.New("provider-store-tool-user-secret")), -32603,

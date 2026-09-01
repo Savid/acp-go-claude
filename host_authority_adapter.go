@@ -240,16 +240,9 @@ func (p *providerAuth) reclaimIdleNativeHome(ctx context.Context) error {
 			return err
 		}
 
-		if errors.Is(err, ErrContainmentIncomplete) {
-			p.agent.recordContainmentError(err)
+		p.agent.recordContainmentError(err)
 
-			return err
-		}
-
-		containmentErr := fmt.Errorf("%w: reclaim provider auth home: %w", ErrContainmentIncomplete, err)
-		p.agent.recordContainmentError(containmentErr)
-
-		return containmentErr
+		return err
 	}
 
 	p.nativeTreePrepared = false

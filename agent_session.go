@@ -83,18 +83,25 @@ func (a *Agent) acquireSessionLifecycle(
 
 	select {
 	case <-flight.admission:
-		if cause := context.Cause(lifecycleCtx); cause != nil {
-			release(true)
-
-			return nil, nil, cause
-		}
-
-		return lifecycleCtx, func() { release(true) }, nil
+		return completeSessionLifecycleAdmission(lifecycleCtx, release)
 	case <-lifecycleCtx.Done():
 		release(false)
 
 		return nil, nil, context.Cause(lifecycleCtx)
 	}
+}
+
+func completeSessionLifecycleAdmission(
+	ctx context.Context,
+	release func(bool),
+) (context.Context, func(), error) {
+	if cause := context.Cause(ctx); cause != nil {
+		release(true)
+
+		return nil, nil, cause
+	}
+
+	return ctx, func() { release(true) }, nil
 }
 
 // NewSession creates and starts a Claude CLI session.
@@ -978,10 +985,7 @@ func (a *Agent) persistReplacementConfiguration(
 	session *agentSession,
 	storeEntries []SessionStoreEntry,
 ) error {
-	configurationEntry, err := marshalSessionConfiguration(session.configuration)
-	if err != nil {
-		return err
-	}
+	configurationEntry := marshalSessionConfiguration(session.configuration)
 
 	store := a.sessionStore()
 	main := SessionKey{SessionID: string(session.id)}
@@ -1339,10 +1343,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	}
 
 	if a.options.hostAuthoritySet {
-		if materialized == nil {
-			return nil, ErrHostAuthorityUnavailable
-		}
-
 		if prepareErr := materialized.prepare(ctx, a.options.HostAuthority, processClaudeHome, mcpConfigDir); prepareErr != nil {
 			return nil, prepareErr
 		}

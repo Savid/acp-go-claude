@@ -207,6 +207,31 @@ func TestSessionLifecycleResidualBranches(t *testing.T) {
 	require.True(t, session.closing)
 }
 
+func TestCompleteSessionLifecycleAdmission(t *testing.T) {
+	t.Run("admitted", func(t *testing.T) {
+		held := false
+		ctx := t.Context()
+		admitted, release, err := completeSessionLifecycleAdmission(ctx, func(value bool) { held = value })
+		require.NoError(t, err)
+		require.Same(t, ctx, admitted)
+		require.False(t, held)
+		release()
+		require.True(t, held)
+	})
+
+	t.Run("cancelled after admission", func(t *testing.T) {
+		cause := errors.New("agent closed during admission")
+		ctx, cancel := context.WithCancelCause(t.Context())
+		cancel(cause)
+		held := false
+		admitted, release, err := completeSessionLifecycleAdmission(ctx, func(value bool) { held = value })
+		require.Nil(t, admitted)
+		require.Nil(t, release)
+		require.ErrorIs(t, err, cause)
+		require.True(t, held)
+	})
+}
+
 func TestAgentAndSessionMapResidualBranches(t *testing.T) {
 	closed := NewAgent()
 	closed.closed = true

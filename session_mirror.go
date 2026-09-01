@@ -87,11 +87,7 @@ func (m *sessionMirror) appendFrame(ctx context.Context, frame *claude.Transcrip
 		defer m.configurationMu.Unlock()
 
 		if !m.configurationWritten {
-			configurationEntry, err := marshalSessionConfiguration(m.configuration)
-			if err != nil {
-				return err
-			}
-
+			configurationEntry := marshalSessionConfiguration(m.configuration)
 			entries = append([]SessionStoreEntry{configurationEntry}, entries...)
 		}
 	}

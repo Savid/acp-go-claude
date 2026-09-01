@@ -103,7 +103,7 @@ func sessionResumeIncompatibleError(field string) error {
 	})
 }
 
-func marshalSessionConfiguration(configuration sessionConfiguration) (SessionStoreEntry, error) {
+func marshalSessionConfiguration(configuration sessionConfiguration) SessionStoreEntry {
 	env := configuration.Env
 	if env == nil {
 		env = map[string]string{}
@@ -126,7 +126,7 @@ func marshalSessionConfiguration(configuration sessionConfiguration) (SessionSto
 		ExtraPathDirs: extraPathDirs,
 	})
 
-	return entry, nil
+	return entry
 }
 
 func unmarshalSessionConfiguration(entry SessionStoreEntry) (sessionConfiguration, error) {

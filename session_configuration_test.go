@@ -18,8 +18,7 @@ import (
 func testStoredSessionEntries(t *testing.T, options ClaudeOptions, entries ...SessionStoreEntry) []SessionStoreEntry {
 	t.Helper()
 
-	configuration, err := marshalSessionConfiguration(configurationFromOptions(options))
-	require.NoError(t, err)
+	configuration := marshalSessionConfiguration(configurationFromOptions(options))
 
 	return append([]SessionStoreEntry{configuration}, entries...)
 }
@@ -43,8 +42,7 @@ func TestSessionConfigurationCodecIsExact(t *testing.T) {
 		Env:           map[string]string{"ANTHROPIC_BASE_URL": "https://example.test"},
 		ExtraPathDirs: []string{"/opt/first", "/opt/second"},
 	}
-	entry, err := marshalSessionConfiguration(configuration)
-	require.NoError(t, err)
+	entry := marshalSessionConfiguration(configuration)
 
 	decoded, err := unmarshalSessionConfiguration(entry)
 	require.NoError(t, err)

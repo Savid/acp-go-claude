@@ -525,3 +525,34 @@ type blockingReader struct{}
 func (*blockingReader) Read([]byte) (int, error) {
 	select {}
 }
+
+func TestAuthorityFailureFanoutLogsCloseFailure(t *testing.T) {
+	agent := NewAgent()
+	session, cleanup := newStartedAgentSessionForTest(t, agent, "failure")
+	defer cleanup()
+	session.client = startedClientWithCloseError(t, errors.New("close refused"))
+	done := make(chan struct{})
+	agent.closeAuthorityFailedSessions(map[acp.SessionId]*agentSession{session.id: session}, done)
+	<-done
+}
+
+func TestAgentCloseRetriesBusySession(t *testing.T) {
+	authority := residualCallbackAuthority()
+	reclaims := 0
+	authority.reclaim = func(context.Context, string) error {
+		reclaims++
+		if reclaims == 1 {
+			return ErrNativeTreeBusy
+		}
+
+		return nil
+	}
+	agent := NewAgent(WithHostAuthority(authority))
+	session, cleanup := newStartedAgentSessionForTest(t, agent, "busy-close")
+	defer cleanup()
+	root := t.TempDir()
+	session.materialized = &materializedSession{configDir: root, authority: authority, prepared: []string{root}}
+	agent.sessions[session.id] = session
+	require.NoError(t, agent.Close())
+	require.Equal(t, 2, reclaims)
+}

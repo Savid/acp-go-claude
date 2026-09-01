@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -533,4 +535,46 @@ func TestClosedAgentRejectsDirectNativeConstructionAdmissions(t *testing.T) {
 
 	session := &agentSession{agent: agent, id: "closed", client: deadClaudeClient(t, nil), canRelaunch: true}
 	require.ErrorIs(t, session.ensureClientAlive(t.Context()), errAgentClosed)
+}
+
+func TestRateLimitResidenceResidualFailures(t *testing.T) {
+	original := materializeMkdirTemp
+	t.Cleanup(func() { materializeMkdirTemp = original })
+
+	authority := residualCallbackAuthority()
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()), WithHome(t.TempDir()))
+	materializeMkdirTemp = func(string, string) (string, error) { return "", errors.New("mkdir refused") }
+	_, err := agent.handleRateLimits(t.Context(), json.RawMessage(`{}`))
+	require.ErrorContains(t, err, "mkdir refused")
+
+	materializeMkdirTemp = original
+	authority.prepare = func(context.Context, string) error { return ErrContainmentIncomplete }
+	_, err = agent.handleRateLimits(t.Context(), json.RawMessage(`{}`))
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+}
+
+func TestRateLimitConfigCopyResidualFailure(t *testing.T) {
+	originalCopy := copyClaudeConfigFiles
+	copyClaudeConfigFiles = func(string, string, claude.Options) error { return errors.New("copy refused") }
+	t.Cleanup(func() { copyClaudeConfigFiles = originalCopy })
+
+	agent := NewAgent(
+		WithHostAuthority(residualCallbackAuthority()),
+		WithScratchDir(t.TempDir()),
+		WithHome(t.TempDir()),
+	)
+	_, err := agent.handleRateLimits(t.Context(), json.RawMessage(`{}`))
+	require.ErrorContains(t, err, "copy refused")
+}
+
+func TestRateLimitScratchParentResidualFailure(t *testing.T) {
+	occupied := filepath.Join(t.TempDir(), "occupied")
+	require.NoError(t, os.WriteFile(occupied, []byte("not a directory"), 0o600))
+	agent := NewAgent(
+		WithHostAuthority(residualCallbackAuthority()),
+		WithScratchDir(occupied),
+		WithHome(t.TempDir()),
+	)
+	_, err := agent.handleRateLimits(t.Context(), json.RawMessage(`{}`))
+	require.ErrorContains(t, err, "create scratch parent dir")
 }

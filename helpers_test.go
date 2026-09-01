@@ -654,3 +654,25 @@ func installFakeClaudeClient(agent *Agent, transport *fakeClaudeTransport) {
 		return claude.NewClient(log, options, transport)
 	}
 }
+
+func residualCallbackAuthority() *callbackHostAuthority {
+	return &callbackHostAuthority{
+		environment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
+		prepare:     func(context.Context, string) error { return nil },
+		reclaim:     func(context.Context, string) error { return nil },
+		start:       func(context.Context, NativeRequest) (NativeProcess, error) { return valueNativeProcess{}, nil },
+	}
+}
+
+func residualProviderAuth(authority HostAuthority) *providerAuth {
+	agent := NewAgent(WithHostAuthority(authority))
+
+	return &providerAuth{agent: agent, home: providerAuthHome{path: "/provider-home"}}
+}
+
+func residualCanceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	return ctx
+}

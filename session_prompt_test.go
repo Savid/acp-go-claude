@@ -1545,3 +1545,20 @@ func requireStoreCommitFailure(t *testing.T, err error) {
 	require.Equal(t, "claude_store_commit_failed", data[jsonFieldError])
 	require.Equal(t, "session store commit failed", data[jsonFieldMessage])
 }
+
+func TestInterruptAfterEmitContainmentResidualBranch(t *testing.T) {
+	transport := newFakeClaudeTransport()
+	client := claude.NewClient(nil, claude.Options{}, &closeErrTransport{
+		Transport: transport,
+		err:       ErrContainmentIncomplete,
+	})
+	require.NoError(t, client.Start(t.Context()))
+	session := &agentSession{
+		agent:       NewAgent(),
+		client:      client,
+		cancel:      func() {},
+		canRelaunch: true,
+	}
+	err := session.interruptAfterEmitError(t.Context(), errors.New("emit refused"))
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+}

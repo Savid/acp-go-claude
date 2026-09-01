@@ -927,3 +927,71 @@ func TestRelaunchReportsAFailedCatalogEmission(t *testing.T) {
 	require.True(t, session.client.Alive(), "the replacement is installed; only the notification failed")
 	require.Empty(t, session.advertisedCommands, "an unreceived snapshot advertises nothing")
 }
+
+func TestSessionLifecycleResidualBranches(t *testing.T) {
+	agent := NewAgent()
+	agent.closed = true
+	session := &agentSession{agent: agent, mcpRefreshPending: true, canRelaunch: true}
+	require.Error(t, session.refreshMCPRegistry(t.Context()))
+
+	cancelled := false
+	session = &agentSession{cancel: func() { cancelled = true }}
+	session.fenceAuthorityFailure()
+	require.True(t, cancelled)
+	require.True(t, session.closing)
+}
+
+func TestRefreshMCPRegistryAndRelaunchResidualBranches(t *testing.T) {
+	t.Run("prompt refresh failure", func(t *testing.T) {
+		agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+		session := newSessionForTransport(t, agent, "prompt-refresh", newFakeClaudeTransport())
+		session.mcpRefreshPending = true
+		session.canRelaunch = true
+		session.client = startedClientWithCloseError(t, ErrContainmentIncomplete)
+		_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "refresh-turn", "hello"))
+		require.ErrorContains(t, err, ErrContainmentIncomplete.Error())
+	})
+
+	t.Run("successful refresh", func(t *testing.T) {
+		first := newFakeClaudeTransport()
+		second := newFakeClaudeTransport()
+		agent, _, _ := newFakeLifecycleAgent(t, first)
+		agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+			return claude.NewClient(log, options, second)
+		}
+		session := newSessionForTransport(t, agent, "refresh", first)
+		session.mcpRefreshPending = true
+		session.canRelaunch = true
+		require.NoError(t, session.refreshMCPRegistry(t.Context()))
+		require.False(t, session.mcpRefreshPending)
+		require.NoError(t, session.Close(t.Context()))
+	})
+
+	for _, phase := range []string{"containment", "output style", "effort"} {
+		t.Run(phase, func(t *testing.T) {
+			first := newFakeClaudeTransport()
+			second := newFakeClaudeTransport()
+			agent, _, _ := newFakeLifecycleAgent(t, first)
+			session := newSessionForTransport(t, agent, acp.SessionId("relaunch-"+phase), first)
+			session.canRelaunch = true
+			if phase == "containment" {
+				session.client = startedClientWithCloseError(t, ErrContainmentIncomplete)
+			} else {
+				if phase == "output style" {
+					session.outputStyle = "concise"
+					second.controlErr = map[string]error{}
+					second.controlErr["apply_flag_settings"] = errors.New("style refused")
+				} else {
+					session.effort = "high"
+					second.controlErr = map[string]error{}
+					second.controlErr["apply_flag_settings"] = errors.New("effort refused")
+				}
+				agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+					return claude.NewClient(log, options, second)
+				}
+			}
+			err := session.relaunchClient(t.Context(), session.client, session.clientOptions)
+			require.Error(t, err)
+		})
+	}
+}

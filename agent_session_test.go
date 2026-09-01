@@ -2003,3 +2003,311 @@ func TestDeleteWaitingOnANativeStartWinsAfterPublication(t *testing.T) {
 	require.NoError(t, loadErr)
 	require.Empty(t, entries, "the tombstone remains final")
 }
+
+func TestCompleteSessionLifecycleAdmission(t *testing.T) {
+	t.Run("admitted", func(t *testing.T) {
+		held := false
+		ctx := t.Context()
+		admitted, release, err := completeSessionLifecycleAdmission(ctx, func(value bool) { held = value })
+		require.NoError(t, err)
+		require.Same(t, ctx, admitted)
+		require.False(t, held)
+		release()
+		require.True(t, held)
+	})
+
+	t.Run("cancelled after admission", func(t *testing.T) {
+		cause := errors.New("agent closed during admission")
+		ctx, cancel := context.WithCancelCause(t.Context())
+		cancel(cause)
+		held := false
+		admitted, release, err := completeSessionLifecycleAdmission(ctx, func(value bool) { held = value })
+		require.Nil(t, admitted)
+		require.Nil(t, release)
+		require.ErrorIs(t, err, cause)
+		require.True(t, held)
+	})
+}
+
+func TestAgentAndSessionMapResidualBranches(t *testing.T) {
+	closed := NewAgent()
+	closed.closed = true
+	_, err := closed.Prompt(t.Context(), TextPromptRequest("missing", "turn", "hello"))
+	require.Error(t, err)
+
+	authAgent := newAuthAgent(t)
+	require.NoError(t, authAgent.Close())
+
+	agent := NewAgent()
+	session, cleanup := newStartedAgentSessionForTest(t, agent, "deleted")
+	defer cleanup()
+	agent.deleted[session.id] = struct{}{}
+	require.Error(t, agent.storeStartedSession(t.Context(), session))
+
+	hosted := NewAgent(WithHostAuthority(residualCallbackAuthority()))
+	called := false
+	originalDelete := deleteNativeTranscript
+	deleteNativeTranscript = func(context.Context, string, string) error {
+		called = true
+
+		return nil
+	}
+	t.Cleanup(func() { deleteNativeTranscript = originalDelete })
+	hosted.retryDeleteNativeTranscript(t.Context(), "session")
+	require.False(t, called)
+}
+
+func TestReplacementConfigurationStoreResidualBranches(t *testing.T) {
+	newSession := func(agent *Agent) *agentSession {
+		return &agentSession{id: "replacement", agent: agent, mirror: &sessionMirror{}}
+	}
+
+	base := NewInMemorySessionStore()
+	store := &faultSessionStore{SessionStore: base, listSubkeysErr: errors.New("list refused")}
+	agent := NewAgent(WithSessionStore(store))
+	require.ErrorContains(t, agent.persistReplacementConfiguration(t.Context(), newSession(agent), nil), "list session store subkeys")
+
+	store = &faultSessionStore{SessionStore: base, listSubkeys: []string{"child"}, loadSubpathErr: errors.New("load refused")}
+	agent = NewAgent(WithSessionStore(store))
+	require.ErrorContains(t, agent.persistReplacementConfiguration(t.Context(), newSession(agent), nil), "load session store subkey")
+
+	require.NoError(t, base.Append(t.Context(), SessionKey{SessionID: "replacement", Subpath: "child"}, []SessionStoreEntry{json.RawMessage(`{"type":"child"}`)}))
+	store = &faultSessionStore{SessionStore: base, listSubkeys: []string{"child"}, replaceErr: errors.New("replace refused")}
+	agent = NewAgent(WithSessionStore(store))
+	require.ErrorContains(t, agent.persistReplacementConfiguration(t.Context(), newSession(agent), nil), "replace session configuration")
+}
+
+func TestStartSessionManagedResidualFailures(t *testing.T) {
+	t.Run("provider auth admission", func(t *testing.T) {
+		agent := newAuthAgent(t)
+		pending := true
+		child := &fakeAuthLogin{closeErr: errors.New("cleanup refused"), cleanupPending: &pending}
+		handle := &authLoginHandle{login: child, agent: agent, owner: agent.providerAuth}
+		agent.providerAuth.retainLogin(handle)
+		_, err := agent.startSession(t.Context(), "auth-admission", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "cleanup refused")
+	})
+
+	t.Run("provider injection and read release", func(t *testing.T) {
+		agent := newAuthAgent(t, WithExecutablePath(filepath.Join(t.TempDir(), "missing-claude")))
+		_, err := agent.startSession(t.Context(), "auth-injection", sessionStart{Cwd: t.TempDir()})
+		require.Error(t, err)
+	})
+
+	t.Run("isolated home creation", func(t *testing.T) {
+		originalMkdirTemp := materializeMkdirTemp
+		materializeMkdirTemp = func(string, string) (string, error) { return "", errors.New("home refused") }
+		t.Cleanup(func() { materializeMkdirTemp = originalMkdirTemp })
+		agent := NewAgent(
+			WithHostAuthority(residualCallbackAuthority()),
+			WithScratchDir(t.TempDir()),
+			WithHome(t.TempDir()),
+		)
+		_, err := agent.startSession(t.Context(), "home-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "create isolated Claude home")
+	})
+
+	t.Run("config copy", func(t *testing.T) {
+		originalCopy := copyClaudeConfigFiles
+		copyClaudeConfigFiles = func(string, string, claude.Options) error { return errors.New("copy refused") }
+		t.Cleanup(func() { copyClaudeConfigFiles = originalCopy })
+		agent := NewAgent(
+			WithHostAuthority(residualCallbackAuthority()),
+			WithScratchDir(t.TempDir()),
+			WithHome(t.TempDir()),
+		)
+		_, err := agent.startSession(t.Context(), "copy-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "copy refused")
+	})
+
+	t.Run("authority preparation", func(t *testing.T) {
+		authority := residualCallbackAuthority()
+		authority.prepare = func(context.Context, string) error { return ErrContainmentIncomplete }
+		agent := NewAgent(
+			WithHostAuthority(authority),
+			WithScratchDir(t.TempDir()),
+			WithHome(t.TempDir()),
+		)
+		_, err := agent.startSession(t.Context(), "prepare-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorIs(t, err, ErrContainmentIncomplete)
+	})
+}
+
+func TestSessionRetirementResidualBranches(t *testing.T) {
+	t.Run("unsettled", func(t *testing.T) {
+		agent, session, _ := newBusySessionAgent(t, "busy")
+		ctx, cancel := context.WithCancel(t.Context())
+		session.mu.Lock()
+		session.cancel = cancel
+		session.mu.Unlock()
+		err := agent.retireSessionPredecessor(ctx, session.id, session)
+		require.ErrorIs(t, err, errSessionCloseUnsettled)
+		<-session.turn
+	})
+
+	t.Run("close failure", func(t *testing.T) {
+		agent := NewAgent()
+		session, cleanup := newStartedAgentSessionForTest(t, agent, "failed")
+		defer cleanup()
+		session.client = startedClientWithCloseError(t, errors.New("close refused"))
+		require.Error(t, agent.retireSessionPredecessor(t.Context(), session.id, session))
+	})
+}
+
+func TestCloseSessionUnsettledResidualBranch(t *testing.T) {
+	agent, session, _ := newBusySessionAgent(t, "busy-close")
+	ctx, cancel := context.WithCancel(t.Context())
+	session.mu.Lock()
+	session.cancel = cancel
+	session.mu.Unlock()
+	_, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id})
+	require.ErrorIs(t, err, errSessionCloseUnsettled)
+	<-session.turn
+}
+
+func TestResumeAndLoadResidualBranches(t *testing.T) {
+	carrierOptions := func(value string) ClaudeOptions {
+		return ClaudeOptions{Env: map[string]string{"TOKEN": value}}
+	}
+
+	for _, method := range []string{"resume", "load"} {
+		t.Run(method+" retirement", func(t *testing.T) {
+			agent, session, _ := newBusySessionAgent(t, acp.SessionId(method+"-busy"))
+			oldOptions := carrierOptions("old")
+			session.configuration = configurationFromOptions(oldOptions)
+			session.fingerprint = sessionStartFingerprint(sessionStart{Cwd: session.cwd, MetaOptions: oldOptions})
+			ctx, cancel := context.WithCancel(t.Context())
+			session.mu.Lock()
+			session.cancel = cancel
+			session.mu.Unlock()
+			if method == "resume" {
+				_, err := agent.ResumeSession(ctx, ResumeSessionRequest(session.id, session.cwd,
+					WithSessionMeta(carrierOptions("new").Meta())))
+				require.ErrorIs(t, err, errSessionCloseUnsettled)
+			} else {
+				_, err := agent.LoadSession(ctx, LoadSessionRequest(session.id, session.cwd,
+					WithSessionMeta(carrierOptions("new").Meta())))
+				require.ErrorIs(t, err, errSessionCloseUnsettled)
+			}
+			<-session.turn
+		})
+	}
+
+	t.Run("stored resume mismatch", func(t *testing.T) {
+		store := NewInMemorySessionStore()
+		id := acp.SessionId("stored-mismatch")
+		oldOptions := carrierOptions("old")
+		require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, testStoredSessionEntries(t, oldOptions)))
+		agent := NewAgent(WithSessionStore(store))
+		_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, t.TempDir(),
+			WithSessionMeta(carrierOptions("new").Meta())))
+		require.Error(t, err)
+	})
+
+	t.Run("active load mismatch", func(t *testing.T) {
+		agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+		created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		require.NoError(t, err)
+		_, err = agent.LoadSession(t.Context(), LoadSessionRequest(created.SessionId, t.TempDir()))
+		require.Error(t, err)
+		require.NoError(t, agent.Close())
+	})
+
+	for _, phase := range []string{"replay", "usage", "success"} {
+		t.Run("active load "+phase, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			agent, conn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(store))
+			cwd := t.TempDir()
+			created, err := agent.NewSession(t.Context(), NewSessionRequest(cwd))
+			require.NoError(t, err)
+			entries := testStoredSessionEntries(t, ClaudeOptions{})
+			if phase == "replay" {
+				entries = testStoredSessionEntries(t, ClaudeOptions{}, json.RawMessage(
+					`{"type":"user","message":{"content":"replay me"}}`,
+				))
+			}
+			require.NoError(t, store.Replace(t.Context(), SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
+				Key: SessionKey{SessionID: string(created.SessionId)}, Entries: entries,
+			}}))
+			if phase != "success" {
+				conn.sessionUpdateErr = errors.New(phase + " update refused")
+			}
+			_, err = agent.LoadSession(t.Context(), LoadSessionRequest(created.SessionId, cwd))
+			if phase == "success" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "update refused")
+			}
+			conn.sessionUpdateErr = nil
+			require.NoError(t, agent.Close())
+		})
+	}
+}
+
+func TestResumeAndLoadRefuseClosureAfterLifecycleAdmission(t *testing.T) {
+	for _, method := range []string{"resume", "load"} {
+		t.Run(method, func(t *testing.T) {
+			agent := NewAgent()
+			id := acp.SessionId(method + "-closed-after-admission")
+			flight := &sessionLifecycleFlight{admission: make(chan struct{}, 1)}
+			agent.lifecycleFlights[id] = flight
+
+			done := make(chan error, 1)
+			go func() {
+				if method == "resume" {
+					_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, t.TempDir()))
+					done <- err
+
+					return
+				}
+
+				_, err := agent.LoadSession(t.Context(), LoadSessionRequest(id, t.TempDir()))
+				done <- err
+			}()
+
+			require.Eventually(t, func() bool {
+				agent.mu.Lock()
+				defer agent.mu.Unlock()
+
+				return flight.waiters == 1
+			}, time.Second, time.Millisecond)
+
+			agent.mu.Lock()
+			agent.closed = true
+			agent.mu.Unlock()
+			flight.admission <- struct{}{}
+
+			requireAgentClosedRefusal(t, <-done)
+		})
+	}
+}
+
+func TestStartSessionImageAndEstablishmentResidualBranches(t *testing.T) {
+	t.Run("image scratch", func(t *testing.T) {
+		original := imageScratchMkdirTemp
+		imageScratchMkdirTemp = func(string, string) (string, error) { return "", errors.New("image scratch refused") }
+		t.Cleanup(func() { imageScratchMkdirTemp = original })
+		agent := NewAgent(WithScratchDir(t.TempDir()), WithHome(t.TempDir()))
+		_, err := agent.startSession(t.Context(), "image-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "image scratch refused")
+	})
+
+	t.Run("managed auth release on copy failure", func(t *testing.T) {
+		originalCopy := copyClaudeConfigFiles
+		copyClaudeConfigFiles = func(string, string, claude.Options) error { return errors.New("copy refused") }
+		t.Cleanup(func() { copyClaudeConfigFiles = originalCopy })
+		agent := newAuthAgent(t, WithHostAuthority(residualCallbackAuthority()))
+		_, err := agent.startSession(t.Context(), "release-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "copy refused")
+	})
+
+	t.Run("local start failure settles gate", func(t *testing.T) {
+		transport := newFakeClaudeTransport()
+		transport.startErr = errors.New("start refused")
+		agent := NewAgent(WithScratchDir(t.TempDir()), WithHome(t.TempDir()))
+		agent.setConnection(&localAgentConnection{agent: agent, hooks: &postResponseHooks{}})
+		installFakeClaudeClient(agent, transport)
+		_, err := agent.startSession(t.Context(), "local-start-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "start refused")
+	})
+}

@@ -493,3 +493,23 @@ func (s *faultSessionStore) ListSubkeys(ctx context.Context, key SessionKey) ([]
 
 	return s.SessionStore.ListSubkeys(ctx, key)
 }
+
+func TestMaterializedPrepareResidualBranches(t *testing.T) {
+	authority := residualCallbackAuthority()
+	materialized := &materializedSession{}
+	require.NoError(t, materialized.prepare(t.Context(), authority, "", "/root"))
+	require.True(t, materialized.owns("/root"))
+
+	for _, failure := range []error{ErrContainmentIncomplete, ErrHostAuthorityUnavailable, errors.New("prepare refused")} {
+		authority := residualCallbackAuthority()
+		authority.prepare = func(context.Context, string) error { return failure }
+		materialized := &materializedSession{}
+		err := materialized.prepare(t.Context(), authority, "/root")
+		if errors.Is(failure, ErrHostAuthorityUnavailable) {
+			require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+		} else {
+			require.ErrorIs(t, err, ErrContainmentIncomplete)
+		}
+		require.Contains(t, materialized.opaque, "/root")
+	}
+}

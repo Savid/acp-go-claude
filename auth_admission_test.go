@@ -2,6 +2,7 @@ package claudeacp
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -571,4 +572,55 @@ func TestAdmissionRefusesEveryLegTheCallerAbandoned(t *testing.T) {
 		requireAuthFailed(t, err, authCauseTimeout)
 		require.Zero(t, seams.logoutCalls)
 	})
+}
+
+func TestProviderAuthReadAdmissionResidualBranches(t *testing.T) {
+	broker := residualProviderAuth(residualCallbackAuthority())
+	require.NoError(t, broker.takeNativeHomeAccess(t.Context()))
+	_, err := broker.admitNativeHomeRead(residualCanceledContext())
+	require.ErrorIs(t, err, context.Canceled)
+	broker.releaseNativeHomeAccess()
+
+	broker.nativeTreeOpaque = errors.New("opaque")
+	_, err = broker.admitNativeHomeRead(t.Context())
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	broker.nativeTreeOpaque = nil
+	broker.nativeTreePrepared = true
+	_, err = broker.admitNativeHomeRead(t.Context())
+	require.ErrorIs(t, err, ErrNativeTreeBusy)
+	broker.nativeTreePrepared = false
+	release, err := broker.admitNativeHomeRead(t.Context())
+	require.NoError(t, err)
+	release()
+}
+
+func TestProviderAuthAdmissionTimeoutResidualBranches(t *testing.T) {
+	broker, sessionID := newAuthBroker(t)
+	release := holdAuthSlot(t, broker)
+
+	flow := &authFlow{
+		id:        "flow",
+		sessionID: sessionID,
+		method: authCatalogMethod{
+			Type: authMethodTypeOAuth,
+		},
+	}
+	_, cause := broker.mintPresentation(residualCanceledContext(), flow)
+	require.Equal(t, authCauseTimeout, cause)
+
+	_, err := broker.inventory(residualCanceledContext(), authParams(t, map[string]any{
+		"sessionId": string(sessionID),
+	}))
+	requireAuthFailed(t, err, authCauseTimeout)
+	_ = release
+}
+
+func TestProviderAuthReadAdmissionRetainedFailure(t *testing.T) {
+	broker, _ := newAuthBroker(t)
+	pending := true
+	child := &fakeAuthLogin{closeErr: errors.New("cleanup refused"), cleanupPending: &pending}
+	handle := &authLoginHandle{login: child, agent: broker.agent, owner: broker}
+	broker.retainLogin(handle)
+	_, err := broker.admitNativeHomeRead(t.Context())
+	require.ErrorContains(t, err, "cleanup refused")
 }

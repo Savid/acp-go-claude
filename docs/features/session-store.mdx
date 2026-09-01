@@ -32,6 +32,13 @@ load or resume value must exactly match the stored value, while an omitted value
 inherits it. A missing, malformed, unsupported, or conflicting configuration
 row fails before native resume.
 
+The current schema does not store Claude's native `.credentials.json` or login
+Keychain material. It does store accepted session `env` values verbatim, and
+those values may themselves contain API keys, bearer tokens, or other
+credentials. Protect a host `SessionStore` as secret-bearing data: restrict
+access, protect data in transit and at rest, avoid logging rows, and apply an
+appropriate deletion and retention policy.
+
 Restore hydrates only the authoritative transcript rows into an isolated
 temporary Claude config directory under the scratch directory (default: system
 temp). The source config directory's credential travels into that temporary

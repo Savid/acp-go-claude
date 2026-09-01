@@ -13,6 +13,16 @@ import (
 )
 
 func startOrdinaryNative(executable string, arguments []string, environment []string, cwd string) (NativeProcess, error) {
+	return startOrdinaryNativeWithPipe(executable, arguments, environment, cwd, os.Pipe)
+}
+
+func startOrdinaryNativeWithPipe(
+	executable string,
+	arguments []string,
+	environment []string,
+	cwd string,
+	openPipe func() (*os.File, *os.File, error),
+) (NativeProcess, error) {
 	resolved, err := resolveOrdinaryExecutable(executable, environment)
 	if err != nil {
 		return nil, err
@@ -22,12 +32,12 @@ func startOrdinaryNative(executable string, arguments []string, environment []st
 	command.Dir = cwd
 	command.Env = environment
 
-	childStdin, stdin, err := os.Pipe()
+	childStdin, stdin, err := openPipe()
 	if err != nil {
 		return nil, fmt.Errorf("create native stdin: %w", err)
 	}
 
-	stdout, childStdout, err := os.Pipe()
+	stdout, childStdout, err := openPipe()
 	if err != nil {
 		_ = childStdin.Close()
 		_ = stdin.Close()
@@ -35,7 +45,7 @@ func startOrdinaryNative(executable string, arguments []string, environment []st
 		return nil, fmt.Errorf("create native stdout: %w", err)
 	}
 
-	stderr, childStderr, err := os.Pipe()
+	stderr, childStderr, err := openPipe()
 	if err != nil {
 		_ = childStdin.Close()
 		_ = stdin.Close()

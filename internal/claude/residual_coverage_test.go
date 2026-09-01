@@ -139,6 +139,24 @@ func TestOrdinaryProcessResidualBranches(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestOrdinaryProcessPipeFailureCleanup(t *testing.T) {
+	for _, failAt := range []int{1, 2, 3} {
+		t.Run(string(rune('0'+failAt)), func(t *testing.T) {
+			calls := 0
+			openPipe := func() (*os.File, *os.File, error) {
+				calls++
+				if calls == failAt {
+					return nil, nil, errors.New("pipe refused")
+				}
+
+				return os.Pipe()
+			}
+			_, err := startOrdinaryNativeWithPipe("/bin/true", nil, []string{"PATH=/bin"}, t.TempDir(), openPipe)
+			require.ErrorContains(t, err, "pipe refused")
+		})
+	}
+}
+
 func TestRunNativeOutputResidualBranches(t *testing.T) {
 	baseAuthority := func() *NativeAuthority {
 		return &NativeAuthority{
@@ -229,6 +247,13 @@ func TestRunNativeOutputResidualBranches(t *testing.T) {
 		require.ErrorIs(t, err, authority.ContainmentIncomplete)
 		close(release)
 	})
+
+	waitErr := errors.New("caller canceled")
+	terminalErr := errors.New("wait refused")
+	classified, terminal := classifyNativeOutputWait(Options{}, waitErr, terminalErr)
+	require.ErrorIs(t, classified, waitErr)
+	require.ErrorIs(t, classified, terminalErr)
+	require.False(t, terminal)
 }
 
 func TestAuthStatusAndGrammarResidualBranches(t *testing.T) {
@@ -252,6 +277,14 @@ func TestStartAuthLoginResidualFailures(t *testing.T) {
 	require.NoError(t, os.WriteFile(scratchFile, []byte("x"), 0o600))
 	_, _, err := StartAuthLogin(t.Context(), Options{ScratchParent: scratchFile})
 	require.ErrorContains(t, err, "browser launch")
+
+	_, err = startAuthLoginChild(Options{
+		ScratchParent: t.TempDir(),
+		Authority: &NativeAuthority{
+			NativeEnvironment: func() map[string]string { return nil },
+		},
+	})
+	require.Error(t, err)
 
 	_, err = startAuthLoginChild(Options{
 		ScratchParent: t.TempDir(),

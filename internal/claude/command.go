@@ -398,15 +398,7 @@ func runNativeOutput(ctx context.Context, options Options, executable string, ar
 		select {
 		case <-waitDone:
 			result = terminalResult
-
-			switch {
-			case terminalWaitErr == nil:
-				terminal = true
-			case options.Authority != nil:
-				waitErr = errors.Join(waitErr, containmentIncomplete(options, "wait for native output process", terminalWaitErr))
-			default:
-				waitErr = errors.Join(waitErr, terminalWaitErr)
-			}
+			waitErr, terminal = classifyNativeOutputWait(options, waitErr, terminalWaitErr)
 		case <-terminalCtx.Done():
 			waitErr = errors.Join(waitErr, containmentIncomplete(options, "wait for native output process", terminalCtx.Err()))
 		}
@@ -422,6 +414,18 @@ func runNativeOutput(ctx context.Context, options Options, executable string, ar
 	stderrErr := awaitNativeDrain(stderrDone, stderr)
 
 	return read.data, result, errors.Join(stdinErr, waitErr, read.err, stderrErr)
+}
+
+func classifyNativeOutputWait(options Options, waitErr, terminalWaitErr error) (error, bool) {
+	if terminalWaitErr == nil {
+		return waitErr, true
+	}
+
+	if options.Authority != nil {
+		return errors.Join(waitErr, containmentIncomplete(options, "wait for native output process", terminalWaitErr)), false
+	}
+
+	return errors.Join(waitErr, terminalWaitErr), false
 }
 
 const nativeOutputMaxBytes = 10 * 1024 * 1024

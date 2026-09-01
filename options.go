@@ -247,8 +247,7 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithHostAuthority delegates every native launch and native-tree ownership
-// transition to authority. The authority is borrowed and is never closed.
+// WithHostAuthority routes native processes and tree ownership through authority.
 func WithHostAuthority(authority HostAuthority) Option {
 	return func(options *Options) {
 		options.HostAuthority = authority

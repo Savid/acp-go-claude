@@ -36,7 +36,49 @@ func TestLifecycleCapabilityStrictScalar(t *testing.T) {
 			t.Parallel()
 
 			var value Negotiated
-			require.Error(t, json.Unmarshal([]byte(test.data), &value))
+			require.Error(t, value.UnmarshalJSON([]byte(test.data)))
+		})
+	}
+}
+
+func TestLifecycleCapabilityStructuredFieldsAndMalformedInput(t *testing.T) {
+	t.Parallel()
+
+	var decoded Negotiated
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"version":1,
+		"updatesOutsidePrompt":true,
+		"authoritativeQuiescence":true,
+		"quiescenceSource":"process-containment",
+		"activityKinds":["task"]
+	}`), &decoded))
+	require.Equal(t, Negotiated{
+		Version:                 Version,
+		UpdatesOutsidePrompt:    true,
+		AuthoritativeQuiescence: true,
+		QuiescenceSource:        ProofClassProcessContainment,
+		ActivityKinds:           []ActivityKind{ActivityTask},
+	}, decoded)
+
+	for _, test := range []struct {
+		name string
+		data string
+	}{
+		{"empty", ``},
+		{"non-object", `[]`},
+		{"truncated member", `{"version":1,`},
+		{"truncated object", `{"version":1`},
+		{"malformed version", `{"version":`},
+		{"malformed updates", `{"version":1,"updatesOutsidePrompt":[]}`},
+		{"malformed authoritative quiescence", `{"version":1,"authoritativeQuiescence":[]}`},
+		{"malformed quiescence source", `{"version":1,"quiescenceSource":[]}`},
+		{"malformed activity kinds", `{"version":1,"activityKinds":false}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var value Negotiated
+			require.Error(t, value.UnmarshalJSON([]byte(test.data)))
 		})
 	}
 }

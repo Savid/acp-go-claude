@@ -78,11 +78,9 @@ Close and delete wait for that full settlement. After delete succeeds, a store
 MUST refuse every late append or replacement for that session; no write may
 recreate the deleted row.
 
-<Note>
 `WithSessionStoreLoadTimeout` bounds store reads used by restore and listing.
 Set it when your store can hang (network round-trips), or a slow backend will
 stall `session/load`, `session/resume`, fork, and `session/list`.
-</Note>
 
 ## Typed image output
 

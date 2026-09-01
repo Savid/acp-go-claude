@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -229,6 +230,13 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 		{
 			name:      "extra path dirs entry empty",
 			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{""}}}},
+			wantField: "_meta.claude.options.extraPathDirs[0]",
+		},
+		{
+			name: "extra path dirs entry contains separator",
+			meta: map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{
+				metaExtraPathDirsKey: []any{"/opt/bin" + string(os.PathListSeparator) + "/srv/bin"},
+			}}},
 			wantField: "_meta.claude.options.extraPathDirs[0]",
 		},
 		{

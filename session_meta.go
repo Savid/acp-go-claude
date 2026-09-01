@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"encoding/json"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -342,7 +343,7 @@ func validateClaudeOptions(options ClaudeOptions) (ClaudeOptions, error) {
 	}
 
 	for index, dir := range options.ExtraPathDirs {
-		if !filepath.IsAbs(dir) {
+		if !filepath.IsAbs(dir) || strings.ContainsRune(dir, os.PathListSeparator) {
 			return ClaudeOptions{}, unsupportedField(
 				metaOptionPath(metaExtraPathDirsKey) + "[" + strconv.Itoa(index) + "]",
 			)

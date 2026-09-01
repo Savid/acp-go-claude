@@ -133,7 +133,7 @@ func TestSessionMirrorWritesConfigurationOnceAheadOfTranscript(t *testing.T) {
 	const sessionID = "11111111-1111-4111-8111-111111111111"
 	home := t.TempDir()
 	store := NewInMemorySessionStore()
-	session := &agentSession{configuration: sessionConfiguration{
+	session := &agentSession{id: sessionID, configuration: sessionConfiguration{
 		Env:           map[string]string{"TOOL_TOKEN": "stored"},
 		ExtraPathDirs: []string{"/opt/tools"},
 	}}

@@ -1136,6 +1136,7 @@ func TestImageTranscriptEdges(t *testing.T) {
 	// A mirror frame whose bytes are unusable still fails the append rather than
 	// storing a broken artifact.
 	badMirror := newSessionMirror(nil, NewInMemorySessionStore(), home, &agentSession{
+		id:             "22222222-2222-4222-8222-222222222222",
 		imageArtifacts: map[string]storedImageArtifact{},
 	})
 	err = badMirror.appendFrame(t.Context(), &claude.TranscriptMirrorMessage{

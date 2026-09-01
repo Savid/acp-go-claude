@@ -24,7 +24,10 @@ const (
 	defaultSessionMirrorCommitTimeout = 90 * time.Second
 )
 
-var errSessionMirrorAppend = errors.New("append transcript mirror entries")
+var (
+	errSessionMirrorAppend = errors.New("append transcript mirror entries")
+	errSessionMirrorOwner  = errors.New("transcript mirror session does not match owner")
+)
 
 var (
 	sessionMirrorAppendTimeout = defaultSessionMirrorAppendTimeout
@@ -72,6 +75,10 @@ func (m *sessionMirror) appendFrame(ctx context.Context, frame *claude.Transcrip
 			slog.String("class", safeErrorClass(err)))
 
 		return nil
+	}
+
+	if m.session != nil && key.SessionID != string(m.session.id) {
+		return fmt.Errorf("%w: transcript %q, owner %q", errSessionMirrorOwner, key.SessionID, m.session.id)
 	}
 
 	entries := frame.Entries

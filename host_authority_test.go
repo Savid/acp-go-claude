@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
@@ -596,6 +597,74 @@ func TestMaterializedResidenceRetainsFailedPrepareWithoutPathAccess(t *testing.T
 	require.ErrorIs(t, residence.Close(), ErrContainmentIncomplete)
 	require.False(t, removed)
 	require.Equal(t, []string{"prepare:" + root}, authority.events)
+}
+
+func TestMaterializedResidenceRetainsMutatedRootAfterPreparePanic(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "native")
+	require.NoError(t, os.MkdirAll(root, 0o700))
+	marker := filepath.Join(root, "mutated")
+	authority := &callbackHostAuthority{
+		prepare: func(context.Context, string) error {
+			require.NoError(t, os.WriteFile(marker, []byte("host mutation"), 0o600))
+			panic("prepare response lost")
+		},
+	}
+	residence := &materializedSession{configDir: root}
+
+	err := residence.prepare(t.Context(), authority, root)
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Empty(t, residence.prepared)
+	require.Contains(t, residence.opaque, root)
+
+	err = residence.Close()
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.FileExists(t, marker)
+}
+
+func TestMaterializedResidenceRetainsRootAfterReclaimPanic(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "native")
+	require.NoError(t, os.MkdirAll(root, 0o700))
+	authority := &callbackHostAuthority{
+		prepare: func(context.Context, string) error { return nil },
+		reclaim: func(context.Context, string) error { panic("reclaim response lost") },
+	}
+	residence := &materializedSession{configDir: root}
+	require.NoError(t, residence.prepare(t.Context(), authority, root))
+
+	err := residence.Close()
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Equal(t, []string{root}, residence.prepared)
+	require.DirExists(t, root)
+}
+
+func TestMaterializedResidenceBoundsReclaimWithDetachedContext(t *testing.T) {
+	previousTimeout := materializedNativeTreeReclaimTimeout
+	materializedNativeTreeReclaimTimeout = time.Nanosecond
+	t.Cleanup(func() { materializedNativeTreeReclaimTimeout = previousTimeout })
+
+	root := filepath.Join(t.TempDir(), "native")
+	require.NoError(t, os.MkdirAll(root, 0o700))
+	callbackObservedDeadline := false
+	authority := &callbackHostAuthority{
+		prepare: func(context.Context, string) error { return nil },
+		reclaim: func(ctx context.Context, _ string) error {
+			_, callbackObservedDeadline = ctx.Deadline()
+			<-ctx.Done()
+
+			return ctx.Err()
+		},
+	}
+	residence := &materializedSession{configDir: root}
+	require.NoError(t, residence.prepare(t.Context(), authority, root))
+
+	err := residence.Close()
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.True(t, callbackObservedDeadline)
+	require.Equal(t, []string{root}, residence.prepared)
+	require.DirExists(t, root)
 }
 
 func TestProviderAuthHomeReadExcludesNativePreparation(t *testing.T) {

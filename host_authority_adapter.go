@@ -43,33 +43,41 @@ func (a *Agent) claudeAuthority() *claude.NativeAuthority {
 
 			return authority.NativeEnvironment()
 		},
-		PrepareNativeTree: func(ctx context.Context, root string) (err error) {
-			defer func() {
-				if recovered := recover(); recovered != nil {
-					err = authorityCallbackAmbiguous("prepare native tree", recovered)
-				}
-			}()
-
-			return authority.PrepareNativeTree(ctx, root)
+		PrepareNativeTree: func(ctx context.Context, root string) error {
+			return guardedPrepareNativeTree(authority, ctx, root)
 		},
-		ReclaimNativeTree: func(ctx context.Context, root string) (err error) {
-			defer func() {
-				if recovered := recover(); recovered != nil {
-					err = authorityCallbackAmbiguous("reclaim native tree", recovered)
-				}
-			}()
-
-			err = authority.ReclaimNativeTree(ctx, root)
-			if err != nil && !errors.Is(err, ErrNativeTreeBusy) && !errors.Is(err, ErrContainmentIncomplete) {
-				return fmt.Errorf("%w: reclaim native tree: %w", ErrContainmentIncomplete, err)
-			}
-
-			return err
+		ReclaimNativeTree: func(ctx context.Context, root string) error {
+			return guardedReclaimNativeTree(authority, ctx, root)
 		},
 		StartNative: func(ctx context.Context, request claude.NativeRequest) (claude.NativeProcess, error) {
 			return guardedStartNative(authority, ctx, request)
 		},
 	}
+}
+
+func guardedPrepareNativeTree(authority HostAuthority, ctx context.Context, root string) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = authorityCallbackAmbiguous("prepare native tree", recovered)
+		}
+	}()
+
+	return authority.PrepareNativeTree(ctx, root)
+}
+
+func guardedReclaimNativeTree(authority HostAuthority, ctx context.Context, root string) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = authorityCallbackAmbiguous("reclaim native tree", recovered)
+		}
+	}()
+
+	err = authority.ReclaimNativeTree(ctx, root)
+	if err != nil && !errors.Is(err, ErrNativeTreeBusy) && !errors.Is(err, ErrContainmentIncomplete) {
+		return fmt.Errorf("%w: reclaim native tree: %w", ErrContainmentIncomplete, err)
+	}
+
+	return err
 }
 
 func guardedStartNative(

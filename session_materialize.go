@@ -21,6 +21,9 @@ const (
 var copyClaudeConfigFiles = copyClaudeConfigFilesImpl
 var deleteNativeTranscript = deleteNativeTranscriptImpl
 
+// materializedNativeTreeReclaimTimeout bounds one detached host reclaim callback.
+var materializedNativeTreeReclaimTimeout = 5 * time.Second
+
 var (
 	materializeGlob        = filepath.Glob
 	materializeMkdirAll    = os.MkdirAll
@@ -62,12 +65,13 @@ func (m *materializedSession) Close() error {
 
 	for len(m.prepared) > 0 {
 		root := m.prepared[len(m.prepared)-1]
-		if err := m.authority.ReclaimNativeTree(context.Background(), root); err != nil {
-			if errors.Is(err, ErrNativeTreeBusy) || errors.Is(err, ErrContainmentIncomplete) {
-				return errors.Join(append(errs, err)...)
-			}
+		reclaimCtx, cancelReclaim := context.WithTimeout(context.Background(), materializedNativeTreeReclaimTimeout)
+		err := guardedReclaimNativeTree(m.authority, reclaimCtx, root)
 
-			return errors.Join(append(errs, fmt.Errorf("%w: reclaim native tree %q: %w", ErrContainmentIncomplete, root, err))...)
+		cancelReclaim()
+
+		if err != nil {
+			return errors.Join(append(errs, fmt.Errorf("reclaim native tree %q: %w", root, err))...)
 		}
 
 		m.prepared = m.prepared[:len(m.prepared)-1]
@@ -101,20 +105,23 @@ func (m *materializedSession) prepare(ctx context.Context, authority HostAuthori
 			continue
 		}
 
-		if err := authority.PrepareNativeTree(ctx, root); err != nil {
-			if m.opaque == nil {
-				m.opaque = make(map[string]error)
+		if m.opaque == nil {
+			m.opaque = make(map[string]error)
+		}
+
+		m.opaque[root] = ErrContainmentIncomplete
+
+		if err := guardedPrepareNativeTree(authority, ctx, root); err != nil {
+			if !errors.Is(err, ErrContainmentIncomplete) && !errors.Is(err, ErrHostAuthorityUnavailable) {
+				err = fmt.Errorf("%w: prepare native tree %q: %w", ErrContainmentIncomplete, root, err)
 			}
 
 			m.opaque[root] = err
 
-			if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
-				return err
-			}
-
-			return fmt.Errorf("%w: prepare native tree %q: %v", ErrContainmentIncomplete, root, err)
+			return err
 		}
 
+		delete(m.opaque, root)
 		m.prepared = append(m.prepared, root)
 	}
 

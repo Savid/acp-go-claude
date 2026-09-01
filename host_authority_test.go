@@ -24,6 +24,29 @@ type fakeHostAuthority struct {
 	settled bool
 }
 
+type callbackHostAuthority struct {
+	environment func() map[string]string
+	prepare     func(context.Context, string) error
+	reclaim     func(context.Context, string) error
+	start       func(context.Context, NativeRequest) (NativeProcess, error)
+}
+
+func (a *callbackHostAuthority) NativeEnvironment() map[string]string {
+	return a.environment()
+}
+
+func (a *callbackHostAuthority) PrepareNativeTree(ctx context.Context, root string) error {
+	return a.prepare(ctx, root)
+}
+
+func (a *callbackHostAuthority) ReclaimNativeTree(ctx context.Context, root string) error {
+	return a.reclaim(ctx, root)
+}
+
+func (a *callbackHostAuthority) StartNative(ctx context.Context, request NativeRequest) (NativeProcess, error) {
+	return a.start(ctx, request)
+}
+
 func newFakeHostAuthority() *fakeHostAuthority {
 	return &fakeHostAuthority{}
 }
@@ -218,6 +241,234 @@ func TestHostAuthorityContractAndNilFailClosed(t *testing.T) {
 	agent := NewAgent(WithHostAuthority(typedNil))
 	require.ErrorIs(t, agent.configurationErr, ErrHostAuthorityUnavailable)
 	require.Nil(t, agent.providerAuth)
+}
+
+func TestHostAuthorityNativeEnvironmentPanicFailsConstructionBeforeMutation(t *testing.T) {
+	prepareCalls := 0
+	startCalls := 0
+	authority := &callbackHostAuthority{
+		environment: func() map[string]string { panic("environment panic") },
+		prepare: func(context.Context, string) error {
+			prepareCalls++
+
+			return nil
+		},
+		reclaim: func(context.Context, string) error { return nil },
+		start: func(context.Context, NativeRequest) (NativeProcess, error) {
+			startCalls++
+
+			return nil, errors.New("unexpected start")
+		},
+	}
+
+	agent := NewAgent(WithHostAuthority(authority))
+	require.ErrorIs(t, agent.configurationErr, ErrHostAuthorityUnavailable)
+	require.NotErrorIs(t, agent.configurationErr, ErrContainmentIncomplete)
+	require.Zero(t, prepareCalls)
+	require.Zero(t, startCalls)
+}
+
+func TestHostAuthorityNilNativeEnvironmentFailsConstructionBeforeMutation(t *testing.T) {
+	prepareCalls := 0
+	authority := &callbackHostAuthority{
+		environment: func() map[string]string { return nil },
+		prepare: func(context.Context, string) error {
+			prepareCalls++
+
+			return nil
+		},
+	}
+
+	agent := NewAgent(WithHostAuthority(authority))
+	require.ErrorIs(t, agent.configurationErr, ErrHostAuthorityUnavailable)
+	require.NotErrorIs(t, agent.configurationErr, ErrContainmentIncomplete)
+	require.Zero(t, prepareCalls)
+}
+
+func TestHostAuthorityAmbiguousCallbacksRetainPreparedTree(t *testing.T) {
+	tests := []struct {
+		name  string
+		start func(context.Context, NativeRequest) (NativeProcess, error)
+	}{
+		{
+			name: "panic",
+			start: func(context.Context, NativeRequest) (NativeProcess, error) {
+				panic("start panic")
+			},
+		},
+		{
+			name: "nil",
+			start: func(context.Context, NativeRequest) (NativeProcess, error) {
+				return nil, nil //nolint:nilnil // invalid successful callback is under test.
+			},
+		},
+		{
+			name: "typed nil",
+			start: func(context.Context, NativeRequest) (NativeProcess, error) {
+				var process *fakeNativeProcess
+
+				return process, nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var events []string
+			authority := &callbackHostAuthority{
+				environment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
+				prepare: func(context.Context, string) error {
+					events = append(events, "prepare")
+
+					return nil
+				},
+				reclaim: func(context.Context, string) error {
+					events = append(events, "reclaim")
+
+					return nil
+				},
+				start: func(ctx context.Context, request NativeRequest) (NativeProcess, error) {
+					events = append(events, "start")
+
+					return tt.start(ctx, request)
+				},
+			}
+			agent := NewAgent(WithHostAuthority(authority))
+
+			_, _, err := claude.AuthStatus(t.Context(), claude.Options{
+				CLIPath: "claude", ClaudeHome: t.TempDir(), Authority: agent.claudeAuthority(),
+			})
+			require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+			require.ErrorIs(t, err, ErrContainmentIncomplete)
+			require.Equal(t, []string{"prepare", "start"}, events)
+		})
+	}
+}
+
+func TestHostAuthorityPrepareAndReclaimPanicsAreContainmentAmbiguous(t *testing.T) {
+	t.Run("prepare", func(t *testing.T) {
+		startCalls := 0
+		reclaimCalls := 0
+		authority := &callbackHostAuthority{
+			environment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
+			prepare:     func(context.Context, string) error { panic("prepare panic") },
+			reclaim: func(context.Context, string) error {
+				reclaimCalls++
+
+				return nil
+			},
+			start: func(context.Context, NativeRequest) (NativeProcess, error) {
+				startCalls++
+
+				return nil, errors.New("unexpected start")
+			},
+		}
+		agent := NewAgent(WithHostAuthority(authority))
+
+		_, _, err := claude.AuthStatus(t.Context(), claude.Options{
+			CLIPath: "claude", ClaudeHome: t.TempDir(), Authority: agent.claudeAuthority(),
+		})
+		require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+		require.ErrorIs(t, err, ErrContainmentIncomplete)
+		require.Zero(t, startCalls)
+		require.Zero(t, reclaimCalls)
+	})
+
+	t.Run("reclaim", func(t *testing.T) {
+		authority := &callbackHostAuthority{
+			environment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
+			prepare:     func(context.Context, string) error { return nil },
+			reclaim:     func(context.Context, string) error { panic("reclaim panic") },
+		}
+		authority.start = func(context.Context, NativeRequest) (NativeProcess, error) {
+			return newAuthStatusProcess(&fakeHostAuthority{}, nil), nil
+		}
+		agent := NewAgent(WithHostAuthority(authority))
+
+		_, _, err := claude.AuthStatus(t.Context(), claude.Options{
+			CLIPath: "claude", ClaudeHome: t.TempDir(), Authority: agent.claudeAuthority(),
+		})
+		require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+		require.ErrorIs(t, err, ErrContainmentIncomplete)
+	})
+
+	t.Run("reclaim failure", func(t *testing.T) {
+		failure := errors.New("reclaim response lost")
+		authority := &callbackHostAuthority{
+			environment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
+			prepare:     func(context.Context, string) error { return nil },
+			reclaim:     func(context.Context, string) error { return failure },
+		}
+		authority.start = func(context.Context, NativeRequest) (NativeProcess, error) {
+			return newAuthStatusProcess(&fakeHostAuthority{}, nil), nil
+		}
+		agent := NewAgent(WithHostAuthority(authority))
+
+		_, _, err := claude.AuthStatus(t.Context(), claude.Options{
+			CLIPath: "claude", ClaudeHome: t.TempDir(), Authority: agent.claudeAuthority(),
+		})
+		require.ErrorIs(t, err, failure)
+		require.ErrorIs(t, err, ErrContainmentIncomplete)
+		require.NotErrorIs(t, err, ErrHostAuthorityUnavailable)
+	})
+}
+
+func TestHostAuthorityOrdinaryStartRefusalRemainsOrdinary(t *testing.T) {
+	refusal := errors.New("admission refused")
+	reclaimed := 0
+	authority := &callbackHostAuthority{
+		environment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
+		prepare:     func(context.Context, string) error { return nil },
+		reclaim: func(context.Context, string) error {
+			reclaimed++
+
+			return nil
+		},
+		start: func(context.Context, NativeRequest) (NativeProcess, error) { return nil, refusal },
+	}
+	agent := NewAgent(WithHostAuthority(authority))
+
+	_, _, err := claude.AuthStatus(t.Context(), claude.Options{
+		CLIPath: "claude", ClaudeHome: t.TempDir(), Authority: agent.claudeAuthority(),
+	})
+	require.ErrorIs(t, err, refusal)
+	require.NotErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.NotErrorIs(t, err, ErrContainmentIncomplete)
+	require.Equal(t, 1, reclaimed)
+}
+
+func TestAmbiguousRuntimeRetainsEveryMaterializedResource(t *testing.T) {
+	root := t.TempDir()
+	reclaimCalls := 0
+	removeCalls := 0
+	materialized := &materializedSession{
+		configDir: root,
+		prepared:  []string{root},
+		authority: &callbackHostAuthority{
+			reclaim: func(context.Context, string) error {
+				reclaimCalls++
+
+				return nil
+			},
+		},
+	}
+	originalRemove := sessionRemoveAll
+	sessionRemoveAll = func(string) error {
+		removeCalls++
+
+		return nil
+	}
+	t.Cleanup(func() { sessionRemoveAll = originalRemove })
+
+	err := finalizeSessionRuntimeResources(
+		errors.Join(ErrHostAuthorityUnavailable, ErrContainmentIncomplete),
+		filepath.Join(root, "mcp"), filepath.Join(root, "images"), materialized,
+	)
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.Zero(t, reclaimCalls)
+	require.Zero(t, removeCalls)
+	require.Equal(t, []string{root}, materialized.prepared)
 }
 
 func TestMaterializedResidenceReclaimsBeforeRemovalAndBusyFailsClosed(t *testing.T) {

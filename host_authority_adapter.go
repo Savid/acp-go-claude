@@ -34,27 +34,75 @@ func (a *Agent) claudeAuthority() *claude.NativeAuthority {
 		Unavailable:           ErrHostAuthorityUnavailable,
 		ContainmentIncomplete: ErrContainmentIncomplete,
 		TreeBusy:              ErrNativeTreeBusy,
-		NativeEnvironment:     authority.NativeEnvironment,
-		PrepareNativeTree:     authority.PrepareNativeTree,
-		ReclaimNativeTree:     authority.ReclaimNativeTree,
+		NativeEnvironment: func() (environment map[string]string) {
+			defer func() {
+				if recover() != nil {
+					environment = nil
+				}
+			}()
+
+			return authority.NativeEnvironment()
+		},
+		PrepareNativeTree: func(ctx context.Context, root string) (err error) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					err = authorityCallbackAmbiguous("prepare native tree", recovered)
+				}
+			}()
+
+			return authority.PrepareNativeTree(ctx, root)
+		},
+		ReclaimNativeTree: func(ctx context.Context, root string) (err error) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					err = authorityCallbackAmbiguous("reclaim native tree", recovered)
+				}
+			}()
+
+			err = authority.ReclaimNativeTree(ctx, root)
+			if err != nil && !errors.Is(err, ErrNativeTreeBusy) && !errors.Is(err, ErrContainmentIncomplete) {
+				return fmt.Errorf("%w: reclaim native tree: %w", ErrContainmentIncomplete, err)
+			}
+
+			return err
+		},
 		StartNative: func(ctx context.Context, request claude.NativeRequest) (claude.NativeProcess, error) {
-			process, err := authority.StartNative(ctx, NativeRequest{
-				Executable:       request.Executable,
-				Arguments:        append([]string(nil), request.Arguments...),
-				Environment:      append([]string(nil), request.Environment...),
-				WorkingDirectory: request.WorkingDirectory,
-			})
-			if err != nil {
-				return nil, err
-			}
-
-			if !validNativeProcess(process) {
-				return nil, ErrHostAuthorityUnavailable
-			}
-
-			return nativeProcessAdapter{NativeProcess: process}, nil
+			return guardedStartNative(authority, ctx, request)
 		},
 	}
+}
+
+func guardedStartNative(
+	authority HostAuthority,
+	ctx context.Context,
+	request claude.NativeRequest,
+) (process claude.NativeProcess, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			process = nil
+			err = authorityCallbackAmbiguous("start native process", recovered)
+		}
+	}()
+
+	nativeProcess, err := authority.StartNative(ctx, NativeRequest{
+		Executable:       request.Executable,
+		Arguments:        append([]string(nil), request.Arguments...),
+		Environment:      append([]string(nil), request.Environment...),
+		WorkingDirectory: request.WorkingDirectory,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if !validNativeProcess(nativeProcess) {
+		return nil, errors.Join(ErrHostAuthorityUnavailable, ErrContainmentIncomplete)
+	}
+
+	return nativeProcessAdapter{NativeProcess: nativeProcess}, nil
+}
+
+func authorityCallbackAmbiguous(operation string, recovered any) error {
+	return fmt.Errorf("%w: %w: %s callback panicked: %T", ErrHostAuthorityUnavailable, ErrContainmentIncomplete, operation, recovered)
 }
 
 func validNativeProcess(process NativeProcess) bool {

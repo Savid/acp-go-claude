@@ -3,9 +3,12 @@ package claudeacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -196,4 +199,253 @@ func TestActiveResumeInheritsConfigurationWhenFieldsAreOmitted(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, original, agent.sessions[created.SessionId])
 	require.NoError(t, agent.Close())
+}
+
+func TestActiveNonCarrierMismatchDoesNotRetirePredecessor(t *testing.T) {
+	transport := newFakeClaudeTransport()
+	agent, _, _ := newFakeLifecycleAgent(t, transport)
+	response, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	original := agent.sessions[response.SessionId]
+
+	_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest(response.SessionId, t.TempDir()))
+	requireSessionResumeIncompatible(t, err, acpFieldSessionID)
+	require.Same(t, original, agent.sessions[response.SessionId])
+	require.Zero(t, transport.CloseCalls())
+	require.NoError(t, agent.Close())
+}
+
+func TestActiveCarrierChangeRetiresThenDurablyPublishesReplacement(t *testing.T) {
+	cwd := t.TempDir()
+	store := NewInMemorySessionStore()
+	originalOptions := ClaudeOptions{
+		Env:           map[string]string{"TOOL_TOKEN": "old"},
+		ExtraPathDirs: []string{"/opt/old-first", "/opt/old-second"},
+	}
+	requestedOptions := ClaudeOptions{
+		Env:           map[string]string{"TOOL_TOKEN": "new"},
+		ExtraPathDirs: []string{"/opt/new-second", "/opt/new-first"},
+	}
+
+	first := newFakeClaudeTransport()
+	second := newFakeClaudeTransport()
+	created := 0
+	agent := NewAgent(WithHome(t.TempDir()), WithSessionStore(store))
+	agent.setConnection(newRecordingAgentClient())
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		created++
+		if created == 1 {
+			return claude.NewClient(log, options, first)
+		}
+
+		require.Equal(t, 1, first.CloseCalls(), "the predecessor is contained before successor construction")
+
+		return claude.NewClient(log, options, second)
+	}
+
+	createdSession, err := agent.NewSession(t.Context(), NewSessionRequest(cwd, WithSessionMeta(originalOptions.Meta())))
+	require.NoError(t, err)
+	original := agent.sessions[createdSession.SessionId]
+	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(createdSession.SessionId)},
+		testStoredSessionEntries(t, originalOptions, []byte(`{"type":"user"}`))))
+
+	_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest(
+		createdSession.SessionId, cwd, WithSessionMeta(requestedOptions.Meta()),
+	))
+	require.NoError(t, err)
+	replacement := agent.sessions[createdSession.SessionId]
+	require.NotSame(t, original, replacement)
+	require.Equal(t, requestedOptions.Env, replacement.configuration.Env)
+	require.Equal(t, requestedOptions.ExtraPathDirs, replacement.configuration.ExtraPathDirs)
+	require.Equal(t, 1, first.CloseCalls())
+
+	entries, err := store.Load(t.Context(), SessionKey{SessionID: string(createdSession.SessionId)})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	configuration, err := unmarshalSessionConfiguration(entries[0])
+	require.NoError(t, err)
+	require.Equal(t, configurationFromOptions(requestedOptions), configuration)
+	require.JSONEq(t, `{"type":"user"}`, string(entries[1]))
+	require.NoError(t, agent.Close())
+}
+
+func TestFailedActiveCarrierSuccessorLeavesColdCommittedPredecessor(t *testing.T) {
+	cwd := t.TempDir()
+	store := NewInMemorySessionStore()
+	originalOptions := ClaudeOptions{Env: map[string]string{"TOOL_TOKEN": "old"}}
+	requestedOptions := ClaudeOptions{Env: map[string]string{"TOOL_TOKEN": "new"}}
+	first := newFakeClaudeTransport()
+	failed := newFakeClaudeTransport()
+	failed.startErr = errors.New("successor start failed")
+	retry := newFakeClaudeTransport()
+	transports := []*fakeClaudeTransport{first, failed, retry}
+	created := 0
+
+	agent := NewAgent(WithHome(t.TempDir()), WithSessionStore(store))
+	agent.setConnection(newRecordingAgentClient())
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		transport := transports[created]
+		created++
+
+		return claude.NewClient(log, options, transport)
+	}
+
+	response, err := agent.NewSession(t.Context(), NewSessionRequest(cwd, WithSessionMeta(originalOptions.Meta())))
+	require.NoError(t, err)
+	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(response.SessionId)},
+		testStoredSessionEntries(t, originalOptions, []byte(`{"type":"user"}`))))
+
+	_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest(
+		response.SessionId, cwd, WithSessionMeta(requestedOptions.Meta()),
+	))
+	require.ErrorContains(t, err, "successor start failed")
+	require.NotContains(t, agent.sessions, response.SessionId)
+	require.Equal(t, 1, first.CloseCalls())
+
+	entries, err := store.Load(t.Context(), SessionKey{SessionID: string(response.SessionId)})
+	require.NoError(t, err)
+	configuration, err := unmarshalSessionConfiguration(entries[0])
+	require.NoError(t, err)
+	require.Equal(t, configurationFromOptions(originalOptions), configuration)
+
+	_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest(response.SessionId, cwd))
+	require.NoError(t, err)
+	require.Equal(t, originalOptions.Env, agent.sessions[response.SessionId].configuration.Env)
+	require.NoError(t, agent.Close())
+}
+
+func TestReplacementConfigurationMustCommitBeforePublication(t *testing.T) {
+	cwd := t.TempDir()
+	backing := NewInMemorySessionStore()
+	store := &faultSessionStore{SessionStore: backing}
+	originalOptions := ClaudeOptions{ExtraPathDirs: []string{"/opt/old"}}
+	requestedOptions := ClaudeOptions{ExtraPathDirs: []string{"/opt/new"}}
+	first := newFakeClaudeTransport()
+	second := newFakeClaudeTransport()
+	created := 0
+
+	agent := NewAgent(WithHome(t.TempDir()), WithSessionStore(store))
+	agent.setConnection(newRecordingAgentClient())
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		created++
+		if created == 1 {
+			return claude.NewClient(log, options, first)
+		}
+
+		return claude.NewClient(log, options, second)
+	}
+
+	response, err := agent.NewSession(t.Context(), NewSessionRequest(cwd, WithSessionMeta(originalOptions.Meta())))
+	require.NoError(t, err)
+	require.NoError(t, backing.Append(t.Context(), SessionKey{SessionID: string(response.SessionId)},
+		testStoredSessionEntries(t, originalOptions, []byte(`{"type":"user"}`))))
+	store.replaceErr = errors.New("configuration commit failed")
+
+	_, err = agent.LoadSession(t.Context(), LoadSessionRequest(
+		response.SessionId, cwd, WithSessionMeta(requestedOptions.Meta()),
+	))
+	require.ErrorContains(t, err, "configuration commit failed")
+	require.NotContains(t, agent.sessions, response.SessionId)
+	require.Equal(t, 1, second.CloseCalls(), "an uncommitted successor is contained")
+
+	entries, err := backing.Load(t.Context(), SessionKey{SessionID: string(response.SessionId)})
+	require.NoError(t, err)
+	configuration, err := unmarshalSessionConfiguration(entries[0])
+	require.NoError(t, err)
+	require.Equal(t, configurationFromOptions(originalOptions), configuration)
+	require.NoError(t, agent.Close())
+}
+
+func TestSessionLifecycleFlightsSerializeByIDAndCleanCanceledWaiters(t *testing.T) {
+	agent := NewAgent()
+	_, releaseA, err := agent.acquireSessionLifecycle(t.Context(), "a")
+	require.NoError(t, err)
+
+	_, releaseB, err := agent.acquireSessionLifecycle(t.Context(), "b")
+	require.NoError(t, err, "an independent id progresses")
+	releaseB()
+
+	waitCtx, cancelWait := context.WithCancel(t.Context())
+	waitDone := make(chan error, 1)
+	go func() {
+		_, _, err := agent.acquireSessionLifecycle(waitCtx, "a")
+		waitDone <- err
+	}()
+	cancelWait()
+	require.ErrorIs(t, <-waitDone, context.Canceled)
+
+	entered := make(chan struct{})
+	released := make(chan struct{})
+	go func() {
+		_, release, err := agent.acquireSessionLifecycle(context.Background(), "a")
+		if err != nil {
+			return
+		}
+		close(entered)
+		<-released
+		release()
+	}()
+
+	select {
+	case <-entered:
+		t.Fatal("same-id lifecycle crossed its predecessor")
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	releaseA()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("same-id lifecycle did not enter after release")
+	}
+	close(released)
+
+	require.Eventually(t, func() bool {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+
+		return len(agent.lifecycleFlights) == 0
+	}, time.Second, time.Millisecond)
+	require.NoError(t, agent.Close())
+}
+
+func TestAgentCloseWaitsForLifecycleFlightAndRefusesLaterAdmission(t *testing.T) {
+	agent := NewAgent()
+	lifecycleCtx, release, err := agent.acquireSessionLifecycle(t.Context(), "session")
+	require.NoError(t, err)
+
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, _, acquireErr := agent.acquireSessionLifecycle(context.Background(), "session")
+		waiterDone <- acquireErr
+	}()
+	require.Eventually(t, func() bool {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+
+		return agent.lifecycleFlights["session"].waiters == 2
+	}, time.Second, time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- agent.Close() }()
+
+	select {
+	case <-lifecycleCtx.Done():
+		requireAgentClosedRefusal(t, context.Cause(lifecycleCtx))
+	case <-time.After(time.Second):
+		t.Fatal("agent close did not cancel the lifecycle owner")
+	}
+	requireAgentClosedRefusal(t, <-waiterDone)
+
+	select {
+	case <-closed:
+		t.Fatal("agent close crossed an active lifecycle flight")
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	release()
+	release()
+	require.NoError(t, <-closed)
+	_, _, err = agent.acquireSessionLifecycle(t.Context(), "session")
+	requireAgentClosedRefusal(t, err)
 }

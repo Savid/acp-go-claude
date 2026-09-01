@@ -87,6 +87,15 @@ func resumeSessionConfiguration(
 	return inheritSessionConfiguration(options, presence, stored), nil
 }
 
+func explicitCarrierChange(
+	options ClaudeOptions,
+	presence sessionConfigurationPresence,
+	accepted sessionConfiguration,
+) bool {
+	return presence.env && !maps.Equal(options.Env, accepted.Env) ||
+		presence.extraPathDirs && !slices.Equal(options.ExtraPathDirs, accepted.ExtraPathDirs)
+}
+
 func sessionResumeIncompatibleError(field string) error {
 	return acp.NewInvalidParams(map[string]any{
 		jsonFieldError: "session_resume_incompatible",

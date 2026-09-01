@@ -89,6 +89,10 @@ type Agent struct {
 	configurationErr    error
 	containmentErr      error
 	authorityFanoutDone chan struct{}
+	lifecycleFlights    map[acp.SessionId]*sessionLifecycleFlight
+	lifecycleCancels    map[uint64]context.CancelCauseFunc
+	lifecycleNext       uint64
+	lifecycleOps        sync.WaitGroup
 	constructions       sync.WaitGroup
 	closeOnce           sync.Once
 	closeErr            error
@@ -128,6 +132,8 @@ func NewAgent(opts ...Option) *Agent {
 		deleted:          make(map[acp.SessionId]struct{}),
 		positionEncoding: acp.PositionEncodingKindUtf16,
 		permissionCache:  make(map[acp.SessionId]map[string]string),
+		lifecycleFlights: make(map[acp.SessionId]*sessionLifecycleFlight),
+		lifecycleCancels: make(map[uint64]context.CancelCauseFunc),
 		activeLimitErr:   validateConcurrencyLimits(options.ConcurrencyLimits),
 		configurationErr: errors.Join(
 			validateHostAuthorityOptions(options),
@@ -190,10 +196,20 @@ func (a *Agent) Close() error {
 func (a *Agent) close() error {
 	a.mu.Lock()
 	a.closed = true
+
+	lifecycleCancels := make([]context.CancelCauseFunc, 0, len(a.lifecycleCancels))
+	for _, cancel := range a.lifecycleCancels {
+		lifecycleCancels = append(lifecycleCancels, cancel)
+	}
 	a.mu.Unlock()
+
+	for _, cancel := range lifecycleCancels {
+		cancel(acp.NewInvalidRequest(map[string]any{jsonFieldError: errAgentClosed.Error()}))
+	}
 
 	connectionErr := a.interruptActiveHostWrite()
 
+	a.lifecycleOps.Wait()
 	a.constructions.Wait()
 
 	a.mu.Lock()

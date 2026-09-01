@@ -19,7 +19,12 @@ func validateHostAuthorityOptions(options Options) error {
 			return ErrHostAuthorityUnavailable
 		}
 
-		if environment := options.HostAuthority.NativeEnvironment(); environment == nil {
+		environment, err := guardedNativeEnvironment(options.HostAuthority)
+		if err != nil {
+			return err
+		}
+
+		if environment == nil {
 			return fmt.Errorf("%w: native environment is unavailable", ErrHostAuthorityUnavailable)
 		}
 	}
@@ -35,6 +40,17 @@ func validateHostAuthorityOptions(options Options) error {
 	}
 
 	return nil
+}
+
+func guardedNativeEnvironment(authority HostAuthority) (environment map[string]string, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			environment = nil
+			err = fmt.Errorf("%w: native environment callback panicked: %T", ErrHostAuthorityUnavailable, recovered)
+		}
+	}()
+
+	return authority.NativeEnvironment(), nil
 }
 
 func privateAdapterEnvName(key string) bool {

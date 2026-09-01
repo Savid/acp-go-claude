@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -22,6 +23,79 @@ import (
 var (
 	mapMCPServersToClaude = mapper.MCPServersToClaude
 )
+
+type sessionLifecycleFlight struct {
+	admission chan struct{}
+	waiters   int
+}
+
+func (a *Agent) acquireSessionLifecycle(
+	ctx context.Context,
+	id acp.SessionId,
+) (context.Context, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+
+		return nil, nil, acp.NewInvalidRequest(map[string]any{jsonFieldError: errAgentClosed.Error()})
+	}
+
+	flight := a.lifecycleFlights[id]
+	if flight == nil {
+		flight = &sessionLifecycleFlight{admission: make(chan struct{}, 1)}
+		flight.admission <- struct{}{}
+
+		a.lifecycleFlights[id] = flight
+	}
+
+	lifecycleCtx, cancel := context.WithCancelCause(ctx)
+	a.lifecycleNext++
+	operation := a.lifecycleNext
+	flight.waiters++
+	a.lifecycleCancels[operation] = cancel
+	a.lifecycleOps.Add(1)
+	a.mu.Unlock()
+
+	var releaseOnce sync.Once
+
+	release := func(held bool) {
+		releaseOnce.Do(func() {
+			if held {
+				flight.admission <- struct{}{}
+			}
+
+			cancel(nil)
+			a.mu.Lock()
+			delete(a.lifecycleCancels, operation)
+
+			flight.waiters--
+			if flight.waiters == 0 && a.lifecycleFlights[id] == flight {
+				delete(a.lifecycleFlights, id)
+			}
+			a.mu.Unlock()
+			a.lifecycleOps.Done()
+		})
+	}
+
+	select {
+	case <-flight.admission:
+		if cause := context.Cause(lifecycleCtx); cause != nil {
+			release(true)
+
+			return nil, nil, cause
+		}
+
+		return lifecycleCtx, func() { release(true) }, nil
+	case <-lifecycleCtx.Done():
+		release(false)
+
+		return nil, nil, context.Cause(lifecycleCtx)
+	}
+}
 
 // NewSession creates and starts a Claude CLI session.
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (resp acp.NewSessionResponse, err error) {
@@ -86,11 +160,23 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}
 
 	presence := configurationPresence(params.Meta)
-	metaOptions = a.inheritActiveSessionConfiguration(params.SessionId, metaOptions, presence)
 
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.ResumeSessionResponse{}, validationErr
+	}
+
+	lifecycleCtx, releaseLifecycle, acquireErr := a.acquireSessionLifecycle(ctx, params.SessionId)
+	if acquireErr != nil {
+		return acp.ResumeSessionResponse{}, acquireErr
+	}
+	defer releaseLifecycle()
+
+	ctx = lifecycleCtx
+
+	predecessor := a.activeSession(params.SessionId)
+	if predecessor != nil {
+		metaOptions = inheritSessionConfiguration(metaOptions, presence, predecessor.configuration)
 	}
 
 	start := sessionStart{
@@ -114,6 +200,17 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return resp, nil
 	}
 
+	configurationChanged := predecessor != nil && carrierOnlySessionStartChange(start, presence, predecessor)
+	if predecessor != nil && !configurationChanged {
+		return acp.ResumeSessionResponse{}, sessionResumeIncompatibleError(acpFieldSessionID)
+	}
+
+	if predecessor != nil {
+		if retireErr := a.retireSessionPredecessor(ctx, params.SessionId, predecessor); retireErr != nil {
+			return acp.ResumeSessionResponse{}, retireErr
+		}
+	}
+
 	if openErr := a.ensureOpen(); openErr != nil {
 		return acp.ResumeSessionResponse{}, openErr
 	}
@@ -123,16 +220,24 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, storeErr
 	}
 
-	metaOptions, err = resumeSessionConfiguration(metaOptions, presence, stored.Configuration)
-	if err != nil {
-		return acp.ResumeSessionResponse{}, err
+	if !configurationChanged {
+		metaOptions, err = resumeSessionConfiguration(metaOptions, presence, stored.Configuration)
+		if err != nil {
+			return acp.ResumeSessionResponse{}, err
+		}
 	}
 
 	start.StoreEntries = stored.Entries
 	start.StoreConfigurationLoaded = true
 	start.MetaOptions = metaOptions
 
-	session, err := a.startAndStoreSession(ctx, params.SessionId, start)
+	session, err := a.startAndStoreSessionWithPrepublish(ctx, params.SessionId, start, func(session *agentSession) error {
+		if !configurationChanged {
+			return nil
+		}
+
+		return a.persistReplacementConfiguration(ctx, session, stored.Entries)
+	})
 	if err != nil {
 		if missingClaudeSessionError(err) {
 			return acp.ResumeSessionResponse{}, unknownSessionError()
@@ -168,15 +273,48 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	}
 
 	presence := configurationPresence(params.Meta)
-	metaOptions = a.inheritActiveSessionConfiguration(params.SessionId, metaOptions, presence)
 
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.LoadSessionResponse{}, validationErr
 	}
 
+	lifecycleCtx, releaseLifecycle, acquireErr := a.acquireSessionLifecycle(ctx, params.SessionId)
+	if acquireErr != nil {
+		return acp.LoadSessionResponse{}, acquireErr
+	}
+	defer releaseLifecycle()
+
+	ctx = lifecycleCtx
+
+	predecessor := a.activeSession(params.SessionId)
+	if predecessor != nil {
+		metaOptions = inheritSessionConfiguration(metaOptions, presence, predecessor.configuration)
+	}
+
 	if openErr := a.ensureOpen(); openErr != nil {
 		return acp.LoadSessionResponse{}, openErr
+	}
+
+	start := sessionStart{
+		Cwd:                   params.Cwd,
+		McpServers:            params.McpServers,
+		AdditionalDirectories: additionalDirectories,
+		ResumeID:              string(params.SessionId),
+		MetaOptions:           metaOptions,
+		RawMessages:           rawMessageConfigFromMeta(params.Meta),
+	}
+	active := a.activeSessionForStart(params.SessionId, start)
+
+	configurationChanged := predecessor != nil && carrierOnlySessionStartChange(start, presence, predecessor)
+	if predecessor != nil && active == nil && !configurationChanged {
+		return acp.LoadSessionResponse{}, sessionResumeIncompatibleError(acpFieldSessionID)
+	}
+
+	if predecessor != nil && active == nil {
+		if retireErr := a.retireSessionPredecessor(ctx, params.SessionId, predecessor); retireErr != nil {
+			return acp.LoadSessionResponse{}, retireErr
+		}
 	}
 
 	stored, err := a.storedSession(ctx, params.SessionId)
@@ -184,14 +322,16 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, err
 	}
 
-	metaOptions, err = resumeSessionConfiguration(metaOptions, presence, stored.Configuration)
-	if err != nil {
-		return acp.LoadSessionResponse{}, err
+	if !configurationChanged {
+		metaOptions, err = resumeSessionConfiguration(metaOptions, presence, stored.Configuration)
+		if err != nil {
+			return acp.LoadSessionResponse{}, err
+		}
 	}
 
 	storeEntries := stored.Entries
 
-	start := sessionStart{
+	start = sessionStart{
 		Cwd:                      params.Cwd,
 		McpServers:               params.McpServers,
 		AdditionalDirectories:    additionalDirectories,
@@ -202,36 +342,42 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		RawMessages:              rawMessageConfigFromMeta(params.Meta),
 	}
 
-	session := a.activeSessionForStart(params.SessionId, start)
-	startedSession := false
-
-	// A live session whose incarnation this adapter had to contain resumes
-	// nothing. The transcript this load would replay continues a projection the
-	// host has already been told has a hole in it, and the process behind that
-	// incarnation is gone or going.
-	if session != nil {
-		if failureErr := session.autonomousFailureError(); failureErr != nil {
+	if active != nil {
+		if failureErr := active.autonomousFailureError(); failureErr != nil {
 			return acp.LoadSessionResponse{}, failureErr
 		}
-	}
 
-	if session == nil {
-		session, err = a.startAndStoreSession(ctx, params.SessionId, start)
-		if err != nil {
-			if missingClaudeSessionError(err) {
-				return acp.LoadSessionResponse{}, unknownSessionError()
-			}
-
-			return acp.LoadSessionResponse{}, err
+		if replayErr := active.replayTranscriptEntries(ctx, storeEntries); replayErr != nil {
+			return acp.LoadSessionResponse{}, replayErr
 		}
 
-		startedSession = true
+		if updateErr := active.emitCurrentUsageUpdate(ctx); updateErr != nil {
+			return acp.LoadSessionResponse{}, updateErr
+		}
+
+		return acp.LoadSessionResponse{
+			Meta:          sessionLoadResponseMeta(active, metaOptions.ProviderAuth, false),
+			ConfigOptions: sessionConfigOptions(active),
+		}, nil
+	}
+
+	session, err := a.startAndStoreSessionWithPrepublish(ctx, params.SessionId, start, func(session *agentSession) error {
+		if !configurationChanged {
+			return nil
+		}
+
+		return a.persistReplacementConfiguration(ctx, session, stored.Entries)
+	})
+	if err != nil {
+		if missingClaudeSessionError(err) {
+			return acp.LoadSessionResponse{}, unknownSessionError()
+		}
+
+		return acp.LoadSessionResponse{}, err
 	}
 
 	if replayErr := session.replayTranscriptEntries(ctx, storeEntries); replayErr != nil {
-		if startedSession {
-			a.removeSession(ctx, params.SessionId, session)
-		}
+		a.removeSession(ctx, params.SessionId, session)
 
 		return acp.LoadSessionResponse{}, replayErr
 	}
@@ -241,7 +387,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	}
 
 	resp = acp.LoadSessionResponse{
-		Meta:          sessionLoadResponseMeta(session, metaOptions.ProviderAuth, startedSession),
+		Meta:          sessionLoadResponseMeta(session, metaOptions.ProviderAuth, true),
 		ConfigOptions: sessionConfigOptions(session),
 	}
 
@@ -385,6 +531,16 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 		return acp.CloseSessionResponse{}, lifecycleErr
 	}
 
+	lifecycleCtx, releaseLifecycle, acquireErr := a.acquireSessionLifecycle(ctx, params.SessionId)
+	if acquireErr != nil {
+		return acp.CloseSessionResponse{}, sessionCloseUnsettledError(
+			fmt.Errorf("%w: %w", errSessionCloseUnsettled, acquireErr),
+		)
+	}
+	defer releaseLifecycle()
+
+	ctx = lifecycleCtx
+
 	session, err := a.session(params.SessionId)
 	if err != nil {
 		return acp.CloseSessionResponse{}, err
@@ -429,6 +585,12 @@ func (a *Agent) UnstableDeleteSession(
 	if err := rejectLifecycleMeta(params.Meta); err != nil {
 		return acp.UnstableDeleteSessionResponse{}, err
 	}
+
+	ctx, releaseLifecycle, err := a.acquireSessionLifecycle(ctx, params.SessionId)
+	if err != nil {
+		return acp.UnstableDeleteSessionResponse{}, sessionDeleteTombstoneError(err)
+	}
+	defer releaseLifecycle()
 
 	a.mu.Lock()
 	session := a.sessions[params.SessionId]
@@ -775,6 +937,15 @@ func (a *Agent) startAndStoreSession(
 	id acp.SessionId,
 	start sessionStart,
 ) (*agentSession, error) {
+	return a.startAndStoreSessionWithPrepublish(ctx, id, start, nil)
+}
+
+func (a *Agent) startAndStoreSessionWithPrepublish(
+	ctx context.Context,
+	id acp.SessionId,
+	start sessionStart,
+	prepublish func(*agentSession) error,
+) (*agentSession, error) {
 	if err := a.beginSessionConstruction(); err != nil {
 		return nil, err
 	}
@@ -789,11 +960,74 @@ func (a *Agent) startAndStoreSession(
 		session.persistPermissionRules(ctx)
 	}
 
+	if prepublish != nil {
+		if err := prepublish(session); err != nil {
+			return nil, a.closeRejectedSession(ctx, session, "prepublish", err)
+		}
+	}
+
 	if err := a.storeStartedSession(ctx, session); err != nil {
 		return nil, err
 	}
 
 	return session, nil
+}
+
+func (a *Agent) persistReplacementConfiguration(
+	ctx context.Context,
+	session *agentSession,
+	storeEntries []SessionStoreEntry,
+) error {
+	configurationEntry, err := marshalSessionConfiguration(session.configuration)
+	if err != nil {
+		return err
+	}
+
+	store := a.sessionStore()
+	main := SessionKey{SessionID: string(session.id)}
+	replacements := []SessionStoreReplacement{{
+		Key:     main,
+		Entries: append([]SessionStoreEntry{configurationEntry}, cloneStoreEntries(storeEntries)...),
+	}}
+
+	listCtx, cancelList := context.WithTimeout(ctx, a.sessionStoreLoadTimeout())
+	listCtx, finishList := a.observe.StartSessionStore(listCtx, "list_subkeys")
+	subkeys, err := store.ListSubkeys(listCtx, main)
+	finishList(err)
+	cancelList()
+
+	if err != nil {
+		return fmt.Errorf("list session store subkeys: %w", err)
+	}
+
+	for _, subpath := range subkeys {
+		key := SessionKey{SessionID: string(session.id), Subpath: subpath}
+
+		subEntries, loadErr := a.loadStoreEntries(ctx, store, key)
+		if loadErr != nil {
+			return fmt.Errorf("load session store subkey %q: %w", subpath, loadErr)
+		}
+
+		replacements = append(replacements, SessionStoreReplacement{Key: key, Entries: subEntries})
+	}
+
+	replaceCtx, cancelReplace := context.WithTimeout(ctx, sessionSettlementTimeout)
+	replaceCtx, finishReplace := a.observe.StartSessionStore(replaceCtx, "replace")
+	err = store.Replace(replaceCtx, main, replacements)
+	finishReplace(err)
+	cancelReplace()
+
+	if err != nil {
+		return fmt.Errorf("replace session configuration: %w", err)
+	}
+
+	session.configurationStored = true
+	session.mirror.configurationMu.Lock()
+	session.mirror.configuration = session.configuration
+	session.mirror.configurationWritten = true
+	session.mirror.configurationMu.Unlock()
+
+	return nil
 }
 
 func (a *Agent) connection() agentClient {
@@ -860,20 +1094,48 @@ func (a *Agent) activeSessionForStart(id acp.SessionId, start sessionStart) *age
 	return session
 }
 
-func (a *Agent) inheritActiveSessionConfiguration(
-	id acp.SessionId,
-	options ClaudeOptions,
-	presence sessionConfigurationPresence,
-) ClaudeOptions {
+func (a *Agent) activeSession(id acp.SessionId) *agentSession {
 	a.mu.Lock()
-	session := a.sessions[id]
-	a.mu.Unlock()
+	defer a.mu.Unlock()
 
-	if session == nil {
-		return options
+	if a.isDeletedLocked(id) {
+		return nil
 	}
 
-	return inheritSessionConfiguration(options, presence, session.configuration)
+	return a.sessions[id]
+}
+
+func carrierOnlySessionStartChange(
+	start sessionStart,
+	presence sessionConfigurationPresence,
+	predecessor *agentSession,
+) bool {
+	if predecessor == nil || !explicitCarrierChange(start.MetaOptions, presence, predecessor.configuration) {
+		return false
+	}
+
+	accepted := start
+	accepted.MetaOptions.Env = cloneStringMap(predecessor.configuration.Env)
+	accepted.MetaOptions.ExtraPathDirs = slices.Clone(predecessor.configuration.ExtraPathDirs)
+
+	return sessionStartFingerprint(accepted) == predecessor.fingerprint
+}
+
+func (a *Agent) retireSessionPredecessor(ctx context.Context, id acp.SessionId, predecessor *agentSession) error {
+	closeErr := predecessor.Close(ctx)
+	a.recordContainmentError(closeErr)
+
+	if closeErr != nil {
+		if errors.Is(closeErr, errSessionCloseUnsettled) {
+			return sessionCloseUnsettledError(closeErr)
+		}
+
+		return closeErr
+	}
+
+	a.dropSession(ctx, id, predecessor)
+
+	return nil
 }
 
 func sessionStartFingerprint(start sessionStart) string {

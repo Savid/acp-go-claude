@@ -104,6 +104,12 @@ func finalizeSessionRuntimeResources(
 	imageScratchDir string,
 	materialized *materializedSession,
 ) error {
+	if errors.Is(runtimeErr, ErrContainmentIncomplete) ||
+		errors.Is(runtimeErr, ErrHostAuthorityUnavailable) ||
+		errors.Is(runtimeErr, ErrNativeTreeBusy) {
+		return runtimeErr
+	}
+
 	var materializedRemoveErr error
 	if materialized != nil {
 		materializedRemoveErr = materialized.Close()

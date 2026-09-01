@@ -39,6 +39,43 @@ func TestProviderNativeOptionsCurrentBehavior(t *testing.T) {
 	require.ErrorContains(t, err, "create scratch parent dir")
 }
 
+func TestAuthLoginBeginAdapterAndRetainedLoginEdges(t *testing.T) {
+	originalStart := authLoginStart
+	t.Cleanup(func() { authLoginStart = originalStart })
+
+	authLoginStart = func(context.Context, claude.Options) (*claude.AuthLogin, string, error) {
+		return nil, "", errTestRandom
+	}
+	_, _, err := authLoginBegin(t.Context(), claude.Options{})
+	require.ErrorIs(t, err, errTestRandom)
+
+	wantLogin := &claude.AuthLogin{}
+	authLoginStart = func(context.Context, claude.Options) (*claude.AuthLogin, string, error) {
+		return wantLogin, "https://example.test", nil
+	}
+	login, authorizeURL, err := authLoginBegin(t.Context(), claude.Options{})
+	require.NoError(t, err)
+	require.Same(t, wantLogin, login)
+	require.Equal(t, "https://example.test", authorizeURL)
+
+	broker := &providerAuth{agent: NewAgent()}
+	broker.logAuthLoginGrammar(t.Context(), errTestRandom)
+	broker.logAuthLoginGrammar(t.Context(), &claude.AuthLoginGrammarError{
+		Line: "open https://example.test/login?code=secret now",
+	})
+
+	loginHandle := &authLoginHandle{}
+	(*providerAuth)(nil).retainLogin(loginHandle)
+	broker.retainLogin(nil)
+	broker.retainLogin(loginHandle)
+	require.Contains(t, broker.retainedLogins, loginHandle)
+	(*providerAuth)(nil).releaseLogin(loginHandle)
+	broker.releaseLogin(nil)
+	broker.releaseLogin(loginHandle)
+	require.NotContains(t, broker.retainedLogins, loginHandle)
+	require.NoError(t, (*providerAuth)(nil).retryRetainedLogins())
+}
+
 func TestProviderNativeLegsFailClosedOnUnresolvableHome(t *testing.T) {
 	newAuthSeams(t)
 	broker, _ := newAuthBroker(t, WithHome(filepath.Join(t.TempDir(), "absent")))
@@ -107,6 +144,9 @@ func TestAccountReadingCurrentSignalIsClosed(t *testing.T) {
 func TestProviderNativeRemovalAndUserCurrentBehavior(t *testing.T) {
 	require.Equal(t, "overlay", authNativeUser(claude.Options{Env: map[string]string{"USER": "overlay"}}))
 	require.Equal(t, "ordinary", authNativeUser(claude.Options{OrdinaryEnvironment: map[string]string{"USER": "ordinary"}}))
+	require.Equal(t, "managed", authNativeUser(claude.Options{Authority: &claude.NativeAuthority{
+		NativeEnvironment: func() map[string]string { return map[string]string{"USER": "managed"} },
+	}}))
 	require.Empty(t, authNativeUser(claude.Options{}))
 
 	seams := newAuthSeams(t)

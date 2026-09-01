@@ -114,7 +114,7 @@ func marshalSessionConfiguration(configuration sessionConfiguration) (SessionSto
 		extraPathDirs = []string{}
 	}
 
-	entry, err := json.Marshal(struct {
+	entry, _ := json.Marshal(struct {
 		Type          string            `json:"type"`
 		Version       int               `json:"version"`
 		Env           map[string]string `json:"env"`
@@ -125,9 +125,6 @@ func marshalSessionConfiguration(configuration sessionConfiguration) (SessionSto
 		Env:           env,
 		ExtraPathDirs: extraPathDirs,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("encode session configuration: %w", err)
-	}
 
 	return entry, nil
 }
@@ -148,10 +145,7 @@ func unmarshalSessionConfiguration(entry SessionStoreEntry) (sessionConfiguratio
 			return sessionConfiguration{}, fmt.Errorf("decode session configuration field: %w", tokenErr)
 		}
 
-		name, ok := token.(string)
-		if !ok {
-			return sessionConfiguration{}, errors.New("session configuration field name must be a string")
-		}
+		name, _ := token.(string)
 
 		switch name {
 		case jsonFieldType, metaVersionKey, settingsFieldEnv, metaExtraPathDirsKey:
@@ -228,10 +222,7 @@ func decodeSessionConfigurationEnv(raw json.RawMessage) (map[string]string, erro
 			return nil, tokenErr
 		}
 
-		name, ok := token.(string)
-		if !ok {
-			return nil, errors.New("environment key must be a string")
-		}
+		name, _ := token.(string)
 
 		if _, duplicate := environment[name]; duplicate {
 			return nil, fmt.Errorf("duplicate environment key %q", name)

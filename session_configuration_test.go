@@ -51,12 +51,19 @@ func TestSessionConfigurationCodecIsExact(t *testing.T) {
 	require.Equal(t, configuration, decoded)
 
 	invalid := []string{
+		``,
+		`[]`,
+		`{"`,
+		`{"type":`,
+		`{"type":"acp_session_configuration"`,
 		`{}`,
+		`{"type":1,"version":1,"env":{},"extraPathDirs":[]}`,
 		`{"type":"acp_session_configuration","version":1,"env":{},"extraPathDirs":[],"unknown":true}`,
 		`{"type":"acp_session_configuration","type":"acp_session_configuration","version":1,"env":{},"extraPathDirs":[]}`,
 		`{"type":"acp_session_configuration","version":1.0,"env":{},"extraPathDirs":[]}`,
 		`{"type":"acp_session_configuration","version":2,"env":{},"extraPathDirs":[]}`,
 		`{"type":"acp_session_configuration","version":1,"env":null,"extraPathDirs":[]}`,
+		`{"type":"acp_session_configuration","version":1,"env":{},"extraPathDirs":null}`,
 		`{"type":"acp_session_configuration","version":1,"env":{"TOKEN":"a","TOKEN":"b"},"extraPathDirs":[]}`,
 		`{"type":"acp_session_configuration","version":1,"env":{"PATH":"/tmp"},"extraPathDirs":[]}`,
 		`{"type":"acp_session_configuration","version":1,"env":{},"extraPathDirs":["relative"]}`,
@@ -64,6 +71,24 @@ func TestSessionConfigurationCodecIsExact(t *testing.T) {
 	}
 	for _, value := range invalid {
 		_, err := unmarshalSessionConfiguration(json.RawMessage(value))
+		require.Error(t, err, value)
+	}
+}
+
+func TestSessionConfigurationEnvironmentDecoderIsExact(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{
+		``,
+		`[]`,
+		`{"`,
+		`{"TOKEN":`,
+		`{"TOKEN":"value"`,
+		`{"TOKEN":1}`,
+		`{"TOKEN":"one","TOKEN":"two"}`,
+		`{"TOKEN":"value"} true`,
+	} {
+		_, err := decodeSessionConfigurationEnv(json.RawMessage(value))
 		require.Error(t, err, value)
 	}
 }

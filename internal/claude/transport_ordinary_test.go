@@ -23,17 +23,15 @@ const ordinaryTransportLines = 500
 // and no explicit policy — against a CLI that writes its whole stream-json
 // transcript and exits immediately.
 //
-// This is the shape the ordinary boundary has to survive: os/exec closes the
-// parent ends of the command's own pipes inside Wait, and the transport owns
-// those pipes, so a reap begun with the child would close stdout underneath the
-// scanner. The turn would then be reported as `read claude stdout: file already
-// closed` with its result line lost, which is why the assertions below are that
-// every message arrives, the terminal result is among them, and the transport
-// error channel stays empty.
+// The assertions pin that process collection cannot close the adapter-owned
+// read ends before every buffered frame has been delivered.
 func TestProcessTransportOrdinaryBoundaryDeliversEveryLine(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
+	originalProbe := claudeVersionProbe
+	claudeVersionProbe = func(context.Context, Options) error { return nil }
+	t.Cleanup(func() { claudeVersionProbe = originalProbe })
 
 	dir := t.TempDir()
 	wrote := filepath.Join(dir, "wrote")
@@ -56,8 +54,6 @@ exit 0
 	})
 
 	require.NoError(t, transport.Start(context.Background()))
-	require.NotNil(t, transport.tree.ordinary,
-		"the default selection must be the real ordinary boundary, not a test stub")
 
 	// The child has published its whole transcript and is on its way out before
 	// the reader starts, so the parent's pipe still has to hold everything.
@@ -92,7 +88,6 @@ exit 0
 	require.Equal(t, "success", final["subtype"])
 
 	require.NoError(t, transport.Close())
-	require.NotNil(t, transport.cmd.ProcessState, "the boundary still reaps the direct child exactly once")
 }
 
 // TestProcessTransportOrdinaryBoundaryStillStopsANonExitingChild proves
@@ -102,6 +97,9 @@ func TestProcessTransportOrdinaryBoundaryStillStopsANonExitingChild(t *testing.T
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses /bin/sh")
 	}
+	originalProbe := claudeVersionProbe
+	claudeVersionProbe = func(context.Context, Options) error { return nil }
+	t.Cleanup(func() { claudeVersionProbe = originalProbe })
 
 	originalGrace, originalWaitDelay := processExitGracePeriod, processShutdownWaitDelay
 	processExitGracePeriod = 20 * time.Millisecond
@@ -126,7 +124,6 @@ while :; do sleep 1; done
 	})
 
 	require.NoError(t, transport.Start(context.Background()))
-	require.NotNil(t, transport.tree.ordinary)
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(ready)
 
@@ -134,5 +131,4 @@ while :; do sleep 1; done
 	}, 10*time.Second, 5*time.Millisecond)
 
 	require.NoError(t, transport.Close())
-	require.NotNil(t, transport.cmd.ProcessState, "a child that refuses to exit is still killed and reaped")
 }

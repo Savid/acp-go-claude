@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -58,7 +59,7 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	transport := newFakeClaudeTransport()
 	sessionClient := claude.NewClient(nil, claude.Options{}, transport)
 	require.NoError(t, sessionClient.Start(context.Background()))
-	transport.closeErr = errors.Join(errors.New("close failed"), claude.ErrProcessContainmentIncomplete)
+	transport.closeErr = errors.Join(errors.New("close failed"), ErrContainmentIncomplete)
 	agent.sessions["session-1"] = &agentSession{
 		agent:  agent,
 		id:     acp.SessionId("session-1"),
@@ -70,8 +71,7 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	// EOF input resolves conn.Done first; the deferred agent close must preserve
 	// the stronger process-tree proof failure.
 	err := Serve(context.Background(), bytes.NewBuffer(nil), io.Discard)
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, ErrProcessContainmentIncomplete, claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 
 	// A context that is already cancelled fails the pre-select guard before an
 	// agent is even constructed.
@@ -84,7 +84,7 @@ func TestServeDoneAndCloseErrorBranches(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	err = Serve(ctx, &blockingReader{}, io.Discard)
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	require.NotErrorIs(t, err, context.DeadlineExceeded)
 }
 
@@ -125,7 +125,7 @@ func TestAgentCloseSingleflightAndStickyContainment(t *testing.T) {
 		Transport: newFakeClaudeTransport(),
 		entered:   make(chan struct{}),
 		release:   make(chan struct{}),
-		err:       errors.Join(errors.New("cleanup failed"), claude.ErrProcessContainmentIncomplete),
+		err:       errors.Join(errors.New("cleanup failed"), ErrContainmentIncomplete),
 	}
 	client := claude.NewClient(nil, claude.Options{}, blocked)
 	require.NoError(t, client.Start(t.Context()))
@@ -142,10 +142,90 @@ func TestAgentCloseSingleflightAndStickyContainment(t *testing.T) {
 	close(blocked.release)
 
 	for range 2 {
-		require.ErrorIs(t, <-results, claude.ErrProcessContainmentIncomplete)
+		require.ErrorIs(t, <-results, ErrContainmentIncomplete)
 	}
-	require.Equal(t, int32(1), blocked.calls.Load())
-	require.ErrorIs(t, agent.Close(), claude.ErrProcessContainmentIncomplete)
+	require.Equal(t, int32(2), blocked.calls.Load(),
+		"the controller retries the failed transport rung after its forced shutdown")
+	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
+}
+
+func TestManagedAuthorityLossFansOutToTwoLiveSessions(t *testing.T) {
+	authority := newFakeHostAuthority()
+	// Session start consults the platform keystore for a resume credential
+	// through this authority on the builds that have one. That probe is not the
+	// authority loss this test drives, so it answers absence — the platform
+	// tool's empty successful read — while every other launch is denied.
+	authority.start = func(_ context.Context, request NativeRequest) (NativeProcess, error) {
+		if request.Executable != keychainToolExecutable {
+			return nil, ErrHostAuthorityUnavailable
+		}
+
+		return valueNativeProcess{}, nil
+	}
+	agent := NewAgent(
+		WithHome(t.TempDir()),
+		WithScratchDir(t.TempDir()),
+		WithHostAuthority(authority),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	agent.setConnection(newRecordingAgentClient())
+
+	var (
+		transportsMu sync.Mutex
+		transports   []*fakeClaudeTransport
+	)
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		transport := newFakeClaudeTransport()
+		transportsMu.Lock()
+		transports = append(transports, transport)
+		transportsMu.Unlock()
+
+		return claude.NewClient(log, options, transport)
+	}
+
+	for range 2 {
+		_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		require.NoError(t, err)
+	}
+
+	// The real usage-probe path reaches HostAuthority.StartNative after its
+	// temporary residence has been prepared. Its explicit authority-loss result
+	// must fence and close both already-live managed sessions.
+	_, err := agent.handleRateLimits(t.Context(), json.RawMessage(`{}`))
+	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+
+	agent.mu.Lock()
+	fanoutDone := agent.authorityFanoutDone
+	agent.mu.Unlock()
+	require.NotNil(t, fanoutDone)
+	select {
+	case <-fanoutDone:
+	case <-time.After(time.Second):
+		t.Fatal("authority-loss fanout did not close both sessions")
+	}
+
+	transportsMu.Lock()
+	require.Len(t, transports, 2)
+	closed := []int{transports[0].CloseCalls(), transports[1].CloseCalls()}
+	transportsMu.Unlock()
+	require.Equal(t, []int{1, 1}, closed)
+
+	agent.mu.Lock()
+	require.Empty(t, agent.sessions)
+	firstFanout := agent.authorityFanoutDone
+	agent.mu.Unlock()
+
+	late, lateCleanup := newStartedAgentSessionForTest(t, agent, "late-construction")
+	defer lateCleanup()
+	require.ErrorIs(t, agent.storeStartedSession(t.Context(), late), ErrHostAuthorityUnavailable)
+	require.True(t, late.isClosing(), "an in-flight construction cannot publish after authority loss")
+
+	agent.recordContainmentError(ErrContainmentIncomplete)
+	agent.mu.Lock()
+	require.Equal(t, firstFanout, agent.authorityFanoutDone)
+	agent.mu.Unlock()
+	require.ErrorIs(t, agent.ensureOpen(), ErrHostAuthorityUnavailable)
+	require.ErrorIs(t, agent.Close(), ErrHostAuthorityUnavailable)
 }
 
 func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {
@@ -156,7 +236,7 @@ func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {
 		Transport: newFakeClaudeTransport(),
 		entered:   make(chan struct{}),
 		release:   make(chan struct{}),
-		err:       claude.ErrProcessContainmentIncomplete,
+		err:       ErrContainmentIncomplete,
 	}
 	agent := NewAgent(
 		WithHome(t.TempDir()),
@@ -212,12 +292,12 @@ func TestCloseAndServeJoinAdmittedIncompleteSessionConstruction(t *testing.T) {
 	}
 
 	close(transport.release)
-	require.ErrorIs(t, <-newSessionErr, claude.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, <-closeErr, claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-newSessionErr, ErrContainmentIncomplete)
+	require.ErrorIs(t, <-closeErr, ErrContainmentIncomplete)
 	gotServeErr := <-serveErr
-	require.ErrorIs(t, gotServeErr, claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, gotServeErr, ErrContainmentIncomplete)
 	require.NotErrorIs(t, gotServeErr, context.Canceled)
-	require.ErrorIs(t, agent.Close(), claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
 }
 
 func TestCloseAndServeJoinAdmittedIncompletePromptRelaunch(t *testing.T) {
@@ -228,7 +308,7 @@ func TestCloseAndServeJoinAdmittedIncompletePromptRelaunch(t *testing.T) {
 		Transport: newFakeClaudeTransport(),
 		entered:   make(chan struct{}),
 		release:   make(chan struct{}),
-		err:       claude.ErrProcessContainmentIncomplete,
+		err:       ErrContainmentIncomplete,
 	}
 	agent := NewAgent(WithLogger(slog.New(slog.DiscardHandler)))
 	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
@@ -285,10 +365,10 @@ func TestCloseAndServeJoinAdmittedIncompletePromptRelaunch(t *testing.T) {
 	}
 
 	close(transport.release)
-	require.ErrorIs(t, <-relaunchErr, ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, <-closeErr, ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, <-serveErr, ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-relaunchErr, ErrContainmentIncomplete)
+	require.ErrorIs(t, <-closeErr, ErrContainmentIncomplete)
+	require.ErrorIs(t, <-serveErr, ErrContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
 }
 
 // TestFailedCloseRetainsItsSessionAndItsContainmentSurvivesTerminalServe pins
@@ -301,19 +381,33 @@ func TestFailedCloseRetainsItsSessionAndItsContainmentSurvivesTerminalServe(t *t
 	t.Cleanup(func() { newServeAgent = previous })
 
 	agent := NewAgent()
-	session := closeErrorAgentSession(t, claude.ErrProcessContainmentIncomplete, nil)
+	session := closeErrorAgentSession(t, ErrContainmentIncomplete)
 	session.agent = agent
 	agent.sessions["session-1"] = session
 
 	_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: "session-1"})
-	require.ErrorIs(t, err, claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
 	require.Contains(t, agent.sessions, acp.SessionId("session-1"),
 		"a close that contained nothing keeps the id its work is still addressable through")
 
 	newServeAgent = func(...Option) *Agent { return agent }
 	err = Serve(t.Context(), bytes.NewBuffer(nil), io.Discard)
-	require.ErrorIs(t, err, claude.ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, agent.Close(), claude.ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
+}
+
+func closeErrorAgentSession(t *testing.T, closeErr error) *agentSession {
+	t.Helper()
+
+	client := claude.NewClient(nil, claude.Options{}, &closeErrTransport{Transport: newFakeClaudeTransport(), err: closeErr})
+	require.NoError(t, client.Start(t.Context()))
+
+	return &agentSession{
+		agent:  NewAgent(),
+		id:     "session-1",
+		client: client,
+		turn:   make(chan struct{}, sessionTurnCapacity),
+	}
 }
 
 func TestAgentLifecycleWithFakeClaude(t *testing.T) {
@@ -441,4 +535,35 @@ type blockingReader struct{}
 
 func (*blockingReader) Read([]byte) (int, error) {
 	select {}
+}
+
+func TestAuthorityFailureFanoutLogsCloseFailure(t *testing.T) {
+	agent := NewAgent()
+	session, cleanup := newStartedAgentSessionForTest(t, agent, "failure")
+	defer cleanup()
+	session.client = startedClientWithCloseError(t, errors.New("close refused"))
+	done := make(chan struct{})
+	agent.closeAuthorityFailedSessions(map[acp.SessionId]*agentSession{session.id: session}, done)
+	<-done
+}
+
+func TestAgentCloseRetriesBusySession(t *testing.T) {
+	authority := residualCallbackAuthority()
+	reclaims := 0
+	authority.reclaim = func(context.Context, string) error {
+		reclaims++
+		if reclaims == 1 {
+			return ErrNativeTreeBusy
+		}
+
+		return nil
+	}
+	agent := NewAgent(WithHostAuthority(authority))
+	session, cleanup := newStartedAgentSessionForTest(t, agent, "busy-close")
+	defer cleanup()
+	root := t.TempDir()
+	session.materialized = &materializedSession{configDir: root, authority: authority, prepared: []string{root}}
+	agent.sessions[session.id] = session
+	require.NoError(t, agent.Close())
+	require.Equal(t, 2, reclaims)
 }

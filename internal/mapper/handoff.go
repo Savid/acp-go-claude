@@ -304,11 +304,12 @@ func handoffFilePath(uri *string, index int) (string, error) {
 		return "", handoffInputError(errInvalidHandoff, index, "handoff uri host is not local")
 	}
 
-	if !filepath.IsAbs(parsed.Path) {
+	hostPath := FileURIHostPath(parsed.Path)
+	if !filepath.IsAbs(hostPath) {
 		return "", handoffInputError(errInvalidHandoff, index, "handoff uri path must be absolute")
 	}
 
-	return filepath.Clean(parsed.Path), nil
+	return filepath.Clean(hostPath), nil
 }
 
 // verifyHandoffBytes fails closed: bytes that do not match the declared size

@@ -17,16 +17,15 @@ fi
 
 rm -f /canary/evidence/browser-escape /canary/evidence/exec.log /canary/evidence/test.log /canary/evidence/launchers
 set +e
-ACP_GO_CLAUDE_BROWSER_CANARY=1 \
-timeout --signal=TERM --kill-after=15 120 \
+ACP_GO_CLAUDE_BROWSER_CANARY=1 timeout --signal=TERM --kill-after=15 120 \
   strace -f -qq -e trace=execve,execveat -o /canary/evidence/exec.log \
-  /canary/browser-canary.test -test.run '^TestRealNativeBrowserContainment$' -test.v \
+  /canary/browser-canary.test -test.run '^TestRealNativeBrowserLaunchIsNeutralized$' -test.v \
   >/canary/evidence/test.log 2>&1
 status=$?
 set -e
 cat /canary/evidence/test.log
 test "$status" -eq 0
-test "$(grep -c '^--- PASS: TestRealNativeBrowserContainment' /canary/evidence/test.log || true)" -eq 1
+test "$(grep -c '^--- PASS: TestRealNativeBrowserLaunchIsNeutralized' /canary/evidence/test.log || true)" -eq 1
 ! grep -q 'testing: warning: no tests to run' /canary/evidence/test.log
 grep -q 'execve("/usr/local/bin/claude"' /canary/evidence/exec.log
 ! grep -Eq 'execveat\([^,]+, "", .*AT_EMPTY_PATH' /canary/evidence/exec.log

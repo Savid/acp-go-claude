@@ -78,6 +78,7 @@ func TestNativeTurnFailureClassification(t *testing.T) {
 	t.Parallel()
 
 	require.Nil(t, nativeTurnFailure(nil))
+	requireTurnFailure(t, nativeTurnFailure(context.Canceled), -32603, failureCauseTransport, context.Canceled.Error())
 	requireTurnFailure(t, nativeTurnFailure(context.DeadlineExceeded), -32603, failureCauseTransport, context.DeadlineExceeded.Error())
 	requireTurnFailure(t, nativeTurnFailure(claude.ErrProcessExited), -32603, failureCauseProcessExit, "claude exited")
 	data := requireTurnFailure(t, nativeTurnFailure(errors.New("provider-store-tool-user-secret")), -32603,
@@ -322,14 +323,11 @@ func TestCancelledPromptRejectsUnprovenNativeTreeSettlement(t *testing.T) {
 	transport := newFakeClaudeTransport()
 	client := claude.NewClient(nil, claude.Options{}, &closeErrTransport{
 		Transport: transport,
-		err:       errors.Join(errors.New("containment probe failed"), claude.ErrProcessContainmentIncomplete),
+		err:       errors.Join(errors.New("containment probe failed"), ErrContainmentIncomplete),
 	})
 	require.NoError(t, client.Start(t.Context()))
 	session.client = client
 	session.canRelaunch = true
-	releases := 0
-	session.nativeRootRelease = func() { releases++ }
-
 	transport.queryMsgs = nil
 	var cancelErr error
 	transport.onQuery = func() {
@@ -340,9 +338,8 @@ func TestCancelledPromptRejectsUnprovenNativeTreeSettlement(t *testing.T) {
 		t.Context(),
 		TextPromptRequest(session.id, "test-turn", "run the long tool"),
 	)
-	require.ErrorIs(t, cancelErr, claude.ErrProcessContainmentIncomplete)
-	requireTurnFailure(t, err, -32603, failureCauseTransport, claude.ErrProcessContainmentIncomplete.Error())
-	require.Zero(t, releases)
+	require.ErrorIs(t, cancelErr, ErrContainmentIncomplete)
+	requireTurnFailure(t, err, -32603, failureCauseTransport, ErrContainmentIncomplete.Error())
 	require.False(t, session.canRelaunch)
 }
 
@@ -353,7 +350,7 @@ func TestTimeoutRejectsUnprovenNativeTreeSettlement(t *testing.T) {
 	transport := newFakeClaudeTransport()
 	client := claude.NewClient(nil, claude.Options{}, &closeErrTransport{
 		Transport: transport,
-		err:       errors.Join(errors.New("containment probe failed"), claude.ErrProcessContainmentIncomplete),
+		err:       errors.Join(errors.New("containment probe failed"), ErrContainmentIncomplete),
 	})
 	require.NoError(t, client.Start(t.Context()))
 	session.client = client
@@ -365,7 +362,7 @@ func TestTimeoutRejectsUnprovenNativeTreeSettlement(t *testing.T) {
 		t.Context(),
 		TextPromptRequest(session.id, "test-turn", "run the long tool"),
 	)
-	requireTurnFailure(t, err, -32603, failureCauseTransport, claude.ErrProcessContainmentIncomplete.Error())
+	requireTurnFailure(t, err, -32603, failureCauseTransport, ErrContainmentIncomplete.Error())
 }
 
 func TestParentCancelRejectsUnprovenNativeTreeSettlement(t *testing.T) {
@@ -375,7 +372,7 @@ func TestParentCancelRejectsUnprovenNativeTreeSettlement(t *testing.T) {
 	transport := newFakeClaudeTransport()
 	client := claude.NewClient(nil, claude.Options{}, &closeErrTransport{
 		Transport: transport,
-		err:       errors.Join(errors.New("containment probe failed"), claude.ErrProcessContainmentIncomplete),
+		err:       errors.Join(errors.New("containment probe failed"), ErrContainmentIncomplete),
 	})
 	require.NoError(t, client.Start(t.Context()))
 	session.client = client
@@ -388,7 +385,7 @@ func TestParentCancelRejectsUnprovenNativeTreeSettlement(t *testing.T) {
 		promptCtx,
 		TextPromptRequest(session.id, "test-turn", "run the long tool"),
 	)
-	requireTurnFailure(t, err, -32603, failureCauseTransport, claude.ErrProcessContainmentIncomplete.Error())
+	requireTurnFailure(t, err, -32603, failureCauseTransport, ErrContainmentIncomplete.Error())
 }
 
 // T6 — with a turn deadline set, a silent-hang harness fails with cause timeout

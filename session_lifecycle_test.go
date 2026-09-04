@@ -1,21 +1,10 @@
 package claudeacp
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
-	"strconv"
-	"strings"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -372,20 +361,6 @@ func newRoutedCancelSessionForTest(t *testing.T) (*agentSession, *fakeClaudeTran
 	return session, transport
 }
 
-// interruptCalls counts the native interrupt control requests the session sent.
-func interruptCalls(transport *fakeClaudeTransport) int {
-	calls := 0
-
-	for _, sent := range transport.Sent() {
-		request, ok := sent.(claude.ControlRequest)
-		if ok && request.Request["subtype"] == "interrupt" {
-			calls++
-		}
-	}
-
-	return calls
-}
-
 func TestSessionCloseResolvesPendingInteractionsFirst(t *testing.T) {
 	ctx := context.Background()
 	agent := NewAgent()
@@ -429,395 +404,6 @@ func TestRegisterElicitationCancellation(t *testing.T) {
 	preCancelledCtx, preFinish := session.registerElicitation(ctx, lifecycleInteractionOwner{})
 	defer preFinish()
 	require.Error(t, preCancelledCtx.Err())
-}
-
-const processContainmentHelperArg = "--acp-go-claude-containment-helper"
-
-var actualProcessFixtureUID atomic.Uint32
-
-// TestCancelContainsActualNativeDescendants exercises the complete adapter
-// cancellation path against a real OS process tree. The protocol stand-in
-// deliberately acknowledges interrupt without stopping a setsid tool process
-// that ignores INT and TERM; only transport containment can make this test pass.
-func TestProcessIsolationActualCancelContainsNativeDescendants(t *testing.T) {
-	fixture := newActualProcessFixture(t)
-	agent, sessionID := fixture.agent, fixture.session.id
-
-	promptResult := make(chan struct {
-		response acp.PromptResponse
-		err      error
-	}, 1)
-	go func() {
-		response, promptErr := agent.Prompt(
-			context.Background(),
-			TextPromptRequest(sessionID, "turn-cancel", "run the long tool"),
-		)
-		promptResult <- struct {
-			response acp.PromptResponse
-			err      error
-		}{response: response, err: promptErr}
-	}()
-
-	childPID := fixture.waitForChild(t)
-	require.NoError(t, agent.Cancel(t.Context(), CancelRequest(sessionID, "turn-cancel")))
-	require.False(t, unixProcessExists(childPID),
-		"session/cancel returned while the native tool descendant was still alive")
-	fixture.assertNoDelayedSideEffect(t)
-
-	select {
-	case result := <-promptResult:
-		require.NoError(t, result.err)
-		require.Equal(t, acp.StopReasonCancelled, result.response.StopReason)
-	case <-time.After(5 * time.Second):
-		t.Fatal("cancelled prompt did not settle")
-	}
-
-	fixture.assertLazyResume(t, "turn-resume")
-}
-
-func TestProcessIsolationActualTimeoutContainsNativeDescendants(t *testing.T) {
-	fixture := newActualProcessFixture(t, WithTurnTimeout(500*time.Millisecond))
-
-	result := make(chan error, 1)
-	go func() {
-		_, err := fixture.agent.Prompt(
-			context.Background(),
-			TextPromptRequest(fixture.session.id, "turn-timeout", "run the long tool"),
-		)
-		result <- err
-	}()
-
-	childPID := fixture.waitForChild(t)
-	select {
-	case err := <-result:
-		requireTurnFailure(t, err, -32603, failureCauseTimeout, "")
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed-out prompt did not settle")
-	}
-	require.False(t, unixProcessExists(childPID),
-		"timeout settled while the native tool descendant was still alive")
-	fixture.assertNoDelayedSideEffect(t)
-	fixture.assertLazyResume(t, "turn-after-timeout")
-}
-
-func TestProcessIsolationActualParentCancelContainsNativeDescendants(t *testing.T) {
-	fixture := newActualProcessFixture(t)
-	promptCtx, cancelPrompt := context.WithCancel(context.Background())
-
-	result := make(chan struct {
-		response acp.PromptResponse
-		err      error
-	}, 1)
-	go func() {
-		response, err := fixture.agent.Prompt(
-			promptCtx,
-			TextPromptRequest(fixture.session.id, "turn-parent-cancel", "run the long tool"),
-		)
-		result <- struct {
-			response acp.PromptResponse
-			err      error
-		}{response: response, err: err}
-	}()
-
-	childPID := fixture.waitForChild(t)
-	cancelPrompt()
-
-	select {
-	case settled := <-result:
-		require.NoError(t, settled.err)
-		require.Equal(t, acp.StopReasonCancelled, settled.response.StopReason)
-	case <-time.After(5 * time.Second):
-		t.Fatal("parent-cancelled prompt did not settle")
-	}
-	require.False(t, unixProcessExists(childPID),
-		"parent cancellation settled while the native tool descendant was still alive")
-	fixture.assertNoDelayedSideEffect(t)
-	fixture.assertLazyResume(t, "turn-after-parent-cancel")
-}
-
-type actualProcessFixture struct {
-	agent        *Agent
-	session      *agentSession
-	pidFile      string
-	argsFile     string
-	triggerFile  string
-	sentinelFile string
-}
-
-func newActualProcessFixture(t *testing.T, agentOptions ...Option) actualProcessFixture {
-	t.Helper()
-	if runtime.GOOS != "linux" {
-		t.Skip("authoritative detached-descendant containment requires Linux")
-	}
-	if os.Geteuid() != 0 {
-		t.Skip("authoritative detached-descendant containment requires root")
-	}
-	selfNamespace, selfErr := os.Readlink("/proc/self/ns/pid")
-	initNamespace, initErr := os.Readlink("/proc/1/ns/pid")
-	if selfErr != nil || initErr != nil || selfNamespace != initNamespace ||
-		selfNamespace != "pid:[4026531836]" && os.Getpid() != 1 {
-		t.Skip("authoritative detached-descendant containment requires the initial PID namespace")
-	}
-
-	uid := 64300 + actualProcessFixtureUID.Add(1)
-	gid := uid
-	dir := createActualProcessStateRoot(t, uid, gid)
-	pidFile := filepath.Join(dir, "child.pid")
-	launchFile := filepath.Join(dir, "launch-count")
-	argsFile := filepath.Join(dir, "launch-args")
-	triggerFile := filepath.Join(dir, "delayed-trigger")
-	sentinelFile := filepath.Join(dir, "delayed-sentinel")
-	executable, err := os.Executable()
-	require.NoError(t, err)
-	executablePayload, err := os.ReadFile(executable)
-	require.NoError(t, err)
-	helperExecutable := filepath.Join(dir, "claude-containment-helper.test")
-	require.NoError(t, os.WriteFile(helperExecutable, executablePayload, 0o700))
-	require.NoError(t, os.Chown(helperExecutable, int(uid), int(gid)))
-
-	wrapper := filepath.Join(dir, "claude")
-	wrapperBody := fmt.Sprintf(
-		"#!/bin/sh\nexec %s -test.run '^TestClaudeProcessContainmentHelper$' -- %s \"$@\"\n",
-		strconv.Quote(helperExecutable), processContainmentHelperArg,
-	)
-	require.NoError(t, os.WriteFile(wrapper, []byte(wrapperBody), 0o700))
-	require.NoError(t, os.Chown(wrapper, int(uid), int(gid)))
-
-	agent := NewAgent(agentOptions...)
-	agent.setConnection(newRecordingAgentClient())
-	sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
-	options := claude.Options{
-		CLIPath: wrapper, Cwd: dir, SessionID: string(sessionID),
-		ProcessIsolation: &claude.ProcessIsolation{
-			UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin"},
-			StandaloneOwnerID:   "claude-session-containment-" + strconv.FormatUint(uint64(uid), 10),
-			StandaloneStateRoot: dir,
-		},
-		Env: map[string]string{
-			"ACP_TEST_CHILD_PID":    pidFile,
-			"ACP_TEST_LAUNCH_COUNT": launchFile,
-			"ACP_TEST_LAUNCH_ARGS":  argsFile,
-			"ACP_TEST_TRIGGER":      triggerFile,
-			"ACP_TEST_SENTINEL":     sentinelFile,
-		},
-	}
-	client := agent.newClaudeClient(agent.log, options)
-	require.NoError(t, client.Start(t.Context()))
-
-	session := &agentSession{
-		agent:             agent,
-		id:                sessionID,
-		cwd:               dir,
-		client:            client,
-		clientOptions:     options,
-		canRelaunch:       true,
-		turn:              make(chan struct{}, sessionTurnCapacity),
-		mirror:            newSessionMirror(agent.log, nil, dir, nil),
-		contextWindowSize: 200000,
-	}
-	agent.mu.Lock()
-	agent.sessions[sessionID] = session
-	agent.mu.Unlock()
-	t.Cleanup(func() { _ = session.Close(context.Background()) })
-
-	return actualProcessFixture{
-		agent: agent, session: session, pidFile: pidFile,
-		argsFile: argsFile, triggerFile: triggerFile, sentinelFile: sentinelFile,
-	}
-}
-
-func createActualProcessStateRoot(t *testing.T, uid, gid uint32) string {
-	t.Helper()
-	base := "/var/lib/acp-go-claude-session-test"
-	require.NoError(t, os.MkdirAll(base, 0o711))
-	require.NoError(t, os.Chmod(base, 0o711))
-	info, err := os.Stat(base)
-	require.NoError(t, err)
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	require.True(t, ok)
-	require.True(t, info.IsDir())
-	require.Equal(t, os.FileMode(0o711), info.Mode().Perm())
-	require.Equal(t, uint32(0), stat.Uid)
-	require.Equal(t, uint32(0), stat.Gid)
-
-	dir := filepath.Join(base, strconv.FormatUint(uint64(uid), 10))
-	require.NoError(t, os.MkdirAll(dir, 0o700))
-	require.NoError(t, os.Chown(dir, int(uid), int(gid)))
-	require.NoError(t, os.Chmod(dir, 0o700))
-	for _, name := range []string{"child.pid", "launch-count", "launch-args", "delayed-trigger", "delayed-sentinel", "claude", "claude-containment-helper.test"} {
-		err = os.Remove(filepath.Join(dir, name))
-		require.True(t, err == nil || errors.Is(err, os.ErrNotExist), "remove stale fixture file %q: %v", name, err)
-	}
-
-	return dir
-}
-
-func (f actualProcessFixture) waitForChild(t *testing.T) int {
-	t.Helper()
-	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(f.pidFile)
-
-		return statErr == nil
-	}, 5*time.Second, 10*time.Millisecond)
-	raw, err := os.ReadFile(f.pidFile)
-	require.NoError(t, err)
-	fields := strings.Fields(string(raw))
-	require.Len(t, fields, 6)
-	values := make([]int, len(fields))
-	for index, field := range fields {
-		values[index], err = strconv.Atoi(field)
-		require.NoError(t, err)
-	}
-	childPID, childPGID, childSID := values[0], values[1], values[2]
-	rootPID, rootPGID, rootSID := values[3], values[4], values[5]
-	require.True(t, unixProcessExists(childPID))
-	require.Equal(t, childPID, childPGID, "setsid child must lead its own process group")
-	require.Equal(t, childPID, childSID, "setsid child must lead its own session")
-	require.NotEqual(t, rootPID, childPID)
-	require.NotEqual(t, rootPGID, childPGID)
-	require.NotEqual(t, rootSID, childSID)
-
-	return childPID
-}
-
-func (f actualProcessFixture) assertNoDelayedSideEffect(t *testing.T) {
-	t.Helper()
-	require.NoError(t, os.WriteFile(f.triggerFile, []byte("settled"), 0o600))
-	time.Sleep(500 * time.Millisecond)
-	require.NoFileExists(t, f.sentinelFile,
-		"a detached native descendant performed a delayed side effect after settlement")
-}
-
-func (f actualProcessFixture) assertLazyResume(t *testing.T, turnNonce string) {
-	t.Helper()
-	response, err := f.agent.Prompt(
-		t.Context(),
-		TextPromptRequest(f.session.id, turnNonce, "continue after containment"),
-	)
-	require.NoError(t, err)
-	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
-
-	launchArgs, err := os.ReadFile(f.argsFile)
-	require.NoError(t, err)
-	lastLaunch := strings.TrimSpace(string(launchArgs))
-	require.Contains(t, lastLaunch, "--resume "+string(f.session.id))
-	require.NotContains(t, lastLaunch, "--fork-session")
-}
-
-func unixProcessExists(pid int) bool {
-	return exec.Command("sh", "-c", "kill -0 \"$1\"", "sh", strconv.Itoa(pid)).Run() == nil
-}
-
-// TestClaudeProcessContainmentHelper is executed through a shell wrapper as a
-// provider-free Claude control-protocol stand-in. Its first launch leaks an
-// interrupt-ignoring native tool descendant; its resumed launch completes.
-func TestClaudeProcessContainmentHelper(t *testing.T) {
-	args := helperArgumentsAfterSeparator(os.Args)
-	if len(args) == 0 || args[0] != processContainmentHelperArg {
-		return
-	}
-	args = args[1:]
-
-	if len(args) == 1 && args[0] == "--version" {
-		fmt.Println("2.1.210 (Claude Code)")
-		os.Exit(0)
-	}
-
-	launch := incrementProcessTestLaunch(os.Getenv("ACP_TEST_LAUNCH_COUNT"))
-	_ = os.WriteFile(os.Getenv("ACP_TEST_LAUNCH_ARGS"), []byte(strings.Join(args, " ")), 0o600)
-
-	scanner := bufio.NewScanner(os.Stdin)
-	encoder := json.NewEncoder(os.Stdout)
-	for scanner.Scan() {
-		var message map[string]any
-		if json.Unmarshal(scanner.Bytes(), &message) != nil {
-			continue
-		}
-
-		switch message["type"] {
-		case "control_request":
-			request, _ := message["request"].(map[string]any)
-			subtype, _ := request["subtype"].(string)
-			payload := map[string]any{}
-
-			switch subtype {
-			case "initialize":
-				payload = map[string]any{
-					"models": []any{map[string]any{"value": "sonnet", "displayName": "Sonnet"}},
-				}
-			case "get_context_usage":
-				payload = map[string]any{"totalTokens": 1, "maxTokens": 200000}
-			}
-
-			_ = encoder.Encode(map[string]any{
-				"type": "control_response",
-				"response": map[string]any{
-					"request_id": message["request_id"],
-					"subtype":    "success",
-					"response":   payload,
-				},
-			})
-		case "user":
-			if launch == 1 {
-				_ = startDetachedContainmentChild(
-					os.Args[0],
-					os.Getenv("ACP_TEST_CHILD_PID"),
-					os.Getenv("ACP_TEST_TRIGGER"),
-					os.Getenv("ACP_TEST_SENTINEL"),
-				)
-
-				continue
-			}
-
-			_ = encoder.Encode(map[string]any{
-				"type":        "result",
-				"subtype":     "success",
-				"is_error":    false,
-				"stop_reason": "end_turn",
-			})
-		}
-	}
-
-	os.Exit(0)
-}
-
-func helperArgumentsAfterSeparator(args []string) []string {
-	for index, arg := range args {
-		if arg == "--" {
-			return args[index+1:]
-		}
-	}
-
-	return nil
-}
-
-func incrementProcessTestLaunch(path string) int {
-	launch := 0
-	if raw, err := os.ReadFile(path); err == nil {
-		launch, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
-	}
-
-	launch++
-	_ = os.WriteFile(path, []byte(strconv.Itoa(launch)), 0o600)
-
-	return launch
-}
-
-// closeHookTransport runs a hook at the moment the native transport is torn
-// down, which is how these tests linearize a same-id install against a close
-// that is already running.
-type closeHookTransport struct {
-	claude.Transport
-
-	onClose func()
-}
-
-func (t *closeHookTransport) Close() error {
-	if t.onClose != nil {
-		t.onClose()
-	}
-
-	return t.Transport.Close()
 }
 
 func newCloseStateSession(t *testing.T, transport claude.Transport) *agentSession {
@@ -892,8 +478,7 @@ func TestSessionCloseWaitIsBoundedOnlyByItsCaller(t *testing.T) {
 func newSettlementBarrierSession(t *testing.T) (*agentSession, *fakeClaudeTransport, *recordingAgentClient, *sessionStream) {
 	t.Helper()
 
-	agent := NewAgent()
-	agent.containmentMode = RuntimeContainmentAuthoritative
+	agent := NewAgent(WithHostAuthority(newFakeHostAuthority()))
 	conn := newRecordingAgentClient()
 	agent.setConnection(conn)
 	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
@@ -1004,16 +589,8 @@ func TestSessionCloseExpiryNeverRacesSettlement(t *testing.T) {
 // fork are all refused, and no replacement native process is started.
 func TestClosedSessionRefusesEveryDoor(t *testing.T) {
 	created := 0
-	acquires := 0
-	releases := 0
 
-	agent := NewAgent(WithHome(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
-		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-			acquires++
-
-			return func() { releases++ }, nil
-		},
-	}))
+	agent := NewAgent(WithHome(t.TempDir()))
 	agent.setConnection(newRecordingAgentClient())
 	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
 		created++
@@ -1034,7 +611,7 @@ func TestClosedSessionRefusesEveryDoor(t *testing.T) {
 	_, err = session.Prompt(t.Context(), TextPromptRequest(session.id, "test-turn", "hello"))
 	requireUnknownSession(t, err)
 
-	requireUnknownSession(t, session.relaunchClient(t.Context(), nil, nil, session.clientOptions))
+	requireUnknownSession(t, session.relaunchClient(t.Context(), nil, session.clientOptions))
 
 	session.mu.Lock()
 	session.mcpRefreshPending = true
@@ -1043,10 +620,8 @@ func TestClosedSessionRefusesEveryDoor(t *testing.T) {
 
 	require.Nil(t, agent.activeSessionForStart(response.SessionId, start))
 
-	// No door started a replacement process, and the admission the session held
-	// was returned exactly once.
+	// No door started a replacement process.
 	require.Equal(t, 1, created)
-	require.Equal(t, acquires, releases)
 }
 
 func TestRelaunchStopsAfterLifecycleRetirementFailure(t *testing.T) {
@@ -1061,24 +636,16 @@ func TestRelaunchStopsAfterLifecycleRetirementFailure(t *testing.T) {
 	require.NoError(t, err)
 	conn.sessionUpdateErr = errors.New("retirement delivery failed")
 
-	err = session.relaunchClient(t.Context(), session.currentClient(), nil, session.clientOptions)
+	err = session.relaunchClient(t.Context(), session.currentClient(), session.clientOptions)
 	require.ErrorContains(t, err, "lifecycle delivery failed")
 }
 
 // TestRelaunchThatLosesToCloseLeavesNoNativeProcess proves a replacement that
 // reaches publication after close begins is contained and never installed.
 func TestRelaunchThatLosesToCloseLeavesNoNativeProcess(t *testing.T) {
-	acquires := 0
-	releases := 0
 	replacement := newFakeClaudeTransport()
 
-	agent := NewAgent(WithHome(t.TempDir()), WithRuntimeResourceHooks(RuntimeResourceHooks{
-		AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-			acquires++
-
-			return func() { releases++ }, nil
-		},
-	}))
+	agent := NewAgent(WithHome(t.TempDir()))
 	agent.setConnection(newRecordingAgentClient())
 	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
 		return claude.NewClient(log, options, newFakeClaudeTransport())
@@ -1101,11 +668,6 @@ func TestRelaunchThatLosesToCloseLeavesNoNativeProcess(t *testing.T) {
 
 	requireUnknownSession(t, session.ensureClientAlive(t.Context()))
 	require.Equal(t, 1, replacement.CloseCalls())
-	require.Equal(t, acquires, releases)
-
-	session.mu.Lock()
-	require.Nil(t, session.nativeRootRelease)
-	session.mu.Unlock()
 }
 
 // TestCloseNeverEvictsAReplacementUnderTheSameID proves removal is
@@ -1364,4 +926,72 @@ func TestRelaunchReportsAFailedCatalogEmission(t *testing.T) {
 	require.ErrorIs(t, session.ensureClientAlive(ctx), emitErr)
 	require.True(t, session.client.Alive(), "the replacement is installed; only the notification failed")
 	require.Empty(t, session.advertisedCommands, "an unreceived snapshot advertises nothing")
+}
+
+func TestSessionLifecycleResidualBranches(t *testing.T) {
+	agent := NewAgent()
+	agent.closed = true
+	session := &agentSession{agent: agent, mcpRefreshPending: true, canRelaunch: true}
+	require.Error(t, session.refreshMCPRegistry(t.Context()))
+
+	cancelled := false
+	session = &agentSession{cancel: func() { cancelled = true }}
+	session.fenceAuthorityFailure()
+	require.True(t, cancelled)
+	require.True(t, session.closing)
+}
+
+func TestRefreshMCPRegistryAndRelaunchResidualBranches(t *testing.T) {
+	t.Run("prompt refresh failure", func(t *testing.T) {
+		agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+		session := newSessionForTransport(t, agent, "prompt-refresh", newFakeClaudeTransport())
+		session.mcpRefreshPending = true
+		session.canRelaunch = true
+		session.client = startedClientWithCloseError(t, ErrContainmentIncomplete)
+		_, err := session.Prompt(t.Context(), TextPromptRequest(session.id, "refresh-turn", "hello"))
+		require.ErrorContains(t, err, ErrContainmentIncomplete.Error())
+	})
+
+	t.Run("successful refresh", func(t *testing.T) {
+		first := newFakeClaudeTransport()
+		second := newFakeClaudeTransport()
+		agent, _, _ := newFakeLifecycleAgent(t, first)
+		agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+			return claude.NewClient(log, options, second)
+		}
+		session := newSessionForTransport(t, agent, "refresh", first)
+		session.mcpRefreshPending = true
+		session.canRelaunch = true
+		require.NoError(t, session.refreshMCPRegistry(t.Context()))
+		require.False(t, session.mcpRefreshPending)
+		require.NoError(t, session.Close(t.Context()))
+	})
+
+	for _, phase := range []string{"containment", "output style", "effort"} {
+		t.Run(phase, func(t *testing.T) {
+			first := newFakeClaudeTransport()
+			second := newFakeClaudeTransport()
+			agent, _, _ := newFakeLifecycleAgent(t, first)
+			session := newSessionForTransport(t, agent, acp.SessionId("relaunch-"+phase), first)
+			session.canRelaunch = true
+			if phase == "containment" {
+				session.client = startedClientWithCloseError(t, ErrContainmentIncomplete)
+			} else {
+				if phase == "output style" {
+					session.outputStyle = "concise"
+					second.controlErr = map[string]error{}
+					second.controlErr["apply_flag_settings"] = errors.New("style refused")
+				} else {
+					session.effort = "high"
+					second.controlErr = map[string]error{}
+					second.controlErr["apply_flag_settings"] = errors.New("effort refused")
+				}
+				agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+					return claude.NewClient(log, options, second)
+				}
+			}
+			err := session.relaunchClient(t.Context(), session.client, session.clientOptions)
+			require.Error(t, err)
+		})
+	}
 }

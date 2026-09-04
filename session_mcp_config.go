@@ -12,17 +12,12 @@ var (
 	mcpRemoveAll = os.RemoveAll
 )
 
-func writeSessionMCPConfig(scratchDir, config string) (path, dir string, err error) {
+func writeSessionMCPConfig(scratchParent, config string) (path, dir string, err error) {
 	if config == "" {
 		return "", "", nil
 	}
 
-	parent, err := ensureScratchParent(scratchDir)
-	if err != nil {
-		return "", "", err
-	}
-
-	dir, err = mcpMkdirTemp(parent, "acp-go-claude-mcp-*")
+	dir, err = mcpMkdirTemp(scratchParent, "acp-go-claude-mcp-*")
 	if err != nil {
 		return "", "", fmt.Errorf("create Claude MCP config dir: %w", err)
 	}

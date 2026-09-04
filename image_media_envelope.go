@@ -7,7 +7,7 @@ const (
 	handoffMetaKey       = mapper.MetaKeyHandoff
 	handoffVersion       = mapper.HandoffVersion
 
-	metaVersionsKey = "versions"
+	metaVersionKey = "version"
 
 	envelopeFieldMaxBytes        = "maxBytes"
 	envelopeFieldMaxPromptBytes  = "maxPromptBytes"

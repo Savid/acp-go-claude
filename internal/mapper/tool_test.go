@@ -1,6 +1,7 @@
 package mapper
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -21,17 +22,17 @@ func TestToolMetadataMapping(t *testing.T) {
 	require.Equal(t, acp.ToolKindSwitchMode, ToolCallInfo("ExitPlanMode", "", nil, ToolUpdateOptions{}).Kind)
 	require.Equal(t, acp.ToolKindOther, ToolCallInfo("Unknown", "", nil, ToolUpdateOptions{}).Kind)
 
-	require.Equal(t, "Read /tmp/a", ToolTitle("Read", map[string]any{"file_path": "/tmp/a"}))
-	require.Equal(t, "LS /tmp", ToolTitle("LS", map[string]any{"path": "/tmp"}))
-	require.Equal(t, acp.ToolKindSearch, ToolCallInfo("LS", "", map[string]any{"path": "/tmp"}, ToolUpdateOptions{}).Kind)
+	require.Equal(t, "Read "+absTestPath("tmp", "a"), ToolTitle("Read", map[string]any{"file_path": absTestPath("tmp", "a")}))
+	require.Equal(t, "LS "+absTestPath("tmp"), ToolTitle("LS", map[string]any{"path": absTestPath("tmp")}))
+	require.Equal(t, acp.ToolKindSearch, ToolCallInfo("LS", "", map[string]any{"path": absTestPath("tmp")}, ToolUpdateOptions{}).Kind)
 	require.Equal(t, "make test", ToolTitle("Bash", map[string]any{"command": "make test"}))
 	require.Equal(t, "Read File", ToolTitle("Read", nil))
 	require.Equal(t, "Read File (1 - 1)", ToolTitle("Read", map[string]any{"limit": 1}))
 	require.Equal(t, "Claude tool call", ToolTitle(" ", nil))
-	require.Equal(t, []acp.ToolCallLocation{{Path: "/tmp/a"}}, locations(map[string]any{"path": "/tmp/a"}))
-	require.Equal(t, []acp.ToolCallLocation{{Path: "/tmp/a"}, {Path: "/tmp/b"}}, locations(map[string]any{
-		"file_path": "/tmp/a",
-		"path":      "/tmp/b",
+	require.Equal(t, []acp.ToolCallLocation{{Path: absTestPath("tmp", "a")}}, locations(map[string]any{"path": absTestPath("tmp", "a")}))
+	require.Equal(t, []acp.ToolCallLocation{{Path: absTestPath("tmp", "a")}, {Path: absTestPath("tmp", "b")}}, locations(map[string]any{
+		"file_path": absTestPath("tmp", "a"),
+		"path":      absTestPath("tmp", "b"),
 	}))
 	require.Nil(t, locations(nil))
 	require.Nil(t, locations(map[string]any{"command": "make test"}))
@@ -56,43 +57,43 @@ func TestToolCallInfoVariants(t *testing.T) {
 	require.Equal(t, "Run tests", info.Content[0].Content.Content.Text.Text)
 
 	info = ToolCallInfo("Read", "", map[string]any{
-		"file_path": "/repo/a.go",
+		"file_path": absTestPath("repo", "a.go"),
 		"offset":    3,
 		"limit":     4,
-	}, ToolUpdateOptions{Cwd: "/repo"})
+	}, ToolUpdateOptions{Cwd: absTestPath("repo")})
 	require.Equal(t, "Read a.go (3 - 6)", info.Title)
 	require.Equal(t, 3, *info.Locations[0].Line)
-	require.Equal(t, "Read /repo/a.go (from line 8)", ToolTitle("Read", map[string]any{
-		"file_path": "/repo/a.go",
+	require.Equal(t, "Read "+absTestPath("repo", "a.go")+" (from line 8)", ToolTitle("Read", map[string]any{
+		"file_path": absTestPath("repo", "a.go"),
 		"offset":    8,
 	}))
 
 	info = ToolCallInfo("Write", "", map[string]any{
-		"file_path": "/repo/new.go",
+		"file_path": absTestPath("repo", "new.go"),
 		"content":   "package main\n",
-	}, ToolUpdateOptions{Cwd: "/repo"})
+	}, ToolUpdateOptions{Cwd: absTestPath("repo")})
 	require.Equal(t, "Write new.go", info.Title)
 	require.Equal(t, "package main\n", info.Content[0].Diff.NewText)
 	require.Equal(t, "draft", ToolCallInfo("Write", "", map[string]any{"content": "draft"}, ToolUpdateOptions{}).Content[0].Content.Content.Text.Text)
 
 	info = ToolCallInfo("Edit", "", map[string]any{
-		"file_path":  "/repo/a.go",
+		"file_path":  absTestPath("repo", "a.go"),
 		"old_string": "old",
 		"new_string": "new",
-	}, ToolUpdateOptions{Cwd: "/repo"})
+	}, ToolUpdateOptions{Cwd: absTestPath("repo")})
 	require.Equal(t, "Edit a.go", info.Title)
 	require.Equal(t, "old", *info.Content[0].Diff.OldText)
-	info = ToolCallInfo("Edit", "", map[string]any{"file_path": "/repo/a.go", "new_string": "new"}, ToolUpdateOptions{})
+	info = ToolCallInfo("Edit", "", map[string]any{"file_path": absTestPath("repo", "a.go"), "new_string": "new"}, ToolUpdateOptions{})
 	require.Nil(t, info.Content[0].Diff.OldText)
 
 	info = ToolCallInfo("MultiEdit", "", map[string]any{
-		"file_path": "/repo/a.go",
+		"file_path": absTestPath("repo", "a.go"),
 		"edits": []any{
 			map[string]any{"old_string": "first", "new_string": "second"},
 			map[string]any{"new_string": "inserted"},
 			map[string]any{"old_string": "", "new_string": ""},
 		},
-	}, ToolUpdateOptions{Cwd: "/repo"})
+	}, ToolUpdateOptions{Cwd: absTestPath("repo")})
 	require.Equal(t, "Edit a.go", info.Title)
 	require.Len(t, info.Content, 2)
 	require.Equal(t, "first", *info.Content[0].Diff.OldText)
@@ -101,17 +102,17 @@ func TestToolCallInfoVariants(t *testing.T) {
 	require.Equal(t, "inserted", info.Content[1].Diff.NewText)
 
 	info = ToolCallInfo("NotebookEdit", "", map[string]any{
-		"notebook_path": "/repo/notes.ipynb",
+		"notebook_path": absTestPath("repo", "notes.ipynb"),
 		"cell_id":       "cell-1",
 		"new_source":    "print('hi')",
-	}, ToolUpdateOptions{Cwd: "/repo"})
+	}, ToolUpdateOptions{Cwd: absTestPath("repo")})
 	require.Equal(t, "Edit notes.ipynb cell cell-1", info.Title)
-	require.Equal(t, "/repo/notes.ipynb", info.Locations[0].Path)
+	require.Equal(t, absTestPath("repo", "notes.ipynb"), info.Locations[0].Path)
 	require.Equal(t, "print('hi')", info.Content[0].Diff.NewText)
 
-	info = ToolCallInfo("Glob", "", map[string]any{"path": "/repo", "pattern": "*.go"}, ToolUpdateOptions{})
-	require.Equal(t, "Find `/repo` `*.go`", info.Title)
-	require.Equal(t, "/repo", info.Locations[0].Path)
+	info = ToolCallInfo("Glob", "", map[string]any{"path": absTestPath("repo"), "pattern": "*.go"}, ToolUpdateOptions{})
+	require.Equal(t, "Find `"+absTestPath("repo")+"` `*.go`", info.Title)
+	require.Equal(t, absTestPath("repo"), info.Locations[0].Path)
 
 	info = ToolCallInfo("Grep", "", map[string]any{
 		"-i":          true,
@@ -125,9 +126,9 @@ func TestToolCallInfoVariants(t *testing.T) {
 		"type":        "go",
 		"multiline":   true,
 		"pattern":     "func",
-		"path":        "/repo",
+		"path":        absTestPath("repo"),
 	}, ToolUpdateOptions{})
-	require.Equal(t, `grep -i -n -A 1 -B 2 -C 3 -l | head -5 --include="*.go" --type=go -P "func" /repo`, info.Title)
+	require.Equal(t, `grep -i -n -A 1 -B 2 -C 3 -l | head -5 --include="*.go" --type=go -P "func" `+absTestPath("repo"), info.Title)
 	require.Equal(t, "grep -c", ToolCallInfo("Grep", "", map[string]any{"output_mode": "count"}, ToolUpdateOptions{}).Title)
 
 	info = ToolCallInfo("WebFetch", "", map[string]any{"url": "https://example.com", "prompt": "Summarize"}, ToolUpdateOptions{})
@@ -162,7 +163,7 @@ func TestToolCallInfoVariants(t *testing.T) {
 	info = ToolCallInfo("Run", "", map[string]any{"command": "make test"}, ToolUpdateOptions{})
 	require.Equal(t, "Run make test", info.Title)
 	require.Contains(t, info.Content[0].Content.Content.Text.Text, `"command": "make test"`)
-	require.Equal(t, "FutureTool /tmp/a", ToolTitle("FutureTool", map[string]any{"path": "/tmp/a"}))
+	require.Equal(t, "FutureTool "+absTestPath("tmp", "a"), ToolTitle("FutureTool", map[string]any{"path": absTestPath("tmp", "a")}))
 	require.Equal(t, "Claude tool call", ToolCallInfo("", "", nil, ToolUpdateOptions{}).Title)
 }
 
@@ -192,7 +193,7 @@ func TestMessageToUpdates(t *testing.T) {
 			claude.TextBlock{Text: "hello"},
 			claude.ThinkingBlock{Thinking: "thinking"},
 			claude.ToolUseBlock{ID: "structured-1", Name: "StructuredOutput", Input: map[string]any{"ok": true}},
-			claude.ToolUseBlock{ID: "tool-1", Name: "Read", Input: map[string]any{"file_path": "/tmp/a"}},
+			claude.ToolUseBlock{ID: "tool-1", Name: "Read", Input: map[string]any{"file_path": absTestPath("tmp", "a")}},
 			claude.ToolResultBlock{
 				ToolUseID: "tool-1",
 				IsError:   true,
@@ -303,7 +304,7 @@ func TestMessageToUpdates(t *testing.T) {
 				"type":  "tool_use",
 				"id":    "stream-tool",
 				"name":  "Read",
-				"input": map[string]any{"file_path": "/tmp/a"},
+				"input": map[string]any{"file_path": absTestPath("tmp", "a")},
 			},
 		},
 	}, ToolUpdateOptions{ToolUses: cache})
@@ -330,7 +331,7 @@ func TestMessageToUpdates(t *testing.T) {
 
 	updates = MessageToUpdatesWithOptions(&claude.AssistantMessage{
 		Content: []claude.ContentBlock{
-			claude.ToolUseBlock{ID: "stream-tool", Name: "Read", Input: map[string]any{"file_path": "/tmp/a"}},
+			claude.ToolUseBlock{ID: "stream-tool", Name: "Read", Input: map[string]any{"file_path": absTestPath("tmp", "a")}},
 		},
 	}, ToolUpdateOptions{ToolUses: cache})
 	require.Len(t, updates, 1)
@@ -474,7 +475,7 @@ func TestToolResultContentVariants(t *testing.T) {
 				map[string]any{"type": "text", "text": "stderr"},
 			}}},
 			claude.ToolResultBlock{ToolUseID: "edit-1", Raw: map[string]any{"content": map[string]any{
-				"filePath": "/repo/a.go",
+				"filePath": absTestPath("repo", "a.go"),
 				"structuredPatch": []any{
 					map[string]any{"newStart": int64(4), "lines": []any{" context", "-old", "+new", ""}},
 					map[string]any{"newStart": 8, "lines": []string{"+added"}},
@@ -482,7 +483,7 @@ func TestToolResultContentVariants(t *testing.T) {
 				},
 			}}},
 			claude.ToolResultBlock{ToolUseID: "multi-1", Raw: map[string]any{"content": map[string]any{
-				"filePath":        "/repo/a.go",
+				"filePath":        absTestPath("repo", "a.go"),
 				"structuredPatch": []any{map[string]any{"newStart": 2, "lines": []any{"-before", "+after"}}},
 			}}},
 			claude.ToolResultBlock{ToolUseID: "plan-1"},
@@ -501,7 +502,7 @@ func TestToolResultContentVariants(t *testing.T) {
 	require.Equal(t, "```console\nstdout\nstderr\n```", updates[1].ToolCallUpdate.Content[0].Content.Content.Text.Text)
 	require.Len(t, updates[2].ToolCallUpdate.Content, 2)
 	require.Equal(t, "after", updates[3].ToolCallUpdate.Content[0].Diff.NewText)
-	require.Equal(t, "/repo/a.go", updates[2].ToolCallUpdate.Locations[0].Path)
+	require.Equal(t, absTestPath("repo", "a.go"), updates[2].ToolCallUpdate.Locations[0].Path)
 	require.Equal(t, 4, *updates[2].ToolCallUpdate.Locations[0].Line)
 	require.Equal(t, "Exited Plan Mode", *updates[4].ToolCallUpdate.Title)
 	require.Equal(t, "image/png", updates[5].ToolCallUpdate.Content[0].Content.Content.Image.MimeType)
@@ -675,11 +676,11 @@ func TestSpecialToolResultContent(t *testing.T) {
 func TestToolMappingHelpers(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "/tmp/a", displayPathForCwd("/tmp/a", ""))
-	require.Equal(t, "/tmp/a", displayPathForCwd("/tmp/a", "/repo"))
-	require.Equal(t, "/repo", displayPathForCwd("/repo", "/repo"))
-	require.Equal(t, "a/b.go", displayPathForCwd("/repo/a/b.go", "/repo"))
-	require.Equal(t, acp.ToolCallLocation{Path: "/tmp/a"}, locationWithOptionalLine("/tmp/a", 0))
+	require.Equal(t, absTestPath("tmp", "a"), displayPathForCwd(absTestPath("tmp", "a"), ""))
+	require.Equal(t, absTestPath("tmp", "a"), displayPathForCwd(absTestPath("tmp", "a"), absTestPath("repo")))
+	require.Equal(t, absTestPath("repo"), displayPathForCwd(absTestPath("repo"), absTestPath("repo")))
+	require.Equal(t, filepath.Join("a", "b.go"), displayPathForCwd(absTestPath("repo", "a", "b.go"), absTestPath("repo")))
+	require.Equal(t, acp.ToolCallLocation{Path: absTestPath("tmp", "a")}, locationWithOptionalLine(absTestPath("tmp", "a"), 0))
 	require.Nil(t, toolMeta("", nil))
 	require.Equal(t, "", stringInput(nil, "x"))
 	require.Equal(t, 2, mustInt(intInput(map[string]any{"x": int64(2)}, "x")))
@@ -744,7 +745,7 @@ func TestToolMappingHelpers(t *testing.T) {
 	require.Nil(t, content)
 	require.Nil(t, locations)
 	content, locations = diffToolResultContent(map[string]any{
-		"filePath":        "/tmp/a",
+		"filePath":        absTestPath("tmp", "a"),
 		"structuredPatch": []any{map[string]any{"lines": []string{""}}},
 	})
 	require.Empty(t, content)

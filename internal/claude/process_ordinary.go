@@ -4,58 +4,96 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 )
 
-var ordinaryEnviron = os.Environ
-
-// OrdinaryEnvironment captures the sanitized ambient environment every native
-// process runs with when no explicit ProcessIsolation was configured. Omission
-// selects ordinary same-identity execution, so there is no policy to read a
-// replacement base from and the adapter's own environment is the base. The
-// capture happens once per call, so every launch built from one result sees the
-// same values however the ambient environment changes later.
-func OrdinaryEnvironment() map[string]string {
-	base := map[string]string{}
-
-	for _, entry := range ordinaryEnviron() {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok || key == "" || strings.ContainsRune(value, '\x00') ||
-			EnvironmentKey(key) == EnvironmentKey(envClaudeCodeNested) || privateAdapterEnvName(key) ||
-			authScrubbedEnvKey(key) {
-			continue
-		}
-
-		base[key] = value
-	}
-
-	return base
+func startOrdinaryNative(executable string, arguments []string, environment []string, cwd string) (NativeProcess, error) {
+	return startOrdinaryNativeWithPipe(executable, arguments, environment, cwd, os.Pipe)
 }
 
-// resolveOrdinaryExecutable resolves a native executable the way the operator's
-// own shell would. Ordinary execution inherits the ambient search path rather
-// than a curated policy one, so the hardened absolute-entry rule does not apply
-// to the PATH itself; the platform's own rules — including Windows executable
-// extensions — decide what is runnable. Every candidate is anchored to the
-// adapter's own working directory before it is examined, so what this answers
-// is the file the launch will run and not a name resolved a second time.
-func resolveOrdinaryExecutable(name string, env []string) (string, error) {
+func startOrdinaryNativeWithPipe(
+	executable string,
+	arguments []string,
+	environment []string,
+	cwd string,
+	openPipe func() (*os.File, *os.File, error),
+) (NativeProcess, error) {
+	resolved, err := resolveOrdinaryExecutable(executable, environment)
+	if err != nil {
+		return nil, err
+	}
+
+	command := exec.Command(resolved, arguments...) // #nosec G702 -- ordinary mode intentionally uses the statically resolved operator-selected executable.
+	command.Dir = cwd
+	command.Env = environment
+
+	childStdin, stdin, err := openPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create native stdin: %w", err)
+	}
+
+	stdout, childStdout, err := openPipe()
+	if err != nil {
+		_ = childStdin.Close()
+		_ = stdin.Close()
+
+		return nil, fmt.Errorf("create native stdout: %w", err)
+	}
+
+	stderr, childStderr, err := openPipe()
+	if err != nil {
+		_ = childStdin.Close()
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = childStdout.Close()
+
+		return nil, fmt.Errorf("create native stderr: %w", err)
+	}
+
+	command.Stdin = childStdin
+	command.Stdout = childStdout
+	command.Stderr = childStderr
+
+	if err := command.Start(); err != nil {
+		_ = childStdin.Close()
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = childStdout.Close()
+		_ = stderr.Close()
+		_ = childStderr.Close()
+
+		return nil, fmt.Errorf("start native process: %w", err)
+	}
+
+	_ = childStdin.Close()
+	_ = childStdout.Close()
+	_ = childStderr.Close()
+
+	process := &ordinaryProcess{command: command, stdin: stdin, stdout: stdout, stderr: stderr, waitDone: make(chan struct{}), revokeDone: make(chan struct{})}
+	process.collectOnce.Do(func() { go process.collect() })
+
+	return process, nil
+}
+
+var ordinaryGetwd = os.Getwd
+
+func resolveOrdinaryExecutable(name string, environment []string) (string, error) {
 	if strings.TrimSpace(name) == "" {
 		return "", errors.New("executable path is empty")
 	}
 
 	if filepath.Base(name) != name {
-		anchored, err := ordinaryAnchoredPath(name)
+		candidate, err := ordinaryAnchoredPath(name)
 		if err != nil {
 			return "", err
 		}
 
-		resolved, err := ordinaryLookPath(anchored, env)
+		resolved, err := ordinaryExecutableCandidate(candidate, environment)
 		if err != nil {
 			return "", fmt.Errorf("resolve executable %q: %w", name, err)
 		}
@@ -63,20 +101,17 @@ func resolveOrdinaryExecutable(name string, env []string) (string, error) {
 		return resolved, nil
 	}
 
-	for _, directory := range filepath.SplitList(ordinaryEnvironmentValue(env, envSearchPath)) {
+	for _, directory := range filepath.SplitList(ordinaryEnvironmentValue(environment, envSearchPath)) {
 		if directory == "" {
 			continue
 		}
 
-		// filepath.Join cleans, so a "." entry would otherwise yield a bare name
-		// and send the platform candidate check back to the adapter's ambient
-		// PATH instead of the search path this launch was built with.
-		anchored, err := ordinaryAnchoredPath(filepath.Join(directory, name))
+		candidate, err := ordinaryAnchoredPath(filepath.Join(directory, name))
 		if err != nil {
 			return "", err
 		}
 
-		if resolved, err := ordinaryLookPath(anchored, env); err == nil {
+		if resolved, candidateErr := ordinaryExecutableCandidate(candidate, environment); candidateErr == nil {
 			return resolved, nil
 		}
 	}
@@ -84,15 +119,12 @@ func resolveOrdinaryExecutable(name string, env []string) (string, error) {
 	return "", fmt.Errorf("find %s in PATH: %w", name, exec.ErrNotFound)
 }
 
-// ordinaryAnchoredPath anchors a candidate to the directory the adapter itself
-// runs in. The launch replaces the child's working directory with the session's,
-// so a relative candidate would be examined here and executed there.
 func ordinaryAnchoredPath(path string) (string, error) {
 	if filepath.IsAbs(path) {
-		return path, nil
+		return filepath.Clean(path), nil
 	}
 
-	directory, err := processGetwd()
+	directory, err := ordinaryGetwd()
 	if err != nil {
 		return "", fmt.Errorf("anchor executable %q to the working directory: %w", path, err)
 	}
@@ -100,162 +132,123 @@ func ordinaryAnchoredPath(path string) (string, error) {
 	return filepath.Join(directory, path), nil
 }
 
-var ordinaryLookPath = ordinaryExecutableCandidate
+func ordinaryEnvironmentValue(environment []string, key string) string {
+	value := ""
+	identity := EnvironmentKey(key)
 
-// resolveLaunchExecutable picks the resolution rules the selected launch mode
-// actually has. A hardened policy owns its whole PATH and is held to absolute
-// entries; ordinary execution reads the operator's own PATH and is not.
-func resolveLaunchExecutable(options Options, name string, env []string) (string, error) {
-	if options.ProcessIsolation == nil {
-		return resolveOrdinaryExecutable(name, env)
-	}
-
-	return resolveProcessExecutable(name, env)
-}
-
-// prepareOrdinaryLaunch selects the directly-owned process boundary. It arms no
-// identity guardian, no standalone disposition and no privileged supervisor: the
-// adapter starts the native command itself, as the identity it already runs as.
-// The caller's scratch generation is left alone: it is a directory the caller
-// owns and finishes, never a containment registry this boundary reports to.
-func prepareOrdinaryLaunch(cmd *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
-	if cmd == nil {
-		return nil, errors.New("claude ordinary launch command is unavailable")
-	}
-
-	return &processTreeCommand{cmd: cmd, ordinary: true}, nil
-}
-
-// ordinaryBoundary is the boundary an omitted ProcessIsolation selects: the
-// process the adapter started and the process group it placed that process in.
-// It publishes no descendant inventory and proves nothing about work that left
-// the group, so its completion means only that the directly owned boundary
-// finished.
-type ordinaryBoundary struct {
-	cmd    *exec.Cmd
-	waiter *commandWait
-	begin  func()
-
-	once sync.Once
-	err  error
-}
-
-func startOrdinaryBoundary(launch *processTreeCommand) (*ordinaryBoundary, error) {
-	if launch == nil || launch.cmd == nil {
-		return nil, errors.New("claude ordinary launch is unavailable")
-	}
-
-	if err := launch.cmd.Start(); err != nil {
-		launch.close()
-
-		return nil, err
-	}
-
-	launch.releaseInherited()
-
-	// The reap is created here and deliberately left paused. The command this
-	// boundary owns is the one the caller took its stdout, stderr and stdin
-	// pipes from, and os/exec closes the parent ends of those pipes the moment
-	// Wait returns. A reap started with the child would therefore race the
-	// caller's own reader: a Claude turn that wrote its final result line and
-	// exited would be reported as a truncated read instead. Whoever owns the
-	// wait begins it.
-	waiter, begin := startPausedCommandWait(launch.cmd.Wait)
-
-	return &ordinaryBoundary{cmd: launch.cmd, waiter: waiter, begin: begin}, nil
-}
-
-// beginWait starts the boundary's sole reap. Every caller that owns or observes
-// the child's exit reaches it, and startPausedCommandWait makes the start
-// idempotent, so the child is still waited on exactly once however many of them
-// run.
-func (b *ordinaryBoundary) beginWait() {
-	if b.begin == nil {
-		return
-	}
-
-	b.begin()
-}
-
-// complete ends the directly owned boundary: the reap is started, the process
-// group is asked to stop, killed if it does not, and the direct child is
-// reaped. It is what the ordinary boundary has instead of an authoritative
-// quiescence proof and deliberately claims nothing about a descendant that left
-// the group.
-func (b *ordinaryBoundary) complete(timeout time.Duration) error {
-	if b == nil {
-		return errors.New("claude ordinary boundary is unavailable")
-	}
-
-	b.once.Do(func() {
-		// A child that never exits on its own must still be terminated and
-		// collected here, so the paused reap is started before the ladder runs
-		// rather than left waiting for a reader that already gave up.
-		b.beginWait()
-
-		if _, err := processTerminate(b.cmd); err != nil {
-			b.err = fmt.Errorf("%w: terminate Claude process: %v", ErrProcessContainmentIncomplete, err)
-
-			return
+	for _, entry := range environment {
+		candidate, candidateValue, ok := strings.Cut(entry, "=")
+		if ok && EnvironmentKey(candidate) == identity {
+			value = candidateValue
 		}
+	}
 
-		if b.awaitChild(timeout) {
-			return
-		}
+	return value
+}
 
-		if _, err := processKill(b.cmd); err != nil {
-			b.err = fmt.Errorf("%w: kill Claude process: %v", ErrProcessContainmentIncomplete, err)
+type ordinaryProcess struct {
+	command     *exec.Cmd
+	stdin       io.WriteCloser
+	stdout      io.ReadCloser
+	stderr      io.ReadCloser
+	waitDone    chan struct{}
+	waitResult  NativeResult
+	waitErr     error
+	revokeWon   bool
+	resultMu    sync.Mutex
+	collectOnce sync.Once
+	revokeOnce  sync.Once
+	revokeDone  chan struct{}
+	revokeErr   error
+}
 
-			return
-		}
+func (p *ordinaryProcess) Stdin() io.WriteCloser { return p.stdin }
+func (p *ordinaryProcess) Stdout() io.ReadCloser { return p.stdout }
+func (p *ordinaryProcess) Stderr() io.ReadCloser { return p.stderr }
 
-		if !b.awaitChild(timeout) {
-			b.err = fmt.Errorf("%w: direct Claude child was not reaped", ErrProcessContainmentIncomplete)
-		}
+func (p *ordinaryProcess) collect() {
+	err := p.command.Wait()
+	p.resultMu.Lock()
+	p.waitResult = ordinaryNativeResult(p.command.ProcessState, p.revokeWon)
+
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) {
+		err = nil
+	}
+
+	p.waitErr = err
+	p.resultMu.Unlock()
+	close(p.waitDone)
+}
+
+func (p *ordinaryProcess) Wait(ctx context.Context) (NativeResult, error) {
+	p.collectOnce.Do(func() { go p.collect() })
+
+	select {
+	case <-p.waitDone:
+		p.resultMu.Lock()
+		defer p.resultMu.Unlock()
+
+		return p.waitResult, p.waitErr
+	case <-ctx.Done():
+		return NativeResult{}, ctx.Err()
+	}
+}
+
+func (p *ordinaryProcess) Revoke(ctx context.Context) error {
+	p.revokeOnce.Do(func() {
+		go func() {
+			defer close(p.revokeDone)
+
+			select {
+			case <-p.waitDone:
+				return
+			default:
+			}
+
+			_ = p.stdin.Close()
+			p.resultMu.Lock()
+
+			killErr := p.command.Process.Kill()
+			if killErr != nil {
+				p.resultMu.Unlock()
+
+				if !errors.Is(killErr, os.ErrProcessDone) {
+					p.revokeErr = killErr
+
+					return
+				}
+			} else {
+				p.revokeWon = true
+				p.resultMu.Unlock()
+			}
+
+			p.collectOnce.Do(func() { go p.collect() })
+			<-p.waitDone
+		}()
 	})
 
-	return b.err
+	select {
+	case <-p.revokeDone:
+		return p.revokeErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
-func (b *ordinaryBoundary) awaitChild(timeout time.Duration) bool {
-	if timeout <= 0 {
-		timeout = time.Second
+var ordinaryEnviron = os.Environ
+
+func OrdinaryEnvironment() map[string]string {
+	base := map[string]string{}
+
+	for _, entry := range ordinaryEnviron() {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key == "" || strings.ContainsRune(value, '\x00') || EnvironmentKey(key) == EnvironmentKey(envClaudeCodeNested) || privateAdapterEnvName(key) || authScrubbedEnvKey(key) {
+			continue
+		}
+
+		base[key] = value
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	_, completed := b.waiter.await(ctx)
-
-	return completed
-}
-
-// wait reports the direct child's own exit. This is the point that owns the
-// wait for a caller that read the child's output to EOF first, so it starts the
-// boundary's single paused reap and then collects its result rather than
-// reaping a second time.
-func (b *ordinaryBoundary) wait() error {
-	if b == nil {
-		return errors.New("claude ordinary boundary is unavailable")
-	}
-
-	b.beginWait()
-
-	waitErr, _ := b.waiter.await(context.Background())
-
-	return waitErr
-}
-
-// observeExit hands the boundary's single reap to a caller that watches for the
-// child's exit without owning the boundary. Such a caller polls the reap for an
-// answer, so the observation has to be running for it to have one; the boundary
-// still reaps exactly once.
-func (b *ordinaryBoundary) observeExit() *commandWait {
-	if b == nil {
-		return nil
-	}
-
-	b.beginWait()
-
-	return b.waiter
+	return base
 }

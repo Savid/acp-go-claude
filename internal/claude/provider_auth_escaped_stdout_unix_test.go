@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	authEscapedStdoutRoleEnv   = "ACP_GO_CLAUDE_FAKE_MODE"
-	authEscapedStdoutPIDEnv    = "ACP_GO_CLAUDE_FAKE_DESCENDANT_PID_FILE"
-	authEscapedStdoutBinaryEnv = "ACP_GO_CLAUDE_FAKE_HELPER"
+	authEscapedStdoutRoleEnv   = "ACP_GO_CLAUDE_AUTH_FAKE_MODE"
+	authEscapedStdoutPIDEnv    = "ACP_GO_CLAUDE_AUTH_DESCENDANT_PID_FILE"
+	authEscapedStdoutBinaryEnv = "ACP_GO_CLAUDE_AUTH_HELPER"
 )
 
 func TestAuthLoginFailedPresentationClosesEscapedStdout(t *testing.T) {
@@ -53,7 +53,7 @@ func TestAuthLoginFailedPresentationClosesEscapedStdout(t *testing.T) {
 	}
 
 	started := time.Now()
-	_, _, err := StartAuthLogin(t.Context(), options, nil)
+	_, _, err := StartAuthLogin(t.Context(), options)
 	require.ErrorIs(t, err, ErrAuthLoginGrammar)
 	require.Less(t, time.Since(started), 2*time.Second,
 		"failed presentation must not wait for the escaped stdout holder")
@@ -66,6 +66,5 @@ func TestAuthLoginFailedPresentationClosesEscapedStdout(t *testing.T) {
 	require.NoError(t, parseErr)
 	holder, findErr := os.FindProcess(pid)
 	require.NoError(t, findErr)
-	require.NoError(t, holder.Signal(syscall.Signal(0)),
-		"escaped holder must outlive the original process-group boundary")
+	require.NoError(t, holder.Signal(syscall.Signal(0)))
 }

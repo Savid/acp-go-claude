@@ -219,14 +219,14 @@ func TestImageOutputValidationAndLocalRoots(t *testing.T) {
 
 	workspaceImage := filepath.Join(workspace, "image.png")
 	require.NoError(t, os.WriteFile(workspaceImage, outputFixtureBytes(t, "valid.png"), 0o600))
-	uri := "file://" + workspaceImage
+	uri := fileTestURI(workspaceImage)
 	local := acp.ContentBlock{Image: &acp.ContentBlockImage{Type: "image", Uri: &uri}}
 	block, _, err = session.prepareOutputContent(t.Context(), "tool:read:0", local, false)
 	require.NoError(t, err)
 	require.Equal(t, outputFixtureBase64(t, "valid.png"), block.Image.Data)
 	require.Nil(t, block.Image.Uri)
 
-	missingURI := "file://" + filepath.Join(workspace, "missing.png")
+	missingURI := fileTestURI(filepath.Join(workspace, "missing.png"))
 	_, _, err = session.prepareOutputContent(t.Context(), "tool:missing:0", acp.ContentBlock{
 		Image: &acp.ContentBlockImage{Type: "image", Uri: &missingURI},
 	}, false)
@@ -252,7 +252,7 @@ func TestImageOutputValidationAndLocalRoots(t *testing.T) {
 
 	tempImage := filepath.Join(tempRoot, "frame_01.png")
 	require.NoError(t, os.WriteFile(tempImage, outputFixtureBytes(t, "valid.png"), 0o600))
-	tempURI := "file://" + tempImage
+	tempURI := fileTestURI(tempImage)
 	block, _, err = session.prepareOutputContent(t.Context(), "tool:temp:0", acp.ContentBlock{
 		Image: &acp.ContentBlockImage{Type: "image", Uri: &tempURI},
 	}, false)
@@ -261,7 +261,7 @@ func TestImageOutputValidationAndLocalRoots(t *testing.T) {
 
 	outside := filepath.Join(outsideRoot, "outside.png")
 	require.NoError(t, os.WriteFile(outside, outputFixtureBytes(t, "valid.png"), 0o600))
-	outsideURI := "file://" + outside
+	outsideURI := fileTestURI(outside)
 	_, _, err = session.prepareOutputContent(t.Context(), "tool:outside:0", acp.ContentBlock{
 		Image: &acp.ContentBlockImage{Type: "image", Uri: &outsideURI},
 	}, false)
@@ -269,13 +269,13 @@ func TestImageOutputValidationAndLocalRoots(t *testing.T) {
 
 	link := filepath.Join(workspace, "escape.png")
 	require.NoError(t, os.Symlink(outside, link))
-	linkURI := "file://" + link
+	linkURI := fileTestURI(link)
 	_, _, err = session.prepareOutputContent(t.Context(), "tool:link:0", acp.ContentBlock{
 		Image: &acp.ContentBlockImage{Type: "image", Uri: &linkURI},
 	}, false)
 	requireImageOutputError(t, err, imageOutputPathNotAllowed)
 
-	dirURI := "file://" + workspace
+	dirURI := fileTestURI(workspace)
 	_, _, err = session.prepareOutputContent(t.Context(), "tool:dir:0", acp.ContentBlock{
 		Image: &acp.ContentBlockImage{Type: "image", Uri: &dirURI},
 	}, false)
@@ -315,7 +315,7 @@ func TestImageOutputEdges(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uri, *prepared.Image.Uri)
 
-	localProvenance := "file:///provenance.png"
+	localProvenance := fileTestURI(absTestPath("provenance.png"))
 	inline.Image.Uri = &localProvenance
 	prepared, _, err = session.prepareOutputContent(t.Context(), "agent:inline-local:0", inline, false)
 	require.NoError(t, err)
@@ -370,7 +370,7 @@ func TestImageOutputEdges(t *testing.T) {
 	}
 	absolute := filepath.Join(workspace, "image.png")
 	require.Equal(t, absolute, requireLocalImagePath(t, absolute))
-	require.Equal(t, absolute, requireLocalImagePath(t, "file://"+absolute))
+	require.Equal(t, absolute, requireLocalImagePath(t, fileTestURI(absolute)))
 
 	require.False(t, pathWithinAnyRoot(absolute, []string{"", filepath.Join(workspace, "missing")}, true))
 	require.True(t, toolContentEqual(acp.ToolCallContent{}, acp.ToolCallContent{}))
@@ -1136,6 +1136,7 @@ func TestImageTranscriptEdges(t *testing.T) {
 	// A mirror frame whose bytes are unusable still fails the append rather than
 	// storing a broken artifact.
 	badMirror := newSessionMirror(nil, NewInMemorySessionStore(), home, &agentSession{
+		id:             "22222222-2222-4222-8222-222222222222",
 		imageArtifacts: map[string]storedImageArtifact{},
 	})
 	err = badMirror.appendFrame(t.Context(), &claude.TranscriptMirrorMessage{
@@ -1290,12 +1291,15 @@ func TestImageLimitConstruction(t *testing.T) {
 }
 
 func TestImageScratchDirectoryLifecycle(t *testing.T) {
+	_, err := createImageScratchDir("")
+	require.ErrorContains(t, err, "empty scratch parent")
+
 	parent := t.TempDir()
 	path, err := createImageScratchDir(parent)
 	require.NoError(t, err)
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+	requirePrivateMode(t, 0o700, info)
 	require.True(t, strings.HasPrefix(filepath.Base(path), "acp-go-claude-images-"))
 	require.NoError(t, os.RemoveAll(path))
 

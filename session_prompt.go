@@ -1149,7 +1149,7 @@ func (s *agentSession) interruptAfterEmitError(ctx context.Context, err error) e
 	defer cancel()
 
 	cancelErr := s.Cancel(interruptCtx)
-	if errors.Is(cancelErr, claude.ErrProcessContainmentIncomplete) {
+	if errors.Is(cancelErr, ErrContainmentIncomplete) {
 		return errors.Join(err, cancelErr)
 	}
 

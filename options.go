@@ -1,9 +1,7 @@
 package claudeacp
 
 import (
-	"context"
 	"log/slog"
-	"os"
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
@@ -14,79 +12,7 @@ import (
 // Option configures the Claude ACP agent.
 type Option func(*Options)
 
-// ProcessIsolation defines the complete operating-system identity and base
-// environment inherited by every native Claude process.
-type ProcessIdentityLockCapability interface {
-	Duplicate() (*os.File, error)
-}
-
-type ProcessIsolation struct {
-	UID                 uint32
-	GID                 uint32
-	BaseEnvironment     map[string]string
-	StandaloneOwnerID   string
-	StandaloneStateRoot string
-	// IdentityLock is an optional trusted-supervisor descriptor for the
-	// host-global UID lock. Linux supervisors validate it and never expose it to
-	// the native Claude process. Standalone embeddings should leave it nil.
-	IdentityLock    ProcessIdentityLockCapability
-	AuthorityDomain ProcessIdentityLockCapability
-}
-
-// RuntimeResourceKind identifies the lifecycle scope consuming a host-managed resource.
-type RuntimeResourceKind string
-
-const (
-	RuntimeResourceRuntime   RuntimeResourceKind = "runtime"
-	RuntimeResourceSession   RuntimeResourceKind = "session"
-	RuntimeResourcePrompt    RuntimeResourceKind = "prompt"
-	RuntimeResourceDiscovery RuntimeResourceKind = "discovery"
-)
-
-type RuntimeProcessKind string
-
-const (
-	RuntimeProcessHomeLockSupervisor RuntimeProcessKind = "home_lock_supervisor"
-	RuntimeProcessProviderDescendant RuntimeProcessKind = "provider_descendant"
-)
-
-// RuntimeContainmentMode identifies the selected native process boundary.
-type RuntimeContainmentMode string
-
 const privateAdapterEnvPrefix = "ACP_" + "GO_CLAUDE_INTERNAL_"
-
-const (
-	RuntimeContainmentAuthoritative RuntimeContainmentMode = "authoritative"
-	RuntimeContainmentBestEffort    RuntimeContainmentMode = "best_effort"
-	// RuntimeContainmentSharedIdentity is the ordinary default an omitted
-	// ProcessIsolation selects: native work runs as the adapter's own
-	// operating-system identity, root or not, on every supported platform. It is
-	// deliberately non-authoritative. It proves no credential separation between
-	// the adapter and the harness, publishes no provider-descendant inventory,
-	// and makes no whole-tree quiescence claim; completion means only that the
-	// directly owned process and its process group finished.
-	RuntimeContainmentSharedIdentity RuntimeContainmentMode = "shared_identity"
-	RuntimeContainmentUnavailable    RuntimeContainmentMode = "unavailable"
-)
-
-type RuntimeStartupStage string
-
-const (
-	RuntimeStartupSpawn         RuntimeStartupStage = "spawn"
-	RuntimeStartupReadiness     RuntimeStartupStage = "readiness"
-	RuntimeStartupConfiguration RuntimeStartupStage = "configuration"
-	RuntimeStartupSession       RuntimeStartupStage = "session"
-)
-
-// RuntimeResourceHooks lets an embedding host enforce native-root and scratch-root limits.
-type RuntimeResourceHooks struct {
-	AcquireNativeRoot      func(context.Context, RuntimeResourceKind) (func(), error)
-	ReserveScratchRoot     func(context.Context, RuntimeResourceKind) (func(), error)
-	ObserveProcess         func(context.Context, RuntimeProcessKind, int64)
-	ObserveProcessSnapshot func(context.Context, RuntimeProcessKind, int)
-	ObserveStartupStage    func(context.Context, RuntimeResourceKind, RuntimeStartupStage, time.Duration, error)
-	ObserveContainment     func(context.Context, RuntimeContainmentMode)
-}
 
 // SettingSource selects one Claude Code filesystem settings source.
 type SettingSource string
@@ -135,12 +61,9 @@ type Options struct {
 	// Env is merged into every launched Claude process environment. Managed
 	// config and identity root variables are rejected.
 	Env map[string]string
-	// ProcessIsolation is the explicitly supplied hardened Linux identity
-	// boundary. Configure it with WithProcessIsolation. Nil is not a defaulted
-	// policy: it selects ordinary same-identity execution, which launches native
-	// work as the current identity over a deterministic capture of the sanitized
-	// ambient environment.
-	ProcessIsolation *ProcessIsolation
+	// HostAuthority delegates native process and residence ownership to the
+	// embedding host. Omission selects ordinary same-identity execution.
+	HostAuthority HostAuthority
 
 	// Logger receives structured diagnostic logs. If nil, the default logger is used.
 	Logger *slog.Logger
@@ -203,13 +126,9 @@ type Options struct {
 	ControlHandlerTimeout time.Duration
 	// TurnTimeout bounds one Claude prompt turn. Zero (the default) means no
 	// deadline. On expiry the turn is aborted and fails with cause "timeout".
-	TurnTimeout          time.Duration
-	RuntimeResourceHooks RuntimeResourceHooks
-	// DarwinBestEffortContainment explicitly accepts Darwin's process-group
-	// boundary and its escaped-descendant and numeric-PGID-reuse risks.
-	DarwinBestEffortContainment bool
-
+	TurnTimeout              time.Duration
 	defaultPermissionModeSet bool
+	hostAuthoritySet         bool
 }
 
 // ConcurrencyLimits controls process-local backpressure. Zero fields use their
@@ -328,23 +247,11 @@ func WithExecutablePath(path string) Option {
 	}
 }
 
-// WithProcessIsolation is explicit hardening: it selects the Linux-only
-// trusted-root boundary and requires every native process to run as the
-// supplied nonzero uid/gid with no supplementary groups, distinct from the
-// supervisor. BaseEnvironment is the complete native environment base; the
-// adapter never overlays os.Environ onto an explicit policy. Omitting the
-// option is the ordinary default — native work runs as the current identity,
-// root or not, over a deterministically captured clone of the sanitized ambient
-// environment. A supplied policy fails closed before any native spawn when it
-// does not validate, the supervisor is not trusted root, or the platform is not
-// Linux; it never retries as ordinary or Darwin best-effort execution, even
-// when its ids name the identity the caller already holds. It cannot be
-// combined with WithDarwinBestEffortContainment.
-func WithProcessIsolation(isolation ProcessIsolation) Option {
+// WithHostAuthority routes native processes and tree ownership through authority.
+func WithHostAuthority(authority HostAuthority) Option {
 	return func(options *Options) {
-		cloned := isolation
-		cloned.BaseEnvironment = cloneStringMap(isolation.BaseEnvironment)
-		options.ProcessIsolation = &cloned
+		options.HostAuthority = authority
+		options.hostAuthoritySet = true
 	}
 }
 
@@ -404,24 +311,6 @@ func WithProviderAuthRoot(path string) Option {
 func WithProviderAuthDirectHome(path string) Option {
 	return func(options *Options) {
 		options.ProviderAuthDirectHome = path
-	}
-}
-
-// WithDarwinBestEffortContainment opts into the explicitly limited Darwin
-// process-group backend, upgrading the ordinary same-identity launch Darwin
-// otherwise uses. It is invalid on every non-Darwin platform, and invalid
-// together with WithProcessIsolation: an explicit hardened identity policy
-// cannot be downgraded to best effort.
-func WithDarwinBestEffortContainment() Option {
-	return func(options *Options) {
-		options.DarwinBestEffortContainment = true
-	}
-}
-
-// WithRuntimeResourceHooks installs host-facing native-root and scratch-root admission hooks.
-func WithRuntimeResourceHooks(hooks RuntimeResourceHooks) Option {
-	return func(options *Options) {
-		options.RuntimeResourceHooks = hooks
 	}
 }
 

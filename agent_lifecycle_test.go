@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"bytes"
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -28,12 +29,12 @@ func TestNonInterruptibleLocalCarrierDeclinesLifecycle(t *testing.T) {
 	require.NoError(t, agent.Close())
 }
 
-func lifecycleOfferMeta(versions ...any) map[string]any {
-	return map[string]any{lifecycle.MetaKey: map[string]any{"versions": versions}}
+func lifecycleOfferMeta(version any) map[string]any {
+	return map[string]any{lifecycle.MetaKey: map[string]any{"version": version}}
 }
 
 func lifecycleKeyMeta() map[string]any {
-	return map[string]any{lifecycle.MetaKey: map[string]any{"versions": []any{1}}}
+	return lifecycleOfferMeta(1)
 }
 
 // TestLifecycleAnswerLandsOnTheResponseMeta pins the answer's placement: the
@@ -51,7 +52,7 @@ func TestLifecycleAnswerLandsOnTheResponseMeta(t *testing.T) {
 	require.Contains(t, resp.Meta, lifecycle.MetaKey)
 
 	answer := requireAnyMap(t, resp.Meta[lifecycle.MetaKey])
-	require.Equal(t, []int{1}, answer["versions"])
+	require.Equal(t, 1, answer["version"])
 	require.Equal(t, true, answer["updatesOutsidePrompt"])
 	require.Equal(t, []string{}, answer["activityKinds"])
 
@@ -60,28 +61,24 @@ func TestLifecycleAnswerLandsOnTheResponseMeta(t *testing.T) {
 	require.NotContains(t, requireAnyMap(t, capMeta[claudeMetaKey]), "lifecycle")
 }
 
-// TestLifecycleAnswerIsPerConfiguration pins the truth table against the same
-// containment accessor that enforces the boundary: only the authoritative mode
-// proves whole-tree vacancy, and every configuration carries the channel outside
-// a prompt and no activity kind without captured identity/parentage evidence.
+// TestLifecycleAnswerIsPerConfiguration pins the truth table against authority
+// selection: a supplied host authority proves quiescence and ordinary execution
+// does not.
 func TestLifecycleAnswerIsPerConfiguration(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
 		name          string
-		mode          RuntimeContainmentMode
+		options       []Option
 		authoritative bool
 	}{
-		{"authoritative", RuntimeContainmentAuthoritative, true},
-		{"shared identity", RuntimeContainmentSharedIdentity, false},
-		{"best effort", RuntimeContainmentBestEffort, false},
-		{"unavailable", RuntimeContainmentUnavailable, false},
+		{"host authority", []Option{WithHostAuthority(newFakeHostAuthority())}, true},
+		{"ordinary", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			agent := NewAgent()
-			agent.containmentMode = tc.mode
+			agent := NewAgent(tc.options...)
 
 			resp, err := agent.Initialize(context.Background(), acp.InitializeRequest{
 				Meta: lifecycleOfferMeta(1),
@@ -103,10 +100,7 @@ func TestLifecycleAnswerIsPerConfiguration(t *testing.T) {
 	}
 }
 
-// TestLifecycleKeyOmittedWithoutACommonVersion pins that no offer, and an offer
-// with no shared version, both answer with the key omitted entirely rather than
-// an empty answer.
-func TestLifecycleKeyOmittedWithoutACommonVersion(t *testing.T) {
+func TestLifecycleKeyOmittedWithoutCapability(t *testing.T) {
 	t.Parallel()
 
 	agent := NewAgent()
@@ -115,28 +109,6 @@ func TestLifecycleKeyOmittedWithoutACommonVersion(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, resp.Meta, lifecycle.MetaKey)
 	require.False(t, agent.negotiatedLifecycle().Present())
-
-	resp, err = agent.Initialize(context.Background(), acp.InitializeRequest{
-		Meta: lifecycleOfferMeta(2),
-	})
-	require.NoError(t, err)
-	require.NotContains(t, resp.Meta, lifecycle.MetaKey)
-	require.False(t, agent.negotiatedLifecycle().Present())
-}
-
-// TestLifecycleOfferIntersectsWithoutOrdering pins that only the answer is
-// ordered: a host offering its versions out of order is intersected, not
-// refused.
-func TestLifecycleOfferIntersectsWithoutOrdering(t *testing.T) {
-	t.Parallel()
-
-	agent := NewAgent()
-
-	resp, err := agent.Initialize(context.Background(), acp.InitializeRequest{
-		Meta: lifecycleOfferMeta(2, 1),
-	})
-	require.NoError(t, err)
-	require.Equal(t, []int{1}, requireAnyMap(t, resp.Meta[lifecycle.MetaKey])["versions"])
 }
 
 // TestLifecycleOfferStrictness pins that a malformed offer is the one family
@@ -152,11 +124,13 @@ func TestLifecycleOfferStrictness(t *testing.T) {
 	}{
 		{"non-object", map[string]any{lifecycle.MetaKey: []any{1}}, lifecycle.MetaPath},
 		{"unknown member", map[string]any{lifecycle.MetaKey: map[string]any{
-			"versions": []any{1}, "activityKinds": []any{},
+			"version": 1, "activityKinds": []any{},
 		}}, lifecycle.MetaPath + ".activityKinds"},
-		{"missing versions", map[string]any{lifecycle.MetaKey: map[string]any{}}, lifecycle.MetaPath + ".versions"},
-		{"empty versions", lifecycleOfferMeta(), lifecycle.MetaPath + ".versions"},
-		{"string version", lifecycleOfferMeta("1"), lifecycle.MetaPath + ".versions"},
+		{"missing version", map[string]any{lifecycle.MetaKey: map[string]any{}}, lifecycle.MetaPath + ".version"},
+		{"other integer", lifecycleOfferMeta(2), lifecycle.MetaPath + ".version"},
+		{"fractional version", lifecycleOfferMeta(1.5), lifecycle.MetaPath + ".version"},
+		{"string version", lifecycleOfferMeta("1"), lifecycle.MetaPath + ".version"},
+		{"boolean version", lifecycleOfferMeta(true), lifecycle.MetaPath + ".version"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -230,7 +204,7 @@ func TestLifecycleKeyRejectedOnNonCarryingSurfaces(t *testing.T) {
 
 		agent := NewAgent()
 		_, err := agent.HandleExtensionMethod(ctx, ForkSessionMethod, []byte(
-			`{"sessionId":"s","cwd":"`+t.TempDir()+`","_meta":{"acp-go.dev/lifecycle":{"versions":[1]}}}`,
+			`{"sessionId":"s","cwd":`+strconv.Quote(t.TempDir())+`,"_meta":{"acp-go.dev/lifecycle":{"version":1}}}`,
 		))
 		requireRequestError(t, err, -32602, lifecycle.MetaPath)
 	})

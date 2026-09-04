@@ -33,10 +33,10 @@ func TestMaterializeStoreSessionCarriesResumeCredentialPrivately(t *testing.T) {
 
 	configInfo, err := os.Stat(materialized.configDir)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o700), configInfo.Mode().Perm())
+	requirePrivateMode(t, 0o700, configInfo)
 	scratchInfo, err := os.Stat(scratch)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o700), scratchInfo.Mode().Perm())
+	requirePrivateMode(t, 0o700, scratchInfo)
 
 	destination := filepath.Join(materialized.configDir, claudeResumeCredentialFile)
 	copied, err := os.ReadFile(destination)
@@ -44,7 +44,7 @@ func TestMaterializeStoreSessionCarriesResumeCredentialPrivately(t *testing.T) {
 	require.Equal(t, credential, copied)
 	destinationInfo, err := os.Stat(destination)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o600), destinationInfo.Mode().Perm())
+	requirePrivateMode(t, 0o600, destinationInfo)
 
 	stored, err := store.Load(ctx, SessionKey{SessionID: sessionID})
 	require.NoError(t, err)

@@ -62,6 +62,7 @@ const (
 	permissionUpdateRules         = "rules"
 	permissionUpdateRuleContent   = "ruleContent"
 	permissionUpdateSession       = "session"
+	sessionCapabilityScope        = "session"
 	permissionUpdateToolName      = "toolName"
 	permissionUpdateAddDirs       = "addDirectories"
 	permissionUpdateLocalSettings = "localSettings"
@@ -148,6 +149,8 @@ type agentSession struct {
 	title                 string
 	updatedAt             string
 	fingerprint           string
+	configuration         sessionConfiguration
+	configurationStored   bool
 	model                 string
 	availableModels       []claude.AvailableModelInfo
 	modelOverrides        map[string]string
@@ -249,8 +252,6 @@ type agentSession struct {
 	materialized       *materializedSession
 	mcpConfigDir       string
 	imageScratchDir    string
-	nativeRootRelease  func()
-	scratchRootRelease func()
 	// Started sessions always mirror transcript rows into the agent's
 	// authoritative session store.
 	mirror *sessionMirror

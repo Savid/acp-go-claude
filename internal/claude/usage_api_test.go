@@ -184,7 +184,7 @@ func TestQueryRateLimitsAPIUsesUsageEndpoint(t *testing.T) {
 	isolateEnv(t, []string{envAnthropicBaseURL + "=" + server.URL, envAnthropicAuthToken + "=sk-ant-oat01-x"})
 	routeHTTP(t, server)
 
-	limits, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{UserAgent: "acp-go-claude/1.2.3", Options: withTestProcessIsolation(Options{})})
+	limits, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{UserAgent: "acp-go-claude/1.2.3", Options: withTestEnvironment(Options{})})
 	require.NoError(t, err)
 
 	require.Equal(t, "Bearer sk-ant-oat01-x", gotAuth)
@@ -234,7 +234,7 @@ func TestQueryRateLimitsAPIFallsBackToHeaderProbe(t *testing.T) {
 	})
 	routeHTTP(t, server)
 
-	limits, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestProcessIsolation(Options{})})
+	limits, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestEnvironment(Options{})})
 	require.NoError(t, err)
 
 	require.Contains(t, string(probedBody), `"model":"claude-haiku-4-5"`)
@@ -250,7 +250,7 @@ func TestQueryRateLimitsAPIFallsBackToHeaderProbe(t *testing.T) {
 func TestQueryRateLimitsAPIWithoutTokenReturnsEmpty(t *testing.T) {
 	isolateEnv(t, nil)
 
-	limits, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestProcessIsolation(Options{})})
+	limits, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestEnvironment(Options{})})
 	require.NoError(t, err)
 	require.Empty(t, limits.Windows)
 }
@@ -279,7 +279,7 @@ func TestQueryRateLimitsAPIFallsBackWhenUsageEndpointIsUndecodable(t *testing.T)
 	})
 	routeHTTP(t, server)
 
-	limits, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestProcessIsolation(Options{})})
+	limits, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestEnvironment(Options{})})
 	require.NoError(t, err)
 	require.Len(t, limits.Windows, 1)
 	require.InDelta(t, 50.0, limits.Windows[0].UsedPercent, 0.0001)
@@ -296,7 +296,7 @@ func TestQueryRateLimitsAPINeverFollowsRedirects(t *testing.T) {
 	isolateEnv(t, []string{envAnthropicBaseURL + "=" + server.URL, envAnthropicAuthToken + "=sk-ant-oat01-x"})
 	routeHTTP(t, server)
 
-	_, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestProcessIsolation(Options{})})
+	_, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestEnvironment(Options{})})
 	require.ErrorContains(t, err, "usage endpoint returned 302")
 	require.ErrorContains(t, err, "usage probe returned 302")
 }
@@ -310,7 +310,7 @@ func TestQueryRateLimitsAPIReportsTransportFailures(t *testing.T) {
 
 	isolateEnv(t, []string{envAnthropicBaseURL + "=" + url, envAnthropicAuthToken + "=sk-ant-oat01-x"})
 
-	_, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestProcessIsolation(Options{})})
+	_, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestEnvironment(Options{})})
 	require.ErrorContains(t, err, "query usage endpoint")
 	require.ErrorContains(t, err, "run usage probe")
 }
@@ -319,7 +319,7 @@ func TestQueryRateLimitsAPIReportsTransportFailures(t *testing.T) {
 func TestQueryRateLimitsAPIReportsRequestBuildFailures(t *testing.T) {
 	isolateEnv(t, []string{envAnthropicBaseURL + "=://nope", envAnthropicAuthToken + "=sk-ant-oat01-x"})
 
-	_, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestProcessIsolation(Options{})})
+	_, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestEnvironment(Options{})})
 	require.ErrorContains(t, err, "build usage request")
 }
 
@@ -332,7 +332,7 @@ func TestQueryRateLimitsAPIReportsBothProbeFailures(t *testing.T) {
 	isolateEnv(t, []string{envAnthropicBaseURL + "=" + server.URL, envAnthropicAuthToken + "=sk-ant-oat01-x"})
 	routeHTTP(t, server)
 
-	_, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestProcessIsolation(Options{})})
+	_, err := QueryRateLimitsAPI(context.Background(), RateLimitsProbe{Options: withTestEnvironment(Options{})})
 	require.ErrorContains(t, err, "usage endpoint returned 500")
 	require.ErrorContains(t, err, "usage probe returned 500")
 }

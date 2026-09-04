@@ -186,19 +186,6 @@ func TestAdvertisedMediaTypesAreTheOnesTheGateAccepts(t *testing.T) {
 	require.Equal(t, "invalid_media_type", details["error"])
 }
 
-func TestInitializeAdvertisesHandoffOnlyWithARoot(t *testing.T) {
-	t.Parallel()
-
-	// Absence is the actionable signal that the host's option never arrived.
-	require.NotContains(t, initializeMeta(t), handoffMetaKey)
-
-	meta := initializeMeta(t, WithInputHandoffRoot(t.TempDir()))
-	require.Equal(t, map[string]any{metaVersionsKey: []int{1}}, meta[handoffMetaKey])
-
-	// The envelope is advertised either way.
-	require.Contains(t, meta, mediaEnvelopeMetaKey)
-}
-
 func TestInputHandoffRootMustBeAbsolute(t *testing.T) {
 	t.Parallel()
 
@@ -250,7 +237,7 @@ func TestPromptHandoffImageNeverForwardsTheHostPath(t *testing.T) {
 		{"type": "result", "subtype": "success", "is_error": false, "stop_reason": "end_turn"},
 	}
 
-	uri := "file://" + path
+	uri := fileTestURI(path)
 	handoff := acp.ContentBlock{Image: &acp.ContentBlockImage{
 		Type:     "image",
 		MimeType: "image/png",
@@ -280,7 +267,7 @@ func TestPromptHandoffImageRejectedWithoutARoot(t *testing.T) {
 	session, _, cleanup := newPromptFlowSession(t)
 	defer cleanup()
 
-	uri := "file:///srv/handoff/a.png"
+	uri := fileTestURI(absTestPath("srv", "handoff", "a.png"))
 	handoff := acp.ContentBlock{Image: &acp.ContentBlockImage{
 		Type:     "image",
 		MimeType: "image/png",

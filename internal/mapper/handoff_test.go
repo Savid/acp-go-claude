@@ -19,7 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const handoffRoot = "/handoff"
+var handoffRoot = absTestPath("handoff")
 
 // stubHandoffReader answers from memory with the same contract the real reader
 // implements: it opens by path, refuses what it cannot find, and reports no size
@@ -81,7 +81,7 @@ func newStubHandoffReader(name string, data []byte) *stubHandoffReader {
 }
 
 func handoffURI(name string) *string {
-	uri := "file://" + filepath.Join(handoffRoot, name)
+	uri := fileTestURI(filepath.Join(handoffRoot, name))
 
 	return &uri
 }
@@ -380,7 +380,7 @@ func TestHandoffImageURIDefects(t *testing.T) {
 	opaque := "file:relative.png"
 	remote := "file://example.test/a.png"
 	unparsable := "file://%zz"
-	localhost := "file://localhost" + filepath.Join(handoffRoot, "a.png")
+	localhost := "file://localhost" + fileTestURIPath(filepath.Join(handoffRoot, "a.png"))
 
 	cases := []struct {
 		name    string

@@ -135,9 +135,16 @@ type providerAuth struct {
 	// retired holds, per flow key, the idempotency keys a later authorize
 	// replaced. They are kept for the session's whole life: a retry can be
 	// arbitrarily delayed and is still unanswerable when it lands.
-	retired    map[authFlowKey]map[string]struct{}
-	admissions map[authFlowKey]*authGate
-	slots      map[string]*authGate
+	retired        map[authFlowKey]map[string]struct{}
+	admissions     map[authFlowKey]*authGate
+	slots          map[string]*authGate
+	retainedLogins map[*authLoginHandle]struct{}
+
+	nativeTreeMu       sync.Mutex
+	nativeHomeAccess   chan struct{}
+	nativeTreePrepared bool
+	nativeTreeOpaque   error
+	nativeTreeUsers    int
 }
 
 type authFlowKey struct {
@@ -168,18 +175,23 @@ func newProviderAuth(agent *Agent) *providerAuth {
 		return nil
 	}
 
-	return &providerAuth{
-		agent:          agent,
-		ledger:         ledger,
-		home:           home,
-		directHome:     providerAuthDirectHome(agent.options, home),
-		flows:          make(map[authFlowKey]*authFlow),
-		byID:           make(map[string]*authFlow),
-		closedSessions: make(map[acp.SessionId]struct{}),
-		retired:        make(map[authFlowKey]map[string]struct{}),
-		admissions:     make(map[authFlowKey]*authGate),
-		slots:          make(map[string]*authGate),
+	broker := &providerAuth{
+		agent:            agent,
+		ledger:           ledger,
+		home:             home,
+		directHome:       providerAuthDirectHome(agent.options, home),
+		flows:            make(map[authFlowKey]*authFlow),
+		byID:             make(map[string]*authFlow),
+		closedSessions:   make(map[acp.SessionId]struct{}),
+		retired:          make(map[authFlowKey]map[string]struct{}),
+		admissions:       make(map[authFlowKey]*authGate),
+		slots:            make(map[string]*authGate),
+		retainedLogins:   make(map[*authLoginHandle]struct{}),
+		nativeHomeAccess: make(chan struct{}, 1),
 	}
+	broker.nativeHomeAccess <- struct{}{}
+
+	return broker
 }
 
 func providerAuthUnavailableReason(options Options, home providerAuthHome) string {

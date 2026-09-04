@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"time"
 )
 
@@ -24,102 +23,15 @@ func runAuthKeychainTool(ctx context.Context, args []string, options Options) (i
 }
 
 func runContainedAuthKeychainTool(ctx context.Context, args []string, options Options) ([]byte, int, error) {
-	env := BuildEnv(options)
-	if env == nil {
-		return nil, 0, errors.New("build keychain environment: invalid process isolation")
-	}
+	options.Cwd = "/"
+	options.ClaudeHome = ""
 
-	path, err := resolveLaunchExecutable(options, "security", env)
+	output, result, err := runNativeOutput(ctx, options, "security", args)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	executable, err := freezeExecutable(path)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	generation, release, err := admitAuthKeychainNative(ctx, options)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	containedOptions := options
-	containedOptions.Cwd = "/"
-
-	output, runErr := containedClaudeOutput(ctx, executable, args, containedOptions, generation, "security keychain")
-	if !errors.Is(runErr, ErrProcessContainmentIncomplete) {
-		release()
-	}
-
-	if runErr == nil {
-		return output, 0, nil
-	}
-
-	if errors.Is(runErr, ErrProcessContainmentIncomplete) {
-		return nil, 0, runErr
-	}
-
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, 0, errors.Join(ctxErr, runErr)
-	}
-
-	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) {
-		return nil, exitErr.ExitCode(), nil
-	}
-
-	return nil, 0, runErr
-}
-
-// admitAuthKeychainNative admits one platform keystore call under the boundary
-// the options select. Best-effort containment cannot launch without its
-// generation and native-root permit, so their absence there is an incomplete
-// boundary; every other mode launches the platform tool as ordinary
-// same-identity execution, which consumes neither, so it runs with whichever
-// admission hooks the caller wired — the same optionality the version probe
-// gives its discovery hooks.
-func admitAuthKeychainNative(ctx context.Context, options Options) (*DarwinGeneration, func(), error) {
-	if options.DarwinBestEffort && (options.PrepareKeychainGeneration == nil || options.AcquireKeychainDiscovery == nil) {
-		return nil, nil, fmt.Errorf("%w: keychain native admission is unavailable", ErrProcessContainmentIncomplete)
-	}
-
-	var generation *DarwinGeneration
-
-	if options.PrepareKeychainGeneration != nil {
-		var err error
-
-		generation, err = options.PrepareKeychainGeneration(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-
-	release := func() {}
-
-	if options.AcquireKeychainDiscovery != nil {
-		acquired, err := options.AcquireKeychainDiscovery(ctx)
-		if err != nil {
-			return nil, nil, errors.Join(err, generation.finish(true))
-		}
-
-		release = acquired
-	}
-
-	return generation, release, nil
-}
-
-func authKeychainExitCode(err error) (int, error) {
-	if err == nil {
-		return 0, nil
-	}
-
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode(), nil
-	}
-
-	return 0, err
+	return output, result.ExitCode, nil
 }
 
 // authKeychainFlagService and authKeychainFlagAccount are the platform
@@ -137,15 +49,6 @@ var authKeychainReadTool = runAuthKeychainReadTool
 
 func runAuthKeychainReadTool(ctx context.Context, args []string, options Options) ([]byte, int, error) {
 	return runContainedAuthKeychainTool(ctx, args, options)
-}
-
-func authKeychainReadResult(output []byte, err error) ([]byte, int, error) {
-	code, launchErr := authKeychainExitCode(err)
-	if code != 0 || launchErr != nil {
-		return nil, code, launchErr
-	}
-
-	return output, 0, nil
 }
 
 // ReadAuthKeychainCredential answers with the composite OAuth credential blob

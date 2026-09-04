@@ -811,7 +811,7 @@ func (s *agentSession) retireExactNativeIncarnationLocked(
 		return true, errors.Join(storeCommitError(commitErr), closeErr)
 	}
 
-	if errors.Is(closeErr, claude.ErrProcessContainmentIncomplete) {
+	if errors.Is(closeErr, ErrContainmentIncomplete) {
 		s.lifecycleStream().abandonIncarnation()
 		s.clearAutonomousRoute(expected)
 		expected.signalMirrorReady()

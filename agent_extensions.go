@@ -75,22 +75,38 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 	}
 
 	claudeOptions := claude.Options{
-		CLIPath:             a.options.ExecutablePath,
-		ClaudeHome:          claudeHome,
-		Env:                 a.options.Env,
-		ProcessIsolation:    a.claudeIsolation(),
-		OrdinaryEnvironment: a.ordinaryEnvironment(),
-		DarwinBestEffort:    a.containmentMode == RuntimeContainmentBestEffort,
-		AcquireUsageDiscovery: func(discoveryCtx context.Context) (func(), error) {
-			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-		},
-		PrepareUsageGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
-			return a.prepareDiscoveryGeneration(generationCtx)
-		},
+		CLIPath:               a.options.ExecutablePath,
+		ClaudeHome:            claudeHome,
+		Env:                   a.options.Env,
+		OrdinaryEnvironment:   a.ordinaryEnvironment(),
+		Authority:             a.claudeAuthority(),
+		ContainmentIncomplete: ErrContainmentIncomplete,
 	}
-	processSnapshotSource := a.descendantProcesses.newSource()
-	claudeOptions.ObserveProcessInventory = processSnapshotSource.started
-	claudeOptions.ObserveBoundaryComplete = processSnapshotSource.completed
+	if a.options.hostAuthoritySet {
+		parent, parentErr := a.ensureScratchParent()
+		if parentErr != nil {
+			return RateLimitsResponse{}, parentErr
+		}
+
+		root, createErr := materializeMkdirTemp(parent, "acp-go-claude-usage-*")
+		if createErr != nil {
+			return RateLimitsResponse{}, createErr
+		}
+
+		residence := &materializedSession{configDir: root}
+		defer func() { returnErr = errors.Join(returnErr, residence.Close()) }()
+
+		if copyErr := copyClaudeConfigFiles(root, claudeHome, a.resumeCredentialOptions()); copyErr != nil {
+			return RateLimitsResponse{}, copyErr
+		}
+
+		if prepareErr := residence.prepare(ctx, a.options.HostAuthority, root); prepareErr != nil {
+			return RateLimitsResponse{}, prepareErr
+		}
+
+		claudeOptions.ClaudeHome = root
+		claudeOptions.TreePrepared = true
+	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, rateLimitsProbeTimeout)
 	defer cancel()
@@ -100,7 +116,7 @@ func (a *Agent) handleRateLimits(ctx context.Context, raw json.RawMessage) (_ Ra
 	// a broken probe must not break the extension.
 	limits, err := a.queryRateLimits(probeCtx, claudeOptions)
 	if err != nil {
-		if errors.Is(err, ErrProcessContainmentIncomplete) {
+		if errors.Is(err, ErrContainmentIncomplete) || errors.Is(err, ErrHostAuthorityUnavailable) {
 			return RateLimitsResponse{}, err
 		}
 
@@ -212,6 +228,8 @@ func (a *Agent) handleForkSession(
 		return acp.UnstableForkSessionResponse{}, err
 	}
 
+	presence := configurationPresence(params.Meta)
+
 	additionalDirectories := sessionAdditionalDirectories(params.AdditionalDirectories)
 	if validationErr := validateSessionStartPaths(params.Cwd, additionalDirectories); validationErr != nil {
 		return acp.UnstableForkSessionResponse{}, validationErr
@@ -235,14 +253,20 @@ func (a *Agent) handleForkSession(
 	var storeEntries []SessionStoreEntry
 
 	a.mu.Lock()
-	parentActive := a.sessions[params.SessionId] != nil
+	parent := a.sessions[params.SessionId]
+	parentActive := parent != nil
 	a.mu.Unlock()
 
-	if !parentActive {
-		storeEntries, err = a.storedSessionEntries(ctx, params.SessionId)
-		if err != nil {
-			return acp.UnstableForkSessionResponse{}, err
+	if parentActive {
+		metaOptions = inheritSessionConfiguration(metaOptions, presence, parent.configuration)
+	} else {
+		stored, loadErr := a.storedSession(ctx, params.SessionId)
+		if loadErr != nil {
+			return acp.UnstableForkSessionResponse{}, loadErr
 		}
+
+		storeEntries = stored.Entries
+		metaOptions = inheritSessionConfiguration(metaOptions, presence, stored.Configuration)
 	}
 
 	session, err := a.startAndStoreSession(ctx, acp.SessionId(sessionID), sessionStart{

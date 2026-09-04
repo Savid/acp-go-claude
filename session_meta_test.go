@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -17,7 +18,7 @@ func TestClaudeOptionsMetaAndParsing(t *testing.T) {
 		Model:          "sonnet",
 		Bare:           true,
 		Env:            map[string]string{"ANTHROPIC_BASE_URL": "https://example.test"},
-		ExtraPathDirs:  []string{"/opt/session/bin"},
+		ExtraPathDirs:  []string{absTestPath("opt", "session", "bin")},
 		OutputSchema:   map[string]any{"type": "object"},
 		SystemPrompt:   "system",
 		PermissionMode: permissionModeDontAsk,
@@ -28,10 +29,10 @@ func TestClaudeOptionsMetaAndParsing(t *testing.T) {
 	require.Equal(t, options, parsed)
 
 	options.Env["ANTHROPIC_BASE_URL"] = "changed"
-	options.ExtraPathDirs[0] = "/changed"
+	options.ExtraPathDirs[0] = absTestPath("changed")
 	options.OutputSchema["type"] = "changed"
 	require.Equal(t, "https://example.test", parsed.Env["ANTHROPIC_BASE_URL"])
-	require.Equal(t, []string{"/opt/session/bin"}, parsed.ExtraPathDirs)
+	require.Equal(t, []string{absTestPath("opt", "session", "bin")}, parsed.ExtraPathDirs)
 	require.Equal(t, "object", parsed.OutputSchema["type"])
 
 	jsonSchema := outputSchemaJSONSchema(parsed.OutputSchema)
@@ -62,11 +63,11 @@ func TestStartSessionCarriesExtraPathDirsToLaunch(t *testing.T) {
 	session, err := agent.startSession(ctx, sessionID, sessionStart{
 		Cwd: cwd,
 		MetaOptions: ClaudeOptions{
-			ExtraPathDirs: []string{"/opt/session/bin", "/opt/shared/bin"},
+			ExtraPathDirs: []string{absTestPath("opt", "session", "bin"), absTestPath("opt", "shared", "bin")},
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"/opt/session/bin", "/opt/shared/bin"}, captured.ExtraPathDirs)
+	require.Equal(t, []string{absTestPath("opt", "session", "bin"), absTestPath("opt", "shared", "bin")}, captured.ExtraPathDirs)
 
 	require.NoError(t, session.Close(ctx))
 }
@@ -218,17 +219,24 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 		},
 		{
 			name:      "extra path dirs entry not string",
-			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{"/opt/bin", 1}}}},
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{absTestPath("opt", "bin"), 1}}}},
 			wantField: "_meta.claude.options.extraPathDirs[1]",
 		},
 		{
 			name:      "extra path dirs entry relative",
-			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{"/opt/bin", "relative/bin"}}}},
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{absTestPath("opt", "bin"), "relative/bin"}}}},
 			wantField: "_meta.claude.options.extraPathDirs[1]",
 		},
 		{
 			name:      "extra path dirs entry empty",
 			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaExtraPathDirsKey: []any{""}}}},
+			wantField: "_meta.claude.options.extraPathDirs[0]",
+		},
+		{
+			name: "extra path dirs entry contains separator",
+			meta: map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{
+				metaExtraPathDirsKey: []any{absTestPath("opt", "bin") + string(os.PathListSeparator) + absTestPath("srv", "bin")},
+			}}},
 			wantField: "_meta.claude.options.extraPathDirs[0]",
 		},
 		{
@@ -251,7 +259,7 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 func TestClaudeMetaSmallHelpers(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, []string{"/a", "/b"}, sessionAdditionalDirectories([]string{"/a", "/b"}))
+	require.Equal(t, []string{absTestPath("a"), absTestPath("b")}, sessionAdditionalDirectories([]string{absTestPath("a"), absTestPath("b")}))
 	require.True(t, blockedClaudeEnvKey("LD_PRELOAD"))
 	// The blocklist compares through the platform seam, so a lowercase spelling
 	// is a distinct variable on Unix and the same one on Windows.
@@ -276,13 +284,13 @@ func TestClaudeMetaSmallHelpers(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, map[string]string{"A": "B"}, env)
 
-	dirs, err := stringSliceOption([]string{"/a"}, metaExtraPathDirsKey)
+	dirs, err := stringSliceOption([]string{absTestPath("a")}, metaExtraPathDirsKey)
 	require.NoError(t, err)
-	require.Equal(t, []string{"/a"}, dirs)
+	require.Equal(t, []string{absTestPath("a")}, dirs)
 
-	dirs, err = stringSliceOption([]any{"/a", "/b"}, metaExtraPathDirsKey)
+	dirs, err = stringSliceOption([]any{absTestPath("a"), absTestPath("b")}, metaExtraPathDirsKey)
 	require.NoError(t, err)
-	require.Equal(t, []string{"/a", "/b"}, dirs)
+	require.Equal(t, []string{absTestPath("a"), absTestPath("b")}, dirs)
 
 	_, err = claudeOptionsFromMeta(map[string]any{
 		claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{metaOutputSchemaKey: map[string]any{}}},

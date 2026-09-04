@@ -41,17 +41,10 @@ var (
 	storeCreateTemp    = func(dir string, pattern string) (tempFile, error) {
 		return os.CreateTemp(dir, pattern)
 	}
-	storeOpenDir = func(dir string) (syncCloser, error) {
-		return os.Open(dir)
-	}
+	storeSyncDir     = syncPermissionsDir
 	storeRename      = os.Rename
 	storeUserHomeDir = os.UserHomeDir
 )
-
-type syncCloser interface {
-	io.Closer
-	Sync() error
-}
 
 // Store persists session-scoped Claude permission rules.
 type Store struct {
@@ -251,21 +244,11 @@ func (s Store) writeAll(all map[string]map[string]string) error {
 		return fmt.Errorf("replace permission rules file: %w", err)
 	}
 
-	if err := syncPermissionsDir(filepath.Dir(path)); err != nil {
+	if err := storeSyncDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("sync permission rules dir: %w", err)
 	}
 
 	return nil
-}
-
-func syncPermissionsDir(dir string) error {
-	opened, err := storeOpenDir(dir)
-	if err != nil {
-		return err
-	}
-	defer opened.Close()
-
-	return opened.Sync()
 }
 
 func (s Store) path() string {

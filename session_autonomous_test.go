@@ -1154,17 +1154,16 @@ func TestPromptDuringAnExcursionLeavesItsPendingActionOwned(t *testing.T) {
 	route := session.autonomousRoute()
 	require.NotEmpty(t, route)
 
-	decisions := make(chan claude.PermissionDecision, 1)
+	decisions := make(chan permissionOutcome, 1)
 
 	go func() {
 		decision, permissionErr := handlePermissionThroughAdmissionForTest(t, session, context.Background(), route,
 			claude.PermissionRequest{
 				ToolName:  "Write",
 				ToolUseID: "tool-write",
-				Input:     map[string]any{"file_path": "/tmp/x", "content": "y"},
+				Input:     map[string]any{"file_path": absTestPath("tmp", "x"), "content": "y"},
 			})
-		require.NoError(t, permissionErr)
-		decisions <- decision
+		decisions <- permissionOutcome{decision: decision, err: permissionErr}
 	}()
 
 	<-permissions.entered
@@ -1189,7 +1188,10 @@ func TestPromptDuringAnExcursionLeavesItsPendingActionOwned(t *testing.T) {
 	}), "a refused prompt terminalizes nobody's pending action")
 
 	close(permissions.release)
-	require.Equal(t, claude.BehaviorAllow, (<-decisions).Behavior)
+
+	outcome := <-decisions
+	require.NoError(t, outcome.err)
+	require.Equal(t, claude.BehaviorAllow, outcome.decision.Behavior)
 
 	accepted, acceptedIndex, found := findLifecycleEvent(t, conn, blockedIndex, func(event map[string]any) bool {
 		if event["type"] != string(lifecycle.EventActionUpdate) {
@@ -1479,7 +1481,7 @@ func TestTaskNotificationResultTerminalizesTheDelayedExcursion(t *testing.T) {
 	require.NoError(t, err, "prompt C proceeds once the delayed excursion settled")
 }
 
-func TestSessionCloseJoinsQueuedAutonomousRetirementSupervisor(t *testing.T) {
+func TestSessionCloseJoinsQueuedAutonomousRetirementWorker(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 	session, transport, _, cleanup := newNegotiatedPromptFlowSession(t)
@@ -1489,7 +1491,7 @@ func TestSessionCloseJoinsQueuedAutonomousRetirementSupervisor(t *testing.T) {
 	incarnation := session.currentNativeIncarnation()
 	require.NotNil(t, incarnation)
 
-	// The supervisor owns a producer admission before it starts its goroutine.
+	// The worker owns a producer admission before it starts its goroutine.
 	// Parking it on the exact serve lock makes its queued lifetime deterministic.
 	session.pumpServeMu.Lock()
 	serveLocked := true
@@ -1512,10 +1514,10 @@ func TestSessionCloseJoinsQueuedAutonomousRetirementSupervisor(t *testing.T) {
 	select {
 	case closeErr := <-closeDone:
 		require.NoError(t, closeErr)
-		t.Fatal("session close returned with its retirement supervisor still queued")
+		t.Fatal("session close returned with its retirement worker still queued")
 	default:
 	}
-	require.Zero(t, transport.CloseCalls(), "carrier teardown waits behind the queued supervisor")
+	require.Zero(t, transport.CloseCalls(), "carrier teardown waits behind the queued worker")
 
 	session.pumpServeMu.Unlock()
 	serveLocked = false
@@ -1894,9 +1896,9 @@ func TestLoadRefusesAnExactContainedIncarnation(t *testing.T) {
 	id := acp.SessionId("contained-load")
 	cwd := t.TempDir()
 	store := NewInMemorySessionStore()
-	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, []SessionStoreEntry{
+	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"user"}`),
-	}))
+	)))
 	agent := NewAgent(WithSessionStore(store))
 	client := claude.NewClient(nil, claude.Options{}, newFakeClaudeTransport())
 	session := &agentSession{

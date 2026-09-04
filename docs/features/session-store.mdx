@@ -23,15 +23,28 @@ err := claudeacp.Serve(ctx, input, output,
 )
 ```
 
-The adapter mirrors Claude transcript rows into the store as the turn streams
-and uses the store as the sole authority for `session/list`, `session/load`,
-`session/resume`, and inactive-session fork. Restore always hydrates the
-authoritative rows into an isolated temporary Claude config directory under the
-scratch directory (default: system temp). The source config directory's
-credential travels into that temporary directory as `.credentials.json`; on
-macOS the login Keychain item the config directory owns is read first, because
-a native login stores the credential only there and the CLI prefers that item
-over any file beside it.
+The adapter writes a strict session-configuration row ahead of the first Claude
+transcript row, then mirrors transcript rows as the turn streams. The store is
+the sole authority for `session/list`, `session/load`, `session/resume`, and
+inactive-session fork. The configuration row records the session environment
+and ordered `extraPathDirs`; recovery rebuilds both from that row. An explicit
+load or resume value must exactly match the stored value, while an omitted value
+inherits it. A missing, malformed, unsupported, or conflicting configuration
+row fails before native resume.
+
+The current schema does not store Claude's native `.credentials.json` or login
+Keychain material. It does store accepted session `env` values verbatim, and
+those values may themselves contain API keys, bearer tokens, or other
+credentials. Protect a host `SessionStore` as secret-bearing data: restrict
+access, protect data in transit and at rest, avoid logging rows, and apply an
+appropriate deletion and retention policy.
+
+Restore hydrates only the authoritative transcript rows into an isolated
+temporary Claude config directory under the scratch directory (default: system
+temp). The source config directory's credential travels into that temporary
+directory as `.credentials.json`; on macOS the login Keychain item the config
+directory owns is read first, because a native login stores the credential only
+there and the CLI prefers that item over any file beside it.
 
 Claude's native transcript is a process cache, not a discovery or restore
 authority. An inactive native transcript whose session id has no main store
@@ -57,15 +70,17 @@ A store implements six methods:
 
 | Method | Role |
 | --- | --- |
-| `Append` | Append transcript rows for a key. |
+| `Append` | Append session rows for a key. |
 | `Load` | Read all rows for a key. |
 | `Replace` | Atomically replace a full generation of a session's files. |
 | `Delete` | Remove a key (and its subkeys for the main key). |
 | `ListSessions` | Enumerate sessions for `session/list`. |
 | `ListSubkeys` | Enumerate a session's non-main subpaths. |
 
-The main transcript uses the empty subpath (`SessionStoreMainSubpath`);
-subagent transcripts mirror under safe relative subpaths of the same session id.
+The main record uses the empty subpath (`SessionStoreMainSubpath`). Its first row
+is the adapter-owned configuration row and every remaining row is native
+transcript. Subagent transcripts mirror under safe relative subpaths of the same
+session id.
 `Replace` MUST include the main key exactly once, and MUST refuse a set that
 names any key twice — naming the duplicate, before any key is written — rather
 than resolving the collision by last write. Session summaries report
@@ -78,11 +93,9 @@ Close and delete wait for that full settlement. After delete succeeds, a store
 MUST refuse every late append or replacement for that session; no write may
 recreate the deleted row.
 
-<Note>
 `WithSessionStoreLoadTimeout` bounds store reads used by restore and listing.
 Set it when your store can hang (network round-trips), or a slow backend will
 stall `session/load`, `session/resume`, fork, and `session/list`.
-</Note>
 
 ## Typed image output
 

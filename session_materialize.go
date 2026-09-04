@@ -21,6 +21,9 @@ const (
 var copyClaudeConfigFiles = copyClaudeConfigFilesImpl
 var deleteNativeTranscript = deleteNativeTranscriptImpl
 
+// materializedNativeTreeReclaimTimeout bounds one detached host reclaim callback.
+var materializedNativeTreeReclaimTimeout = 5 * time.Second
+
 var (
 	materializeGlob        = filepath.Glob
 	materializeMkdirAll    = os.MkdirAll
@@ -36,6 +39,10 @@ var (
 type materializedSession struct {
 	configDir string
 	mainPath  string
+	authority HostAuthority
+	prepared  []string
+	cleanup   []string
+	opaque    map[string]error
 }
 
 func (m *materializedSession) Close() error {
@@ -43,7 +50,102 @@ func (m *materializedSession) Close() error {
 		return nil
 	}
 
-	return materializeRemoveAll(m.configDir)
+	remainingCleanup := m.cleanup[:0]
+
+	var errs []error
+
+	for _, root := range m.cleanup {
+		if err := materializeRemoveAll(root); err != nil {
+			errs = append(errs, err)
+			remainingCleanup = append(remainingCleanup, root)
+		}
+	}
+
+	m.cleanup = remainingCleanup
+
+	for len(m.prepared) > 0 {
+		root := m.prepared[len(m.prepared)-1]
+		reclaimCtx, cancelReclaim := context.WithTimeout(context.Background(), materializedNativeTreeReclaimTimeout)
+		err := guardedReclaimNativeTree(m.authority, reclaimCtx, root)
+
+		cancelReclaim()
+
+		if err != nil {
+			return errors.Join(append(errs, fmt.Errorf("reclaim native tree %q: %w", root, err))...)
+		}
+
+		m.prepared = m.prepared[:len(m.prepared)-1]
+
+		if err := materializeRemoveAll(root); err != nil {
+			errs = append(errs, err)
+			m.cleanup = append(m.cleanup, root)
+		}
+	}
+
+	for root, cause := range m.opaque {
+		errs = append(errs, fmt.Errorf("%w: native tree %q was not prepared conclusively: %v", ErrContainmentIncomplete, root, cause))
+	}
+
+	if len(m.opaque) > 0 {
+		return errors.Join(errs...)
+	}
+
+	if len(m.cleanup) == 0 {
+		errs = append(errs, materializeRemoveAll(m.configDir))
+	}
+
+	return errors.Join(errs...)
+}
+
+func (m *materializedSession) prepare(ctx context.Context, authority HostAuthority, roots ...string) error {
+	m.authority = authority
+
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+
+		if m.opaque == nil {
+			m.opaque = make(map[string]error)
+		}
+
+		m.opaque[root] = ErrContainmentIncomplete
+
+		if err := guardedPrepareNativeTree(authority, ctx, root); err != nil {
+			if !errors.Is(err, ErrContainmentIncomplete) && !errors.Is(err, ErrHostAuthorityUnavailable) {
+				err = fmt.Errorf("%w: prepare native tree %q: %w", ErrContainmentIncomplete, root, err)
+			}
+
+			m.opaque[root] = err
+
+			return err
+		}
+
+		delete(m.opaque, root)
+		m.prepared = append(m.prepared, root)
+	}
+
+	return nil
+}
+
+func (m *materializedSession) owns(root string) bool {
+	for _, prepared := range m.prepared {
+		if prepared == root {
+			return true
+		}
+	}
+
+	for _, cleanup := range m.cleanup {
+		if cleanup == root {
+			return true
+		}
+	}
+
+	if _, opaque := m.opaque[root]; opaque {
+		return true
+	}
+
+	return false
 }
 
 func (a *Agent) materializeStoreSession(
@@ -93,7 +195,7 @@ func (a *Agent) materializeStoreSessionWithEntries(
 		return noMaterializedSession()
 	}
 
-	scratchDir, err := ensureScratchParent(a.options.ScratchDir)
+	scratchDir, err := a.ensureScratchParent()
 	if err != nil {
 		return nil, err
 	}
@@ -300,21 +402,8 @@ func copyClaudeConfigFilesImpl(dst string, sourceClaudeHome string, options clau
 
 func (a *Agent) resumeCredentialOptions() claude.Options {
 	return claude.Options{
-		ProcessIsolation:    a.claudeIsolation(),
 		OrdinaryEnvironment: a.ordinaryEnvironment(),
-		DarwinBestEffort:    a.containmentMode == RuntimeContainmentBestEffort,
-		AcquireKeychainDiscovery: func(discoveryCtx context.Context) (func(), error) {
-			return acquireNativeRoot(discoveryCtx, a.options.RuntimeResourceHooks, RuntimeResourceDiscovery)
-		},
-		// The resume keystore read runs under every launch mode, because the
-		// materialized destination never hashes to the login home's Keychain
-		// item name. The discovery generation is the admission that exists in
-		// every mode that can launch at all; the best-effort-only Darwin
-		// generation would refuse the ordinary shared-identity mode this read
-		// most commonly runs in.
-		PrepareKeychainGeneration: func(generationCtx context.Context) (*claude.DarwinGeneration, error) {
-			return a.prepareDiscoveryGeneration(generationCtx)
-		},
+		Authority:           a.claudeAuthority(),
 	}
 }
 

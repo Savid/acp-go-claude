@@ -150,13 +150,13 @@ func TestLoadDiscoveredSettingsStopsOnContextCancellation(t *testing.T) {
 }
 
 func TestSettingsHelpers(t *testing.T) {
-	require.Equal(t, "/home/claude/settings.json", userSettingsPath("/home/claude"))
-	t.Setenv("CLAUDE_CONFIG_DIR", "/env/claude")
-	require.Equal(t, "/env/claude/settings.json", userSettingsPath(""))
+	require.Equal(t, absTestPath("home", "claude", "settings.json"), userSettingsPath(absTestPath("home", "claude")))
+	t.Setenv("CLAUDE_CONFIG_DIR", absTestPath("env", "claude"))
+	require.Equal(t, absTestPath("env", "claude", "settings.json"), userSettingsPath(""))
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	previousUserHomeDir := userHomeDir
-	userHomeDir = func() (string, error) { return "/home/user", nil }
-	require.Equal(t, "/home/user/.claude/settings.json", userSettingsPath(""))
+	userHomeDir = func() (string, error) { return absTestPath("home", "user"), nil }
+	require.Equal(t, absTestPath("home", "user", ".claude", "settings.json"), userSettingsPath(""))
 	userHomeDir = previousUserHomeDir
 
 	home := t.TempDir()

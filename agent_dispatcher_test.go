@@ -902,8 +902,13 @@ func TestLocalAgentConnectionClientMethods(t *testing.T) {
 	require.NoError(t, err)
 	_, err = conn.CreateElicitation(ctx, acp.UnstableCreateElicitationRequest{Form: &acp.UnstableCreateElicitationForm{Message: "approve", Mode: "form", Meta: map[string]any{"f": "m"}}}, elicitationScope{SessionID: "s", TurnNonce: "turn-2", ToolCallID: "tool-1"}, writeAdmission)
 	require.NoError(t, err)
-	_, err = conn.RequestPermission(ctx, acp.RequestPermissionRequest{}, actionWireAdmission{})
-	require.ErrorIs(t, err, errActionWireRegistration)
+	// A permission request with no lifecycle action behind it still reaches the
+	// host: only the action announcement is skipped.
+	permission, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{
+		Options: []acp.PermissionOption{{OptionId: permissionRejectOnce, Kind: acp.PermissionOptionKindRejectOnce}},
+	}, actionWireAdmission{})
+	require.NoError(t, err)
+	require.NotNil(t, permission.Outcome.Cancelled)
 	elicitations := recording.Elicitations()
 	require.Len(t, elicitations, 2)
 	require.Equal(t, map[string]any{
@@ -928,7 +933,7 @@ func TestLocalAgentConnectionClientMethods(t *testing.T) {
 	require.Error(t, err)
 	_, err = conn.WriteTextFile(ctx, acp.WriteTextFileRequest{Path: "/tmp/file", Content: "body"})
 	require.Error(t, err)
-	permission, err := conn.RequestPermission(ctx, acp.RequestPermissionRequest{
+	permission, err = conn.RequestPermission(ctx, acp.RequestPermissionRequest{
 		Options: []acp.PermissionOption{{OptionId: permissionRejectOnce, Kind: acp.PermissionOptionKindRejectOnce}},
 	}, writeAdmission)
 	require.NoError(t, err)
@@ -1588,7 +1593,7 @@ func TestPostResponseHookRequestIDSurvivesARealRequestsParams(t *testing.T) {
 
 	tagged := tagPostResponseHookRequest([]byte(
 		`{"jsonrpc":"2.0","id":9,"method":"session/new","params":` +
-			`{"cwd":"/tmp/work","mcpServers":[],"_meta":{"lifecycle":{"versions":[1]}}}}`,
+			`{"cwd":"/tmp/work","mcpServers":[],"_meta":{"lifecycle":{"version":1}}}}`,
 	))
 
 	var msg struct {

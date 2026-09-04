@@ -25,7 +25,7 @@ func TestWriteSessionMCPConfig(t *testing.T) {
 	require.JSONEq(t, `{"mcpServers":{}}`, string(data))
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	requirePrivateMode(t, 0o600, info)
 
 	fileParent := filepath.Join(t.TempDir(), "not-a-directory")
 	require.NoError(t, os.WriteFile(fileParent, []byte("x"), 0o600))

@@ -111,15 +111,9 @@ providers.
 - OpenTelemetry spans, metrics, trace propagation, and structured logs without
   recording prompt or tool secrets by default.
 - Ordinary same-identity native execution by default on every supported
-  platform: native work runs as the adapter's own identity, needs no privileged
-  supervisor, and reports non-authoritative `shared_identity` with no
-  provider-descendant inventory. Supplying `WithProcessIsolation` selects the
-  authoritative Linux boundary instead; that policy is refused before any spawn
-  on Windows, Darwin, FreeBSD, and OpenBSD, whose process APIs cannot apply the
-  Unix UID/GID identity boundary with empty supplementary groups, and
-  cross-compilation proves only that this refusal path builds. Darwin also has
-  an explicit best-effort opt-in — mutually exclusive with process isolation —
-  for operators who accept escaped-descendant and numeric-PGID-reuse risks.
+  platform. Embedded hosts can supply `WithHostAuthority` to route every native
+  launch and prepared-tree boundary through a host-owned containment service;
+  a supplied authority is strict and never falls back to direct launch.
 
 ## Slash Commands
 
@@ -135,7 +129,7 @@ corresponding Claude command.
 - [Models and config](docs/features/models-config.mdx)
 - [ACP methods](docs/reference/acp-methods.mdx)
 - [Observability](docs/operations/observability.mdx)
-- [Security and process containment](docs/operations/security.mdx)
+- [Security and host authority](docs/operations/security.mdx)
 
 Full Go API reference:
 [pkg.go.dev/github.com/savid/acp-go-claude](https://pkg.go.dev/github.com/savid/acp-go-claude).

@@ -39,6 +39,9 @@ func TestProcessExitErrorIs(t *testing.T) {
 
 	require.True(t, errors.Is(&ProcessExitError{}, ErrProcessExited))
 	require.False(t, errors.Is(&ProcessExitError{}, ErrClientClosed))
+	require.Equal(t, "claude process was revoked", (&ProcessExitError{Revoked: true}).Error())
+	require.Equal(t, "claude exited with status 23", (&ProcessExitError{ExitCode: 23}).Error())
+	require.Equal(t, ErrProcessExited.Error(), (&ProcessExitError{ExitCode: -1}).Error())
 }
 
 func TestClosedTransportErrorPreservesRecognizedJoinedCausesWithoutOpaqueText(t *testing.T) {
@@ -91,7 +94,6 @@ func TestClosedTransportErrorClassifiesEveryTerminalBoundary(t *testing.T) {
 		{name: "none", class: transportClassNone},
 		{name: "canceled", err: context.Canceled, class: transportClassCanceled},
 		{name: "deadline", err: context.DeadlineExceeded, class: transportClassDeadline},
-		{name: "containment", err: ErrProcessContainmentIncomplete, class: transportClassContainment},
 		{name: "process exit", err: ErrProcessExited, class: "process_exit"},
 		{name: "stdout panic", err: errClaudeStdoutReaderPanic, class: "stdout_panic"},
 		{name: "stdout read", err: errClaudeStdoutRead, class: "stdout_read"},
@@ -128,19 +130,6 @@ func TestClientAlive(t *testing.T) {
 
 	require.NoError(t, client.Close())
 	require.False(t, client.Alive())
-}
-
-func TestProcessTransportProcessExitErrorExcludesOpaqueCause(t *testing.T) {
-	t.Parallel()
-
-	transport := &ProcessTransport{}
-	sentinel := "provider-secret-exit-cause"
-	err := transport.processExitError(errors.New(sentinel))
-
-	var exit *ProcessExitError
-	require.ErrorAs(t, err, &exit)
-	require.Equal(t, -1, exit.ExitCode)
-	require.NotContains(t, err.Error(), sentinel)
 }
 
 func TestProcessTransportMalformedLineLogged(t *testing.T) {

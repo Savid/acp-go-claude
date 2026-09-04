@@ -3,7 +3,6 @@ package claude
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -33,56 +32,13 @@ var loadUsageLocation = time.LoadLocation
 // subscription usage panel. Every value is harness-reported; when the panel
 // carries no usage windows (for example on API billing) the result is empty.
 func QueryRateLimits(ctx context.Context, options Options) (RateLimits, error) {
-	executable, err := Discover(ctx, options.CLIPath, options)
-	if err != nil {
-		return RateLimits{}, err
-	}
-
-	if options.PrepareUsageGeneration == nil {
-		return RateLimits{}, fmt.Errorf("%w: claude /usage scratch generation is unavailable", ErrProcessContainmentIncomplete)
-	}
-
-	generation, err := options.PrepareUsageGeneration(ctx)
-	if err != nil {
-		return RateLimits{}, err
-	}
-
-	if options.AcquireUsageDiscovery == nil {
-		return RateLimits{}, errors.Join(
-			fmt.Errorf("%w: claude /usage native admission is unavailable", ErrProcessContainmentIncomplete),
-			generation.finish(true),
-		)
-	}
-
-	release, err := options.AcquireUsageDiscovery(ctx)
-	if err != nil {
-		return RateLimits{}, errors.Join(err, generation.finish(true))
-	}
-
-	if release == nil {
-		return RateLimits{}, errors.Join(
-			errors.New("admit claude /usage discovery: nil release"),
-			generation.finish(true),
-		)
-	}
-
-	output, err := containedClaudeOutput(
-		ctx,
-		executable,
-		[]string{"/usage", "--print", cliArgOutputFormat, "json"},
-		options,
-		generation,
-		"claude /usage",
-	)
-	finishErr := generation.finish(!errors.Is(err, ErrProcessContainmentIncomplete))
-
-	err = errors.Join(err, finishErr)
-	if !errors.Is(err, ErrProcessContainmentIncomplete) {
-		release()
-	}
-
+	output, result, err := runNativeOutput(ctx, options, options.CLIPath, []string{"/usage", "--print", cliArgOutputFormat, "json"})
 	if err != nil {
 		return RateLimits{}, fmt.Errorf("run claude /usage: %w", err)
+	}
+
+	if result.ExitCode != 0 {
+		return RateLimits{}, fmt.Errorf("claude /usage exited %d", result.ExitCode)
 	}
 
 	return parseUsageOutput(output, usageNow())

@@ -3,7 +3,7 @@ set -euo pipefail
 
 provider=claude
 packages=(./internal/claude)
-selector='^TestWindowsOrdinaryExecutableLookup'
+selector='^(TestOrdinaryWindowsExecutableAndEnvironmentBehavior|TestWindowsEnvironmentCollapsesRepeatedSpellingsDeterministically)$'
 
 result_log="$(mktemp)"
 cleanup() { rm -f "$result_log"; }

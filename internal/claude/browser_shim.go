@@ -3,6 +3,7 @@ package claude
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -55,30 +56,40 @@ func (s *browserShim) remove() error {
 // because harnesses split across them: one execs a launcher off PATH, another
 // reads BROWSER, and neither alone covers both.
 func browserShimEnviron(env []string, dir string) []string {
-	kept := make([]string, 0, len(env)+2)
+	values := make(map[string]string, len(env)+2)
 	search := dir
 
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok {
-			kept = append(kept, entry)
-
 			continue
 		}
 
-		switch key {
-		case envSearchPath:
+		switch EnvironmentKey(key) {
+		case EnvironmentKey(envSearchPath):
 			search = dir + string(os.PathListSeparator) + value
-		case browserShimBrowserEnv:
+		case EnvironmentKey(browserShimBrowserEnv):
 		default:
-			kept = append(kept, entry)
+			values[EnvironmentKey(key)] = value
 		}
 	}
 
-	return append(kept,
-		envSearchPath+"="+search,
-		browserShimBrowserEnv+"="+browserShimCommand(dir),
-	)
+	values[EnvironmentKey(envSearchPath)] = search
+	values[EnvironmentKey(browserShimBrowserEnv)] = browserShimCommand(dir)
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+
+	slices.Sort(keys)
+
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, key+"="+values[key])
+	}
+
+	return result
 }
 
 // browserShimCommand is the value BROWSER carries: an absolute no-op that

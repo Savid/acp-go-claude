@@ -8,23 +8,25 @@ import (
 
 // negotiateLifecycle reads the host's `acp-go.dev/lifecycle` offer and answers
 // with the facts this connection's active configuration proved. It records the
-// answer as the contract for the whole connection: with no offer, or with no
-// common version, the key is omitted from the response and no envelope,
+// answer as the contract for the whole connection: with no capability, the key
+// is omitted from the response and no envelope,
 // correlation read, or lifecycle fact exists on the connection at all.
 func (a *Agent) negotiateLifecycle(meta map[string]any) (map[string]any, error) {
-	offer, offered, refusal := lifecycle.DecodeOffer(meta)
+	offered, refusal := lifecycle.DecodeCapability(meta)
 	if refusal != nil {
 		return nil, unsupportedField(refusal.Field)
 	}
 
-	answer, common := offer.Answer(a.provenLifecycleFacts())
-	if !offered || !common || !a.lifecycleCarrierSupported() {
+	if !offered || !a.lifecycleCarrierSupported() {
 		a.retainNegotiatedLifecycle(lifecycle.Negotiated{})
 
 		// An omitted key and an empty answer are the same wire fact: the
 		// response carries no lifecycle member at all.
 		return map[string]any{}, nil
 	}
+
+	answer := a.provenLifecycleFacts()
+	answer.Version = lifecycle.Version
 
 	a.retainNegotiatedLifecycle(answer)
 	a.requireLifecycleWrites()
@@ -52,16 +54,14 @@ func (a *Agent) requireLifecycleWrites() {
 // native trace proves stable task identity and parentage, so no activity kind is
 // advertised. Background native work is still represented by agent-origin turns
 // and ordinary typed tool-call updates, without fabricating an activity registry.
-// Only the authoritative containment mode enumerates the whole
-// descendant tree, so only it proves vacancy and names the `process-containment`
-// class; ordinary same-identity execution and opted-in Darwin containment prove a
-// weaker boundary, and a weaker boundary is never promoted.
+// Only a supplied host authority owns the complete native tree, so only that
+// configuration proves vacancy and names the `process-containment` class.
 func (a *Agent) provenLifecycleFacts() lifecycle.Negotiated {
 	proven := lifecycle.Negotiated{
 		UpdatesOutsidePrompt: true,
 		ActivityKinds:        []lifecycle.ActivityKind{},
 	}
-	if a.containmentMode.provesWholeTreeLifecycle() {
+	if a.options.hostAuthoritySet {
 		proven.AuthoritativeQuiescence = true
 		proven.QuiescenceSource = lifecycle.ProofClassProcessContainment
 	}

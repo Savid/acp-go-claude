@@ -23,10 +23,11 @@ const (
 	escapedStdoutPIDEnv  = "ACP_GO_CLAUDE_FAKE_DESCENDANT_PID_FILE"
 )
 
-func TestContainedClaudeOutputCancellationClosesEscapedStdout(t *testing.T) {
+func TestRunNativeOutputCancellationClosesEscapedStdout(t *testing.T) {
 	switch os.Getenv(escapedStdoutRoleEnv) {
 	case "parent":
 		startEscapedStdoutHolder(t)
+		time.Sleep(30 * time.Second)
 
 		return
 	case "holder":
@@ -46,16 +47,14 @@ func TestContainedClaudeOutputCancellationClosesEscapedStdout(t *testing.T) {
 	defer cancel()
 
 	started := time.Now()
-	_, err := containedClaudeOutput(ctx, admitExecutable(t, os.Args[0]), []string{
-		"-test.run=^TestContainedClaudeOutputCancellationClosesEscapedStdout$",
-	}, Options{
+	_, _, err := runNativeOutput(ctx, Options{
 		Cwd:                 dir,
 		OrdinaryEnvironment: OrdinaryEnvironment(),
 		Env: map[string]string{
 			escapedStdoutRoleEnv: "parent",
 			escapedStdoutPIDEnv:  pidFile,
 		},
-	}, nil, "escaped stdout holder")
+	}, os.Args[0], []string{"-test.run=^TestRunNativeOutputCancellationClosesEscapedStdout$"})
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Less(t, time.Since(started), 2*time.Second,
@@ -69,7 +68,7 @@ func TestContainedClaudeOutputCancellationClosesEscapedStdout(t *testing.T) {
 func startEscapedStdoutHolder(t *testing.T) {
 	t.Helper()
 
-	command := exec.Command(os.Args[0], "-test.run=^TestContainedClaudeOutputCancellationClosesEscapedStdout$")
+	command := exec.Command(os.Args[0], "-test.run=^TestRunNativeOutputCancellationClosesEscapedStdout$")
 	command.Env = replaceTestEnvironment(os.Environ(), escapedStdoutRoleEnv, "holder")
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr

@@ -21,10 +21,9 @@ func TestBrowserShimEnvironSetsBothMechanismsAtOnce(t *testing.T) {
 	}, dir)
 
 	require.Equal(t, []string{
-		"MALFORMED",
+		browserShimBrowserEnv + "=" + filepath.Join(dir, "open"),
 		"KEEP=value",
 		envSearchPath + "=" + dir + string(os.PathListSeparator) + "/usr/bin:/bin",
-		browserShimBrowserEnv + "=" + filepath.Join(dir, "open"),
 	}, environ)
 }
 
@@ -34,8 +33,8 @@ func TestBrowserShimEnvironLeadsPathWhenTheChildInheritsNone(t *testing.T) {
 	dir := filepath.Join("shim", "dir")
 
 	require.Equal(t, []string{
-		envSearchPath + "=" + dir,
 		browserShimBrowserEnv + "=" + filepath.Join(dir, "open"),
+		envSearchPath + "=" + dir,
 	}, browserShimEnviron(nil, dir))
 }
 

@@ -51,11 +51,11 @@ func TestAuthLedgerRootValidation(t *testing.T) {
 
 	rootInfo, err := os.Stat(root)
 	require.NoError(t, err)
-	require.Equal(t, fs.FileMode(authLedgerDirMode), rootInfo.Mode().Perm())
+	requirePrivateMode(t, authLedgerDirMode, rootInfo)
 
 	info, err := os.Stat(ledger.dir)
 	require.NoError(t, err)
-	require.Equal(t, fs.FileMode(authLedgerDirMode), info.Mode().Perm())
+	requirePrivateMode(t, authLedgerDirMode, info)
 
 	// Two agents pointed at different config dirs never alias.
 	require.NotEqual(t, authLedgerHomeKey("/home"), authLedgerHomeKey("/other"))
@@ -188,7 +188,7 @@ func TestAuthLedgerWriteIsAtomicAndValuesFree(t *testing.T) {
 
 	info, err := os.Stat(broker.ledger.path(authProviderID))
 	require.NoError(t, err)
-	require.Equal(t, fs.FileMode(authLedgerFileMode), info.Mode().Perm())
+	requirePrivateMode(t, authLedgerFileMode, info)
 
 	records, err := broker.ledger.list()
 	require.NoError(t, err)
@@ -286,10 +286,10 @@ func TestAuthLedgerWriteFailures(t *testing.T) {
 		{"the directory cannot be synced", func(t *testing.T) {
 			t.Helper()
 
-			original := ledgerOpen
-			ledgerOpen = func(string) (*os.File, error) { return nil, errTestRandom }
+			original := ledgerSyncDir
+			ledgerSyncDir = func(string) error { return errTestRandom }
 
-			t.Cleanup(func() { ledgerOpen = original })
+			t.Cleanup(func() { ledgerSyncDir = original })
 		}},
 	}
 
@@ -719,6 +719,11 @@ func TestLedgerWriteRemovesTheTemporaryFileOnFailure(t *testing.T) {
 	ledgerCreateTemp = func(dir string, pattern string) (ledgerFile, error) {
 		file, err := os.CreateTemp(dir, pattern)
 		require.NoError(t, err)
+		// Every operation on the entry is stubbed below, so the real handle is
+		// released here: the removal under test is an unlink, and a platform that
+		// refuses to unlink a file another handle still holds would report the
+		// stub's leak rather than the cleanup this test is about.
+		require.NoError(t, file.Close())
 
 		return &failingLedgerFile{name: file.Name(), writeErr: errTestRandom}, nil
 	}

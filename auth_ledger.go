@@ -58,6 +58,7 @@ var (
 	ledgerStat       = os.Stat
 	ledgerRename     = os.Rename
 	ledgerOpen       = os.Open
+	ledgerSyncDir    = syncAuthLedgerDirectory
 	ledgerReadFile   = os.ReadFile
 	ledgerReadDir    = os.ReadDir
 	ledgerRemove     = os.Remove
@@ -208,7 +209,7 @@ func (l *authLedger) write(record authLedgerRecord) error {
 		return errors.Join(fmt.Errorf("commit provider auth ledger entry: %w", err), ledgerRemove(temp))
 	}
 
-	return l.syncDir()
+	return ledgerSyncDir(l.dir)
 }
 
 func writeLedgerFile(file ledgerFile, contents []byte) error {
@@ -225,15 +226,6 @@ func writeLedgerFile(file ledgerFile, contents []byte) error {
 	}
 
 	return file.Close()
-}
-
-func (l *authLedger) syncDir() error {
-	dir, err := ledgerOpen(l.dir)
-	if err != nil {
-		return fmt.Errorf("open provider auth ledger root: %w", err)
-	}
-
-	return errors.Join(dir.Sync(), dir.Close())
 }
 
 func (l *authLedger) list() ([]authLedgerRecord, error) {
@@ -368,6 +360,12 @@ func (p *providerAuth) inventory(ctx context.Context, params json.RawMessage) (a
 	if sessionErr != nil {
 		return nil, sessionErr
 	}
+
+	releaseSlot, admitted := p.admitSlot(ctx)
+	if !admitted {
+		return nil, authFailed(authCauseTimeout, "", "", "")
+	}
+	defer releaseSlot()
 
 	records, err := p.ledger.list()
 	if err != nil {

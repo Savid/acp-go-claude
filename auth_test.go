@@ -39,11 +39,12 @@ type fakeAuthLogin struct {
 	// refused makes the child reject the submitted value the way the provider
 	// rejects a wrong or expired authorization code: the value crosses and the
 	// config dir is left exactly as it was.
-	refused     bool
-	submitErr   error
-	waitErr     error
-	closeErr    error
-	exitUnknown bool
+	refused        bool
+	submitErr      error
+	waitErr        error
+	closeErr       error
+	cleanupPending *bool
+	exitUnknown    bool
 	// beforeSubmit runs before the write is attempted and before the child's
 	// own lock is taken, which is where anything racing the write lands: the
 	// real child's stdin is closed by whoever terminalizes the flow, without
@@ -121,6 +122,17 @@ func (f *fakeAuthLogin) Close() error {
 	return f.closeErr
 }
 
+func (f *fakeAuthLogin) CleanupPending() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.cleanupPending != nil {
+		return *f.cleanupPending
+	}
+
+	return f.closeErr != nil
+}
+
 // markExited models the child ending on its own, which the harness's
 // unconditionally armed loopback hook makes possible before any value is
 // pasted back.
@@ -189,7 +201,7 @@ func newAuthSeams(t *testing.T) *authTestSeams {
 	removeOriginal := authKeychainRemove
 	userOriginal := authNativeUser
 
-	authLoginBegin = func(context.Context, claude.Options, *claude.DarwinGeneration) (authLoginSession, string, error) {
+	authLoginBegin = func(context.Context, claude.Options) (authLoginSession, string, error) {
 		seams.loginCalls++
 		if seams.loginErr != nil {
 			return nil, "", seams.loginErr
@@ -202,13 +214,13 @@ func newAuthSeams(t *testing.T) *authTestSeams {
 		return seams.login, seams.loginURL, nil
 	}
 
-	authStatusProbe = func(context.Context, claude.Options, *claude.DarwinGeneration) (claude.AuthAccount, int, error) {
+	authStatusProbe = func(context.Context, claude.Options) (claude.AuthAccount, int, error) {
 		seams.statusCalls++
 
 		return seams.account, seams.statusExt, seams.statusErr
 	}
 
-	authLogoutCommand = func(context.Context, claude.Options, *claude.DarwinGeneration) (int, error) {
+	authLogoutCommand = func(context.Context, claude.Options) (int, error) {
 		seams.logoutCalls++
 
 		return 0, seams.logoutErr
@@ -253,7 +265,6 @@ func newAuthAgent(t *testing.T, opts ...Option) *Agent {
 	}, opts...)
 
 	agent := NewAgent(options...)
-	agent.containmentMode = RuntimeContainmentAuthoritative
 
 	return agent
 }
@@ -526,11 +537,11 @@ func TestProviderAuthUnusableRootStaysUnadvertised(t *testing.T) {
 
 func TestProviderAuthRelativePathsFailConstruction(t *testing.T) {
 	require.Error(t, validateProviderAuthRoot(Options{ProviderAuthRoot: "relative"}))
-	require.NoError(t, validateProviderAuthRoot(Options{ProviderAuthRoot: "/abs"}))
+	require.NoError(t, validateProviderAuthRoot(Options{ProviderAuthRoot: absTestPath("abs")}))
 	require.NoError(t, validateProviderAuthRoot(Options{}))
 
 	require.Error(t, validateProviderAuthDirectHome("relative"))
-	require.NoError(t, validateProviderAuthDirectHome("/abs"))
+	require.NoError(t, validateProviderAuthDirectHome(absTestPath("abs")))
 	require.NoError(t, validateProviderAuthDirectHome(""))
 
 	agent := NewAgent(WithProviderAuthRoot("relative"), WithLogger(slog.New(slog.DiscardHandler)))

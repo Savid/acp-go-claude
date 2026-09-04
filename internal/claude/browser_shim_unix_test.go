@@ -3,6 +3,7 @@
 package claude
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,9 @@ import (
 // testBrowserProbeURL is the address the fake harness hands a launcher. It
 // resolves nowhere, so nothing reaches the network even if a probe misfires.
 const testBrowserProbeURL = "https://example.invalid/"
+const testAuthorizeURL = "https://claude.com/oauth/authorize?redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+
+var errAuthTest = errors.New("auth test failure")
 
 // TestLoginNeverExecsABrowserLauncher is the whole point of the shim: a login
 // child that execs a launcher off PATH must reach a no-op, not a browser. Every
@@ -23,8 +27,7 @@ const testBrowserProbeURL = "https://example.invalid/"
 // and the positive control proves the recorder works before the absence of a
 // record is allowed to mean anything.
 func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
-	skipUnprivilegedDarwinIsolation(t)
-	dir := testTraversableTempDir(t)
+	dir := t.TempDir()
 	probe := filepath.Join(dir, "probe")
 	marker := filepath.Join(dir, "launched")
 
@@ -61,10 +64,10 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 		"printf '" + AuthLoginPrompt + "'\n" +
 		"sleep 30\n"
 
-	options, generation := authTestOptions(t, Options{Cwd: dir})
+	options := Options{Cwd: dir, ScratchParent: t.TempDir(), OrdinaryEnvironment: OrdinaryEnvironment()}
 	options.CLIPath = writeShellScript(t, filepath.Join(dir, "login"), script)
 
-	login, authorizeURL, err := StartAuthLogin(t.Context(), options, generation)
+	login, authorizeURL, err := StartAuthLogin(t.Context(), options)
 	require.NoError(t, err)
 	require.Equal(t, testAuthorizeURL, authorizeURL)
 
@@ -117,8 +120,8 @@ func TestStartAuthLoginFailsClosedWhenTheBrowserLaunchCannotBeContained(t *testi
 
 	browserShimMkdirTemp = func(string, string) (string, error) { return "", errAuthTest }
 
-	options, generation := authTestOptions(t, Options{CLIPath: "/bin/sh", Cwd: t.TempDir()})
+	options := Options{CLIPath: "/bin/sh", Cwd: t.TempDir(), ScratchParent: t.TempDir(), OrdinaryEnvironment: OrdinaryEnvironment()}
 
-	_, _, err := StartAuthLogin(t.Context(), options, generation)
+	_, _, err := StartAuthLogin(t.Context(), options)
 	require.ErrorIs(t, err, errAuthTest)
 }

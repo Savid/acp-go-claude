@@ -75,19 +75,6 @@ func TestLocalSessionStartSettlesEveryEstablishmentFailure(t *testing.T) {
 	_, err := agent.startSession(t.Context(), "session-install-failure", sessionStart{Cwd: t.TempDir()})
 	uuidRandom = previous
 	require.ErrorContains(t, err, "read random uuid")
-
-	rootErr := errors.New("native root refused")
-	agent = newLocalAgent(
-		WithHome(t.TempDir()),
-		WithScratchDir(t.TempDir()),
-		WithRuntimeResourceHooks(RuntimeResourceHooks{
-			AcquireNativeRoot: func(context.Context, RuntimeResourceKind) (func(), error) {
-				return nil, rootErr
-			},
-		}),
-	)
-	_, err = agent.startSession(t.Context(), "session-root-failure", sessionStart{Cwd: t.TempDir()})
-	require.ErrorIs(t, err, rootErr)
 }
 
 func TestResumeSessionEdgeBranches(t *testing.T) {
@@ -118,7 +105,7 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	missingTransport := newFakeClaudeTransport()
 	missingTransport.startErr = claude.ErrSessionNotFound
 	missingStore := NewInMemorySessionStore()
-	require.NoError(t, missingStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	require.NoError(t, missingStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"user"}`))))
 	missing, _, _ := newFakeLifecycleAgent(t, missingTransport, WithSessionStore(missingStore))
 	_, err = missing.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
 	requireUnknownSession(t, err)
@@ -145,14 +132,14 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, resumed.Close())
 
 	emitStore := NewInMemorySessionStore()
-	require.NoError(t, emitStore.Append(ctx, SessionKey{SessionID: "22222222-2222-4222-8222-222222222222"}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	require.NoError(t, emitStore.Append(ctx, SessionKey{SessionID: "22222222-2222-4222-8222-222222222222"}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"user"}`))))
 	emitFail, emitConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(emitStore))
 	emitConn.sessionUpdateErr = errors.New("resume update failed")
 	_, err = emitFail.ResumeSession(ctx, ResumeSessionRequest("22222222-2222-4222-8222-222222222222", cwd))
 	require.ErrorContains(t, err, "resume update failed")
 
 	backpressureStore := NewInMemorySessionStore()
-	require.NoError(t, backpressureStore.Append(ctx, SessionKey{SessionID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	require.NoError(t, backpressureStore.Append(ctx, SessionKey{SessionID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"user"}`))))
 	backpressure, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(backpressureStore), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	existing, cleanup := newStartedAgentSessionForTest(t, backpressure, "existing")
 	defer cleanup()
@@ -183,7 +170,7 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 
 	badHome := string([]byte{0})
 	badHomeStore := NewInMemorySessionStore()
-	require.NoError(t, badHomeStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
+	require.NoError(t, badHomeStore.Append(ctx, SessionKey{SessionID: string(sessionID)}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"user"}`))))
 	_, err = NewAgent(WithHome(badHome), WithSessionStore(badHomeStore)).LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
 	require.Error(t, err)
 
@@ -191,9 +178,9 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	requireUnknownSession(t, err)
 
 	store := NewInMemorySessionStore()
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{
-		[]byte(`{"type":"user","cwd":"` + filepath.ToSlash(cwd) + `","message":{"content":"hello"}}`),
-	}))
+	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(sessionID)}, testStoredSessionEntries(t, ClaudeOptions{},
+		[]byte(`{"type":"user","cwd":"`+filepath.ToSlash(cwd)+`","message":{"content":"hello"}}`),
+	)))
 	countedStore := &mainLoadCountingStore{SessionStore: store}
 	loaded, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(countedStore))
 	resp, err := loaded.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
@@ -216,7 +203,7 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, nativeLoaded.Close())
 
 	closedStore := NewInMemorySessionStore()
-	require.NoError(t, closedStore.Append(ctx, SessionKey{SessionID: "77777777-7777-4777-8777-777777777777"}, []SessionStoreEntry{[]byte(`{"type":"system"}`)}))
+	require.NoError(t, closedStore.Append(ctx, SessionKey{SessionID: "77777777-7777-4777-8777-777777777777"}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"system"}`))))
 	closed := NewAgent(WithHome(t.TempDir()), WithSessionStore(closedStore))
 	require.NoError(t, closed.Close())
 	_, err = closed.LoadSession(ctx, LoadSessionRequest("77777777-7777-4777-8777-777777777777", cwd))
@@ -248,25 +235,25 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(envNativePath), 0o755))
 	require.NoError(t, os.WriteFile(envNativePath, []byte("{}\n"), 0o600))
 	envSkipStore := NewInMemorySessionStore()
-	require.NoError(t, envSkipStore.Append(ctx, SessionKey{SessionID: "88888888-8888-4888-8888-888888888888"}, []SessionStoreEntry{[]byte(`{"type":"system"}`)}))
+	require.NoError(t, envSkipStore.Append(ctx, SessionKey{SessionID: "88888888-8888-4888-8888-888888888888"}, testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"system"}`))))
 	envSkip, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(envSkipStore), WithHome(envNativeHome))
 	_, err = envSkip.LoadSession(ctx, LoadSessionRequest("88888888-8888-4888-8888-888888888888", cwd))
 	require.NoError(t, err)
 	require.NotNil(t, envSkip.sessions["88888888-8888-4888-8888-888888888888"].materialized)
 
 	emptyUpdateStore := NewInMemorySessionStore()
-	require.NoError(t, emptyUpdateStore.Append(ctx, SessionKey{SessionID: "44444444-4444-4444-8444-444444444444"}, []SessionStoreEntry{
+	require.NoError(t, emptyUpdateStore.Append(ctx, SessionKey{SessionID: "44444444-4444-4444-8444-444444444444"}, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"system","subtype":"init"}`),
-	}))
+	)))
 	emitFail, emitConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(emptyUpdateStore))
 	emitConn.sessionUpdateErr = errors.New("load update failed")
 	_, err = emitFail.LoadSession(ctx, LoadSessionRequest("44444444-4444-4444-8444-444444444444", cwd))
 	require.ErrorContains(t, err, "load update failed")
 
 	replayErrStore := NewInMemorySessionStore()
-	require.NoError(t, replayErrStore.Append(ctx, SessionKey{SessionID: "55555555-5555-4555-8555-555555555555"}, []SessionStoreEntry{
+	require.NoError(t, replayErrStore.Append(ctx, SessionKey{SessionID: "55555555-5555-4555-8555-555555555555"}, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"user","message":{"content":"replay me"}}`),
-	}))
+	)))
 	replayErrAgent, replayErrConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(replayErrStore))
 	replayErrConn.sessionUpdateErr = errors.New("replay update failed")
 	_, err = replayErrAgent.LoadSession(ctx, LoadSessionRequest("55555555-5555-4555-8555-555555555555", cwd))
@@ -421,7 +408,7 @@ func TestListPromptCloseAndDeleteEdgeBranches(t *testing.T) {
 }
 
 // newSessionForTransport builds one started session over transport, so a test can
-// observe that session's own native containment.
+// observe that session's own native process boundary.
 func newSessionForTransport(
 	t *testing.T,
 	agent *Agent,
@@ -481,10 +468,6 @@ func requireCancelledCloseRefusal(t *testing.T, ctx context.Context, err error) 
 	require.Equal(t, "Request cancelled", mapped.Message)
 }
 
-// requireExpiredCloseRefusal pins the wire answer for a barrier wait that ran out
-// without a cancel. The request was well formed and nothing failed internally: it
-// is a retryable refusal that names itself, and its message carries the
-// barrier-wait error rather than anything the native process said.
 func requireExpiredCloseRefusal(t *testing.T, ctx context.Context, err error) {
 	t.Helper()
 
@@ -495,7 +478,7 @@ func requireExpiredCloseRefusal(t *testing.T, ctx context.Context, err error) {
 	require.Equal(t, "Invalid request", reqErr.Message)
 
 	data, ok := reqErr.Data.(map[string]any)
-	require.True(t, ok, "the refusal names itself")
+	require.True(t, ok)
 	require.Equal(t, "claude_session_close_unsettled", data[jsonFieldError])
 	require.Equal(t, "session close did not reach its settlement barrier", data[jsonFieldMessage])
 	mapped := requestError(ctx, err)
@@ -511,9 +494,9 @@ func requireExpiredCloseRefusal(t *testing.T, ctx context.Context, err error) {
 // nothing, so the id keeps the live session and the next close settles it.
 //
 // The session it refuses is a real one: a turn is running and its cancel is
-// registered, which is the only shape under which a native teardown hoisted ahead
-// of the barrier would actually fire. "Contained nothing" has to be asserted on
-// the session that could have been contained, or it asserts nothing at all.
+// registered. The lifecycle flight rejects the already-withdrawn caller before
+// the session close ladder begins, so the refusal mutates neither the turn nor
+// the native boundary.
 func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
 	sessionID := acp.SessionId("session-busy")
 	agent, session, transport := newBusySessionAgent(t, sessionID)
@@ -534,7 +517,7 @@ func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
 	require.Zero(t, transport.CloseCalls(), "an unsettled close contains nothing")
 	require.True(t, session.client.Alive(), "a refused close leaves the native process it never contained")
 	require.Zero(t, interruptCalls(transport), "a refused close reaches no rung of the native teardown")
-	require.Error(t, turnCtx.Err(), "the turn the close is waiting on is still asked to wind down")
+	require.NoError(t, turnCtx.Err(), "a caller canceled before lifecycle admission mutates no turn")
 
 	held, lookupErr := agent.session(sessionID)
 	require.NoError(t, lookupErr, "the work still running behind the id stays addressable")
@@ -556,10 +539,6 @@ func TestCloseSessionKeepsAnUnsettledSessionAddressable(t *testing.T) {
 // memoized. The next close retakes the boundary, completes the rung, and only
 // then does the id stop resolving — dropping it on the first failure would leave
 // the host holding the only name for what this adapter had not finished.
-//
-// Each admission is still returned exactly once across both closes: the native
-// root on the close that proved containment, the scratch reservation on the
-// close that finished deleting what it reserved.
 func TestFailedCloseRetriesItsBoundaryOnTheNextClose(t *testing.T) {
 	previous := sessionRemoveAll
 	t.Cleanup(func() { sessionRemoveAll = previous })
@@ -573,10 +552,6 @@ func TestFailedCloseRetriesItsBoundaryOnTheNextClose(t *testing.T) {
 	require.NoError(t, os.Mkdir(mcp, 0o700))
 	session.mcpConfigDir = mcp
 
-	nativeReleases, scratchReleases := 0, 0
-	session.nativeRootRelease = func() { nativeReleases++ }
-	session.scratchRootRelease = func() { scratchReleases++ }
-
 	removeErr := errors.New("delete MCP root")
 	sessionRemoveAll = func(string) error { return removeErr }
 
@@ -586,16 +561,11 @@ func TestFailedCloseRetriesItsBoundaryOnTheNextClose(t *testing.T) {
 	held, lookupErr := agent.session(sessionID)
 	require.NoError(t, lookupErr, "a close that failed a rung of its boundary keeps its id addressable")
 	require.Same(t, session, held)
-	require.Equal(t, 1, nativeReleases, "containment completed, so that admission is already back")
-	require.Zero(t, scratchReleases, "the reservation survives the deletion the close still owes it")
-
 	sessionRemoveAll = previous
 
 	_, err = agent.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: sessionID})
 	require.NoError(t, err, "the next close retakes the boundary rather than replaying a memoized failure")
 	require.NoDirExists(t, mcp, "the rung the first close failed is the one the retry completes")
-	require.Equal(t, 1, nativeReleases, "an admission returned twice would credit work that was never admitted")
-	require.Equal(t, 1, scratchReleases)
 
 	_, lookupErr = agent.session(sessionID)
 	require.Error(t, lookupErr, "a completed boundary removes the id")
@@ -627,9 +597,9 @@ func TestDeleteSessionTombstonesBeforeItTearsAnythingDown(t *testing.T) {
 	sessionID := acp.SessionId("session-busy")
 	key := SessionKey{SessionID: string(sessionID)}
 	backing := NewInMemorySessionStore()
-	require.NoError(t, backing.Append(ctx, key, []SessionStoreEntry{
+	require.NoError(t, backing.Append(ctx, key, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"user","message":{"content":"live"}}`),
-	}))
+	)))
 
 	withdrawn, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -689,6 +659,58 @@ func TestDeleteSessionTombstonesBeforeItTearsAnythingDown(t *testing.T) {
 	entries, err = backing.Load(ctx, key)
 	require.NoError(t, err)
 	require.Empty(t, entries, "no write behind the tombstone recreates the row")
+}
+
+func TestManagedDeleteNeverReopensTheNativeTranscriptHome(t *testing.T) {
+	authority := newFakeHostAuthority()
+	agent := NewAgent(WithSessionStore(NewInMemorySessionStore()), WithHostAuthority(authority))
+
+	previousDelete := deleteNativeTranscript
+	t.Cleanup(func() { deleteNativeTranscript = previousDelete })
+	deleteNativeTranscript = func(context.Context, string, string) error {
+		t.Fatal("managed delete reopened the native transcript home")
+
+		return nil
+	}
+
+	_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest("managed-session"))
+	require.NoError(t, err)
+}
+
+func TestManagedDeleteRetainsBusyResidenceForRetry(t *testing.T) {
+	authority := newFakeHostAuthority()
+	authority.reclaim = ErrNativeTreeBusy
+	agent, _, _ := newFakeLifecycleAgent(
+		t,
+		newFakeClaudeTransport(),
+		WithSessionStore(NewInMemorySessionStore()),
+		WithHostAuthority(authority),
+	)
+	sessionID := acp.SessionId("managed-busy-delete")
+	session := newSessionForTransport(t, agent, sessionID, newFakeClaudeTransport())
+	agent.sessions[sessionID] = session
+
+	root := filepath.Join(t.TempDir(), "native")
+	session.materialized = &materializedSession{configDir: root}
+	require.NoError(t, session.materialized.prepare(t.Context(), authority, root))
+
+	_, err := agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(sessionID))
+	require.ErrorIs(t, err, ErrNativeTreeBusy)
+	agent.mu.Lock()
+	require.Same(t, session, agent.sessions[sessionID])
+	agent.mu.Unlock()
+
+	authority.reclaim = nil
+	_, err = agent.UnstableDeleteSession(t.Context(), DeleteSessionRequest(sessionID))
+	require.NoError(t, err)
+	agent.mu.Lock()
+	require.NotContains(t, agent.sessions, sessionID)
+	agent.mu.Unlock()
+	require.Equal(t, []string{
+		"prepare:" + root,
+		"reclaim:" + root,
+		"reclaim:" + root,
+	}, authority.snapshot())
 }
 
 // TestRemoveSessionEvictsOnlyASettledSession proves the internal cleanup path
@@ -833,6 +855,19 @@ func startedClientWithCloseError(t *testing.T, closeErr error) *claude.Client {
 	return client
 }
 
+func deadClaudeClient(t *testing.T, closeErr error) *claude.Client {
+	t.Helper()
+	transport := newFakeClaudeTransport()
+	client := claude.NewClient(nil, claude.Options{}, &closeErrTransport{Transport: transport, err: closeErr})
+	require.NoError(t, client.Start(t.Context()))
+	transport.errs <- errors.New("process exited")
+	close(transport.errs)
+	close(transport.messages)
+	require.Eventually(t, func() bool { return !client.Alive() }, time.Second, time.Millisecond)
+
+	return client
+}
+
 type closeErrTransport struct {
 	claude.Transport
 	err error
@@ -906,32 +941,35 @@ func TestAgentSessionHelperBranches(t *testing.T) {
 	require.NotEmpty(t, config)
 }
 
-func TestStoredSessionEntries(t *testing.T) {
+func TestStoredSession(t *testing.T) {
 	ctx := context.Background()
 	sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
 	store := NewInMemorySessionStore()
 	agent := NewAgent(WithSessionStore(store))
 
-	_, err := NewAgent().storedSessionEntries(ctx, sessionID)
+	_, err := NewAgent().storedSession(ctx, sessionID)
 	requireUnknownSession(t, err)
-	_, err = agent.storedSessionEntries(ctx, sessionID)
+	_, err = agent.storedSession(ctx, sessionID)
 	requireUnknownSession(t, err)
 
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(sessionID)}, []SessionStoreEntry{[]byte(`{"type":"user"}`)}))
-	entries, err := agent.storedSessionEntries(ctx, sessionID)
+	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(sessionID)}, testStoredSessionEntries(
+		t, ClaudeOptions{Env: map[string]string{"TOKEN": "stored"}}, []byte(`{"type":"user"}`),
+	)))
+	stored, err := agent.storedSession(ctx, sessionID)
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
+	require.Len(t, stored.Entries, 1)
+	require.Equal(t, map[string]string{"TOKEN": "stored"}, stored.Configuration.Env)
 
 	agent.deleted[sessionID] = struct{}{}
 	previousDeleteNativeTranscript := deleteNativeTranscript
 	deleteNativeTranscript = func(context.Context, string, string) error { return errors.New("cleanup failed") }
 	t.Cleanup(func() { deleteNativeTranscript = previousDeleteNativeTranscript })
-	_, err = agent.storedSessionEntries(ctx, sessionID)
+	_, err = agent.storedSession(ctx, sessionID)
 	requireUnknownSession(t, err)
 	deleteNativeTranscript = previousDeleteNativeTranscript
 
 	errAgent := NewAgent(WithSessionStore(&faultSessionStore{SessionStore: NewInMemorySessionStore(), loadErr: errors.New("load failed")}))
-	_, err = errAgent.storedSessionEntries(ctx, sessionID)
+	_, err = errAgent.storedSession(ctx, sessionID)
 	require.ErrorContains(t, err, "load failed")
 }
 
@@ -1274,102 +1312,11 @@ func TestStartSessionEdgeBranches(t *testing.T) {
 	require.ErrorContains(t, err, "claude control request failed")
 }
 
-func TestStartSessionIsolationFailureBranches(t *testing.T) {
-	ctx := t.Context()
-	cwd := t.TempDir()
-	sessionID := acp.SessionId("34343434-3434-4434-8434-343434343434")
-	uid, gid := testIsolationIdentity()
-	isolation := ProcessIsolation{UID: uid, GID: gid, BaseEnvironment: map[string]string{"PATH": "/usr/bin:/bin"}}
-	// Every isolated branch below reaches its own seam only if the native-owned
-	// home check ahead of it passes. That check is real on Linux, so the home has
-	// to be one the isolated identity genuinely owns rather than a t.TempDir leaf.
-	isolatedOptions := []Option{WithHome(testNativeOwnedHome(t)), WithProcessIsolation(isolation)}
-
-	originalEnsure := sessionEnsureScratchParent
-	originalHandoff := sessionHandoffGeneratedNativeTree
-	originalValidate := sessionValidateNativeOwnedDirectory
-	originalMkdirTemp := materializeMkdirTemp
-	originalCopy := copyClaudeConfigFiles
-	t.Cleanup(func() {
-		sessionEnsureScratchParent = originalEnsure
-		sessionHandoffGeneratedNativeTree = originalHandoff
-		sessionValidateNativeOwnedDirectory = originalValidate
-		materializeMkdirTemp = originalMkdirTemp
-		copyClaudeConfigFiles = originalCopy
-	})
-	restore := func() {
-		sessionEnsureScratchParent = originalEnsure
-		sessionHandoffGeneratedNativeTree = originalHandoff
-		sessionValidateNativeOwnedDirectory = originalValidate
-		materializeMkdirTemp = originalMkdirTemp
-		copyClaudeConfigFiles = originalCopy
-	}
-	start := func(options []Option, request sessionStart) error {
-		agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), options...)
-		_, err := agent.startSession(ctx, sessionID, request)
-
-		return err
-	}
-	authAgent := newAuthAgent(t)
-	authAgent.setConnection(newRecordingAgentClient())
-	installFakeClaudeClient(authAgent, newFakeClaudeTransport())
-	authSession, err := authAgent.startSession(ctx, sessionID, sessionStart{Cwd: cwd})
-	require.NoError(t, err)
-	require.NoError(t, authSession.Close(ctx))
-
-	sessionValidateNativeOwnedDirectory = func(string, *ProcessIsolation) error { return errors.New("validate native home") }
-	err = start(nil, sessionStart{Cwd: cwd})
-	require.ErrorContains(t, err, "validate native home")
-	restore()
-
-	sessionEnsureScratchParent = func(string) (string, error) { return "", errors.New("isolated scratch") }
-	err = start(isolatedOptions, sessionStart{Cwd: cwd})
-	require.ErrorContains(t, err, "isolated scratch")
-	restore()
-
-	materializeMkdirTemp = func(string, string) (string, error) { return "", errors.New("isolated home") }
-	err = start(isolatedOptions, sessionStart{Cwd: cwd})
-	require.ErrorContains(t, err, "create isolated Claude home")
-	restore()
-
-	copyClaudeConfigFiles = func(string, string, claude.Options) error { return errors.New("copy isolated home") }
-	err = start(isolatedOptions, sessionStart{Cwd: cwd})
-	require.ErrorContains(t, err, "copy isolated home")
-	restore()
-
-	copyClaudeConfigFiles = func(string, string, claude.Options) error { return nil }
-	sessionHandoffGeneratedNativeTree = func(string, *ProcessIsolation) error { return errors.New("handoff isolated home") }
-	err = start(isolatedOptions, sessionStart{Cwd: cwd})
-	require.ErrorContains(t, err, "handoff isolated home")
-	restore()
-
-	handoffs := 0
-	copyClaudeConfigFiles = func(string, string, claude.Options) error { return nil }
-	sessionHandoffGeneratedNativeTree = func(string, *ProcessIsolation) error {
-		handoffs++
-		if handoffs == 2 {
-			return errors.New("handoff MCP config")
-		}
-
-		return nil
-	}
-	err = start(isolatedOptions, sessionStart{
-		Cwd: cwd,
-		McpServers: []acp.McpServer{{
-			Stdio: &acp.McpServerStdio{Name: "fixture", Command: "/bin/true"},
-		}},
-	})
-	require.ErrorContains(t, err, "handoff MCP config")
-	require.Equal(t, 2, handoffs)
-}
-
 func TestSessionCloseReportsMCPConfigRemovalError(t *testing.T) {
 	agent := NewAgent()
 	session, cleanup := newStartedAgentSessionForTest(t, agent, "session-close-mcp")
 	defer cleanup()
-	parentFile := filepath.Join(t.TempDir(), "not-a-directory")
-	require.NoError(t, os.WriteFile(parentFile, []byte("x"), 0o600))
-	session.mcpConfigDir = filepath.Join(parentFile, "mcp")
+	session.mcpConfigDir = unremovableTestDir(t)
 	require.Error(t, session.Close(t.Context()))
 }
 
@@ -1392,23 +1339,20 @@ func (s *gatedLoadStore) Load(ctx context.Context, key SessionKey) ([]SessionSto
 	return entries, err
 }
 
-// TestLoadSessionRacingDeleteInstallsNothingBehindTheTombstone proves the
-// tombstone is re-read where an id becomes live, not only where a load begins.
-// The load passes its tombstone check, the delete lands while the native process
-// is starting, and the instance that start produced is refused rather than
-// registered: an install behind a tombstone is a live native session no host
-// could ever address again, because session, load, resume, fork and close all
-// answer unknown-session for that id.
-func TestLoadSessionRacingDeleteInstallsNothingBehindTheTombstone(t *testing.T) {
+// TestLoadSessionAndDeleteSerializeFromLookupThroughPublication proves a delete
+// cannot cross a same-id load while its store lookup is in flight. The load may
+// publish one addressable instance, then the waiting delete tombstones and
+// contains it before reporting success.
+func TestLoadSessionAndDeleteSerializeFromLookupThroughPublication(t *testing.T) {
 	ctx := context.Background()
 	sessionID := acp.SessionId("22222222-2222-4222-8222-222222222222")
 	key := SessionKey{SessionID: string(sessionID)}
 	cwd := t.TempDir()
 
 	backing := NewInMemorySessionStore()
-	require.NoError(t, backing.Append(ctx, key, []SessionStoreEntry{
+	require.NoError(t, backing.Append(ctx, key, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"user","message":{"content":"live"}}`),
-	}))
+	)))
 
 	gate := &gatedLoadStore{SessionStore: backing, entered: make(chan struct{}), release: make(chan struct{})}
 	transport := newFakeClaudeTransport()
@@ -1439,22 +1383,31 @@ func TestLoadSessionRacingDeleteInstallsNothingBehindTheTombstone(t *testing.T) 
 	}()
 
 	<-gate.entered
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, deleteErr := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+		deleteDone <- deleteErr
+	}()
+	require.Eventually(t, func() bool {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
 
-	_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
-	require.NoError(t, err, "the delete of an id the map does not hold succeeds")
+		return agent.lifecycleFlights[sessionID].waiters == 2
+	}, time.Second, time.Millisecond)
 
 	close(gate.release)
 
-	requireUnknownSession(t, <-loadDone)
+	require.NoError(t, <-loadDone)
+	require.NoError(t, <-deleteDone)
 
 	// The native start really did happen — this is the window, not a load that
 	// failed early — and what it produced is contained rather than published.
 	startedMu.Lock()
 	require.Len(t, started, 1, "the load started exactly one native process")
-	require.False(t, started[0].Alive(), "the process the refused install started is not left running")
+	require.False(t, started[0].Alive(), "the process the load published was contained by delete")
 	startedMu.Unlock()
 
-	require.Equal(t, 1, transport.CloseCalls(), "the refused install is torn down exactly once")
+	require.Equal(t, 1, transport.CloseCalls(), "the published instance is torn down exactly once")
 
 	agent.mu.Lock()
 	require.NotContains(t, agent.sessions, sessionID, "nothing is registered behind the tombstone")
@@ -1464,6 +1417,84 @@ func TestLoadSessionRacingDeleteInstallsNothingBehindTheTombstone(t *testing.T) 
 	entries, err := backing.Load(ctx, key)
 	require.NoError(t, err)
 	require.Empty(t, entries, "the racing load recreated no row")
+}
+
+func TestConcurrentLoadAndResumePublishOneSameIDInstance(t *testing.T) {
+	ctx := context.Background()
+	sessionID := acp.SessionId("33333333-3333-4333-8333-333333333333")
+	cwd := t.TempDir()
+	backing := NewInMemorySessionStore()
+	require.NoError(t, backing.Append(ctx, SessionKey{SessionID: string(sessionID)},
+		testStoredSessionEntries(t, ClaudeOptions{}, []byte(`{"type":"user"}`))))
+
+	gate := &gatedLoadStore{SessionStore: backing, entered: make(chan struct{}), release: make(chan struct{})}
+	created := 0
+	agent := NewAgent(WithHome(t.TempDir()), WithSessionStore(gate))
+	agent.setConnection(newRecordingAgentClient())
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		created++
+
+		return claude.NewClient(log, options, newFakeClaudeTransport())
+	}
+	t.Cleanup(func() { _ = agent.Close() })
+
+	loadDone := make(chan error, 1)
+	go func() {
+		_, err := agent.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
+		loadDone <- err
+	}()
+	<-gate.entered
+
+	resumeDone := make(chan error, 1)
+	go func() {
+		_, err := agent.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
+		resumeDone <- err
+	}()
+	require.Eventually(t, func() bool {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+
+		return agent.lifecycleFlights[sessionID].waiters == 2
+	}, time.Second, time.Millisecond)
+
+	close(gate.release)
+	require.NoError(t, <-loadDone)
+	require.NoError(t, <-resumeDone)
+	require.Equal(t, 1, created)
+	require.Len(t, agent.sessions, 1)
+}
+
+func TestConcurrentCloseAndDeleteSettleOneSameIDInstance(t *testing.T) {
+	ctx := context.Background()
+	sessionID := acp.SessionId("session-close-delete")
+	agent, session, transport := newBusySessionAgent(t, sessionID)
+	t.Cleanup(func() { _ = agent.Close() })
+
+	closeDone := make(chan error, 1)
+	go func() {
+		_, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: sessionID})
+		closeDone <- err
+	}()
+	require.Eventually(t, session.isClosing, time.Second, time.Millisecond)
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+		deleteDone <- err
+	}()
+	require.Eventually(t, func() bool {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+
+		return agent.lifecycleFlights[sessionID].waiters == 2
+	}, time.Second, time.Millisecond)
+
+	<-session.turn
+	require.NoError(t, <-closeDone)
+	require.NoError(t, <-deleteDone)
+	require.Equal(t, 1, transport.CloseCalls())
+	_, lookupErr := agent.session(sessionID)
+	requireUnknownSession(t, lookupErr)
 }
 
 // tombstoningTransport writes the agent's tombstone for an id while that id's
@@ -1854,9 +1885,9 @@ func TestConcurrentInstallAndDeleteNeverResurrectTheSession(t *testing.T) {
 			key := SessionKey{SessionID: string(sessionID)}
 
 			store := NewInMemorySessionStore()
-			require.NoError(t, store.Append(ctx, key, []SessionStoreEntry{
-				[]byte(`{"type":"user","cwd":"` + filepath.ToSlash(cwd) + `","message":{"content":"hello"}}`),
-			}))
+			require.NoError(t, store.Append(ctx, key, testStoredSessionEntries(t, ClaudeOptions{},
+				[]byte(`{"type":"user","cwd":"`+filepath.ToSlash(cwd)+`","message":{"content":"hello"}}`),
+			)))
 
 			agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(store))
 			t.Cleanup(func() { _ = agent.Close() })
@@ -1911,53 +1942,370 @@ func TestConcurrentInstallAndDeleteNeverResurrectTheSession(t *testing.T) {
 	}
 }
 
-// TestDeleteLandingInsideANativeStartRefusesTheInstall drives the same race with
-// the window held open deliberately. The delete lands after the install decided
-// its id was addressable and before it has anything to publish, which is the one
-// interleaving a scheduler is unlikely to produce on its own and the exact one
-// the re-check under the install lock exists for.
-func TestDeleteLandingInsideANativeStartRefusesTheInstall(t *testing.T) {
+// TestDeleteWaitingOnANativeStartWinsAfterPublication holds a load inside native
+// construction while a delete of the same id waits on the lifecycle flight. The
+// load publishes at most one addressable instance, then the delete tombstones
+// and contains it before it returns.
+func TestDeleteWaitingOnANativeStartWinsAfterPublication(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 	sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
 	key := SessionKey{SessionID: string(sessionID)}
 
 	store := NewInMemorySessionStore()
-	require.NoError(t, store.Append(ctx, key, []SessionStoreEntry{
-		[]byte(`{"type":"user","cwd":"` + filepath.ToSlash(cwd) + `","message":{"content":"hello"}}`),
-	}))
+	require.NoError(t, store.Append(ctx, key, testStoredSessionEntries(t, ClaudeOptions{},
+		[]byte(`{"type":"user","cwd":"`+filepath.ToSlash(cwd)+`","message":{"content":"hello"}}`),
+	)))
 
 	transport := newFakeClaudeTransport()
 	agent, _, _ := newFakeLifecycleAgent(t, transport, WithSessionStore(store))
 	t.Cleanup(func() { _ = agent.Close() })
 
-	deletes := 0
+	deleteDone := make(chan error, 1)
+	deleteStarted := make(chan struct{})
+	var deleteOnce sync.Once
 	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
-		if deletes == 0 {
-			deletes++
+		deleteOnce.Do(func() {
+			go func() {
+				close(deleteStarted)
+				_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
+				deleteDone <- err
+			}()
+		})
+		<-deleteStarted
+		require.Eventually(t, func() bool {
+			agent.mu.Lock()
+			defer agent.mu.Unlock()
 
-			_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
-			require.NoError(t, err)
-		}
+			return agent.lifecycleFlights[sessionID].waiters == 2
+		}, time.Second, time.Millisecond)
 
 		return claude.NewClient(log, options, transport)
 	}
 
 	_, err := agent.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
-	requireUnknownSession(t, err)
-	require.Equal(t, 1, deletes, "the delete really landed inside the native start")
+	require.NoError(t, err)
+	require.NoError(t, <-deleteDone)
 
 	agent.mu.Lock()
 	_, resident := agent.sessions[sessionID]
 	agent.mu.Unlock()
 	require.False(t, resident, "the instance nothing could ever name is torn down, not installed")
 
-	require.Positive(t, transport.CloseCalls(), "and its native process is contained")
+	require.Equal(t, 1, transport.CloseCalls(), "the published process is contained exactly once")
 
 	_, lookupErr := agent.session(sessionID)
 	requireUnknownSession(t, lookupErr)
 
 	entries, loadErr := store.Load(ctx, key)
 	require.NoError(t, loadErr)
-	require.Empty(t, entries, "nothing the refused install did reaches the store")
+	require.Empty(t, entries, "the tombstone remains final")
+}
+
+func TestCompleteSessionLifecycleAdmission(t *testing.T) {
+	t.Run("admitted", func(t *testing.T) {
+		held := false
+		ctx := t.Context()
+		admitted, release, err := completeSessionLifecycleAdmission(ctx, func(value bool) { held = value })
+		require.NoError(t, err)
+		require.Same(t, ctx, admitted)
+		require.False(t, held)
+		release()
+		require.True(t, held)
+	})
+
+	t.Run("cancelled after admission", func(t *testing.T) {
+		cause := errors.New("agent closed during admission")
+		ctx, cancel := context.WithCancelCause(t.Context())
+		cancel(cause)
+		held := false
+		admitted, release, err := completeSessionLifecycleAdmission(ctx, func(value bool) { held = value })
+		require.Nil(t, admitted)
+		require.Nil(t, release)
+		require.ErrorIs(t, err, cause)
+		require.True(t, held)
+	})
+}
+
+func TestAgentAndSessionMapResidualBranches(t *testing.T) {
+	closed := NewAgent()
+	closed.closed = true
+	_, err := closed.Prompt(t.Context(), TextPromptRequest("missing", "turn", "hello"))
+	require.Error(t, err)
+
+	authAgent := newAuthAgent(t)
+	require.NoError(t, authAgent.Close())
+
+	agent := NewAgent()
+	session, cleanup := newStartedAgentSessionForTest(t, agent, "deleted")
+	defer cleanup()
+	agent.deleted[session.id] = struct{}{}
+	require.Error(t, agent.storeStartedSession(t.Context(), session))
+
+	hosted := NewAgent(WithHostAuthority(residualCallbackAuthority()))
+	called := false
+	originalDelete := deleteNativeTranscript
+	deleteNativeTranscript = func(context.Context, string, string) error {
+		called = true
+
+		return nil
+	}
+	t.Cleanup(func() { deleteNativeTranscript = originalDelete })
+	hosted.retryDeleteNativeTranscript(t.Context(), "session")
+	require.False(t, called)
+}
+
+func TestReplacementConfigurationStoreResidualBranches(t *testing.T) {
+	newSession := func(agent *Agent) *agentSession {
+		return &agentSession{id: "replacement", agent: agent, mirror: &sessionMirror{}}
+	}
+
+	base := NewInMemorySessionStore()
+	store := &faultSessionStore{SessionStore: base, listSubkeysErr: errors.New("list refused")}
+	agent := NewAgent(WithSessionStore(store))
+	require.ErrorContains(t, agent.persistReplacementConfiguration(t.Context(), newSession(agent), nil), "list session store subkeys")
+
+	store = &faultSessionStore{SessionStore: base, listSubkeys: []string{"child"}, loadSubpathErr: errors.New("load refused")}
+	agent = NewAgent(WithSessionStore(store))
+	require.ErrorContains(t, agent.persistReplacementConfiguration(t.Context(), newSession(agent), nil), "load session store subkey")
+
+	require.NoError(t, base.Append(t.Context(), SessionKey{SessionID: "replacement", Subpath: "child"}, []SessionStoreEntry{json.RawMessage(`{"type":"child"}`)}))
+	store = &faultSessionStore{SessionStore: base, listSubkeys: []string{"child"}, replaceErr: errors.New("replace refused")}
+	agent = NewAgent(WithSessionStore(store))
+	require.ErrorContains(t, agent.persistReplacementConfiguration(t.Context(), newSession(agent), nil), "replace session configuration")
+}
+
+func TestStartSessionManagedResidualFailures(t *testing.T) {
+	t.Run("provider auth admission", func(t *testing.T) {
+		agent := newAuthAgent(t)
+		pending := true
+		child := &fakeAuthLogin{closeErr: errors.New("cleanup refused"), cleanupPending: &pending}
+		handle := &authLoginHandle{login: child, agent: agent, owner: agent.providerAuth}
+		agent.providerAuth.retainLogin(handle)
+		_, err := agent.startSession(t.Context(), "auth-admission", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "cleanup refused")
+	})
+
+	t.Run("provider injection and read release", func(t *testing.T) {
+		agent := newAuthAgent(t, WithExecutablePath(filepath.Join(t.TempDir(), "missing-claude")))
+		_, err := agent.startSession(t.Context(), "auth-injection", sessionStart{Cwd: t.TempDir()})
+		require.Error(t, err)
+	})
+
+	t.Run("isolated home creation", func(t *testing.T) {
+		originalMkdirTemp := materializeMkdirTemp
+		materializeMkdirTemp = func(string, string) (string, error) { return "", errors.New("home refused") }
+		t.Cleanup(func() { materializeMkdirTemp = originalMkdirTemp })
+		agent := NewAgent(
+			WithHostAuthority(residualCallbackAuthority()),
+			WithScratchDir(t.TempDir()),
+			WithHome(t.TempDir()),
+		)
+		_, err := agent.startSession(t.Context(), "home-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "create isolated Claude home")
+	})
+
+	t.Run("config copy", func(t *testing.T) {
+		originalCopy := copyClaudeConfigFiles
+		copyClaudeConfigFiles = func(string, string, claude.Options) error { return errors.New("copy refused") }
+		t.Cleanup(func() { copyClaudeConfigFiles = originalCopy })
+		agent := NewAgent(
+			WithHostAuthority(residualCallbackAuthority()),
+			WithScratchDir(t.TempDir()),
+			WithHome(t.TempDir()),
+		)
+		_, err := agent.startSession(t.Context(), "copy-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "copy refused")
+	})
+
+	t.Run("authority preparation", func(t *testing.T) {
+		authority := residualCallbackAuthority()
+		authority.prepare = func(context.Context, string) error { return ErrContainmentIncomplete }
+		agent := NewAgent(
+			WithHostAuthority(authority),
+			WithScratchDir(t.TempDir()),
+			WithHome(t.TempDir()),
+		)
+		_, err := agent.startSession(t.Context(), "prepare-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorIs(t, err, ErrContainmentIncomplete)
+	})
+}
+
+func TestSessionRetirementResidualBranches(t *testing.T) {
+	t.Run("unsettled", func(t *testing.T) {
+		agent, session, _ := newBusySessionAgent(t, "busy")
+		ctx, cancel := context.WithCancel(t.Context())
+		session.mu.Lock()
+		session.cancel = cancel
+		session.mu.Unlock()
+		err := agent.retireSessionPredecessor(ctx, session.id, session)
+		require.ErrorIs(t, err, errSessionCloseUnsettled)
+		<-session.turn
+	})
+
+	t.Run("close failure", func(t *testing.T) {
+		agent := NewAgent()
+		session, cleanup := newStartedAgentSessionForTest(t, agent, "failed")
+		defer cleanup()
+		session.client = startedClientWithCloseError(t, errors.New("close refused"))
+		require.Error(t, agent.retireSessionPredecessor(t.Context(), session.id, session))
+	})
+}
+
+func TestCloseSessionUnsettledResidualBranch(t *testing.T) {
+	agent, session, _ := newBusySessionAgent(t, "busy-close")
+	ctx, cancel := context.WithCancel(t.Context())
+	session.mu.Lock()
+	session.cancel = cancel
+	session.mu.Unlock()
+	_, err := agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.id})
+	require.ErrorIs(t, err, errSessionCloseUnsettled)
+	<-session.turn
+}
+
+func TestResumeAndLoadResidualBranches(t *testing.T) {
+	carrierOptions := func(value string) ClaudeOptions {
+		return ClaudeOptions{Env: map[string]string{"TOKEN": value}}
+	}
+
+	for _, method := range []string{"resume", "load"} {
+		t.Run(method+" retirement", func(t *testing.T) {
+			agent, session, _ := newBusySessionAgent(t, acp.SessionId(method+"-busy"))
+			oldOptions := carrierOptions("old")
+			session.configuration = configurationFromOptions(oldOptions)
+			session.fingerprint = sessionStartFingerprint(sessionStart{Cwd: session.cwd, MetaOptions: oldOptions})
+			ctx, cancel := context.WithCancel(t.Context())
+			session.mu.Lock()
+			session.cancel = cancel
+			session.mu.Unlock()
+			if method == "resume" {
+				_, err := agent.ResumeSession(ctx, ResumeSessionRequest(session.id, session.cwd,
+					WithSessionMeta(carrierOptions("new").Meta())))
+				require.ErrorIs(t, err, errSessionCloseUnsettled)
+			} else {
+				_, err := agent.LoadSession(ctx, LoadSessionRequest(session.id, session.cwd,
+					WithSessionMeta(carrierOptions("new").Meta())))
+				require.ErrorIs(t, err, errSessionCloseUnsettled)
+			}
+			<-session.turn
+		})
+	}
+
+	t.Run("stored resume mismatch", func(t *testing.T) {
+		store := NewInMemorySessionStore()
+		id := acp.SessionId("stored-mismatch")
+		oldOptions := carrierOptions("old")
+		require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, testStoredSessionEntries(t, oldOptions)))
+		agent := NewAgent(WithSessionStore(store))
+		_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, t.TempDir(),
+			WithSessionMeta(carrierOptions("new").Meta())))
+		require.Error(t, err)
+	})
+
+	t.Run("active load mismatch", func(t *testing.T) {
+		agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
+		created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		require.NoError(t, err)
+		_, err = agent.LoadSession(t.Context(), LoadSessionRequest(created.SessionId, t.TempDir()))
+		require.Error(t, err)
+		require.NoError(t, agent.Close())
+	})
+
+	for _, phase := range []string{"replay", "usage", "success"} {
+		t.Run("active load "+phase, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			agent, conn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(store))
+			cwd := t.TempDir()
+			created, err := agent.NewSession(t.Context(), NewSessionRequest(cwd))
+			require.NoError(t, err)
+			entries := testStoredSessionEntries(t, ClaudeOptions{})
+			if phase == "replay" {
+				entries = testStoredSessionEntries(t, ClaudeOptions{}, json.RawMessage(
+					`{"type":"user","message":{"content":"replay me"}}`,
+				))
+			}
+			require.NoError(t, store.Replace(t.Context(), SessionKey{SessionID: string(created.SessionId)}, []SessionStoreReplacement{{
+				Key: SessionKey{SessionID: string(created.SessionId)}, Entries: entries,
+			}}))
+			if phase != "success" {
+				conn.sessionUpdateErr = errors.New(phase + " update refused")
+			}
+			_, err = agent.LoadSession(t.Context(), LoadSessionRequest(created.SessionId, cwd))
+			if phase == "success" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "update refused")
+			}
+			conn.sessionUpdateErr = nil
+			require.NoError(t, agent.Close())
+		})
+	}
+}
+
+func TestResumeAndLoadRefuseClosureAfterLifecycleAdmission(t *testing.T) {
+	for _, method := range []string{"resume", "load"} {
+		t.Run(method, func(t *testing.T) {
+			agent := NewAgent()
+			id := acp.SessionId(method + "-closed-after-admission")
+			flight := &sessionLifecycleFlight{admission: make(chan struct{}, 1)}
+			agent.lifecycleFlights[id] = flight
+
+			done := make(chan error, 1)
+			go func() {
+				if method == "resume" {
+					_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, t.TempDir()))
+					done <- err
+
+					return
+				}
+
+				_, err := agent.LoadSession(t.Context(), LoadSessionRequest(id, t.TempDir()))
+				done <- err
+			}()
+
+			require.Eventually(t, func() bool {
+				agent.mu.Lock()
+				defer agent.mu.Unlock()
+
+				return flight.waiters == 1
+			}, time.Second, time.Millisecond)
+
+			agent.mu.Lock()
+			agent.closed = true
+			agent.mu.Unlock()
+			flight.admission <- struct{}{}
+
+			requireAgentClosedRefusal(t, <-done)
+		})
+	}
+}
+
+func TestStartSessionImageAndEstablishmentResidualBranches(t *testing.T) {
+	t.Run("image scratch", func(t *testing.T) {
+		original := imageScratchMkdirTemp
+		imageScratchMkdirTemp = func(string, string) (string, error) { return "", errors.New("image scratch refused") }
+		t.Cleanup(func() { imageScratchMkdirTemp = original })
+		agent := NewAgent(WithScratchDir(t.TempDir()), WithHome(t.TempDir()))
+		_, err := agent.startSession(t.Context(), "image-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "image scratch refused")
+	})
+
+	t.Run("managed auth release on copy failure", func(t *testing.T) {
+		originalCopy := copyClaudeConfigFiles
+		copyClaudeConfigFiles = func(string, string, claude.Options) error { return errors.New("copy refused") }
+		t.Cleanup(func() { copyClaudeConfigFiles = originalCopy })
+		agent := newAuthAgent(t, WithHostAuthority(residualCallbackAuthority()))
+		_, err := agent.startSession(t.Context(), "release-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "copy refused")
+	})
+
+	t.Run("local start failure settles gate", func(t *testing.T) {
+		transport := newFakeClaudeTransport()
+		transport.startErr = errors.New("start refused")
+		agent := NewAgent(WithScratchDir(t.TempDir()), WithHome(t.TempDir()))
+		agent.setConnection(&localAgentConnection{agent: agent, hooks: &postResponseHooks{}})
+		installFakeClaudeClient(agent, transport)
+		_, err := agent.startSession(t.Context(), "local-start-failure", sessionStart{Cwd: t.TempDir()})
+		require.ErrorContains(t, err, "start refused")
+	})
 }

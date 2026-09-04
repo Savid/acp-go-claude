@@ -1,6 +1,6 @@
-# Real-native browser containment canary
+# Real-native browser canary
 
-This fixture drives `claude auth login` through the adapter's production ACP
+This fixture drives `claude auth login` through the adapter's production
 provider-auth path, then uses passive `execve` tracing to require a real browser
 attempt and prove every launcher resolved inside the production-generated shim.
 The runtime container has no GUI, credentials, host mounts, or network.

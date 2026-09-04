@@ -68,35 +68,38 @@ type Agent struct {
 	log     *slog.Logger
 	observe *observer.Observer
 	// ordinaryEnv is the one-time sanitized ambient capture ordinary native
-	// launches run with when no explicit ProcessIsolation was configured.
+	// launches run with when no host authority was configured.
 	ordinaryEnv map[string]string
 
 	// Lock order: acquire mu before docsMu when both are needed. Do not call
 	// session or bridge close methods while holding either lock.
-	mu                 sync.Mutex
-	closed             bool
-	conn               agentClient
-	sessions           map[acp.SessionId]*agentSession
-	store              SessionStore
-	deleted            map[acp.SessionId]struct{}
-	clientCalls        chan struct{}
-	clientCapabilities acp.ClientCapabilities
-	positionEncoding   acp.PositionEncodingKind
-	lifecycle          lifecycle.Negotiated
-	lifecycleCarrier   *bool
-	permissionCache    map[acp.SessionId]map[string]string
-	activeLimitErr     error
-	configurationErr   error
-	containmentMode    RuntimeContainmentMode
-	containmentErr     error
-	constructions      sync.WaitGroup
-	closeOnce          sync.Once
-	closeErr           error
+	mu                  sync.Mutex
+	closed              bool
+	conn                agentClient
+	sessions            map[acp.SessionId]*agentSession
+	store               SessionStore
+	deleted             map[acp.SessionId]struct{}
+	clientCalls         chan struct{}
+	clientCapabilities  acp.ClientCapabilities
+	positionEncoding    acp.PositionEncodingKind
+	lifecycle           lifecycle.Negotiated
+	lifecycleCarrier    *bool
+	permissionCache     map[acp.SessionId]map[string]string
+	activeLimitErr      error
+	configurationErr    error
+	containmentErr      error
+	authorityFanoutDone chan struct{}
+	lifecycleFlights    map[acp.SessionId]*sessionLifecycleFlight
+	lifecycleCancels    map[uint64]context.CancelCauseFunc
+	lifecycleNext       uint64
+	lifecycleOps        sync.WaitGroup
+	constructions       sync.WaitGroup
+	closeOnce           sync.Once
+	closeErr            error
 
-	rateLimitsCacheMu   sync.Mutex
-	rateLimitsCache     rateLimitsCacheEntry
-	descendantProcesses *runtimeProcessSnapshotTracker
-	providerAuth        *providerAuth
+	rateLimitsCacheMu sync.Mutex
+	rateLimitsCache   rateLimitsCacheEntry
+	providerAuth      *providerAuth
 
 	newClaudeClient    func(*slog.Logger, claude.Options) *claude.Client
 	queryRateLimits    func(context.Context, claude.Options) (claude.RateLimits, error)
@@ -112,7 +115,6 @@ var (
 // NewAgent creates an ACP agent for Claude Code.
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
-	homeErr := normalizeStandaloneHome(&options)
 
 	log := options.Logger
 	if log == nil {
@@ -120,19 +122,6 @@ func NewAgent(opts ...Option) *Agent {
 	}
 
 	observe := observer.New(observer.Config{MeterProvider: options.MeterProvider, Propagator: options.TextMapPropagator, TracerProvider: options.TracerProvider, Version: options.AgentVersion})
-	options.RuntimeResourceHooks = instrumentRuntimeResourceHooks(options.RuntimeResourceHooks, observe)
-
-	mode := containmentMode(options)
-	if options.RuntimeResourceHooks.ObserveContainment != nil {
-		options.RuntimeResourceHooks.ObserveContainment(context.Background(), mode)
-	}
-
-	if mode == RuntimeContainmentBestEffort {
-		log.Warn("Darwin best-effort process containment is enabled; escaped descendants may survive, numeric PGID reuse can cause collateral signalling, marker correlation is not ownership, markers can be scrubbed, and native-root permits do not bound escaped provider work",
-			slog.String("containment", string(mode)),
-		)
-	}
-
 	agent := &Agent{
 		options:          options,
 		log:              log,
@@ -143,17 +132,16 @@ func NewAgent(opts ...Option) *Agent {
 		deleted:          make(map[acp.SessionId]struct{}),
 		positionEncoding: acp.PositionEncodingKindUtf16,
 		permissionCache:  make(map[acp.SessionId]map[string]string),
+		lifecycleFlights: make(map[acp.SessionId]*sessionLifecycleFlight),
+		lifecycleCancels: make(map[uint64]context.CancelCauseFunc),
 		activeLimitErr:   validateConcurrencyLimits(options.ConcurrencyLimits),
 		configurationErr: errors.Join(
-			homeErr,
-			validateContainmentOptions(options),
+			validateHostAuthorityOptions(options),
 			validateImageLimits(options.ImageLimits),
 			validateInputHandoffRoot(options.InputHandoffRoot),
 			validateProviderAuthRoot(options),
 			validateProviderAuthDirectHome(options.ProviderAuthDirectHome),
 		),
-		containmentMode:     mode,
-		descendantProcesses: newRuntimeProcessSnapshotTracker(options.RuntimeResourceHooks, mode.provesWholeTreeLifecycle()),
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
 			return claude.NewClient(log, options, nil)
 		},
@@ -208,10 +196,20 @@ func (a *Agent) Close() error {
 func (a *Agent) close() error {
 	a.mu.Lock()
 	a.closed = true
+
+	lifecycleCancels := make([]context.CancelCauseFunc, 0, len(a.lifecycleCancels))
+	for _, cancel := range a.lifecycleCancels {
+		lifecycleCancels = append(lifecycleCancels, cancel)
+	}
 	a.mu.Unlock()
+
+	for _, cancel := range lifecycleCancels {
+		cancel(acp.NewInvalidRequest(map[string]any{jsonFieldError: errAgentClosed.Error()}))
+	}
 
 	connectionErr := a.interruptActiveHostWrite()
 
+	a.lifecycleOps.Wait()
 	a.constructions.Wait()
 
 	a.mu.Lock()
@@ -233,6 +231,10 @@ func (a *Agent) close() error {
 	a.permissionCache = make(map[acp.SessionId]map[string]string)
 	a.deleted = make(map[acp.SessionId]struct{})
 	a.mu.Unlock()
+
+	if a.providerAuth != nil {
+		a.providerAuth.fenceLogins()
+	}
 
 	if len(sessions) > 0 {
 		a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
@@ -258,6 +260,29 @@ func (a *Agent) close() error {
 
 	closes.Wait()
 
+	var authCleanupErr error
+	if a.providerAuth != nil {
+		authCleanupErr = a.providerAuth.retryRetainedLogins()
+	}
+
+	for index, closeErr := range closeErrs {
+		if errors.Is(closeErr, ErrNativeTreeBusy) {
+			closeErrs[index] = sessions[index].Close(context.Background())
+		}
+	}
+
+	// A first managed authority failure starts detached per-session teardown so
+	// the session that reported it never waits on its own locks. Agent shutdown
+	// joins that work before returning, keeping every owned goroutine and cleanup
+	// rung inside the Agent lifetime.
+	a.mu.Lock()
+	authorityFanoutDone := a.authorityFanoutDone
+	a.mu.Unlock()
+
+	if authorityFanoutDone != nil {
+		<-authorityFanoutDone
+	}
+
 	// The connection outlives the close ladders that run on it. Each session's
 	// close is the containment-proving boundary, and the terminal actions, the
 	// terminal idle and the quiescence fact it proves are the last thing this
@@ -274,7 +299,7 @@ func (a *Agent) close() error {
 		connectionErr = errors.Join(connectionErr, local.hooks.closeWrites())
 	}
 
-	return errors.Join(errors.Join(closeErrs...), containmentErr, connectionErr)
+	return errors.Join(errors.Join(closeErrs...), authCleanupErr, containmentErr, connectionErr)
 }
 
 func (a *Agent) beginSessionConstruction() error {
@@ -283,6 +308,10 @@ func (a *Agent) beginSessionConstruction() error {
 
 	if a.closed {
 		return errAgentClosed
+	}
+
+	if a.containmentErr != nil {
+		return a.containmentErr
 	}
 
 	a.constructions.Add(1)
@@ -295,7 +324,7 @@ func (a *Agent) endSessionConstruction() {
 }
 
 func (a *Agent) recordContainmentError(err error) {
-	if !errors.Is(err, claude.ErrProcessContainmentIncomplete) {
+	if !errors.Is(err, ErrContainmentIncomplete) && !errors.Is(err, ErrHostAuthorityUnavailable) {
 		return
 	}
 
@@ -303,7 +332,55 @@ func (a *Agent) recordContainmentError(err error) {
 	if a.containmentErr == nil {
 		a.containmentErr = err
 	}
+
+	if !a.options.hostAuthoritySet || a.authorityFanoutDone != nil {
+		a.mu.Unlock()
+
+		return
+	}
+
+	sessions := make(map[acp.SessionId]*agentSession, len(a.sessions))
+	for id, session := range a.sessions {
+		sessions[id] = session
+	}
+
+	done := make(chan struct{})
+	a.authorityFanoutDone = done
 	a.mu.Unlock()
+
+	go a.closeAuthorityFailedSessions(sessions, done)
+}
+
+func (a *Agent) closeAuthorityFailedSessions(sessions map[acp.SessionId]*agentSession, done chan struct{}) {
+	defer close(done)
+
+	// The reporting stack may own one session's lock. Do not touch any session
+	// until this detached fanout is running independently of that stack.
+	for _, session := range sessions {
+		session.fenceAuthorityFailure()
+	}
+
+	var closes sync.WaitGroup
+	for id, session := range sessions {
+		closes.Add(1)
+
+		go func() {
+			defer closes.Done()
+			defer recoverAgentGoroutine(context.Background(), a.log, "authority-loss session close")
+
+			closeErr := session.Close(context.Background())
+			if closeErr != nil {
+				a.log.DebugContext(context.Background(), "close authority-failed Claude session failed",
+					slog.String("class", safeErrorClass(closeErr)))
+			}
+
+			if !errors.Is(closeErr, errSessionCloseUnsettled) {
+				a.dropSession(context.Background(), id, session)
+			}
+		}()
+	}
+
+	closes.Wait()
 }
 
 func (a *Agent) setConnection(conn agentClient) {
@@ -399,7 +476,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 // a host its option never reached this adapter.
 func (a *Agent) capabilityMeta() map[string]any {
 	meta := map[string]any{
-		routeMetaKey:         map[string]any{metaVersionsKey: []int{routeVersion}},
+		routeMetaKey:         map[string]any{metaVersionKey: routeVersion},
 		mediaEnvelopeMetaKey: mediaEnvelope(a.options.ImageLimits),
 		claudeMetaKey: map[string]any{
 			"fork": map[string]any{
@@ -410,7 +487,7 @@ func (a *Agent) capabilityMeta() map[string]any {
 			},
 			metaElicitation: map[string]any{
 				"unstable": true,
-				"scope":    string(RuntimeResourceSession),
+				"scope":    sessionCapabilityScope,
 				"tracks":   "ACP v1 elicitation",
 			},
 			"rawEvent": map[string]any{
@@ -432,7 +509,7 @@ func (a *Agent) capabilityMeta() map[string]any {
 	}
 
 	if a.options.InputHandoffRoot != "" {
-		meta[handoffMetaKey] = map[string]any{metaVersionsKey: []int{handoffVersion}}
+		meta[handoffMetaKey] = map[string]any{metaVersionKey: handoffVersion}
 	}
 
 	// The methods array is the host's only discovery surface for which legs
@@ -493,16 +570,17 @@ func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params
 }
 
 type sessionStart struct {
-	Cwd                   string
-	AdditionalDirectories []string
-	McpServers            []acp.McpServer
-	ResumeID              string
-	StoreEntries          []SessionStoreEntry
-	ActiveSessionResume   bool
-	ForkSession           bool
-	PermissionRules       map[string]string
-	MetaOptions           ClaudeOptions
-	RawMessages           rawMessageConfig
+	Cwd                      string
+	AdditionalDirectories    []string
+	McpServers               []acp.McpServer
+	ResumeID                 string
+	StoreEntries             []SessionStoreEntry
+	StoreConfigurationLoaded bool
+	ActiveSessionResume      bool
+	ForkSession              bool
+	PermissionRules          map[string]string
+	MetaOptions              ClaudeOptions
+	RawMessages              rawMessageConfig
 }
 
 type initialModelSelection struct {

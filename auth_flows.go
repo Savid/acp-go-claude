@@ -320,6 +320,12 @@ func (p *providerAuth) mintPresentation(ctx context.Context, flow *authFlow) (au
 		}, ""
 	}
 
+	releaseSlot, admitted := p.admitSlot(ctx)
+	if !admitted {
+		return authAuthorizeResult{}, authCauseTimeout
+	}
+	defer releaseSlot()
+
 	// The baseline is read before the child that could change it exists, so the
 	// no-callback completion signal describes the config dir this flow inherited
 	// rather than one it may already have mutated.

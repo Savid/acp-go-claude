@@ -115,6 +115,56 @@ func TestMaterializeStoreSessionBranches(t *testing.T) {
 	require.NoError(t, materialized.Close())
 }
 
+func TestMaterializedSessionCleanupAndOwnershipEdges(t *testing.T) {
+	originalRemoveAll := materializeRemoveAll
+	t.Cleanup(func() { materializeRemoveAll = originalRemoveAll })
+
+	removeErr := errors.New("remove failed")
+	materializeRemoveAll = func(string) error { return removeErr }
+	cleanup := &materializedSession{configDir: "config", cleanup: []string{"cleanup"}}
+	require.ErrorIs(t, cleanup.Close(), removeErr)
+	require.Equal(t, []string{"cleanup"}, cleanup.cleanup)
+
+	reclaimErr := errors.New("reclaim failed")
+	uncertain := &materializedSession{
+		configDir: "config",
+		prepared:  []string{"prepared"},
+		authority: &callbackHostAuthority{reclaim: func(context.Context, string) error { return reclaimErr }},
+	}
+	require.ErrorIs(t, uncertain.Close(), ErrContainmentIncomplete)
+	require.ErrorIs(t, uncertain.Close(), reclaimErr)
+	require.Equal(t, []string{"prepared"}, uncertain.prepared)
+
+	removedPrepared := &materializedSession{
+		configDir: "config",
+		prepared:  []string{"prepared"},
+		authority: &callbackHostAuthority{reclaim: func(context.Context, string) error { return nil }},
+	}
+	require.ErrorIs(t, removedPrepared.Close(), removeErr)
+	require.Empty(t, removedPrepared.prepared)
+	require.Equal(t, []string{"prepared"}, removedPrepared.cleanup)
+
+	opaqueErr := errors.New("prepare ambiguous")
+	opaque := &materializedSession{configDir: "config", opaque: map[string]error{"opaque": opaqueErr}}
+	require.ErrorIs(t, opaque.Close(), ErrContainmentIncomplete)
+	require.ErrorContains(t, opaque.Close(), "opaque")
+
+	owned := &materializedSession{
+		prepared: []string{"prepared"},
+		cleanup:  []string{"cleanup"},
+		opaque:   map[string]error{"opaque": opaqueErr},
+	}
+	require.True(t, owned.owns("prepared"))
+	require.True(t, owned.owns("cleanup"))
+	require.True(t, owned.owns("opaque"))
+	require.False(t, owned.owns("foreign"))
+
+	prepared := &materializedSession{}
+	authority := &callbackHostAuthority{prepare: func(context.Context, string) error { return nil }}
+	require.NoError(t, prepared.prepare(t.Context(), authority, ""))
+	require.Empty(t, prepared.prepared)
+}
+
 func TestMaterializeStoreSessionErrors(t *testing.T) {
 	ctx := context.Background()
 	sessionID := "22222222-2222-4222-8222-222222222222"
@@ -442,4 +492,24 @@ func (s *faultSessionStore) ListSubkeys(ctx context.Context, key SessionKey) ([]
 	}
 
 	return s.SessionStore.ListSubkeys(ctx, key)
+}
+
+func TestMaterializedPrepareResidualBranches(t *testing.T) {
+	authority := residualCallbackAuthority()
+	materialized := &materializedSession{}
+	require.NoError(t, materialized.prepare(t.Context(), authority, "", "/root"))
+	require.True(t, materialized.owns("/root"))
+
+	for _, failure := range []error{ErrContainmentIncomplete, ErrHostAuthorityUnavailable, errors.New("prepare refused")} {
+		authority := residualCallbackAuthority()
+		authority.prepare = func(context.Context, string) error { return failure }
+		materialized := &materializedSession{}
+		err := materialized.prepare(t.Context(), authority, "/root")
+		if errors.Is(failure, ErrHostAuthorityUnavailable) {
+			require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
+		} else {
+			require.ErrorIs(t, err, ErrContainmentIncomplete)
+		}
+		require.Contains(t, materialized.opaque, "/root")
+	}
 }

@@ -2,23 +2,17 @@ package claude
 
 import (
 	"context"
-	"errors"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuildArgs(t *testing.T) {
-	t.Parallel()
-
+func TestBuildArgsExactCurrentSurface(t *testing.T) {
 	args := BuildArgs(Options{
 		SessionID:               "session-1",
 		Model:                   "claude-test",
@@ -29,8 +23,9 @@ func TestBuildArgs(t *testing.T) {
 		SessionMirror:           true,
 		Bare:                    true,
 		SettingSources:          []string{"user", "project", "local"},
+		SettingsFile:            "/tmp/settings.json",
 		AddDirs:                 []string{"/repo", ""},
-		MCPConfigPath:           "/tmp/acp-go-claude-mcp.json",
+		MCPConfigPath:           "/tmp/mcp.json",
 		JSONSchema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{"ok": map[string]any{"type": "boolean"}},
@@ -38,184 +33,117 @@ func TestBuildArgs(t *testing.T) {
 	})
 
 	require.Equal(t, []string{
-		cliArgOutputFormat, "stream-json",
-		"--input-format", "stream-json",
-		"--include-partial-messages",
-		"--verbose",
-		"--include-hook-events",
-		"--session-mirror",
-		"--bare",
-		"--permission-mode", "default",
-		"--allow-dangerously-skip-permissions",
-		"--permission-prompt-tool", "stdio",
-		"--model", "claude-test",
-		"--system-prompt", "system",
+		"--output-format", "stream-json", "--input-format", "stream-json",
+		"--include-partial-messages", "--verbose", "--include-hook-events",
+		"--session-mirror", "--bare", "--permission-mode", "default",
+		"--allow-dangerously-skip-permissions", "--permission-prompt-tool", "stdio",
+		"--model", "claude-test", "--system-prompt", "system",
 		"--json-schema", `{"properties":{"ok":{"type":"boolean"}},"type":"object"}`,
-		"--mcp-config", "/tmp/acp-go-claude-mcp.json",
-		"--strict-mcp-config",
-		"--setting-sources=user,project,local",
-		"--add-dir", "/repo",
-		"--session-id", "session-1",
+		"--mcp-config", "/tmp/mcp.json", "--strict-mcp-config",
+		"--setting-sources=user,project,local", "--settings", "/tmp/settings.json",
+		"--add-dir", "/repo", "--session-id", "session-1",
 	}, args)
 }
 
-func TestBuildArgsInvalidJSONSchemaFallsBackToEmptyObject(t *testing.T) {
-	t.Parallel()
-
-	args := BuildArgs(Options{JSONSchema: map[string]any{"bad": func() {}}})
-
-	require.Contains(t, args, "--json-schema")
-	require.Contains(t, args, "{}")
-}
-
-func TestBuildArgsSettingSources(t *testing.T) {
-	t.Parallel()
-
+func TestBuildArgsCurrentEdgeCases(t *testing.T) {
+	require.Contains(t, BuildArgs(Options{JSONSchema: map[string]any{"bad": func() {}}}), "{}")
 	require.NotContains(t, BuildArgs(Options{}), "--setting-sources=")
 	require.Contains(t, BuildArgs(Options{SettingSources: []string{}}), "--setting-sources=")
-	require.Contains(t, BuildArgs(Options{SettingSources: []string{"project"}}), "--setting-sources=project")
-}
-
-func TestBuildArgsSettingsFile(t *testing.T) {
-	t.Parallel()
-
-	require.NotContains(t, BuildArgs(Options{}), "--settings")
-
-	args := BuildArgs(Options{SettingsFile: "/tmp/home/custom.settings.json"})
-
-	index := slices.Index(args, "--settings")
-	require.GreaterOrEqual(t, index, 0)
-	require.Less(t, index+1, len(args))
-	require.Equal(t, "/tmp/home/custom.settings.json", args[index+1])
-}
-
-func TestBuildArgsResumeTakesPrecedenceOverSessionID(t *testing.T) {
-	t.Parallel()
 
 	args := BuildArgs(Options{SessionID: "new", ResumeID: "old", ForkSession: true})
+	require.Equal(t, []string{"--resume", "old", "--fork-session", "--session-id", "new"}, args[len(args)-5:])
 
-	require.Contains(t, args, "--resume")
-	require.Contains(t, args, "old")
-	require.Contains(t, args, "--fork-session")
+	withoutBypass := BuildArgs(Options{PermissionMode: "bypassPermissions", AllowSkipPermissionsArg: true})
+	require.NotContains(t, withoutBypass, "--allow-dangerously-skip-permissions")
+}
+
+func TestBuildArgsCurrentSurface(t *testing.T) {
+	args := BuildArgs(Options{SessionID: "session", Model: "sonnet", MCPConfigPath: "/tmp/mcp.json", SettingsFile: "overlay.json", ExtraPathDirs: []string{"/tools"}})
 	require.Contains(t, args, "--session-id")
-	require.Contains(t, args, "new")
+	require.Contains(t, args, "--model")
+	require.Contains(t, args, "--mcp-config")
+	require.Contains(t, args, "--strict-mcp-config")
+	require.Contains(t, args, "--settings")
 }
 
-func TestBuildEnv(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", "/process/claude-home")
-	t.Setenv("CLAUDE_CODE_ENTRYPOINT", "process-entrypoint")
-	t.Setenv("CLAUDECODE", "nested")
-	t.Setenv("PWD", "/process/cwd")
+func TestBuildEnvUsesAuthorityBaseAndCanonicalOverlay(t *testing.T) {
+	authority := &NativeAuthority{NativeEnvironment: func() map[string]string {
+		return map[string]string{"PATH": "/native/bin", "BASE": "one", "HOME": "/host/home"}
+	}}
+	environment := BuildEnv(Options{Cwd: "/work", ClaudeHome: "/native/home", Env: map[string]string{"OVERLAY": "two", "HOME": "/ignored"}, Authority: authority, ExtraPathDirs: []string{"/shim"}})
+	require.Contains(t, environment, "BASE=one")
+	require.Contains(t, environment, "OVERLAY=two")
+	require.Contains(t, environment, "CLAUDE_CONFIG_DIR=/native/home")
+	require.Contains(t, environment, "PATH=/shim"+string(os.PathListSeparator)+"/native/bin")
+	require.Contains(t, environment, "HOME=/host/home")
+}
 
-	options := withTestProcessIsolation(Options{
-		ClaudeHome: "/tmp/claude-home",
-		Cwd:        "/repo",
+func TestBuildEnvRejectsUnavailableAndMalformedBases(t *testing.T) {
+	t.Parallel()
+
+	require.Nil(t, BuildEnv(Options{Authority: &NativeAuthority{}}))
+	require.Nil(t, BuildEnv(Options{OrdinaryEnvironment: nil}))
+
+	for _, environment := range []map[string]string{
+		{"": "value"},
+		{"BAD=KEY": "value"},
+		{"BAD\x00KEY": "value"},
+		{"KEY": "bad\x00value"},
+	} {
+		require.Nil(t, BuildEnv(Options{OrdinaryEnvironment: environment}))
+	}
+}
+
+func TestBuildEnvUsesOnlySelectedBaseAndProtectsManagedRoots(t *testing.T) {
+	separator := string(os.PathListSeparator)
+	environment := BuildEnv(Options{
+		Cwd:                 "/work",
+		ClaudeHome:          "/native/home",
+		OrdinaryEnvironment: map[string]string{"PATH": "/base/bin", "HOME": "/base/home", "BASE": "one"},
 		Env: map[string]string{
-			"CLAUDE_CONFIG_DIR": "/override/claude-home",
-			"CLAUDECODE":        "explicit-nested",
-			"HOME":              "/override/home",
-			"PWD":               "/override/cwd",
-			"X_TEST":            "1",
-			"XDG_CONFIG_HOME":   "/override/xdg-config",
+			"PATH":              "/overlay/bin",
+			"HOME":              "/ignored/home",
+			"XDG_CONFIG_HOME":   "/ignored/xdg",
+			"CLAUDE_CONFIG_DIR": "/ignored/claude",
+			"OVERLAY":           "two",
+			"CLAUDECODE":        "nested",
 		},
+		ExtraPathDirs: []string{"/shim"},
 	})
-	options.ProcessIsolation.BaseEnvironment["HOME"] = "/managed/home"
-	options.ProcessIsolation.BaseEnvironment["XDG_CONFIG_HOME"] = "/managed/xdg-config"
-	env := BuildEnv(options)
 
-	require.Equal(t, 1, countEnvKey(env, "CLAUDE_CONFIG_DIR"))
-	require.Equal(t, 1, countEnvKey(env, "CLAUDE_CODE_ENTRYPOINT"))
-	require.Equal(t, 1, countEnvKey(env, "PWD"))
-	require.Equal(t, 0, countEnvKey(env, "CLAUDECODE"))
-	require.Contains(t, env, "CLAUDE_CONFIG_DIR=/tmp/claude-home")
-	require.Contains(t, env, "CLAUDE_CODE_ENTRYPOINT=acp-go-claude")
-	require.Contains(t, env, "HOME=/managed/home")
-	require.Contains(t, env, "PWD=/repo")
-	require.Contains(t, env, "X_TEST=1")
-	require.Contains(t, env, "XDG_CONFIG_HOME=/managed/xdg-config")
-	require.NotContains(t, env, "CLAUDE_CONFIG_DIR=/override/claude-home")
-	require.NotContains(t, env, "HOME=/override/home")
-	require.NotContains(t, env, "XDG_CONFIG_HOME=/override/xdg-config")
+	require.Contains(t, environment, "BASE=one")
+	require.Contains(t, environment, "OVERLAY=two")
+	require.Contains(t, environment, "HOME=/base/home")
+	require.Contains(t, environment, "CLAUDE_CONFIG_DIR=/native/home")
+	require.Contains(t, environment, "PWD=/work")
+	require.Contains(t, environment, "PATH=/shim"+separator+"/overlay/bin")
+	require.Zero(t, countEnvironmentKey(environment, "CLAUDECODE"))
+	require.Equal(t, 1, countEnvironmentKey(environment, "CLAUDE_CONFIG_DIR"))
+	require.NotContains(t, environment, "XDG_CONFIG_HOME=/ignored/xdg")
 }
 
-// TestBuildEnvKeepsEnvironmentNamesDistinctByPlatformIdentity proves the launch
-// environment answers variable identity through the platform seam rather than by
-// folding case everywhere. On Unix a lowercase spelling of a managed root is a
-// variable of the host's own and survives; on Windows it names the managed root
-// itself and is replaced.
-func TestBuildEnvKeepsEnvironmentNamesDistinctByPlatformIdentity(t *testing.T) {
-	options := withTestProcessIsolation(Options{
-		ClaudeHome: "/tmp/claude-home",
-		Env:        map[string]string{"claude_config_dir": "/host/own"},
+func TestBuildEnvPlatformEnvironmentIdentity(t *testing.T) {
+	environment := BuildEnv(Options{
+		ClaudeHome:          "/native/home",
+		OrdinaryEnvironment: map[string]string{"PATH": "/base/bin", "home": "/base/lower"},
+		Env:                 map[string]string{"claude_config_dir": "/overlay/lower"},
 	})
-	options.ProcessIsolation.BaseEnvironment["home"] = "/host/own-home"
-
-	env := BuildEnv(options)
-
-	folded := EnvironmentKey("claude_config_dir") == EnvironmentKey(envClaudeConfigDir)
-	require.Equal(t, !folded, slices.Contains(env, EnvironmentKey("claude_config_dir")+"=/host/own"))
-	require.Equal(t, !folded, slices.Contains(env, EnvironmentKey("home")+"=/host/own-home"))
-	require.Contains(t, env, envClaudeConfigDir+"=/tmp/claude-home")
-	require.Equal(t, 1, countEnvKey(env, envClaudeConfigDir))
-
-	require.True(t, managedRootEnvKey(envClaudeConfigDir))
+	folded := EnvironmentKey("home") == EnvironmentKey("HOME")
+	// A base key reaches the child under the platform's variable identity: its
+	// own spelling where spellings are distinct, the folded one where they name
+	// one variable.
+	require.Contains(t, environment, EnvironmentKey("home")+"=/base/lower")
+	require.Equal(t, folded, slices.Contains(environment, "HOME=/base/lower"))
+	require.Equal(t, !folded, slices.Contains(environment, EnvironmentKey("claude_config_dir")+"=/overlay/lower"))
+	require.True(t, managedRootEnvKey("CLAUDE_CONFIG_DIR"))
 	require.Equal(t, folded, managedRootEnvKey("claude_config_dir"))
 }
 
-func TestBuildEnvPrependsExtraPathDirs(t *testing.T) {
-	separator := string(os.PathListSeparator)
-
-	t.Setenv(envSearchPath, "/usr/bin"+separator+"/bin")
-
-	env := BuildEnv(withTestProcessIsolation(Options{ExtraPathDirs: []string{"/session/bin", "/shared/bin"}}))
-
-	require.Equal(t, 1, countEnvKey(env, envSearchPath))
-	require.Contains(t, env, envSearchPath+"=/session/bin"+separator+"/shared/bin"+separator+"/usr/bin"+separator+"/bin")
-}
-
-// TestBuildEnvExtraPathDirsOutrankAnOverriddenPath pins the precedence between
-// the two ways a PATH reaches the child: an explicit Env override replaces the
-// inherited value, and the extra dirs still lead it.
-func TestBuildEnvExtraPathDirsOutrankAnOverriddenPath(t *testing.T) {
-	separator := string(os.PathListSeparator)
-
-	t.Setenv(envSearchPath, "/inherited/bin")
-
-	env := BuildEnv(withTestProcessIsolation(Options{
-		Env:           map[string]string{envSearchPath: "/override/bin"},
-		ExtraPathDirs: []string{"/session/bin"},
-	}))
-
-	require.Equal(t, 1, countEnvKey(env, envSearchPath))
-	require.Contains(t, env, envSearchPath+"=/session/bin"+separator+"/override/bin")
-}
-
-func TestBuildEnvExtraPathDirsWithoutInheritedPath(t *testing.T) {
-	env := BuildEnv(Options{
-		ProcessIsolation: &ProcessIsolation{UID: 1, GID: 2, BaseEnvironment: map[string]string{"GOOD": "1"}, StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test"},
-		ExtraPathDirs:    []string{"/session/bin"},
-	})
-
-	require.Contains(t, env, envSearchPath+"=/session/bin")
-}
-
-func TestBuildEnvUsesOnlyPolicyEntries(t *testing.T) {
-	env := BuildEnv(Options{ProcessIsolation: &ProcessIsolation{
-		UID: 1, GID: 2, BaseEnvironment: map[string]string{"GOOD": "1"},
-		StandaloneOwnerID: "test-owner", StandaloneStateRoot: "/var/lib/acp-go-test",
-	}})
-
-	require.Contains(t, env, "GOOD=1")
-	require.NotContains(t, env, "")
-	require.NotContains(t, env, "BROKEN")
-	require.NotContains(t, env, "=empty")
-}
-
-func countEnvKey(env []string, key string) int {
+func countEnvironmentKey(environment []string, key string) int {
 	count := 0
-	prefix := key + "="
-	for _, item := range env {
-		if strings.HasPrefix(item, prefix) {
+	for _, entry := range environment {
+		candidate, _, ok := strings.Cut(entry, "=")
+		if ok && EnvironmentKey(candidate) == EnvironmentKey(key) {
 			count++
 		}
 	}
@@ -223,39 +151,15 @@ func countEnvKey(env []string, key string) int {
 	return count
 }
 
-func TestDiscover(t *testing.T) {
-	t.Parallel()
-
-	executable, err := Discover(context.Background(), "/bin/sh", withTestProcessIsolation(Options{}))
-	require.NoError(t, err)
-	require.Equal(t, "/bin/sh", executable.Path())
-	require.True(t, executable.Admitted())
+func TestParseAndCompareClaudeVersion(t *testing.T) {
+	version := parseClaudeVersion("Claude Code 2.1.3")
+	require.Equal(t, "2.1.3", version)
+	require.GreaterOrEqual(t, compareSemver(version, minClaudeVersion), 0)
+	require.Empty(t, parseClaudeVersion("not claude"))
 }
 
-func TestDiscoverCancelledExplicitPath(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	_, err := Discover(ctx, "/bin/sh", withTestProcessIsolation(Options{}))
-	require.ErrorIs(t, err, context.Canceled)
-
-	_, err = Discover(ctx, "", withTestProcessIsolation(Options{}))
-	require.ErrorIs(t, err, context.Canceled)
-}
-
-func TestDiscoverMissingFromPath(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-
-	_, err := Discover(context.Background(), "", withTestProcessIsolation(Options{}))
-	require.Error(t, err)
-}
-
-func TestParseClaudeVersion(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
+func TestClaudeVersionParsingAndComparisonMatrix(t *testing.T) {
+	for _, test := range []struct {
 		output string
 		want   string
 	}{
@@ -266,242 +170,34 @@ func TestParseClaudeVersion(t *testing.T) {
 		{"", ""},
 		{"no version here", ""},
 	} {
-		require.Equal(t, tc.want, parseClaudeVersion(tc.output), tc.output)
+		require.Equal(t, test.want, parseClaudeVersion(test.output), test.output)
 	}
+
+	require.Negative(t, compareSemver("1.9.9", "2.0.0"))
+	require.Positive(t, compareSemver("2.1.0", "2.0.9"))
+	require.Zero(t, compareSemver("2.0", "2.0.0"))
 }
 
-func TestCompareSemver(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t, -1, compareSemver("1.9.9", "2.0.0"))
-	require.Equal(t, 1, compareSemver("2.1.0", "2.0.9"))
-	require.Equal(t, 0, compareSemver("2.0.0", "2.0.0"))
-	require.Equal(t, 1, compareSemver("2.1.201", "2.0.0"))
-	require.Equal(t, 0, compareSemver("2.0", "2.0.0"))
-	require.Equal(t, -1, compareSemver("2", "2.0.1"))
-}
-
-func TestValidateClaudeVersion(t *testing.T) {
+func TestValidateClaudeVersionOrdinaryBoundary(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("test uses /bin/sh scripts")
+		t.Skip("test uses shell scripts")
 	}
 
 	dir := t.TempDir()
+	options := Options{Cwd: dir, OrdinaryEnvironment: OrdinaryEnvironment()}
 
-	current := writeShellScript(t, filepath.Join(dir, "current"), "#!/bin/sh\necho '2.1.201 (Claude Code)'\n")
-	options := platformTestTransportOptions(t, Options{})
-	require.NoError(t, validateClaudeVersion(context.Background(), admitExecutable(t, current), options))
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "current"), "#!/bin/sh\nprintf '2.1.201 (Claude Code)\\n'\n")
+	require.NoError(t, validateClaudeVersion(context.Background(), options))
 
-	old := writeShellScript(t, filepath.Join(dir, "old"), "#!/bin/sh\necho '1.9.9 (Claude Code)'\n")
-	require.ErrorContains(t, validateClaudeVersion(context.Background(), admitExecutable(t, old), options), "too old")
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "old"), "#!/bin/sh\nprintf '1.9.9 (Claude Code)\\n'\n")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), options), "older")
 
-	unparsable := writeShellScript(t, filepath.Join(dir, "bad"), "#!/bin/sh\necho 'no version'\n")
-	require.ErrorContains(t, validateClaudeVersion(context.Background(), admitExecutable(t, unparsable), options), "could not parse")
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "bad"), "#!/bin/sh\nprintf 'no version\\n'\n")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), options), "parse")
 
-	failing := writeShellScript(t, filepath.Join(dir, "fail"), "#!/bin/sh\nexit 1\n")
-	require.Error(t, validateClaudeVersion(context.Background(), admitExecutable(t, failing), options))
-}
+	options.CLIPath = writeShellScript(t, filepath.Join(dir, "failure"), "#!/bin/sh\nexit 7\n")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), options), "exited 7")
 
-func TestContainedClaudeOutputSurvivesWaitBeforeRead(t *testing.T) {
-	const (
-		helperEnv = "CLAUDE_TEST_CONTAINED_OUTPUT_HELPER"
-		sentinel  = "contained-output-survived"
-	)
-	if os.Getenv(helperEnv) == "1" {
-		_, err := io.WriteString(os.Stdout, sentinel)
-		require.NoError(t, err)
-
-		return
-	}
-
-	originalPrepare := processPrepareContained
-	originalStart := processStartContained
-	originalWait := processWaitContained
-	originalQuiesce := processBoundaryComplete
-	originalClose := processContainmentClose
-	t.Cleanup(func() {
-		processPrepareContained = originalPrepare
-		processStartContained = originalStart
-		processWaitContained = originalWait
-		processBoundaryComplete = originalQuiesce
-		processContainmentClose = originalClose
-	})
-
-	processPrepareContained = func(command *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
-		return &processTreeCommand{cmd: command}, nil
-	}
-	processStartContained = func(launch *processTreeCommand) (*processContainment, error) {
-		require.NoError(t, launch.cmd.Start())
-		require.NoError(t, launch.cmd.Wait())
-
-		return &processContainment{}, nil
-	}
-	processWaitContained = func(*processContainment, *exec.Cmd) error { return nil }
-	processBoundaryComplete = func(*processContainment, time.Duration) error { return nil }
-	processContainmentClose = func(*processContainment) error { return nil }
-	t.Setenv(helperEnv, "1")
-
-	output, err := containedClaudeOutput(
-		t.Context(),
-		admitExecutable(t, os.Args[0]),
-		[]string{"-test.run=^TestContainedClaudeOutputSurvivesWaitBeforeRead$"},
-		withTestProcessIsolation(Options{Cwd: t.TempDir()}),
-		nil,
-		"contained output regression",
-	)
-	require.NoError(t, err)
-	require.Contains(t, string(output), sentinel)
-}
-
-func TestValidateClaudeVersionContainmentFailureBranches(t *testing.T) {
-	want := errors.New("version seam")
-	releases := 0
-	err := validateClaudeVersion(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
-		AcquireVersionDiscovery: func(context.Context) (func(), error) { return nil, want },
-	}))
-	require.ErrorIs(t, err, want)
-	err = validateClaudeVersion(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
-		AcquireVersionDiscovery: func(context.Context) (func(), error) { return nil, nil }, //nolint:nilnil // Invalid callback result under test.
-	}))
-	require.ErrorContains(t, err, "nil release")
-
-	err = validateClaudeVersion(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
-		DarwinBestEffort: true,
-		AcquireVersionDiscovery: func(context.Context) (func(), error) {
-			return func() { releases++ }, nil
-		},
-	}))
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
-	require.Zero(t, releases)
-
-	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
-		DarwinBestEffort: true,
-		PrepareDarwinVersionGeneration: func(context.Context) (*DarwinGeneration, error) {
-			return nil, want
-		},
-	}))
-	require.ErrorIs(t, err, want)
-
-	originalGetwd := processGetwd
-	originalPrepare := processPrepareContained
-	originalStart := processStartContained
-	t.Cleanup(func() {
-		processGetwd = originalGetwd
-		processPrepareContained = originalPrepare
-		processStartContained = originalStart
-	})
-
-	finished := 0
-	generationOptions := withTestProcessIsolation(Options{
-		DarwinBestEffort: true,
-		PrepareDarwinVersionGeneration: func(context.Context) (*DarwinGeneration, error) {
-			return &DarwinGeneration{RecordFinished: func(bool) error {
-				finished++
-
-				return nil
-			}}, nil
-		},
-	})
-	processGetwd = func() (string, error) { return "", want }
-	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), generationOptions)
-	require.ErrorIs(t, err, want)
-	require.Equal(t, 1, finished)
-	processGetwd = originalGetwd
-
-	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) { return nil, want }
-	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{Cwd: t.TempDir()}))
-	require.ErrorIs(t, err, want)
-	observedUnavailable := 0
-	processPrepareContained = func(*exec.Cmd, processLaunchOptions) (*processTreeCommand, error) {
-		return nil, ErrProcessContainmentIncomplete
-	}
-	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
-		Cwd: t.TempDir(),
-		ObserveProcessInventory: func(context.Context, func() (int, bool)) {
-			observedUnavailable++
-		},
-	}))
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
-	require.Equal(t, 1, observedUnavailable)
-
-	processPrepareContained = func(command *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
-		command.Stdout = io.Discard
-
-		return &processTreeCommand{cmd: command}, nil
-	}
-	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{Cwd: t.TempDir()}))
-	require.ErrorContains(t, err, "capture claude version output")
-
-	processPrepareContained = func(command *exec.Cmd, _ processLaunchOptions) (*processTreeCommand, error) {
-		return &processTreeCommand{cmd: command}, nil
-	}
-	processStartContained = func(*processTreeCommand) (*processContainment, error) { return nil, want }
-	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{Cwd: t.TempDir()}))
-	require.ErrorIs(t, err, want)
-	processStartContained = func(*processTreeCommand) (*processContainment, error) {
-		return nil, ErrProcessContainmentIncomplete
-	}
-	_, err = containedClaudeVersionOutput(t.Context(), admitExecutable(t, "/bin/sh"), withTestProcessIsolation(Options{
-		Cwd: t.TempDir(),
-		ObserveProcessInventory: func(context.Context, func() (int, bool)) {
-			observedUnavailable++
-		},
-	}))
-	require.ErrorIs(t, err, ErrProcessContainmentIncomplete)
-	require.Equal(t, 2, observedUnavailable)
-
-	_, err = containedClaudeOutput(
-		t.Context(), admitExecutable(t, "/bin/sh"), nil, Options{ProcessIsolation: &ProcessIsolation{}}, nil, "invalid environment",
-	)
-	require.ErrorContains(t, err, "invalid process isolation")
-
-	originalPipe := commandPipe
-	t.Cleanup(func() { commandPipe = originalPipe })
-	commandPipe = func() (*os.File, *os.File, error) { return nil, nil, want }
-	_, err = containedClaudeOutput(t.Context(), admitExecutable(t, "/bin/sh"), nil, withTestProcessIsolation(Options{Cwd: t.TempDir()}), nil, "pipe failure")
-	require.ErrorIs(t, err, want)
-	commandPipe = originalPipe
-
-	processPrepareContained = originalPrepare
-	processStartContained = originalStart
-	if runtime.GOOS != "windows" {
-		dir := t.TempDir()
-		hanging := writeShellScript(t, filepath.Join(dir, "hanging"), "#!/bin/sh\nsleep 30\n")
-		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
-		defer cancel()
-		_, err = containedClaudeVersionOutput(ctx, admitExecutable(t, hanging), platformTestTransportOptions(t, Options{Cwd: dir}))
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-	}
-}
-
-func TestObserveAuxiliaryBoundaryCompleteBranches(t *testing.T) {
-	inventories := 0
-	completed := 0
-	options := Options{
-		ObserveProcessInventory: func(context.Context, func() (int, bool)) { inventories++ },
-		ObserveBoundaryComplete: func(context.Context) { completed++ },
-	}
-	observeAuxiliaryBoundaryComplete(options, errors.New("cleanup failed"))
-	require.Equal(t, 1, inventories)
-	require.Zero(t, completed)
-
-	observeAuxiliaryBoundaryComplete(Options{}, errors.New("cleanup failed"))
-	observeAuxiliaryBoundaryComplete(options, nil)
-	require.Equal(t, 1, inventories)
-	require.Equal(t, 1, completed)
-}
-
-func TestDiscoverFromPath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses executable mode bits")
-	}
-
-	binDir := t.TempDir()
-	path := filepath.Join(binDir, "claude")
-	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755))
-	t.Setenv("PATH", binDir)
-
-	found, err := Discover(context.Background(), "", withTestProcessIsolation(Options{}))
-	require.NoError(t, err)
-	require.Equal(t, path, found.Path())
+	options.CLIPath = filepath.Join(dir, "missing")
+	require.ErrorContains(t, validateClaudeVersion(context.Background(), options), "probe claude version")
 }

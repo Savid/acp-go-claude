@@ -7,22 +7,17 @@ The adapter does not manage Claude Code account state. Authentication is owned b
 the local Claude Code installation selected by `-home` (`WithHome`), so there is
 nothing for a host to log into through ACP.
 
-## Standalone credential input
+## Credential input
 
-Without a `-process-isolation-config` policy, the adapter forwards a
-deterministic sanitized capture of its own ambient environment, so ambient
+Ordinary execution forwards a deterministic sanitized capture of the adapter's
+ambient environment, so ambient
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN`
 values work as-is.
 
-With a policy, the standalone root supervisor never forwards its ambient
-environment. To pass `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN`, name each variable explicitly in the
-`inheritEnvironment` array of the root-owned
-`-process-isolation-config` policy. The value must be set in the supervisor
-environment or startup fails; identity, path, loader, XDG/native-home, and
-adapter-private variables cannot be inherited. File-backed or provider-broker
-credentials must live only in the explicit target-owned native home described
-by the adapter. No standalone path reads root `HOME`, root native config, or
-an unlisted root credential.
+With `WithHostAuthority`, the base environment comes from
+`HostAuthority.NativeEnvironment`. Add explicitly selected credentials with
+`WithEnv`. File-backed credentials live only in the selected native home, which
+is fully materialized before the host prepares it.
 
 ## No ACP auth methods
 
@@ -48,8 +43,8 @@ err := claudeacp.Serve(ctx, input, output,
 )
 ```
 
-Environment variables set with `WithEnv` (or in `ProcessIsolation.BaseEnvironment`)
-are merged into every launched Claude process. Keep secrets in
+Environment variables set with `WithEnv` are merged into every launched Claude
+process. Keep secrets in
 the environment rather than in seeded config files. See
 [Models and config](/docs/features/models-config) for pointing Claude at a
 custom Anthropic-compatible endpoint.
@@ -157,11 +152,9 @@ The login child opens no browser on the host. Its environment carries a
 mode-`0700` directory of no-op launchers ahead of every other `PATH` entry and
 points `BROWSER` inside it, so a harness that reads `BROWSER` and one that execs
 `open` or `xdg-open` directly are both covered; the directory is removed when
-the flow's fence closes the child. Windows rejects every native Claude launch
-at the mandatory Unix UID/GID identity boundary, so `authorize` is unavailable
-there. Independently, Windows admits no browser containment: the `start` that
-opens a URL is a `cmd.exe` builtin with no image to shadow, and the system
-directory precedes every `PATH` entry.
+the flow's fence closes the child. An embedded host authority must provide the
+same native-process and prepared-tree boundary on its platform. The adapter
+fails closed if that authority is unavailable.
 
 `inventory` reads the values-free ledger and checks the residence for the
 recorded method. Native login probes `claude auth status`; setup tokens and API

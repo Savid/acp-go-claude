@@ -116,6 +116,37 @@ func TestSessionMirrorAppendFrameAndEntries(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
+func TestSessionMirrorRejectsForeignMainAndSubagentTranscripts(t *testing.T) {
+	t.Parallel()
+
+	const (
+		ownerID   = "55555555-5555-4555-8555-555555555555"
+		foreignID = "66666666-6666-4666-8666-666666666666"
+	)
+	home := t.TempDir()
+	store := NewInMemorySessionStore()
+	session := &agentSession{id: ownerID, configuration: sessionConfiguration{
+		Env: map[string]string{"SHOULD_NOT": "BE_WRITTEN"},
+	}}
+	mirror := newSessionMirror(nil, store, home, session)
+
+	for _, filePath := range []string{
+		filepath.Join(home, "projects", "workspace", foreignID+".jsonl"),
+		filepath.Join(home, "projects", "workspace", foreignID, "subagents", "worker", "turn.jsonl"),
+	} {
+		err := mirror.appendFrame(t.Context(), &claude.TranscriptMirrorMessage{
+			FilePath: filePath,
+			Entries:  []SessionStoreEntry{[]byte(`{"type":"user"}`)},
+		})
+		require.ErrorIs(t, err, errSessionMirrorOwner)
+	}
+
+	entries, err := store.Load(t.Context(), SessionKey{SessionID: foreignID})
+	require.NoError(t, err)
+	require.Empty(t, entries)
+	require.False(t, mirror.configurationWritten)
+}
+
 func TestNewSessionMirrorAndDefaultClaudeConfigDir(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 

@@ -3,26 +3,26 @@ title: "Install"
 description: "Install the binary, add the library, or build from a checkout"
 ---
 
-The adapter ships as both an installable CLI and an importable Go package.
+The adapter ships as both a CLI and an importable Go package.
 
 ## Install the CLI
-
-Install the standalone ACP subprocess binary:
 
 ```sh
 go install github.com/savid/acp-go-claude/cmd/acp-go-claude@latest
 ```
 
-The `acp-go-claude` binary speaks ACP over stdin/stdout; an ACP host launches it
-as a subprocess rather than running it as a human-facing chat UI.
+The command speaks ACP over stdin/stdout; an ACP host launches it as a
+subprocess.
 
 ## Add the library
-
-To embed the adapter in a Go host, add the module and call `claudeacp.Serve`:
 
 ```sh
 go get github.com/savid/acp-go-claude
 ```
+
+Embed the adapter with `claudeacp.Serve`. Hosts that own native containment can
+also provide `WithHostAuthority`; standalone command execution remains ordinary
+same-identity execution.
 
 ## Build from a checkout
 
@@ -30,36 +30,8 @@ go get github.com/savid/acp-go-claude
 go build ./cmd/acp-go-claude
 ```
 
-## Locating the Claude CLI
-
-The adapter launches `claude` from `PATH` unless a host provides `-path`
-(`WithExecutablePath`). Use `-home` (`WithHome`) to select the
-`CLAUDE_CONFIG_DIR` used for launched sessions. The launched CLI must be Claude
-Code **2.0.0 or newer** and already authenticated; the adapter probes its
-version at session start and fails fast on older builds.
-
-## Provision Linux identity authority
-
-Linux installations must persist the shared identity-lock root:
-
-```sh
-sudo install -d -o root -g root -m 0700 \
-  /var/lib/acp-go /var/lib/acp-go/agent-identities
-```
-
-Mount that exact local-lock volume into every service or container that can use
-the same numeric UID pool, with identical user-namespace UID/GID mappings and
-authoritative PID visibility. Otherwise use disjoint pools. Network, FUSE,
-pseudo, read-only, and unknown authority filesystems are rejected. Files named
-`<uid>.lock` are permanent and must never be unlinked, renamed, or replaced.
-
-Provision a dedicated durable provider state root such as `/var/lib/acp-go-claude`,
-outside and not beneath the authority root. Its ancestors must be root-owned
-and not group/world writable; the final directory must be owned by the target
-UID:GID with mode `0700`. Keep its device/inode stable.
-Set that exact path as both `standaloneStateRoot` in the isolation policy and
-the native `-home`; assign a stable nonsecret deployment identity as
-`standaloneOwnerId`. The authority's `domain.lock`, `owners.lock`, UID
-locks, affinity locks, and owner records are permanent coordination state.
-Deleting or reconstructing one beside retained records is corruption, not
-routine cleanup.
+The adapter launches `claude` from `PATH` unless `-path`
+(`WithExecutablePath`) selects another executable. Use `-home` (`WithHome`) to
+select `CLAUDE_CONFIG_DIR`. Claude Code must be version 2.0.0 or newer and
+authenticated for the selected home or environment; the adapter probes the
+version at each native start.

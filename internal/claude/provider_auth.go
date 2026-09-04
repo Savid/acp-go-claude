@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -30,15 +29,21 @@ const authLoginHost = "claude.com"
 // authLoginMaxURLBytes bounds the authorization URL before it is relayed.
 const authLoginMaxURLBytes = 2048
 
-var authLoginHandoffGeneratedNativeTree = handoffGeneratedNativeTree
 var authLoginPresentationReader = ReadAuthLoginPresentation
-var authLoginPrepareChildExit = prepareChildExit
 
 // authRedirectQueryKey names the query parameter carrying the hosted callback.
 const authRedirectQueryKey = "redirect_uri"
 
 // authLoginURLScheme is the only scheme an authorization URL may carry.
 const authLoginURLScheme = "https"
+const authCommand = "auth"
+const authStatus = "status"
+
+const (
+	envForceHyperlink = "FORCE_HYPERLINK"
+	envCustomOAuthURL = "CLAUDE_CODE_CUSTOM_OAUTH_URL"
+	envGoTraceback    = "GOTRACEBACK"
+)
 
 // authLoginNonURLLines is the exhaustive set of whole-line patterns that
 // classify a login line carrying no authorization URL: the blank padding, and
@@ -92,9 +97,9 @@ var ErrAuthLoginNoURL = errors.New("claude auth login presented no authorization
 // credential store, which every child that reads or writes it must agree on.
 var authScrubbedEnvNames = []string{
 	"TERM_PROGRAM",
-	"FORCE_HYPERLINK",
-	"CLAUDE_CODE_CUSTOM_OAUTH_URL",
-	"GOTRACEBACK",
+	envForceHyperlink,
+	envCustomOAuthURL,
+	envGoTraceback,
 }
 
 // authLoginReadLimit bounds the bytes read from one login child before the
@@ -110,7 +115,11 @@ const authLoginChunkBytes = 4096
 var authLoginPresentationWait = 60 * time.Second
 
 // authShutdownWait bounds the login child's own exit once it is asked to stop.
-const authShutdownWait = 5 * time.Second
+var authShutdownWait = 5 * time.Second
+
+// nativeTreeReclaimWait bounds each detached host reclaim attempt. A timeout
+// retains the prepared root for the next cleanup attempt.
+var nativeTreeReclaimWait = 5 * time.Second
 
 // AuthAccount is the allowlist-and-ignore projection of `claude auth status
 // --json`. The payload carries three fields logged out, four on the api-key
@@ -140,10 +149,10 @@ type authStatusPayload struct {
 // AuthStatus runs `claude auth status --json` under the selected containment
 // boundary and reports the account projection beside the child's exit code.
 // Both values are needed to decide whether the configured home is logged in.
-func AuthStatus(ctx context.Context, options Options, generation *DarwinGeneration) (AuthAccount, int, error) {
+func AuthStatus(ctx context.Context, options Options) (AuthAccount, int, error) {
 	// --json is passed explicitly even though it is the documented default, so
 	// a future default flip changes nothing here.
-	output, code, err := authCommandOutput(ctx, []string{"auth", "status", "--json"}, options, generation, "claude auth status")
+	output, code, err := authCommandOutput(ctx, []string{authCommand, authStatus, "--json"}, options)
 	if err != nil {
 		return AuthAccount{}, code, err
 	}
@@ -172,8 +181,8 @@ func decodeAuthStatus(output []byte) (AuthAccount, error) {
 
 // AuthLogout runs `claude auth logout`, which clears the config dir's account
 // and, where the platform has one, its keystore items.
-func AuthLogout(ctx context.Context, options Options, generation *DarwinGeneration) (int, error) {
-	_, code, err := authCommandOutput(ctx, []string{"auth", "logout"}, options, generation, "claude auth logout")
+func AuthLogout(ctx context.Context, options Options) (int, error) {
+	_, code, err := authCommandOutput(ctx, []string{authCommand, "logout"}, options)
 
 	return code, err
 }
@@ -185,36 +194,13 @@ func authCommandOutput(
 	ctx context.Context,
 	args []string,
 	options Options,
-	generation *DarwinGeneration,
-	operation string,
 ) ([]byte, int, error) {
-	executable, err := Discover(ctx, options.CLIPath, options)
+	output, result, err := runNativeOutput(ctx, options, options.CLIPath, args)
 	if err != nil {
-		return nil, 0, errors.Join(err, generation.finish(true))
-	}
-
-	output, err := containedClaudeOutput(ctx, executable, args, options, generation, operation)
-	if err == nil {
-		return output, 0, nil
-	}
-
-	if errors.Is(err, ErrProcessContainmentIncomplete) {
 		return nil, 0, err
 	}
 
-	// A child the wrapper killed on its own deadline also carries an exit
-	// status, so the deadline is read first: reporting it as an ordinary
-	// non-zero exit would let a timeout answer "not logged in".
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, 0, errors.Join(ctxErr, err)
-	}
-
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return output, exitErr.ExitCode(), nil
-	}
-
-	return nil, 0, err
+	return output, result.ExitCode, nil
 }
 
 // authScrubbedEnvKey reports whether a variable is dropped from every child's
@@ -410,16 +396,20 @@ func classifyAuthLoginLines(buffered string, authorizeURL string) (string, strin
 // lifetime end to end: claude exposes no native flow cancel, so terminating
 // this process is the fence.
 type AuthLogin struct {
-	stdin      io.WriteCloser
-	stdout     io.ReadCloser
-	tree       *processContainment
-	generation *DarwinGeneration
-	shim       *browserShim
-	exit       *commandWait
-	beginExit  func()
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	process  NativeProcess
+	shim     *browserShim
+	options  Options
+	prepared []string
 
-	once     sync.Once
-	closeErr error
+	flightMu   sync.Mutex
+	exitFlight *nativeWaitFlight
+
+	closeMu        sync.Mutex
+	processSettled bool
+	processErr     error
+	shimRemoved    bool
 }
 
 // AuthLoginExit is the direct login child's natural exit outcome. Zero is only
@@ -436,13 +426,8 @@ const (
 // StartAuthLogin spawns the login child under the selected containment boundary
 // with a scrubbed environment and returns once the grammar has yielded the
 // validated authorization URL.
-func StartAuthLogin(ctx context.Context, options Options, generation *DarwinGeneration) (*AuthLogin, string, error) {
-	executable, err := Discover(ctx, options.CLIPath, options)
-	if err != nil {
-		return nil, "", errors.Join(err, generation.finish(true))
-	}
-
-	login, err := startAuthLoginChild(executable, options, generation)
+func StartAuthLogin(ctx context.Context, options Options) (*AuthLogin, string, error) {
+	login, err := startAuthLoginChild(ctx, options)
 	if err != nil {
 		return nil, "", err
 	}
@@ -459,8 +444,6 @@ func StartAuthLogin(ctx context.Context, options Options, generation *DarwinGene
 
 	select {
 	case result := <-presented:
-		login.beginExit()
-
 		if result.err != nil {
 			return nil, "", errors.Join(result.err, login.Close())
 		}
@@ -477,41 +460,7 @@ type authPresentation struct {
 	err error
 }
 
-func startAuthLoginChild(
-	executable Executable,
-	options Options,
-	generation *DarwinGeneration,
-) (login *AuthLogin, returnErr error) {
-	started := false
-
-	defer func() {
-		if !started {
-			returnErr = errors.Join(returnErr, generation.finish(!errors.Is(returnErr, ErrProcessContainmentIncomplete)))
-		}
-	}()
-
-	if err := executable.verify(); err != nil {
-		return nil, fmt.Errorf("admit claude auth login executable: %w", err)
-	}
-
-	command := processCommand(executable.Path(), "auth", "login")
-	configureProcessCommand(command)
-
-	cwd, err := processGetwd()
-	if err != nil {
-		return nil, fmt.Errorf("get working directory for claude auth login: %w", err)
-	}
-
-	command.Dir = cwd
-
-	envOptions := options
-	envOptions.Cwd = cwd
-
-	command.Env = BuildEnv(envOptions)
-	if command.Env == nil {
-		return nil, errors.New("build Claude auth login environment: invalid process isolation")
-	}
-
+func startAuthLoginChild(ctx context.Context, options Options) (login *AuthLogin, returnErr error) {
 	// The shim is applied after BuildEnv because BuildEnv drops keys wholesale,
 	// and a PATH or BROWSER it rewrote afterwards would hand the authorization
 	// URL to a real browser. A tab that reaches this leg's loopback listener
@@ -522,63 +471,85 @@ func startAuthLoginChild(
 		return nil, fmt.Errorf("contain claude auth login browser launch: %w", err)
 	}
 
-	if handoffErr := authLoginHandoffGeneratedNativeTree(shim.dir, options.ProcessIsolation); handoffErr != nil {
-		return nil, errors.Join(fmt.Errorf("handoff claude auth login browser shim: %w", handoffErr), shim.remove())
+	environment := BuildEnv(options)
+	if environment == nil {
+		return nil, errors.Join(authorityUnavailable(options.Authority), shim.remove())
 	}
 
+	options.PreparedEnvironment = shim.environ(environment)
+	prepared := make([]string, 0, 2)
+	retainPrepared := false
+	failedRoot := ""
+
 	defer func() {
-		if !started {
-			returnErr = errors.Join(returnErr, shim.remove())
+		if login == nil {
+			if retainPrepared {
+				return
+			}
+
+			if failedRoot != "" {
+				if failedRoot != shim.dir {
+					returnErr = errors.Join(returnErr, shim.remove())
+				}
+
+				return
+			}
+
+			reclaimErr := reclaimPreparedRoots(options.Authority, prepared)
+
+			returnErr = errors.Join(returnErr, reclaimErr)
+			if reclaimErr == nil {
+				returnErr = errors.Join(returnErr, shim.remove())
+			}
 		}
 	}()
 
-	command.Env = shim.environ(command.Env)
+	if options.Authority != nil {
+		if options.Authority.PrepareNativeTree == nil {
+			return nil, errors.Join(authorityUnavailable(options.Authority), shim.remove())
+		}
 
-	launch, err := processPrepareContained(command, processLaunchOptions{
-		DarwinBestEffort: options.DarwinBestEffort,
-		Generation:       generation,
-		Isolation:        options.ProcessIsolation,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("prepare claude auth login containment: %w", err)
+		roots := []string{shim.dir}
+		if !options.TreePrepared {
+			roots = append([]string{options.ClaudeHome}, roots...)
+		}
+
+		for _, root := range roots {
+			if root == "" {
+				continue
+			}
+
+			if prepareErr := options.Authority.PrepareNativeTree(ctx, root); prepareErr != nil {
+				failedRoot = root
+
+				if errors.Is(prepareErr, options.Authority.ContainmentIncomplete) ||
+					errors.Is(prepareErr, options.Authority.Unavailable) {
+					return nil, prepareErr
+				}
+
+				return nil, containmentIncomplete(options, "prepare claude auth login native tree", prepareErr)
+			}
+
+			prepared = append(prepared, root)
+		}
+
+		options.TreePrepared = true
 	}
 
-	stdin, err := launch.cmd.StdinPipe()
+	process, err := startNative(ctx, options, options.CLIPath, []string{authCommand, "login"})
 	if err != nil {
-		launch.close()
-
-		return nil, fmt.Errorf("open claude auth login input: %w", err)
-	}
-
-	stdout, err := launch.cmd.StdoutPipe()
-	if err != nil {
-		_ = stdin.Close()
-
-		launch.close()
-
-		return nil, fmt.Errorf("open claude auth login output: %w", err)
-	}
-
-	tree, err := processStartContained(launch)
-	if err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
+		if options.Authority != nil &&
+			(errors.Is(err, options.Authority.Unavailable) || errors.Is(err, options.Authority.ContainmentIncomplete)) {
+			retainPrepared = true
+		}
 
 		return nil, fmt.Errorf("start claude auth login: %w", err)
 	}
 
-	started = true
-	exit, beginExit := authLoginPrepareChildExit(tree, launch.cmd)
+	login = &AuthLogin{stdin: process.Stdin(), stdout: process.Stdout(), process: process, shim: shim, options: options, prepared: prepared}
+	login.exitFlight = login.newExitFlight()
 
-	return &AuthLogin{
-		stdin:      stdin,
-		stdout:     stdout,
-		tree:       tree,
-		generation: generation,
-		shim:       shim,
-		exit:       exit,
-		beginExit:  beginExit,
-	}, nil
+	return login, nil
 }
 
 // Submit writes the pasted value and closes the child's input. The value is
@@ -598,8 +569,13 @@ func (l *AuthLogin) Submit(value string) error {
 // child's reap is armed before the login is exposed, so this answers before and
 // independently of the fence below.
 func (l *AuthLogin) Exited() bool {
+	flight := l.exitFlightSnapshot()
+	if flight == nil {
+		return false
+	}
+
 	select {
-	case <-l.exit.done:
+	case <-flight.done:
 		return true
 	default:
 		return false
@@ -610,27 +586,30 @@ func (l *AuthLogin) Exited() bool {
 // status class. It never signals the process; Close remains the sole
 // containment and shutdown boundary.
 func (l *AuthLogin) Wait(ctx context.Context) (AuthLoginExit, error) {
-	waitErr, completed := l.exit.await(ctx)
-	if !completed {
-		return AuthLoginExitUnknown, ctx.Err()
+	flight := l.ensureExitFlight()
+	if flight == nil {
+		return AuthLoginExitUnknown, errors.New("claude auth login process is unavailable")
 	}
 
-	if waitErr == nil {
+	result, err := flight.wait(ctx)
+	if err != nil {
+		return AuthLoginExitUnknown, err
+	}
+
+	if result.ExitCode == 0 {
 		return AuthLoginExitZero, nil
 	}
 
-	var exitErr *exec.ExitError
-	if errors.As(waitErr, &exitErr) && exitErr.ExitCode() >= 0 {
-		return AuthLoginExitNonzero, nil
-	}
-
-	return AuthLoginExitUnknown, waitErr
+	return AuthLoginExitNonzero, nil
 }
 
 // Close terminates the login child and completes its containment boundary. It
 // is the flow's fence and is idempotent.
 func (l *AuthLogin) Close() error {
-	l.once.Do(func() {
+	l.closeMu.Lock()
+	defer l.closeMu.Unlock()
+
+	if !l.processSettled {
 		_ = l.stdin.Close()
 
 		stdoutErr := l.stdout.Close()
@@ -638,50 +617,170 @@ func (l *AuthLogin) Close() error {
 			stdoutErr = nil
 		}
 
-		l.beginExit()
+		revokeErr := boundedNativeRevoke(l.process, authShutdownWait)
+		flight := l.ensureExitFlight()
 
-		containErr := processBoundaryComplete(l.tree, authShutdownWait)
-		waitErr := l.reap()
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), authShutdownWait)
+		_, waitErr := flight.wait(waitCtx)
 
-		closeErr := processContainmentClose(l.tree)
+		cancelWait()
 
-		l.closeErr = errors.Join(authCloseError(containErr, waitErr, closeErr), stdoutErr, l.shim.remove())
-		l.closeErr = errors.Join(l.closeErr, l.generation.finish(!errors.Is(l.closeErr, ErrProcessContainmentIncomplete)))
-	})
+		if waitErr != nil {
+			cancelCause := containmentIncomplete(l.options, "wait for claude auth login", waitErr)
 
-	return l.closeErr
-}
+			_, joinedErr := flight.cancelAndJoin(cancelCause)
+			if joinedErr == nil {
+				waitErr = nil
+			} else {
+				waitErr = joinedErr
+				if l.options.Authority != nil &&
+					!errors.Is(waitErr, l.options.Authority.ContainmentIncomplete) {
+					waitErr = containmentIncomplete(l.options, "wait for claude auth login", waitErr)
+				}
 
-// reap collects the result of the child's own exit. That exit is already being
-// observed, and it is the only wait on this child, so the fence takes its result
-// rather than starting a second one. The bound matters because the boundary has
-// just been asked to stop the child: a boundary that reports quiescence has
-// reaped it too, so waiting past the fence's own window would be waiting on a
-// boundary that already failed and said so.
-func (l *AuthLogin) reap() error {
-	ctx, cancel := context.WithTimeout(context.Background(), authShutdownWait)
-	defer cancel()
+				// A later Close or Wait starts a fresh host Wait, which may rejoin
+				// the authority's cached terminal result.
+				l.clearExitFlight(flight)
+			}
+		}
 
-	waitErr, _ := l.exit.await(ctx)
+		if waitErr == nil && (errors.Is(revokeErr, context.DeadlineExceeded) || errors.Is(revokeErr, context.Canceled)) {
+			revokeErr = nil
+		}
 
-	return waitErr
-}
+		l.processErr = errors.Join(revokeErr, waitErr, stdoutErr)
+		if waitErr != nil {
+			return l.processErr
+		}
 
-// authCloseError joins the fence's results. A fenced login child either exits
-// with a status of its own or is signalled by the fence, so an exit status is
-// the expected outcome rather than a wrapper failure. A child that exited while
-// something else still held its output pipe is reported by the wait delay the
-// spawn arms, and a boundary that completed has already accounted for whatever
-// held it. Any other wait failure is real and is reported.
-func authCloseError(containErr error, waitErr error, closeErr error) error {
-	joined := errors.Join(containErr, closeErr)
-
-	var exitErr *exec.ExitError
-
-	expected := errors.As(waitErr, &exitErr) || (joined == nil && errors.Is(waitErr, exec.ErrWaitDelay))
-	if waitErr != nil && !expected {
-		joined = errors.Join(joined, waitErr)
+		l.processSettled = true
 	}
 
-	return joined
+	for len(l.prepared) > 0 {
+		index := len(l.prepared) - 1
+		if err := reclaimNativeTree(l.options.Authority, l.prepared[index]); err != nil {
+			return errors.Join(l.processErr, err)
+		}
+
+		l.prepared = l.prepared[:index]
+	}
+
+	if !l.shimRemoved {
+		if err := l.shim.remove(); err != nil {
+			return errors.Join(l.processErr, err)
+		}
+
+		l.shimRemoved = true
+	}
+
+	return l.processErr
+}
+
+// CleanupPending reports whether another Close call still owns a process or
+// native-tree cleanup rung.
+func (l *AuthLogin) CleanupPending() bool {
+	l.closeMu.Lock()
+	defer l.closeMu.Unlock()
+
+	return !l.processSettled || len(l.prepared) > 0 || !l.shimRemoved
+}
+
+func (l *AuthLogin) newExitFlight() *nativeWaitFlight {
+	return newNativeWaitFlight(
+		l.process,
+		containmentIncomplete(l.options, "wait for claude auth login", errNativeProcessWaitPanic),
+	)
+}
+
+func (l *AuthLogin) ensureExitFlight() *nativeWaitFlight {
+	l.flightMu.Lock()
+	defer l.flightMu.Unlock()
+
+	if l.exitFlight == nil && l.process != nil {
+		l.exitFlight = l.newExitFlight()
+	}
+
+	return l.exitFlight
+}
+
+func (l *AuthLogin) exitFlightSnapshot() *nativeWaitFlight {
+	l.flightMu.Lock()
+	defer l.flightMu.Unlock()
+
+	return l.exitFlight
+}
+
+func (l *AuthLogin) clearExitFlight(flight *nativeWaitFlight) {
+	l.flightMu.Lock()
+	defer l.flightMu.Unlock()
+
+	if l.exitFlight == flight {
+		l.exitFlight = nil
+	}
+}
+
+func reclaimPreparedRoots(authority *NativeAuthority, roots []string) error {
+	var errs []error
+	for index := len(roots) - 1; index >= 0; index-- {
+		errs = append(errs, reclaimNativeTree(authority, roots[index]))
+	}
+
+	return errors.Join(errs...)
+}
+
+func reclaimNativeTree(authority *NativeAuthority, root string) error {
+	if authority == nil || root == "" {
+		return nil
+	}
+
+	if authority.ReclaimNativeTree == nil {
+		return authorityUnavailable(authority)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nativeTreeReclaimWait)
+	err := callNativeTreeReclaim(ctx, authority, root)
+
+	cancel()
+
+	if err != nil {
+		if errors.Is(err, authority.TreeBusy) || errors.Is(err, authority.ContainmentIncomplete) {
+			return err
+		}
+
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, errNativeTreeReclaimPanic) {
+			return containmentIncomplete(Options{Authority: authority}, "reclaim native tree", err)
+		}
+
+		if authority.ContainmentIncomplete != nil {
+			return fmt.Errorf("%w: reclaim native tree %q: %w", authority.ContainmentIncomplete, root, err)
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+func (l *AuthLogin) reap(ctx context.Context) error {
+	flight := l.ensureExitFlight()
+	if flight == nil {
+		return errors.New("claude auth login process is unavailable")
+	}
+
+	_, err := flight.wait(ctx)
+
+	return err
+}
+
+var errNativeTreeReclaimPanic = errors.New("native tree reclaim panicked")
+
+func callNativeTreeReclaim(ctx context.Context, authority *NativeAuthority, root string) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errNativeTreeReclaimPanic
+		}
+	}()
+
+	return authority.ReclaimNativeTree(ctx, root)
 }

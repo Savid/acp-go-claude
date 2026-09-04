@@ -12,7 +12,7 @@ import (
 // and the process-containment proof class.
 func provenConfiguration() Negotiated {
 	return Negotiated{
-		Versions:                []int{Version},
+		Version:                 Version,
 		UpdatesOutsidePrompt:    true,
 		AuthoritativeQuiescence: true,
 		QuiescenceSource:        ProofClassProcessContainment,
@@ -150,7 +150,7 @@ func TestEmitterRefusesAStructurallyInvalidIdentity(t *testing.T) {
 func TestEmitterRefusesAnUnnegotiatedFact(t *testing.T) {
 	t.Parallel()
 
-	degenerate := Negotiated{Versions: []int{Version}, ActivityKinds: []ActivityKind{}}
+	degenerate := Negotiated{Version: Version, ActivityKinds: []ActivityKind{}}
 	stream := openStream(t, degenerate, "strm-1")
 
 	_, err := stream.Emit(QuiescenceEvent(QuiescenceFact{
@@ -169,7 +169,7 @@ func TestEmitterRefusesAnUnnegotiatedFact(t *testing.T) {
 func TestSnapshotStatesAnUnprovenBoundaryAsNotQuiescent(t *testing.T) {
 	t.Parallel()
 
-	degenerate := Negotiated{Versions: []int{Version}, ActivityKinds: []ActivityKind{}}
+	degenerate := Negotiated{Version: Version, ActivityKinds: []ActivityKind{}}
 	stream := NewStream(degenerate)
 	stream.Incarnate("strm-1")
 

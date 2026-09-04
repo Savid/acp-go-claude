@@ -14,57 +14,61 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRunPassesContractFlags(t *testing.T) {
-	stubProcessIsolationConfig(t)
+func TestRunPassesCurrentFlags(t *testing.T) {
 	originalServe := serve
-	originalAgentVersion := agentVersion
+	originalVersion := agentVersion
 	t.Cleanup(func() {
 		serve = originalServe
-		agentVersion = originalAgentVersion
+		agentVersion = originalVersion
 	})
-
+	agentVersion = func() string { return "v1.2.3" }
 	var got claudeacp.Options
-	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...claudeacp.Option) error {
-		for _, opt := range opts {
-			opt(&got)
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, options ...claudeacp.Option) error {
+		for _, option := range options {
+			option(&got)
 		}
 
 		return nil
 	}
-	agentVersion = func() string { return "v1.2.3" }
-
-	var stderr bytes.Buffer
-	code := run(context.Background(), []string{
-		"-process-isolation-config", testProcessIsolationConfigPath,
+	code := run(t.Context(), []string{
 		"-path", "/bin/claude",
-		"-home", "/tmp/claude",
-		"-scratch-dir", "/tmp/claude-scratch",
+		"-home", "/tmp/home",
+		"-scratch-dir", "/tmp/scratch",
+		"-provider-auth-root", "/tmp/auth",
+		"-provider-auth-direct-home", "/tmp/home",
 		"-model", "sonnet",
 		"-claude-bare",
 		"-claude-permission-mode", "plan",
 		"-claude-system-prompt", "system",
 		"-claude-hide-auth",
 		"-debug",
-	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
-
-	require.Equal(t, 0, code)
+	}, bytes.NewReader(nil), io.Discard, io.Discard)
+	require.Zero(t, code)
 	require.Equal(t, "v1.2.3", got.AgentVersion)
 	require.Equal(t, "/bin/claude", got.ExecutablePath)
-	require.Equal(t, "/tmp/claude", got.Home)
-	require.Equal(t, "/tmp/claude-scratch", got.ScratchDir)
+	require.Equal(t, "/tmp/home", got.Home)
+	require.Equal(t, "/tmp/scratch", got.ScratchDir)
+	require.Equal(t, "/tmp/auth", got.ProviderAuthRoot)
+	require.Equal(t, "/tmp/home", got.ProviderAuthDirectHome)
 	require.Equal(t, "sonnet", got.DefaultModel)
 	require.True(t, got.BareMode)
 	require.Equal(t, "plan", got.DefaultPermissionMode)
 	require.Equal(t, "system", got.DefaultSystemPrompt)
 	require.True(t, got.HideAuth)
-	require.NotNil(t, got.ProcessIsolation)
-	require.Equal(t, uint32(20001), got.ProcessIsolation.UID)
 	require.NotNil(t, got.Logger)
-	require.Empty(t, stderr.String())
+}
+
+func TestRunVersionAndUnknownFlag(t *testing.T) {
+	originalVersion := agentVersion
+	t.Cleanup(func() { agentVersion = originalVersion })
+	agentVersion = func() string { return "test-version" }
+	var output bytes.Buffer
+	require.Zero(t, run(t.Context(), []string{"-version"}, bytes.NewReader(nil), &output, io.Discard))
+	require.Equal(t, "test-version\n", output.String())
+	require.Equal(t, 2, run(t.Context(), []string{"-removed-flag"}, bytes.NewReader(nil), io.Discard, io.Discard))
 }
 
 func TestRunPassesSeedAndSettingsFlags(t *testing.T) {
-	stubProcessIsolationConfig(t)
 	originalServe := serve
 	t.Cleanup(func() { serve = originalServe })
 
@@ -72,27 +76,25 @@ func TestRunPassesSeedAndSettingsFlags(t *testing.T) {
 	require.NoError(t, os.WriteFile(hostFile, []byte(`{"model":"opus"}`), 0o600))
 
 	var got claudeacp.Options
-	serve = func(_ context.Context, _ io.Reader, _ io.Writer, opts ...claudeacp.Option) error {
-		for _, opt := range opts {
-			opt(&got)
+	serve = func(_ context.Context, _ io.Reader, _ io.Writer, options ...claudeacp.Option) error {
+		for _, option := range options {
+			option(&got)
 		}
 
 		return nil
 	}
 
-	code := run(context.Background(), []string{
-		"-process-isolation-config", testProcessIsolationConfigPath,
+	code := run(t.Context(), []string{
 		"-home", "/tmp/claude",
 		"-seed-file", "settings.json=" + hostFile,
 		"-claude-settings-file", "custom.settings.json",
-	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
-
-	require.Equal(t, 0, code)
+	}, bytes.NewReader(nil), io.Discard, io.Discard)
+	require.Zero(t, code)
 	require.Equal(t, map[string]string{"settings.json": `{"model":"opus"}`}, got.SeedFiles)
 	require.Equal(t, "custom.settings.json", got.SettingsFile)
 }
 
-func TestSeedFileFlag(t *testing.T) {
+func TestSeedFileFlagCurrentBehavior(t *testing.T) {
 	t.Parallel()
 
 	var empty seedFileFlag
@@ -101,67 +103,43 @@ func TestSeedFileFlag(t *testing.T) {
 	hostFile := filepath.Join(t.TempDir(), "host.json")
 	require.NoError(t, os.WriteFile(hostFile, []byte("contents"), 0o600))
 
-	var flag seedFileFlag
-	require.NoError(t, flag.Set("a.json="+hostFile))
-	require.NoError(t, flag.Set("b.json="+hostFile))
-	require.Equal(t, "a.json,b.json", flag.String())
-	require.Equal(t, "contents", flag.files["a.json"])
-
-	require.ErrorContains(t, flag.Set("missing-separator"), "expected <relpath>=<hostpath>")
-	require.ErrorContains(t, flag.Set("=/only/host"), "expected <relpath>=<hostpath>")
-	require.ErrorContains(t, flag.Set("rel="), "expected <relpath>=<hostpath>")
-	require.ErrorContains(t, flag.Set("rel="+filepath.Join(t.TempDir(), "does-not-exist")), "read seed file")
+	var value seedFileFlag
+	require.NoError(t, value.Set("a.json="+hostFile))
+	require.NoError(t, value.Set("b.json="+hostFile))
+	require.Equal(t, "a.json,b.json", value.String())
+	require.Equal(t, "contents", value.files["a.json"])
+	require.Error(t, value.Set("missing-separator"))
+	require.Error(t, value.Set("=/only/host"))
+	require.Error(t, value.Set("rel="))
+	require.Error(t, value.Set("rel="+filepath.Join(t.TempDir(), "missing")))
 }
 
-func TestRunVersion(t *testing.T) {
-	originalAgentVersion := agentVersion
-	t.Cleanup(func() { agentVersion = originalAgentVersion })
-	agentVersion = func() string { return "v9.9.9" }
-
-	var stdout bytes.Buffer
-	code := run(context.Background(), []string{"-version"}, bytes.NewBuffer(nil), &stdout, bytes.NewBuffer(nil))
-
-	require.Equal(t, 0, code)
-	require.Equal(t, "v9.9.9\n", stdout.String())
-}
-
-func TestRunErrorBranches(t *testing.T) {
-	stubProcessIsolationConfig(t)
+func TestRunCurrentErrorBranches(t *testing.T) {
 	originalServe := serve
 	originalShutdown := shutdownOpenTelemetry
-	originalAgentVersion := agentVersion
 	t.Cleanup(func() {
 		serve = originalServe
 		shutdownOpenTelemetry = originalShutdown
-		agentVersion = originalAgentVersion
 	})
-	agentVersion = func() string { return "v1.2.3" }
-
-	code := run(context.Background(), []string{"-bad"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil), bytes.NewBuffer(nil))
-	require.Equal(t, 2, code)
 
 	serve = func(context.Context, io.Reader, io.Writer, ...claudeacp.Option) error {
 		return errors.New("serve failed")
 	}
 	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return nil }
 	var stderr bytes.Buffer
-	code = run(context.Background(), isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
-	require.Equal(t, 1, code)
+	require.Equal(t, 1, run(t.Context(), nil, bytes.NewReader(nil), io.Discard, &stderr))
 	require.Contains(t, stderr.String(), "serve failed")
 
-	serve = func(ctx context.Context, _ io.Reader, _ io.Writer, _ ...claudeacp.Option) error {
-		return ctx.Err()
-	}
+	serve = func(ctx context.Context, _ io.Reader, _ io.Writer, _ ...claudeacp.Option) error { return ctx.Err() }
 	shutdownOpenTelemetry = func(context.Context, func(context.Context) error) error { return errors.New("shutdown failed") }
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	stderr.Reset()
-	code = run(ctx, isolatedArgs(), bytes.NewBuffer(nil), bytes.NewBuffer(nil), &stderr)
-	require.Equal(t, 1, code)
+	require.Equal(t, 1, run(ctx, nil, bytes.NewReader(nil), io.Discard, &stderr))
 	require.Contains(t, stderr.String(), "shutdown OpenTelemetry")
 }
 
-func TestPendingSignalAndSignalCode(t *testing.T) {
+func TestPendingSignalAndSignalCodeCurrentBehavior(t *testing.T) {
 	signals := make(chan os.Signal, 1)
 	require.Nil(t, pendingSignal(signals))
 	signals <- syscall.SIGTERM
@@ -170,8 +148,7 @@ func TestPendingSignalAndSignalCode(t *testing.T) {
 	require.Equal(t, 1, signalCode(fakeSignal("fake")))
 }
 
-func TestMainExitBranch(t *testing.T) {
-	stubProcessIsolationConfig(t)
+func TestMainCurrentExitBranch(t *testing.T) {
 	originalServe := serve
 	originalExit := exit
 	originalArgs := os.Args
@@ -184,7 +161,7 @@ func TestMainExitBranch(t *testing.T) {
 	serve = func(context.Context, io.Reader, io.Writer, ...claudeacp.Option) error {
 		return errors.New("serve failed")
 	}
-	os.Args = []string{"acp-go-claude", "-process-isolation-config", testProcessIsolationConfigPath}
+	os.Args = []string{"acp-go-claude"}
 	exitCode := -1
 	exit = func(code int) { exitCode = code }
 
@@ -195,5 +172,4 @@ func TestMainExitBranch(t *testing.T) {
 type fakeSignal string
 
 func (s fakeSignal) String() string { return string(s) }
-
-func (s fakeSignal) Signal() {}
+func (s fakeSignal) Signal()        {}

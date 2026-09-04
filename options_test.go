@@ -29,9 +29,9 @@ func TestApplyOptionsBranches(t *testing.T) {
 		WithMeterProvider(meter),
 		WithTextMapPropagator(propagator),
 		WithTracerProvider(tracer),
-		WithExecutablePath("/bin/claude"),
-		WithHome("/tmp/claude-home"),
-		WithScratchDir("/tmp/claude-scratch"),
+		WithExecutablePath(absTestPath("bin", "claude")),
+		WithHome(absTestPath("tmp", "claude-home")),
+		WithScratchDir(absTestPath("tmp", "claude-scratch")),
 		WithSessionStore(store),
 		WithSessionStoreLoadTimeout(2 * time.Second),
 		WithDefaultModel("claude-sonnet"),
@@ -64,9 +64,9 @@ func TestApplyOptionsBranches(t *testing.T) {
 	require.Equal(t, meter, options.MeterProvider)
 	require.Equal(t, tracer, options.TracerProvider)
 	require.Equal(t, propagator, options.TextMapPropagator)
-	require.Equal(t, "/bin/claude", options.ExecutablePath)
-	require.Equal(t, "/tmp/claude-home", options.Home)
-	require.Equal(t, "/tmp/claude-scratch", options.ScratchDir)
+	require.Equal(t, absTestPath("bin", "claude"), options.ExecutablePath)
+	require.Equal(t, absTestPath("tmp", "claude-home"), options.Home)
+	require.Equal(t, absTestPath("tmp", "claude-scratch"), options.ScratchDir)
 	require.Same(t, store, options.SessionStore)
 	require.Equal(t, 2*time.Second, options.SessionStoreLoadTimeout)
 	require.Equal(t, "claude-sonnet", options.DefaultModel)
@@ -107,13 +107,4 @@ func TestApplyOptionsBranches(t *testing.T) {
 	require.ErrorContains(t, validateImageLimits(ImageLimits{MaxInputBytesPerPrompt: -1}), "MaxInputBytesPerPrompt")
 	require.ErrorContains(t, validateImageLimits(ImageLimits{MaxOutputBytesPerImage: -1}), "MaxOutputBytesPerImage")
 	require.ErrorContains(t, validateImageLimits(ImageLimits{MaxOutputBytesPerToolCall: -1}), "MaxOutputBytesPerToolCall")
-}
-
-func TestWithProcessIsolationClonesBaseEnvironment(t *testing.T) {
-	base := map[string]string{"PATH": "/policy/bin", "ONLY_POLICY": "present"}
-	options := applyOptions([]Option{WithProcessIsolation(ProcessIsolation{UID: 12, GID: 34, BaseEnvironment: base})})
-	base["ONLY_POLICY"] = "mutated"
-	if options.ProcessIsolation == nil || options.ProcessIsolation.BaseEnvironment["ONLY_POLICY"] != "present" {
-		t.Fatal("WithProcessIsolation did not clone the base environment")
-	}
 }

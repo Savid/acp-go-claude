@@ -140,14 +140,14 @@ func TestStoreWriteAllErrorBranches(t *testing.T) {
 	mkdirAll := storeMkdirAll
 	marshalIndent := storeMarshalIndent
 	createTemp := storeCreateTemp
-	openDir := storeOpenDir
+	syncDir := storeSyncDir
 	rename := storeRename
 	userHomeDir := storeUserHomeDir
 	t.Cleanup(func() {
 		storeMkdirAll = mkdirAll
 		storeMarshalIndent = marshalIndent
 		storeCreateTemp = createTemp
-		storeOpenDir = openDir
+		storeSyncDir = syncDir
 		storeRename = rename
 		storeUserHomeDir = userHomeDir
 	})
@@ -206,17 +206,11 @@ func TestStoreWriteAllErrorBranches(t *testing.T) {
 	require.ErrorContains(t, err, "backup corrupt permission rules")
 	storeRename = rename
 
-	storeOpenDir = func(string) (syncCloser, error) {
-		return nil, errors.New("open dir failed")
+	storeSyncDir = func(string) error {
+		return errors.New("sync dir failed")
 	}
 	require.Error(t, store.writeAll(rules))
-	storeOpenDir = openDir
-
-	storeOpenDir = func(string) (syncCloser, error) {
-		return fakeSyncCloser{syncErr: errors.New("sync dir failed")}, nil
-	}
-	require.Error(t, store.writeAll(rules))
-	storeOpenDir = openDir
+	storeSyncDir = syncDir
 
 	storeUserHomeDir = func() (string, error) {
 		return "", errors.New("home failed")
@@ -250,18 +244,6 @@ func (f fakeTempFile) Sync() error {
 
 func (f fakeTempFile) Name() string {
 	return f.name
-}
-
-type fakeSyncCloser struct {
-	syncErr error
-}
-
-func (f fakeSyncCloser) Close() error {
-	return nil
-}
-
-func (f fakeSyncCloser) Sync() error {
-	return f.syncErr
 }
 
 func TestStoreConfigHomeAndNullFile(t *testing.T) {

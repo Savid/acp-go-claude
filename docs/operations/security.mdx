@@ -1,318 +1,50 @@
 ---
 title: "Security"
-description: "The trust boundaries an operator relies on when running the adapter"
+description: "Native-process and filesystem authority boundaries"
 ---
 
-## Standalone command boundary
+## Ordinary execution
 
-The standalone command's hardened launch is Linux-only and requires the
-root-owned mode-`0600` `-process-isolation-config` policy; omitting the flag
-instead launches native work ordinarily as the identity the command already
-runs as. Resolution walks
-from an open `/` descriptor with `openat` and `O_NOFOLLOW`; every ancestor
-must be root-owned and not writable by group or other, and the final single-link
-policy inode is read through the descriptor that was validated. The configured
-account home is resolved the same way, must be a target-owned mode-`0700`
-directory beneath protected root-owned ancestry, and cannot be `/root` or
-`/nonexistent`.
+When `WithHostAuthority` is omitted, Claude runs as the adapter process's own
+identity. The adapter captures a sanitized ambient environment, applies
+`WithEnv`, and starts the configured executable directly. `WithHome` selects
+the Claude config directory. Reserved home, XDG, and adapter-private variables
+cannot be overridden through `WithEnv` or session metadata.
 
-The adapter remains root, but its ambient environment is never copied wholesale
-to the child. Only the complete literal `baseEnvironment` plus names in
-`inheritEnvironment` reach native work. The CLI refuses Darwin, Windows, and
-other platforms; Darwin best-effort containment remains an explicit
-embedded-Go option only. `-version` and Darwin containment diagnostics launch
-no native worker and are exempt.
+## Host authority
 
-## Credential boundary
+An embedded host that owns native containment supplies `WithHostAuthority`.
+This is a strict boundary: an unusable supplied authority fails with
+`ErrHostAuthorityUnavailable`, and the adapter never falls back to a direct
+process launch.
 
-Claude account material stays in the Claude config directory the host selects
-with `-home` (`WithHome`). `CLAUDE_CONFIG_DIR`, `HOME`, and XDG root variables
-cannot be overridden through `WithEnv` or session metadata. Config hydration
-reads only from that authoritative Claude home, and native account removal
-runs only against the same consented home. By default the adapter does not log
-secrets, prompt text, tool payloads, or raw Claude event bodies.
+Every native launch uses `HostAuthority.StartNative`, including the per-start
+Claude version probe, session processes, provider-auth commands, usage probes,
+and platform credential checks. Each `NativeRequest` contains the logical
+executable, complete argument vector, canonical environment, and working
+directory. The environment starts from `HostAuthority.NativeEnvironment` and
+then receives the adapter's validated overlays.
 
-## Permission enforcement
+The adapter writes all settings, copied config, session transcript seeds, MCP
+configuration, and browser-launcher shims before calling
+`PrepareNativeTree`. It does not access a prepared tree again until
+`ReclaimNativeTree` succeeds. Session-residence disposal owns removal of a
+prepared transcript tree; session deletion does not reopen it.
 
-Permission prompts are load-bearing and are never bypassed. Decisions stay scoped
-to the session that made them and are copied to a forked session only through
-intentional fork behavior. `bypass_permissions` and the skip-permissions
-capability flag are available only when explicitly enabled — see
-[Permissions](/docs/features/permissions).
+Shutdown first closes protocol stdin, then waits for the native process. If it
+does not exit within the grace period, the adapter calls `Revoke` and waits for
+terminal settlement. Stream frames remain readable until `Wait` completes.
 
-## Executable admission
+`ErrNativeTreeBusy` means live lease processes still prevent reclamation; the
+tree is retained. Any other uncertain reclaim failure is reported as
+`ErrContainmentIncomplete`, and the tree is likewise retained. Either
+`ErrContainmentIncomplete` or `ErrHostAuthorityUnavailable` stops new native
+session admission for that agent.
 
-A session admits its Claude executable once. Discovery resolves the configured
-`-path` (`WithExecutablePath`), or the search path when none was configured, to
-an absolute path — including when a search-path entry is relative — and records
-the identity of the file that path named. The version probe, the launch it
-admits, and every later relaunch re-read that one path and refuse when the file
-underneath it is no longer the admitted one. Because the adapter examines the
-executable in its own working directory while the child runs in the session's,
-absolute admission is what keeps the file that was validated and the file that
-is executed the same file.
+## Credentials and logs
 
-## Process isolation
-
-Process isolation is optional. Omitting `WithProcessIsolation` selects ordinary
-same-identity execution on every platform this adapter otherwise supports, and
-supplying it selects the hardened Linux identity boundary described below.
-
-### Ordinary same-identity execution (the default)
-
-With no `WithProcessIsolation` value, native Claude work runs as the adapter's
-current operating-system identity — root or non-root, unchanged either way. No
-`ProcessIsolation` value is manufactured on the caller's behalf, no privileged
-guardian or liveness supervisor is started, no `/var/lib/acp-go` authority is
-touched, and no UID/GID policy, standalone owner, or `sudo` is required. The
-adapter builds its ordinary sanitized environment — the ambient environment
-minus the private adapter prefix, `CLAUDECODE`, and the variables scrubbed from
-every child — and reaps the direct child after sending bounded best-effort
-TERM/KILL to its original process group. It does not prove that group absent or
-that a descendant which left it stopped.
-
-That boundary is deliberately non-authoritative. It proves no credential
-separation between the adapter and Claude, publishes no provider-descendant
-inventory — not even a terminal zero — and makes no whole-tree quiescence claim.
-Containment is reported as `shared_identity`. A host that requires those
-properties supplies `WithProcessIsolation` and requires `authoritative` before
-admitting work; it must never catch that refusal and retry without the option.
-
-### Hardened Linux identity isolation (explicit)
-
-Supplying `WithProcessIsolation` is a strict selection, never a preference. Its
-`UID` and `GID` must be nonzero and distinct from the trusted supervisor, and
-the value is refused before any spawn when the platform is not Linux, the
-supervisor is not root, or the policy does not validate. Such a refusal never
-falls back to ordinary same-identity or Darwin best-effort execution, and a
-policy whose ids happen to name the identity the caller already holds is refused
-on exactly those terms rather than degraded.
-
-On Linux, each session's Claude process then runs below an independent
-trusted-root guardian/liveness pair. Both processes enable `PR_SET_CHILD_SUBREAPER` before
-launch; the liveness supervisor directly parents Claude and the guardian is its
-fallback reaper. A
-tool descendant that double-forks, calls `setsid`, changes process group, or
-ignores `SIGINT`/`SIGTERM` is still adopted, identity-checked through `/proc`,
-killed, and reaped. The surviving supervisor accepts only the kernel's `ECHILD` result as
-the final no-descendants condition; an empty `/proc` scan is not proof because
-it can race a fork or reparent. Separate inherited descriptors carry immutable
-launch configuration, shutdown control, startup readiness, and the final
-quiescence proof. Those descriptors are close-on-exec before Claude starts.
-Adapter death therefore closes the control writer and makes the pair contain
-the tree rather than leaving it detached.
-
-Both Linux supervisors stay root and run from `/` with closed private
-environments. Immutable launch configuration carries the target identity and
-native environment; only Claude receives the configured UID/GID with no
-supplementary groups. Before native start both supervisors validate and retain
-duplicates of the identical UID EX and domain SH open file descriptions. A
-primary guardian `SIGKILL` leaves liveness authoritative; a liveness `SIGKILL`
-leaves the guardian authoritative. The survivor holds both capabilities while
-it adopts, kills, and reaps daemonized and `setsid` descendants to kernel
-`ECHILD`; completion and the managed-root permit wait for that proof. Claude
-inherits none of the launch, control, proof, or lock descriptors, so it cannot
-signal its supervisor, forge completion, or overlap another native tree using
-the same host identity.
-A dedicated guardian peer-liveness descriptor is fenced immediately before
-native start. Guardian death before readiness refuses native launch and lets
-liveness publish completion or quarantine only after kernel `ECHILD`.
-The identity root must be a persistent local-lock volume shared by every
-service or container using the same numeric UID namespace. Otherwise those
-participants require disjoint UID pools. Lock inodes are permanent and are
-never unlinked, renamed, or replaced.
-The durable authority root is `/var/lib/acp-go/agent-identities`.
-Before any identity operation, the adapter joins permanent `domain.lock`
-through matching strict `domain.json`, binding the boot, PID/user namespaces,
-canonical UID/GID maps, and unrestricted root procfs view. It and both trusted
-supervisors retain a shared checked-CLOEXEC lease through containment; native
-inherits no domain descriptor. Before launch the supervisor re-reads matching
-strict `domain.json` under that lease. Borrowed adoption strictly parses
-`/proc/self/fdinfo/<fd>` and requires the supplied open file description's
-matching whole-file `FLOCK`: UID `WRITE` and domain `READ`. Missing, unreadable,
-malformed, ambiguous, wrong-inode, partial-range, or wrong-mode state refuses;
-the adapter never calls mode-converting `flock` on the supplied descriptor.
-Separate-open contention remains an independent proof. Contended pristine same-domain bootstrap uses a
-bounded shared-lock rejoin; a retained shared lease protecting a live mismatch
-refuses. Rebind requires an
-exclusive lease, a boot-aware whole-root audit, durable atomic record replacement,
-and a shared-lock re-read. A contender that sees a peer's matching record after
-obtaining EX performs a real EX-to-SH conversion and shared re-read; it never
-returns a mislabeled exclusive lifetime lease. The full local-durable-noncloned
-filesystem probe reruns immediately before every initial publish, rebind, or
-replacement. Failure preserves the old record and blocks downgrade and launch.
-Same-boot exact-owner `ACTIVE` may rebind only while this provider holds that
-UID lock exclusively and proves task vacancy; a live UID-lock holder blocks rebind,
-and every other owner or `ACTIVE` refuses. A changed boot carries every valid standalone
-owner+`ACTIVE` unchanged and excluded, and ownerless `CLEAN_READY`
-may be carried. A provider never recovers ownerless `ACTIVE`: it performs no
-kill, path deletion, disposition rewrite, or CLEAN publish, and fails closed
-naming the uid whose ownerless `ACTIVE` it cannot recover. The actionable
-result that refusal leaves the operator is `Host recovery required`, which
-describes what has to happen next rather than the wording of the error: the
-host authority alone owns that destructive recovery grammar and authority. Only the exact standalone owner may roll retained `ACTIVE`
-after publication and two consecutive vacancy scans. Missing domain state plus
-any owner or disposition fails closed. Every authorized cleanup requires exact
-persisted root device/inode; device renumber and cleanup-root filesystem
-substitution fail closed.
-Canonical crash temps are metadata-checked and never parsed. Domain temps are
-unlinked and directory-synced only under domain EX; marker temps only under
-their UID EX lock. A live-writer conflict is untouched, and malformed temp
-names or metadata fail closed. A matching-domain participant still joins SH
-while a valid canonical marker temp is protected by a live UID lock; its cleanup
-needs UID EX, not domain EX. Domain-record temps remain domain-EX-only.
-A matching-domain provider audit validates but tolerates a canonical unrelated marker temp.
-After target UID EX, it cleans target marker temps and re-reads the final disposition.
-A domain-rebind audit under domain EX drains all canonical marker temps under
-their UID EX locks.
-Pre-join filesystem probes hold a checked-CLOEXEC inode EX lease through unlink
-and directory sync across both canonical
-`.authority-probe-<24-lowercase-hex>` and
-`.authority-probe-<24-lowercase-hex>.renamed` names. Audit validates the named inode and
-metadata, takes inode `LOCK_EX|LOCK_NB`, then unlinks and directory-syncs. That
-inode lease permits matching shared cleanup; domain EX alone is insufficient.
-A live conflict remains untouched, matching shared join proceeds, and bootstrap
-cleanup bounded-waits. An authority `/proc/self/fd/<fd>` path ending in the
-kernel ` (deleted)` suffix fails closed.
-Permanent coordination inodes are never reconstructed beside durable state.
-  `domain.lock` creation requires a truly empty authority root; `owners.lock`
-  creation requires an established domain with no owner, disposition, UID-lock,
-  or affinity-lock state. A missing UID lock refuses beside its owner,
-  disposition, or temp; a missing affinity lock refuses when a marker maps to
-  its shard. This prevents an old unlinked open file description from becoming
-  split-brain authority. An exact-owner restart still validates the named
-  owners-lock metadata even though it skips that flock.
-With both host capabilities nil, standalone acquisition requires the explicit
-owner ID and state-root fields and strictly validates `<uid>.owner` and
-`<uid>.quarantine`. A new claim takes domain SH, permanent checked-CLOEXEC
-`owners.lock` EX, then nonblocking UID EX, and retains them through owner plus `ACTIVE`
-publication. It audits every owner and disposition globally and refuses
-duplicate UID, GID, provider+owner ID, state-root path, or state-root
-device/inode. It requires both owner and disposition absent and never claims
-ownerless `CLEAN_READY`. No provider waits for UID while holding owners EX; a busy candidate releases
-owners and boundedly retries the complete global scan. An exact-owner restart
-skips owners and may wait for UID with cancellation. The permanent owner kind is
-`standalone-provider`
-and permanently binds UID:GID, fixed provider module
-`github.com/savid/acp-go-claude`, canonical owner ID, and the exact no-symlink state-root
-path/device/inode.
-
-Before any audit passes, the provider drains every canonical owner temp,
-including temps for unrelated UIDs, under owners EX plus that temp's
-nonblocking UID EX lock. A busy temp UID releases owners and retries the whole
-scan. An exact-owner fast path that encounters a temp releases its target UID
-and joins owners-before-UID cleanup; unknown temp names refuse.
-
-The state root is dedicated, never `/`, and outside and not beneath the
-authority root. This exact provider resolves it componentwise from `/` without
-symlinks or magic links, and every ancestor except the final directory is
-root-owned and not group- or world-writable; the final directory is owned by
-the configured UID:GID with mode `0700`. It revalidates the protected path,
-ownership, mode, device, and inode immediately before `ACTIVE` publication and native launch. Host authority and foreign providers
-validate the tuple but carry or refuse it without requiring the path in their
-mount namespace.
-
-Publication uses a synced `<uid>.owner.next-` temporary,
-`RENAME_NOREPLACE`, named revalidation, and directory sync. Two consecutive
-full scans of every task's four `Uid`, four `Gid`, and supplementary
-`Groups` values are required before owner and `ACTIVE` publication. Every
-status has exactly one `Uid`, one `Gid`, and one `Groups`; missing, duplicate,
-or malformed fields refuse, while an empty `Groups` value is valid.
-`ACTIVE` has a fresh lease, empty paths, and `standalone:` plus lowercase
-SHA-256 of the compact canonical owner JSON without the file newline. Only the
-exact owner may restart matching retained `ACTIVE`, or finish an
-absent-disposition owner-sync crash marker, after two new consecutive scans.
-`CLEAN_READY`, unreadable or hidden credentials, survivors, and every tuple
-or state-root mismatch fail closed. Standalone never becomes `CLEAN_READY`,
-including on clean exit. With host capabilities, the adapter rejects any owner
-and never rewrites the ownerless host record.
-Participants sharing a pool must also share identical user-namespace UID/GID
-mappings and authoritative PID visibility, or use disjoint pools. The authority
-root rejects network, FUSE, pseudo, read-only, overlay, tmpfs, and unknown
-filesystems. Only probed ext2/3/4-magic, XFS, btrfs, f2fs, ZFS, and bcachefs backing
-filesystems are accepted. It probes separate-open lock exclusion, file sync,
-same-directory atomic rename,
-and directory sync. Each newly created directory level is parent-synced before
-any lock becomes authoritative.
-
-Windows, FreeBSD, OpenBSD, and other non-Linux kernels reject a supplied
-`WithProcessIsolation` policy before spawning Claude, because their process APIs
-cannot apply the Unix UID/GID identity boundary with empty supplementary groups.
-A cross-compile proves only that this refusal path builds; it does not establish
-runtime support for the hardened boundary. Ordinary same-identity execution is
-unaffected on those platforms and remains the default there.
-
-Embedded Darwin hosts run ordinary `shared_identity` execution by default. An
-operator can explicitly select a stronger process-group boundary with
-`WithDarwinBestEffortContainment`, which is mutually exclusive with
-`WithProcessIsolation`: combining the two fails agent construction, so no native
-process is ever spawned for that configuration. Each launch then gets a fresh mode-`0700`
-generation under the selected scratch parent, a random runtime identity, and a
-new process group. Shutdown reaps the direct child, sends bounded group
-`SIGTERM` then `SIGKILL`, and polls the captured original group until absent.
-The fixed cleanup budget is five seconds, with escalation after 500 ms.
-
-That success means only that the direct child was reaped and its original group
-was absent. A descendant can call `setsid` and survive outside the group;
-Darwin's numeric PGID reuse can make a later negative-PGID signal affect an
-unrelated group. Marker correlation is not ownership, inherited markers can be
-scrubbed, and managed native-root permits do not bound provider work that
-escaped. Best-effort mode therefore emits no provider-descendant snapshots,
-including zero, and never claims whole-tree quiescence.
-
-For crash investigation, `acp-go-claude containment diagnose -scratch-dir
-<parent>` reads the retained identity registry. Cleanup requires an exact
-operator-selected runtime and force acknowledgement:
-
-```sh
-acp-go-claude containment cleanup -scratch-dir <parent> -runtime-id <id> -force
-```
-
-Cleanup revalidates same-user process identity and both inherited markers,
-signals individual correlated processes rather than a recorded PGID, and
-retains ambiguous evidence. Neither command proves that marker-scrubbing
-escapees are absent. Darwin has no identity-bound process handle here: a PID
-can be reused between revalidation and `kill(pid, signal)`, so even individual
-signalling can affect unrelated same-user work. The command's fixed five-second
-deadline starts before registry and process enumeration.
-
-Turn cancellation is also contained. A native interrupt response is advisory;
-the adapter then completes the selected per-session boundary before settling a
-cancel, timeout, or caller-context cancellation. Authoritative Linux
-containment covers every descendant. Ordinary `shared_identity` execution
-completes only the process the adapter started and its process group. Darwin
-best effort
-requires only direct-child reaping and absence of the original process group,
-so a `setsid` escape may remain. Readiness and supervisor exit are not
-authoritative proof: Linux requires the dedicated proof descriptor, and an
-unexpected supervisor death fails closed.
-The next prompt starts a fresh Claude process with
-`--resume <session-id>`. Incomplete containment disables that relaunch and
-retains the runtime admission instead of making an unsafe capacity claim.
-
-## Input validation
-
-MCP server declarations are validated before Claude launches; unsupported
-transports are rejected up front and never reach the CLI (see
-[MCP](/docs/features/mcp)). Seed and settings-overlay writes fail closed rather
-than overwrite an operator-authored file — see
-[Models and config](/docs/features/models-config).
-
-Embedded image data is decoded and structurally validated before a native turn,
-and the native request carries the decoded bytes re-encoded rather than the
-base64 the host supplied. Handed-over image files are opened relative to the
-configured read root with containment enforced by the operating system as part
-of the open, must be regular files, and are rejected unless their bytes match
-the digest the host declared. Anything able to write under that root can
-hardlink a file into it from elsewhere, so treat the digest rather than the root
-as the confidentiality boundary.
-Local image output is readable only from the session workspace, the private
-session image scratch directory, or the operating-system temporary directory —
-the roots the harness sandbox already lets a turn write to. The roots stop
-accidental reads of arbitrary paths; they are not an exfiltration boundary
-against a shell-capable agent, which can copy any readable file into the
-workspace. Reads resolve symlinks, require a regular file, and enforce the
-configured byte bound before emission. A refused path fails that tool call with
-fixed guidance and does not end the turn. Remote image URLs are never
-fetched. Raw events and raw tool output remove image base64 and
-signed query strings, retaining only bounded metadata needed for diagnostics.
+Claude account material stays in the selected Claude config directory. The
+adapter does not log authentication material, prompts, tool input, tool output,
+or raw Claude event bodies by default. ACP logout clears adapter-owned state;
+native account changes occur only through the explicitly selected provider-auth
+operation.

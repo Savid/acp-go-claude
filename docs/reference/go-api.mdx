@@ -1,179 +1,83 @@
 ---
 title: "Go API"
-description: "The public package entry point, options, and helpers at a glance"
+description: "The public package entry point, options, and host-authority contract"
 ---
 
-The full, authoritative API — signatures, types, and doc comments — is on
-[pkg.go.dev](https://pkg.go.dev/github.com/savid/acp-go-claude). This page indexes
-the public surface; it does not restate godoc.
-
-## Entry point
-
-`Serve(ctx, input, output, opts...)` runs the agent over a pair of JSON-RPC
-streams:
+The authoritative signatures and doc comments are on
+[pkg.go.dev](https://pkg.go.dev/github.com/savid/acp-go-claude). The primary
+entry point is:
 
 ```go
 err := claudeacp.Serve(ctx, input, output,
-	claudeacp.WithExecutablePath("/usr/local/bin/claude"),
-	claudeacp.WithProcessIsolation(claudeacp.ProcessIsolation{UID: agentUID, GID: agentGID, BaseEnvironment: agentEnv, StandaloneOwnerID: ownerID, StandaloneStateRoot: "/var/lib/acp-go-claude"}),
+	claudeacp.WithExecutablePath("claude"),
 	claudeacp.WithHome("/var/lib/acp-go-claude"),
-	claudeacp.WithDefaultModel("sonnet"),
-	claudeacp.WithClaudeDefaultPermissionMode("default"),
 	claudeacp.WithSessionStore(store),
 )
 ```
 
-`Serve` closes the agent before it returns. If shutdown fails, that close error
-takes precedence over EOF or context cancellation. In particular,
-`errors.Is(err, claudeacp.ErrProcessContainmentIncomplete)` means the adapter could not
-complete the selected native containment boundary; an embedding host must keep
-that runtime and its resources quarantined. Close is idempotent, and this
-failure remains sticky across repeated calls so later cleanup cannot
-accidentally release the quarantined admission.
+`Serve` closes the agent before returning. Close errors take precedence over
+EOF or caller cancellation.
 
-## Process and session options
+## HostAuthority
 
-| Option | Purpose |
+`WithHostAuthority(authority)` delegates native work to a host:
+
+```go
+type HostAuthority interface {
+	NativeEnvironment() map[string]string
+	PrepareNativeTree(context.Context, string) error
+	ReclaimNativeTree(context.Context, string) error
+	StartNative(context.Context, NativeRequest) (NativeProcess, error)
+}
+```
+
+`NativeRequest` carries `Executable`, `Arguments`, `Environment`, and
+`WorkingDirectory`. `NativeProcess` exposes `Stdin`, `Stdout`, `Stderr`,
+`Wait(context.Context) (NativeResult, error)`, and `Revoke(context.Context)
+error`. `NativeResult` carries `ExitCode`, `Signal`, and `Revoked`.
+
+The public boundary errors are:
+
+- `ErrHostAuthorityUnavailable`: a supplied authority cannot provide the
+  selected operation.
+- `ErrContainmentIncomplete`: native shutdown or tree reclamation is uncertain.
+- `ErrNativeTreeBusy`: reclamation is refused because lease processes are live.
+
+Supplying an authority is strict and never enables direct-launch fallback.
+Omitting it selects ordinary same-identity execution.
+
+## Common options
+
+| Option group | Options |
 | --- | --- |
-| `WithExecutablePath` | Set the Claude CLI path (default: search the isolation policy's `PATH`). |
-| `WithProcessIsolation` | Optional explicit hardening: a nonzero target UID/GID and complete replacement environment for native Claude processes, selecting the Linux-only trusted-root boundary. Only the native child receives the configured identity, with supplementary groups cleared; the value is refused before any spawn off Linux, under a non-root supervisor, or when it does not validate, and never degrades to ordinary or best-effort execution. Omitting the option is the ordinary default on every supported platform: native work runs as the current identity — root or not — over a deterministic clone of the sanitized ambient environment, reported as non-authoritative `shared_identity`. |
-| `WithHome` | Set `CLAUDE_CONFIG_DIR` for launched Claude processes. Standalone isolation defaults it to `StandaloneStateRoot` and rejects any different explicit path. |
-| `WithScratchDir` | Parent directory for ephemeral on-disk materialization, created `0700` when missing (default: system temp). |
-| `WithInputHandoffRoot` | Absolute directory prompt images may be handed over in as local files. Read-only to the adapter; unset rejects every handoff-form block. |
-| `WithProviderAuthRoot` | Absolute durable directory holding the values-free provider-auth ledger. Unset, relative, unusable, bare mode, or agent-wide static authentication leaves every `_claude/auth/*` method unadvertised. |
-| `WithProviderAuthDirectHome` | Consent gate for native-login disconnect. Secret-backed disconnect never clears the native home. |
-| `WithDarwinBestEffortContainment` | Explicitly accept Darwin's process-group boundary. Invalid off Darwin, and invalid together with `WithProcessIsolation`; without it Darwin uses ordinary `shared_identity` execution. |
-| `WithDefaultModel` | Default Claude model for new sessions. |
-| `WithEnv` | Overlay ordinary environment variables on the launch's base environment for every Claude child — `ProcessIsolation.BaseEnvironment` under explicit isolation, the sanitized ambient capture under ordinary execution. `CLAUDE_CONFIG_DIR`, `HOME`, and XDG root variables are reserved and rejected. |
-| `WithSeedFiles` | Write files into the resolved config dir before launch (requires `WithHome`). |
-| `WithSessionStore` | Replace the default in-memory session authority with a host store. |
-| `WithSessionStoreLoadTimeout` | Bound store reads used during restore and listing. |
-| `WithConcurrencyLimits` | Cap active sessions and concurrent outbound client calls. Zero fields use defaults of 32 sessions and 16 client calls; a full client-call limit returns `client_calls` backpressure. |
-| `WithImageLimits` | Set decoded-byte policy limits for image input and output. |
-| `WithTurnTimeout` | Bound one prompt turn; expiry fails the turn with cause `timeout` (default: no deadline). |
-| `WithRuntimeResourceHooks` | Let an embedding host admit native roots and reserve adapter scratch roots before they are created. |
+| Native paths and environment | `WithExecutablePath`, `WithHome`, `WithScratchDir`, `WithEnv`, `WithSeedFiles` |
+| Host boundaries | `WithHostAuthority`, `WithInputHandoffRoot` |
+| Session behavior | `WithDefaultModel`, `WithTurnTimeout`, `WithConcurrencyLimits`, `WithImageLimits` |
+| Durable sessions | `WithSessionStore`, `WithSessionStoreLoadTimeout` |
+| Provider auth | `WithProviderAuthRoot`, `WithProviderAuthDirectHome` |
+| Claude behavior | `WithClaudeDefaultPermissionMode`, `WithClaudeDefaultSystemPrompt`, `WithClaudeHideAuth`, `WithClaudeBareMode`, `WithClaudeSettingSources`, `WithClaudeSettingsFile`, `WithClaudeDirectAPI`, `WithClaudeAllowSkipPermissionsFlag`, `WithClaudeInitializeTimeout`, `WithClaudeControlHandlerTimeout` |
+| Identity and diagnostics | `WithAgentName`, `WithAgentTitle`, `WithAgentVersion`, `WithLogger` |
+| Telemetry | `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator` |
 
-`ProcessIsolation.IdentityLock` and `ProcessIsolation.AuthorityDomain`
-optionally accept opaque host capabilities with `Duplicate() (*os.File, error)`
-for the already-held canonical UID lock and shared `domain.lock` lease. Each
-capability keeps ownership of its original descriptor; caller-owned duplicates
-reach only the trusted supervisor, which validates the named inodes, held locks,
-and strict matching domain record and protects them with checked `FD_CLOEXEC`.
-Set both fields together for
-host-borrowed authority or leave both nil for standalone domain, permanent
-provider-owner binding, retained `ACTIVE`, and UID-lock acquisition. A
-mixed nil/non-nil pair fails closed. Borrowed authority rejects owned UIDs. Native
-processes receive neither capability nor descriptor.
+`WithClaudeDirectAPI(false)` prevents the adapter itself from making the
+Anthropic fallback request used by `_claude/rateLimits`; native Claude network
+behavior is unaffected.
 
-`ProcessIsolation.StandaloneOwnerID` and
-`ProcessIsolation.StandaloneStateRoot` are required when both capabilities
-are nil and forbidden when both are set. The owner ID is the nonsecret
-case-sensitive deployment identity: 1--256 canonical ASCII bytes beginning
-alphanumeric, followed only by alphanumerics or `._:@/-`. The state root is
-the existing dedicated durable provider home, neither `/` nor equal to or
-beneath `/var/lib/acp-go/agent-identities`, expressed as a clean absolute UTF-8 path of
-at most 4096 bytes with no control character. Linux resolves it from `/`
-without symlinks or magic links, requires protected root-owned ancestry and an
-exact configured UID:GID mode-`0700` final directory, and binds the exact
-path, device, and inode. The protected path and metadata are revalidated
-immediately before `ACTIVE` publication and native launch. Standalone claims
-are permanent; changing either value does not migrate authority and fails
-closed. Standalone `WithHome` defaults to this exact state root and any
-different explicit home fails construction validation.
+`ConcurrencyLimits` caps active sessions and concurrent outbound client calls.
+`ImageLimits` controls decoded input and emitted output byte limits.
 
-## Claude-specific options
+## Requests and session storage
 
-| Option | Purpose |
-| --- | --- |
-| `WithClaudeDefaultPermissionMode` | Initial permission mode for new sessions. |
-| `WithClaudeDefaultSystemPrompt` | Default system prompt. |
-| `WithClaudeHideAuth` | Withdraw the Claude subscription sign-in from the advertised auth catalog. |
-| `WithClaudeBareMode` | Launch Claude with `--bare`. |
-| `WithClaudeSettingSources` | Select Claude filesystem setting sources (`--setting-sources`). |
-| `WithClaudeSettingsFile` | Load a settings overlay via `--settings` (requires `WithHome`). |
-| `WithClaudeAllowSkipPermissionsFlag` | Permit Claude's skip-permissions capability flag. |
-| `WithClaudeInitializeTimeout` | Bound the Claude control-protocol initialize request. |
-| `WithClaudeControlHandlerTimeout` | Bound one inbound Claude control request. |
-| `WithClaudeDirectAPI` | Allow the adapter to call the Anthropic API itself (default: enabled). |
-
-### `WithClaudeDirectAPI`
-
-Every other network call this adapter makes happens inside a `claude` child
-process. `WithClaudeDirectAPI` governs the one exception: when
-[`_claude/rateLimits`](/docs/reference/acp-methods) finds no usage windows in the
-harness panel, it reads the account's usage straight from the Anthropic API —
-which may issue a billable one-token inference request.
-
-It is enabled by default. Pass `WithClaudeDirectAPI(false)` to forbid the
-adapter from contacting any network service on its own behalf; `_claude/rateLimits`
-then reports only what the harness prints.
-
-## Identity and observability options
-
-| Option | Purpose |
-| --- | --- |
-| `WithAgentName`, `WithAgentTitle`, `WithAgentVersion` | Values advertised during ACP initialize. |
-| `WithLogger` | Structured diagnostic logger. |
-| `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator` | OpenTelemetry wiring (see [Observability](/docs/operations/observability)). |
-
-## Request helpers and store types
-
-Request builders: `TextPromptRequest`, `CallForkSession`, `WithSessionRawEvents`,
-`WithSessionOutputSchema`, `SetConfigOptionRequest`, `SetModelRequest`,
-`DeleteSessionRequest`, `StdioMCPServer`, `HTTPMCPServer`.
+Request builders such as `NewSessionRequest`, `TextPromptRequest`, and
+`DeleteSessionRequest` construct ACP request values with the adapter metadata
+shape.
 
 `PromptRequest(sessionID, turnNonce, blocks...)` and
-`TextPromptRequest(sessionID, turnNonce, text)` require a fresh, unguessable
-nonce of at most 4096 bytes for every turn. Use the same nonce with
-`CancelRequest(sessionID, turnNonce)` while that turn is active; a cancel naming
-any other nonce, or one sent to a session running no turn at all, is refused
-before Claude is interrupted. A blank nonce or one larger than 4096 bytes leaves
-the builder's route metadata nil, so the receiving agent rejects the request or
-cancellation fail-closed.
+`TextPromptRequest(sessionID, turnNonce, text)` require a fresh non-empty turn
+nonce. `CancelRequest(sessionID, turnNonce)` must repeat the active turn's
+nonce; a different or absent nonce is refused before the native process is
+interrupted.
 
-`RuntimeResourceHooks` has `AcquireNativeRoot`, `ReserveScratchRoot`,
-`ObserveProcess`, `ObserveProcessSnapshot`, `ObserveStartupStage`, and
-`ObserveContainment`
-callbacks. Admission callbacks receive one of `runtime`, `session`, `prompt`,
-or `discovery` and return an idempotently wrapped release function. Native-root
-release happens only after the native controller has stopped; scratch release
-happens after deletion. Claude is lockless and emits no home-lock-supervisor
-count. `Agent.ContainmentMode()` and `ObserveContainment` report
-`authoritative`, `shared_identity`, `best_effort`, or `unavailable`. Absolute
-descendant snapshots are emitted only under authoritative containment; ordinary
-`shared_identity` and Darwin best effort suppress all such snapshots, including
-zero, and neither reports whole-tree quiescence. Startup stages are `spawn`, `readiness`,
-`configuration`, and `session`
-where applicable. A nil callback keeps standalone use unbounded.
-
-Session-store surface: `SessionStore`, `SessionKey`, `SessionSummary`,
-`SessionStoreReplacement`, `InMemorySessionStore`, and the constants
-`SessionStoreFormat` and `SessionStoreMainSubpath`.
-
-`WithInputHandoffRoot` takes an absolute directory. The adapter only reads
-under it: it never creates, writes, moves, or deletes anything there, and the
-host owns the files' lifetime. A relative path makes initialization fail. Every
-handoff read is opened relative to that directory with the operating system
-enforcing containment, so the root is a boundary against paths and symlinks —
-but not against a process that can already create files under it, which can
-hardlink a file from anywhere the adapter's user can read. The declared digest,
-not the root, is what makes handed-over bytes trustworthy. When
-the option is set, initialize advertises
-`agentCapabilities._meta["acp-go.dev/handoff"]`, so a host can confirm the
-option arrived; see [Metadata](/docs/reference/meta).
-
-`ImageLimits` has four `int64` fields:
-`MaxInputBytesPerImage`, `MaxInputBytesPerPrompt`,
-`MaxOutputBytesPerImage`, and `MaxOutputBytesPerToolCall`. Omitting
-`WithImageLimits` defaults every field to 6 MiB decoded. Supplying the option
-replaces the whole struct, and a negative field makes initialization fail.
-
-A zero `MaxInputBytesPerImage` does not remove the per-image bound: the ACP Go
-frame clamp becomes the bound instead, and a configured value wider than that
-clamp is narrowed to it. The advertised `maxBytes` is that effective number, so
-an inbound image is never accepted above what the advertisement promises. A zero
-`MaxInputBytesPerPrompt` genuinely removes the per-prompt total, and the
-advertisement reports `0` for it. Independently of the byte total, one prompt may
-hand over at most 64 image files; the block that crosses that count is rejected
-`too_large`. The ACP Go frame bound still limits one emitted image even when an
-output policy field is zero.
+The durable surface consists of `SessionStore`, `SessionStoreEntry`,
+`SessionKey`, `SessionSummary`, `SessionStoreReplacement`,
+`InMemorySessionStore`, `SessionStoreFormat`, and `SessionStoreMainSubpath`.

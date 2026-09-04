@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -162,9 +164,9 @@ func TestHandleForkSessionBranches(t *testing.T) {
 
 	storedParentID := acp.SessionId("22222222-2222-4222-8222-222222222222")
 	store := NewInMemorySessionStore()
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(storedParentID)}, []SessionStoreEntry{
+	require.NoError(t, store.Append(ctx, SessionKey{SessionID: string(storedParentID)}, testStoredSessionEntries(t, ClaudeOptions{},
 		[]byte(`{"type":"user","message":{"content":"stored parent"}}`),
-	}))
+	)))
 	stored := NewAgent(WithHome(t.TempDir()), WithSessionStore(store))
 	stored.setConnection(newRecordingAgentClient())
 	installFakeClaudeClient(stored, newFakeClaudeTransport())
@@ -208,21 +210,11 @@ func TestHandleRateLimits(t *testing.T) {
 		WithExecutablePath("/usr/bin/claude-test"),
 		WithEnv(map[string]string{"CLAUDE_TEST": "1"}),
 	)
-	agent.containmentMode = RuntimeContainmentAuthoritative
-
 	var gotOptions claude.Options
 
 	reset := time.Date(2026, time.July, 9, 13, 40, 0, 0, time.UTC)
 	agent.queryRateLimits = func(_ context.Context, options claude.Options) (claude.RateLimits, error) {
 		gotOptions = options
-		generation, generationErr := options.PrepareUsageGeneration(ctx)
-		require.NoError(t, generationErr)
-		release, acquireErr := options.AcquireUsageDiscovery(ctx)
-		require.NoError(t, acquireErr)
-		options.ObserveProcessInventory(ctx, func() (int, bool) { return 0, true })
-		options.ObserveBoundaryComplete(ctx)
-		require.NoError(t, generation.Release(true))
-		release()
 
 		return claude.RateLimits{Windows: []claude.RateLimitWindow{
 			{ID: sessionWindowID, UsedPercent: 92, ResetsAt: reset},
@@ -243,11 +235,6 @@ func TestHandleRateLimits(t *testing.T) {
 	require.Equal(t, "/usr/bin/claude-test", gotOptions.CLIPath)
 	require.NotEmpty(t, gotOptions.ClaudeHome)
 	require.Equal(t, map[string]string{"CLAUDE_TEST": "1"}, gotOptions.Env)
-	require.NotNil(t, gotOptions.AcquireUsageDiscovery)
-	require.NotNil(t, gotOptions.PrepareUsageGeneration)
-	require.NotNil(t, gotOptions.ObserveProcessInventory)
-	require.NotNil(t, gotOptions.ObserveBoundaryComplete)
-
 	encoded, err := json.Marshal(resp)
 	require.NoError(t, err)
 	require.JSONEq(
@@ -507,7 +494,7 @@ func TestHandleRateLimitsContainmentFailureFencesClose(t *testing.T) {
 		close(started)
 		<-release
 
-		return claude.RateLimits{}, claude.ErrProcessContainmentIncomplete
+		return claude.RateLimits{}, ErrContainmentIncomplete
 	}
 	agent.queryRateLimitsAPI = func(context.Context, claude.RateLimitsProbe) (claude.RateLimits, error) {
 		t.Fatal("containment failure must not fall back to the direct API")
@@ -531,9 +518,9 @@ func TestHandleRateLimitsContainmentFailureFencesClose(t *testing.T) {
 	}
 
 	close(release)
-	require.ErrorIs(t, <-requestDone, ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, <-closeDone, ErrProcessContainmentIncomplete)
-	require.ErrorIs(t, agent.Close(), ErrProcessContainmentIncomplete)
+	require.ErrorIs(t, <-requestDone, ErrContainmentIncomplete)
+	require.ErrorIs(t, <-closeDone, ErrContainmentIncomplete)
+	require.ErrorIs(t, agent.Close(), ErrContainmentIncomplete)
 }
 
 func TestClosedAgentRejectsDirectNativeConstructionAdmissions(t *testing.T) {
@@ -548,4 +535,46 @@ func TestClosedAgentRejectsDirectNativeConstructionAdmissions(t *testing.T) {
 
 	session := &agentSession{agent: agent, id: "closed", client: deadClaudeClient(t, nil), canRelaunch: true}
 	require.ErrorIs(t, session.ensureClientAlive(t.Context()), errAgentClosed)
+}
+
+func TestRateLimitResidenceResidualFailures(t *testing.T) {
+	original := materializeMkdirTemp
+	t.Cleanup(func() { materializeMkdirTemp = original })
+
+	authority := residualCallbackAuthority()
+	agent := NewAgent(WithHostAuthority(authority), WithScratchDir(t.TempDir()), WithHome(t.TempDir()))
+	materializeMkdirTemp = func(string, string) (string, error) { return "", errors.New("mkdir refused") }
+	_, err := agent.handleRateLimits(t.Context(), json.RawMessage(`{}`))
+	require.ErrorContains(t, err, "mkdir refused")
+
+	materializeMkdirTemp = original
+	authority.prepare = func(context.Context, string) error { return ErrContainmentIncomplete }
+	_, err = agent.handleRateLimits(t.Context(), json.RawMessage(`{}`))
+	require.ErrorIs(t, err, ErrContainmentIncomplete)
+}
+
+func TestRateLimitConfigCopyResidualFailure(t *testing.T) {
+	originalCopy := copyClaudeConfigFiles
+	copyClaudeConfigFiles = func(string, string, claude.Options) error { return errors.New("copy refused") }
+	t.Cleanup(func() { copyClaudeConfigFiles = originalCopy })
+
+	agent := NewAgent(
+		WithHostAuthority(residualCallbackAuthority()),
+		WithScratchDir(t.TempDir()),
+		WithHome(t.TempDir()),
+	)
+	_, err := agent.handleRateLimits(t.Context(), json.RawMessage(`{}`))
+	require.ErrorContains(t, err, "copy refused")
+}
+
+func TestRateLimitScratchParentResidualFailure(t *testing.T) {
+	occupied := filepath.Join(t.TempDir(), "occupied")
+	require.NoError(t, os.WriteFile(occupied, []byte("not a directory"), 0o600))
+	agent := NewAgent(
+		WithHostAuthority(residualCallbackAuthority()),
+		WithScratchDir(occupied),
+		WithHome(t.TempDir()),
+	)
+	_, err := agent.handleRateLimits(t.Context(), json.RawMessage(`{}`))
+	require.ErrorContains(t, err, "create scratch parent dir")
 }

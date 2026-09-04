@@ -70,7 +70,11 @@ func TestNativeProcessResidualBranches(t *testing.T) {
 	require.ErrorContains(t, err, "environment")
 	require.ErrorContains(t, authorityUnavailable(nil), "unavailable")
 
-	requireNativeStartReportsALostWorkingDirectory(t)
+	previousGetwd := nativeGetwd
+	nativeGetwd = func() (string, error) { return "", errors.New("getwd refused") }
+	_, err = startNative(t.Context(), Options{PreparedEnvironment: []string{residualSearchPath}}, residualResolvedExecutable, nil)
+	nativeGetwd = previousGetwd
+	require.ErrorContains(t, err, "working directory")
 }
 
 func TestOrdinaryProcessResidualBranches(t *testing.T) {

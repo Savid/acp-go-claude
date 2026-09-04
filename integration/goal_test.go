@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const pinnedGoalProbeClaudeVersion = "2.1.200"
+const pinnedGoalProbeClaudeVersion = "2.1.260"
 
 func TestClaudeGoalCommandLiveProbe(t *testing.T) {
 	requireLiveTokens(t)

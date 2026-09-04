@@ -7,15 +7,17 @@ package claude
 // behavior they prove does not.
 const (
 	// residualSearchExecutable is resolved through the search path below. POSIX
-	// carries no executable extension, so the name is the whole file.
-	residualSearchExecutable = "true"
+	// carries no executable extension, so the name is the whole file. sh is the
+	// one program POSIX places at a fixed path on every host; true moves between
+	// /bin and /usr/bin.
+	residualSearchExecutable = "sh"
 
 	// residualSearchPath puts one empty entry ahead of the directory holding
 	// that program, so the search's empty-entry branch is exercised too.
 	residualSearchPath = "PATH=:/bin"
 
 	// residualResolvedExecutable is what the search must resolve to.
-	residualResolvedExecutable = "/bin/true"
+	residualResolvedExecutable = "/bin/sh"
 
 	// residualExecutableSuffix is what a file needs before the platform will try
 	// to run it. POSIX decides that by mode, never by name.
@@ -24,7 +26,7 @@ const (
 
 var (
 	// residualExitCommand exits immediately.
-	residualExitCommand = []string{"/bin/true"}
+	residualExitCommand = []string{"/bin/sh", "-c", "exit 0"}
 
 	// residualLingeringCommand stays alive until it is revoked.
 	residualLingeringCommand = []string{"/bin/sh", "-c", "sleep 60"}

@@ -25,10 +25,12 @@ func runAuthKeychainTool(ctx context.Context, args []string, options Options) (i
 func runContainedAuthKeychainTool(ctx context.Context, args []string, options Options) ([]byte, int, error) {
 	options.Cwd = "/"
 	options.ClaudeHome = ""
+
 	output, result, err := runNativeOutput(ctx, options, "security", args)
 	if err != nil {
 		return nil, 0, err
 	}
+
 	return output, result.ExitCode, nil
 }
 

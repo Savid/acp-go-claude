@@ -18,7 +18,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const claudeMCPRefreshMarker = "CLAUDE_AUTHORIZED_MCP_REFRESH_OK"
+// claudeMCPRefreshMarker is the sentinel the live turns must echo. It stays
+// neutral on purpose: a sentinel that reads like a machine-checkable
+// authorization claim makes the model refuse the turn instead of calling the
+// tool, and its refusal quotes the sentinel back.
+const claudeMCPRefreshMarker = "ACP_MCP_REFRESH_OK"
 
 // TestClaudeCLIAuthorizedMCPRefresh reproduces a session-bound worker proxy:
 // session establishment sees only runtime_ready, then the first user turn arms
@@ -44,8 +48,8 @@ func TestClaudeCLIAuthorizedMCPRefresh(t *testing.T) {
 
 	session, err := conn.NewSession(ctx, request)
 	require.NoError(t, err)
-	require.Equal(t, []string{"runtime_ready"}, runtime.lastToolList())
-	require.Equal(t, []string{"browser_navigate"}, external.lastToolList())
+	requireProbeToolList(t, runtime, []string{"runtime_ready"})
+	requireProbeToolList(t, external, []string{"browser_navigate"})
 
 	runtime.setArmed(true)
 	resp := promptWithRefusalRetry(t, func() (acp.PromptResponse, error) {
@@ -76,7 +80,7 @@ func TestClaudeCLIAuthorizedMCPRefresh(t *testing.T) {
 		McpServers: request.McpServers,
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"runtime_ready"}, runtime.lastToolList())
+	requireProbeToolList(t, runtime, []string{"runtime_ready"})
 	require.Equal(t, firstMessageID, lastClaudeMessageID(client.updateSnapshot()))
 
 	runtime.setArmed(true)
@@ -96,6 +100,18 @@ func TestClaudeCLIAuthorizedMCPRefresh(t *testing.T) {
 
 	_, err = conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
+}
+
+// requireProbeToolList waits for the probe's most recent tools/list to carry
+// exactly the wanted names. Claude answers the control initialize request that
+// settles a launch before its MCP handshake completes, so the registry a launch
+// discovered is only observable after the fact.
+func requireProbeToolList(t *testing.T, probe *claudeMCPProbe, want []string) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		return slices.Equal(probe.lastToolList(), want)
+	}, 30*time.Second, 100*time.Millisecond, "probe tool list never settled on %v", want)
 }
 
 type claudeMCPProbe struct {

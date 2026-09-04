@@ -134,6 +134,10 @@ func (valueHostAuthority) StartNative(context.Context, NativeRequest) (NativePro
 	return valueNativeProcess{}, nil
 }
 
+// keychainToolExecutable is the platform keystore tool a session start reaches
+// through a host authority on the builds that carry a keystore residence.
+const keychainToolExecutable = "security"
+
 type valueNativeProcess struct{}
 
 func (valueNativeProcess) Stdin() io.WriteCloser                      { return &fakeNativeInput{} }

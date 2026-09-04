@@ -151,6 +151,17 @@ func TestAgentCloseSingleflightAndStickyContainment(t *testing.T) {
 
 func TestManagedAuthorityLossFansOutToTwoLiveSessions(t *testing.T) {
 	authority := newFakeHostAuthority()
+	// Session start consults the platform keystore for a resume credential
+	// through this authority on the builds that have one. That probe is not the
+	// authority loss this test drives, so it answers absence — the platform
+	// tool's empty successful read — while every other launch is denied.
+	authority.start = func(_ context.Context, request NativeRequest) (NativeProcess, error) {
+		if request.Executable != keychainToolExecutable {
+			return nil, ErrHostAuthorityUnavailable
+		}
+
+		return valueNativeProcess{}, nil
+	}
 	agent := NewAgent(
 		WithHome(t.TempDir()),
 		WithScratchDir(t.TempDir()),

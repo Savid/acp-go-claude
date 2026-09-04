@@ -100,6 +100,12 @@ func TestIsolatedClaudeRuntimeUsesFreshHomeWithProcessAuth(t *testing.T) {
 }
 
 func TestIsolatedClaudeRuntimeCopiesExplicitSource(t *testing.T) {
+	// Process auth outranks a copied credential, so the explicit-source path is
+	// only observable once the ambient live-auth variables are cleared.
+	t.Setenv(envAnthropicAuthToken, "")
+	t.Setenv(envAnthropicAPIKey, "")
+	t.Setenv(envClaudeCodeOAuthToken, "")
+
 	source := t.TempDir()
 	t.Setenv(envClaudeHome, source)
 	require.NoError(t, os.WriteFile(filepath.Join(source, ".credentials.json"), []byte(`{"claudeAiOauth":{"accessToken":"access","refreshToken":"refresh"}}`), 0o600))

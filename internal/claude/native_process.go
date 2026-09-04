@@ -63,6 +63,13 @@ func (f *nativeWaitFlight) cancelAndJoin(cause error) (NativeResult, error) {
 	return f.result, f.err
 }
 
+// nativeGetwd names where a launch with no explicit working directory starts.
+// It is a seam because a process cannot portably be made to lose its own
+// working directory: POSIX lets the directory be unlinked underneath it, darwin
+// still answers the unlinked path from its name cache, and Windows refuses the
+// unlink outright.
+var nativeGetwd = os.Getwd
+
 func startNative(ctx context.Context, options Options, executable string, arguments []string) (NativeProcess, error) {
 	if executable == "" {
 		executable = defaultCLIExecutable
@@ -72,7 +79,7 @@ func startNative(ctx context.Context, options Options, executable string, argume
 	if cwd == "" {
 		var err error
 
-		cwd, err = os.Getwd()
+		cwd, err = nativeGetwd()
 		if err != nil {
 			return nil, fmt.Errorf("get native working directory: %w", err)
 		}

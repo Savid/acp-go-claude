@@ -64,6 +64,34 @@ func TestReadAuthKeychainCredentialCurrentBehavior(t *testing.T) {
 	authKeychainReadTool = func(context.Context, []string, Options) ([]byte, int, error) { return nil, 51, nil }
 	_, err = ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator", Options{})
 	require.ErrorContains(t, err, "status 51")
+
+	want := errors.New("keystore unavailable")
+	authKeychainReadTool = func(context.Context, []string, Options) ([]byte, int, error) { return nil, 0, want }
+	_, err = ReadAuthKeychainCredential(t.Context(), "/tmp/cfg", "operator", Options{})
+	require.ErrorIs(t, err, want)
+	require.ErrorContains(t, err, "read keychain item")
+}
+
+// TestAuthKeychainToolLegsReportTheirLaunchFailure drives both platform-tool
+// legs through a boundary that refuses the launch. A keystore call that never
+// ran carries no status, so neither leg may answer with one.
+func TestAuthKeychainToolLegsReportTheirLaunchFailure(t *testing.T) {
+	want := errors.New("authority refused")
+	authority := &NativeAuthority{
+		NativeEnvironment: func() map[string]string { return map[string]string{"PATH": "/usr/bin:/bin"} },
+		PrepareNativeTree: func(context.Context, string) error { return nil },
+		ReclaimNativeTree: func(context.Context, string) error { return nil },
+		StartNative:       func(context.Context, NativeRequest) (NativeProcess, error) { return nil, want },
+	}
+
+	code, err := runAuthKeychainTool(t.Context(), []string{"delete-generic-password"}, Options{Authority: authority})
+	require.ErrorIs(t, err, want)
+	require.Zero(t, code)
+
+	output, code, err := runAuthKeychainReadTool(t.Context(), []string{"find-generic-password"}, Options{Authority: authority})
+	require.ErrorIs(t, err, want)
+	require.Zero(t, code)
+	require.Nil(t, output)
 }
 
 func TestManagedAuthKeychainLaunchDoesNotPrepareOperatorClaudeHome(t *testing.T) {

@@ -1154,17 +1154,16 @@ func TestPromptDuringAnExcursionLeavesItsPendingActionOwned(t *testing.T) {
 	route := session.autonomousRoute()
 	require.NotEmpty(t, route)
 
-	decisions := make(chan claude.PermissionDecision, 1)
+	decisions := make(chan permissionOutcome, 1)
 
 	go func() {
 		decision, permissionErr := handlePermissionThroughAdmissionForTest(t, session, context.Background(), route,
 			claude.PermissionRequest{
 				ToolName:  "Write",
 				ToolUseID: "tool-write",
-				Input:     map[string]any{"file_path": "/tmp/x", "content": "y"},
+				Input:     map[string]any{"file_path": absTestPath("tmp", "x"), "content": "y"},
 			})
-		require.NoError(t, permissionErr)
-		decisions <- decision
+		decisions <- permissionOutcome{decision: decision, err: permissionErr}
 	}()
 
 	<-permissions.entered
@@ -1189,7 +1188,10 @@ func TestPromptDuringAnExcursionLeavesItsPendingActionOwned(t *testing.T) {
 	}), "a refused prompt terminalizes nobody's pending action")
 
 	close(permissions.release)
-	require.Equal(t, claude.BehaviorAllow, (<-decisions).Behavior)
+
+	outcome := <-decisions
+	require.NoError(t, outcome.err)
+	require.Equal(t, claude.BehaviorAllow, outcome.decision.Behavior)
 
 	accepted, acceptedIndex, found := findLifecycleEvent(t, conn, blockedIndex, func(event map[string]any) bool {
 		if event["type"] != string(lifecycle.EventActionUpdate) {

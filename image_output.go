@@ -506,7 +506,7 @@ func localImagePath(location string) (string, error) {
 		return "", fmt.Errorf("image output path is invalid")
 	}
 
-	switch parsed.Scheme {
+	switch imageLocationScheme(parsed.Scheme, location) {
 	case "":
 		if !filepath.IsAbs(location) {
 			return "", fmt.Errorf("image output path must be absolute")
@@ -522,7 +522,7 @@ func localImagePath(location string) (string, error) {
 			return "", fmt.Errorf("image output file URI has no path")
 		}
 
-		return filepath.Clean(parsed.Path), nil
+		return filepath.Clean(mapper.FileURIHostPath(parsed.Path)), nil
 	default:
 		return "", fmt.Errorf("image output path scheme is not allowed")
 	}

@@ -40,7 +40,7 @@ func TestSessionConfigurationCodecIsExact(t *testing.T) {
 
 	configuration := sessionConfiguration{
 		Env:           map[string]string{"ANTHROPIC_BASE_URL": "https://example.test"},
-		ExtraPathDirs: []string{"/opt/first", "/opt/second"},
+		ExtraPathDirs: []string{absTestPath("opt", "first"), absTestPath("opt", "second")},
 	}
 	entry := marshalSessionConfiguration(configuration)
 
@@ -96,7 +96,7 @@ func TestResumeSessionConfigurationInheritsAndRejectsConflicts(t *testing.T) {
 
 	stored := sessionConfiguration{
 		Env:           map[string]string{"TOKEN": "stored"},
-		ExtraPathDirs: []string{"/stored/first", "/stored/second"},
+		ExtraPathDirs: []string{absTestPath("stored", "first"), absTestPath("stored", "second")},
 	}
 
 	inherited, err := resumeSessionConfiguration(ClaudeOptions{}, sessionConfigurationPresence{}, stored)
@@ -106,7 +106,7 @@ func TestResumeSessionConfigurationInheritsAndRejectsConflicts(t *testing.T) {
 
 	matching, err := resumeSessionConfiguration(ClaudeOptions{
 		Env:           map[string]string{"TOKEN": "stored"},
-		ExtraPathDirs: []string{"/stored/first", "/stored/second"},
+		ExtraPathDirs: []string{absTestPath("stored", "first"), absTestPath("stored", "second")},
 	}, sessionConfigurationPresence{env: true, extraPathDirs: true}, stored)
 	require.NoError(t, err)
 	require.Equal(t, inherited.Env, matching.Env)
@@ -120,7 +120,7 @@ func TestResumeSessionConfigurationInheritsAndRejectsConflicts(t *testing.T) {
 	requireSessionResumeIncompatible(t, err, metaOptionPath(settingsFieldEnv))
 
 	_, err = resumeSessionConfiguration(
-		ClaudeOptions{ExtraPathDirs: []string{"/stored/second", "/stored/first"}},
+		ClaudeOptions{ExtraPathDirs: []string{absTestPath("stored", "second"), absTestPath("stored", "first")}},
 		sessionConfigurationPresence{extraPathDirs: true},
 		stored,
 	)
@@ -135,7 +135,7 @@ func TestSessionMirrorWritesConfigurationOnceAheadOfTranscript(t *testing.T) {
 	store := NewInMemorySessionStore()
 	session := &agentSession{id: sessionID, configuration: sessionConfiguration{
 		Env:           map[string]string{"TOOL_TOKEN": "stored"},
-		ExtraPathDirs: []string{"/opt/tools"},
+		ExtraPathDirs: []string{absTestPath("opt", "tools")},
 	}}
 	mirror := newSessionMirror(nil, store, home, session)
 	path := filepath.Join(home, "projects", "workspace", sessionID+".jsonl")
@@ -164,7 +164,7 @@ func TestColdLoadReconstructsStoredEnvironmentAndOrderedPath(t *testing.T) {
 	cwd := t.TempDir()
 	storedOptions := ClaudeOptions{
 		Env:           map[string]string{"TOOL_TOKEN": "stored"},
-		ExtraPathDirs: []string{"/opt/first", "/opt/second"},
+		ExtraPathDirs: []string{absTestPath("opt", "first"), absTestPath("opt", "second")},
 	}
 	store := NewInMemorySessionStore()
 	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: sessionID}, testStoredSessionEntries(
@@ -176,7 +176,7 @@ func TestColdLoadReconstructsStoredEnvironmentAndOrderedPath(t *testing.T) {
 	require.NoError(t, err)
 	session := agent.sessions[sessionID]
 	require.Equal(t, "stored", session.clientOptions.Env["TOOL_TOKEN"])
-	require.Equal(t, []string{"/opt/first", "/opt/second"}, session.clientOptions.ExtraPathDirs)
+	require.Equal(t, []string{absTestPath("opt", "first"), absTestPath("opt", "second")}, session.clientOptions.ExtraPathDirs)
 
 	materialized, err := os.ReadFile(session.materialized.mainPath)
 	require.NoError(t, err)
@@ -211,7 +211,7 @@ func TestActiveResumeInheritsConfigurationWhenFieldsAreOmitted(t *testing.T) {
 	cwd := t.TempDir()
 	options := ClaudeOptions{
 		Env:           map[string]string{"TOOL_TOKEN": "active"},
-		ExtraPathDirs: []string{"/opt/active"},
+		ExtraPathDirs: []string{absTestPath("opt", "active")},
 	}
 	agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
 	created, err := agent.NewSession(t.Context(), NewSessionRequest(cwd, WithSessionMeta(options.Meta())))
@@ -243,11 +243,11 @@ func TestActiveCarrierChangeRetiresThenDurablyPublishesReplacement(t *testing.T)
 	store := NewInMemorySessionStore()
 	originalOptions := ClaudeOptions{
 		Env:           map[string]string{"TOOL_TOKEN": "old"},
-		ExtraPathDirs: []string{"/opt/old-first", "/opt/old-second"},
+		ExtraPathDirs: []string{absTestPath("opt", "old-first"), absTestPath("opt", "old-second")},
 	}
 	requestedOptions := ClaudeOptions{
 		Env:           map[string]string{"TOOL_TOKEN": "new"},
-		ExtraPathDirs: []string{"/opt/new-second", "/opt/new-first"},
+		ExtraPathDirs: []string{absTestPath("opt", "new-second"), absTestPath("opt", "new-first")},
 	}
 
 	first := newFakeClaudeTransport()
@@ -341,8 +341,8 @@ func TestReplacementConfigurationMustCommitBeforePublication(t *testing.T) {
 	cwd := t.TempDir()
 	backing := NewInMemorySessionStore()
 	store := &faultSessionStore{SessionStore: backing}
-	originalOptions := ClaudeOptions{ExtraPathDirs: []string{"/opt/old"}}
-	requestedOptions := ClaudeOptions{ExtraPathDirs: []string{"/opt/new"}}
+	originalOptions := ClaudeOptions{ExtraPathDirs: []string{absTestPath("opt", "old")}}
+	requestedOptions := ClaudeOptions{ExtraPathDirs: []string{absTestPath("opt", "new")}}
 	first := newFakeClaudeTransport()
 	second := newFakeClaudeTransport()
 	created := 0

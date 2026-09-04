@@ -537,11 +537,11 @@ func TestProviderAuthUnusableRootStaysUnadvertised(t *testing.T) {
 
 func TestProviderAuthRelativePathsFailConstruction(t *testing.T) {
 	require.Error(t, validateProviderAuthRoot(Options{ProviderAuthRoot: "relative"}))
-	require.NoError(t, validateProviderAuthRoot(Options{ProviderAuthRoot: "/abs"}))
+	require.NoError(t, validateProviderAuthRoot(Options{ProviderAuthRoot: absTestPath("abs")}))
 	require.NoError(t, validateProviderAuthRoot(Options{}))
 
 	require.Error(t, validateProviderAuthDirectHome("relative"))
-	require.NoError(t, validateProviderAuthDirectHome("/abs"))
+	require.NoError(t, validateProviderAuthDirectHome(absTestPath("abs")))
 	require.NoError(t, validateProviderAuthDirectHome(""))
 
 	agent := NewAgent(WithProviderAuthRoot("relative"), WithLogger(slog.New(slog.DiscardHandler)))

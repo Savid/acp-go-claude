@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -12,6 +16,56 @@ import (
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
+
+// absTestPath builds a host-absolute path from POSIX-looking segments, so a
+// test states "an absolute working directory" rather than a spelling only one
+// platform accepts.
+func absTestPath(segments ...string) string {
+	root := "/"
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+	}
+
+	return filepath.Join(append([]string{root}, segments...)...)
+}
+
+// fileTestURI spells a host path as the file URI a host on this platform sends:
+// a POSIX path is already the URI path, while a Windows path needs its
+// separators turned around and an empty authority in front of the drive.
+func fileTestURI(path string) string {
+	slashed := filepath.ToSlash(path)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+
+	return "file://" + slashed
+}
+
+// requirePrivateMode asserts the POSIX permission bits a private file or
+// directory carries. Windows keeps no POSIX bits: os.FileMode.Perm reports
+// 0o777 for every directory and 0o666 for every writable file there, and
+// privacy rests on the ACL the parent hands down, so the assertion states the
+// mode that platform actually records rather than one it can never report.
+func requirePrivateMode(t *testing.T, want os.FileMode, info os.FileInfo) {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		want = os.FileMode(0o666)
+		if info.IsDir() {
+			want = os.FileMode(0o777)
+		}
+	}
+
+	require.Equal(t, want, info.Mode().Perm())
+}
+
+// permissionOutcome carries a permission handler's whole result across a
+// goroutine boundary, so the assertion runs on the test goroutine where
+// require's FailNow is legal.
+type permissionOutcome struct {
+	decision claude.PermissionDecision
+	err      error
+}
 
 type extensionNotification struct {
 	method string

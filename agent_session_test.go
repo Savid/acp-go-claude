@@ -1316,9 +1316,7 @@ func TestSessionCloseReportsMCPConfigRemovalError(t *testing.T) {
 	agent := NewAgent()
 	session, cleanup := newStartedAgentSessionForTest(t, agent, "session-close-mcp")
 	defer cleanup()
-	parentFile := filepath.Join(t.TempDir(), "not-a-directory")
-	require.NoError(t, os.WriteFile(parentFile, []byte("x"), 0o600))
-	session.mcpConfigDir = filepath.Join(parentFile, "mcp")
+	session.mcpConfigDir = unremovableTestDir(t)
 	require.Error(t, session.Close(t.Context()))
 }
 

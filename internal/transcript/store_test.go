@@ -117,7 +117,7 @@ func TestStoreListForCwdFallsBackToTranscriptCwd(t *testing.T) {
 	require.NoError(t, os.MkdirAll(target, 0o755))
 
 	writeTestTranscript(t, home, "/stored-elsewhere", testSessionID, []string{
-		`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"` + target + `","message":{"content":"hello"}}`,
+		`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":` + jsonPath(target) + `,"message":{"content":"hello"}}`,
 	})
 
 	sessions, err := Store{ClaudeHome: home}.List(context.Background(), &target, nil)
@@ -138,10 +138,10 @@ func TestStoreListForCwdFiltersSanitizedDirectoryCollisions(t *testing.T) {
 	require.NoError(t, os.MkdirAll(other, 0o755))
 
 	writeTestTranscript(t, home, target, testSessionID, []string{
-		`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"` + target + `","message":{"content":"target"}}`,
+		`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":` + jsonPath(target) + `,"message":{"content":"target"}}`,
 	})
 	writeTestTranscript(t, home, other, "22222222-2222-4222-8222-222222222222", []string{
-		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","cwd":"` + other + `","message":{"content":"other"}}`,
+		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","cwd":` + jsonPath(other) + `,"message":{"content":"other"}}`,
 	})
 
 	sessions, err := Store{ClaudeHome: home}.List(context.Background(), &target, nil)
@@ -179,10 +179,10 @@ func TestStoreListErrors(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, projectsDirName), []byte("file"), 0o600))
 
 	_, err = Store{ClaudeHome: home}.List(context.Background(), nil, nil)
-	require.Error(t, err)
+	requireProjectsPathFault(t, err)
 
 	_, err = Store{ClaudeHome: home}.readSessionsFromDir(context.Background(), filepath.Join(home, projectsDirName), "")
-	require.Error(t, err)
+	requireProjectsPathFault(t, err)
 
 	dir := filepath.Join(t.TempDir(), "project")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -223,7 +223,7 @@ func TestStoreListEdgeBranches(t *testing.T) {
 	fallbackHome := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(fallbackHome, projectsDirName), []byte("file"), 0o600))
 	_, err = Store{ClaudeHome: fallbackHome}.List(context.Background(), &cwd, nil)
-	require.Error(t, err)
+	requireProjectsPathFault(t, err)
 
 	home = t.TempDir()
 	projects := filepath.Join(home, projectsDirName)
@@ -389,9 +389,10 @@ func TestReplayStripsLocalCommandMetadata(t *testing.T) {
 func TestReplayKeepsToolUseCacheAcrossEntries(t *testing.T) {
 	t.Parallel()
 
+	repo := absTestPath("repo")
 	updates, truncated := replayLines(
-		`{"type":"assistant","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/repo/main.go"}}]}}`,
-		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"`+"```go\\nfmt.Println(1)\\n```"+`"}]}}`,
+		`{"type":"assistant","uuid":"22222222-2222-4222-8222-222222222222","cwd":`+jsonPath(repo)+`,"message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":`+jsonPath(filepath.Join(repo, "main.go"))+`}}]}}`,
+		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","cwd":`+jsonPath(repo)+`,"message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"`+"```go\\nfmt.Println(1)\\n```"+`"}]}}`,
 	)
 	require.False(t, truncated)
 	require.Len(t, updates, 2)
@@ -407,9 +408,10 @@ func TestReplayKeepsToolUseCacheAcrossEntries(t *testing.T) {
 func TestReplayUsesToolUseCacheAcrossOutOfOrderEntries(t *testing.T) {
 	t.Parallel()
 
+	repo := absTestPath("repo")
 	updates, truncated := replayLines(
-		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"`+"```go\\nfmt.Println(1)\\n```"+`"}]}}`,
-		`{"type":"assistant","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/repo/main.go"}}]}}`,
+		`{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","cwd":`+jsonPath(repo)+`,"message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"`+"```go\\nfmt.Println(1)\\n```"+`"}]}}`,
+		`{"type":"assistant","uuid":"22222222-2222-4222-8222-222222222222","cwd":`+jsonPath(repo)+`,"message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":`+jsonPath(filepath.Join(repo, "main.go"))+`}}]}}`,
 	)
 	require.False(t, truncated)
 	require.Len(t, updates, 2)

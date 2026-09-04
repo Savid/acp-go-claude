@@ -74,7 +74,7 @@ func TestBuildEnvUsesAuthorityBaseAndCanonicalOverlay(t *testing.T) {
 	require.Contains(t, environment, "BASE=one")
 	require.Contains(t, environment, "OVERLAY=two")
 	require.Contains(t, environment, "CLAUDE_CONFIG_DIR=/native/home")
-	require.Contains(t, environment, "PATH=/shim:/native/bin")
+	require.Contains(t, environment, "PATH=/shim"+string(os.PathListSeparator)+"/native/bin")
 	require.Contains(t, environment, "HOME=/host/home")
 }
 
@@ -129,7 +129,11 @@ func TestBuildEnvPlatformEnvironmentIdentity(t *testing.T) {
 		Env:                 map[string]string{"claude_config_dir": "/overlay/lower"},
 	})
 	folded := EnvironmentKey("home") == EnvironmentKey("HOME")
-	require.Equal(t, !folded, slices.Contains(environment, EnvironmentKey("home")+"=/base/lower"))
+	// A base key reaches the child under the platform's variable identity: its
+	// own spelling where spellings are distinct, the folded one where they name
+	// one variable.
+	require.Contains(t, environment, EnvironmentKey("home")+"=/base/lower")
+	require.Equal(t, folded, slices.Contains(environment, "HOME=/base/lower"))
 	require.Equal(t, !folded, slices.Contains(environment, EnvironmentKey("claude_config_dir")+"=/overlay/lower"))
 	require.True(t, managedRootEnvKey("CLAUDE_CONFIG_DIR"))
 	require.Equal(t, folded, managedRootEnvKey("claude_config_dir"))

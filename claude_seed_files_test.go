@@ -67,13 +67,13 @@ func TestWriteSeedFilesWritesUnderDir(t *testing.T) {
 
 		info, err := os.Stat(target)
 		require.NoError(t, err)
-		require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+		requirePrivateMode(t, 0o600, info)
 	}
 
 	parentInfo, err := os.Stat(filepath.Join(dir, "agents", "reviewer"))
 	require.NoError(t, err)
 	require.True(t, parentInfo.IsDir())
-	require.Equal(t, os.FileMode(0o700), parentInfo.Mode().Perm())
+	requirePrivateMode(t, 0o700, parentInfo)
 }
 
 func TestWriteSeedFilesEmptyInputNoop(t *testing.T) {

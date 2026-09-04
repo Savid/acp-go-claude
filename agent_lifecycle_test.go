@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"bytes"
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -203,7 +204,7 @@ func TestLifecycleKeyRejectedOnNonCarryingSurfaces(t *testing.T) {
 
 		agent := NewAgent()
 		_, err := agent.HandleExtensionMethod(ctx, ForkSessionMethod, []byte(
-			`{"sessionId":"s","cwd":"`+t.TempDir()+`","_meta":{"acp-go.dev/lifecycle":{"version":1}}}`,
+			`{"sessionId":"s","cwd":`+strconv.Quote(t.TempDir())+`,"_meta":{"acp-go.dev/lifecycle":{"version":1}}}`,
 		))
 		requireRequestError(t, err, -32602, lifecycle.MetaPath)
 	})

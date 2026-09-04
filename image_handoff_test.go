@@ -96,7 +96,7 @@ func readHandoffPath(t *testing.T, root string, path string) ([]byte, error) {
 // says are at path.
 func handoffBlock(path string, data []byte) acp.ContentBlock {
 	sum := sha256.Sum256(data)
-	uri := "file://" + path
+	uri := fileTestURI(path)
 
 	return handoffBlockForURI(uri, data, hex.EncodeToString(sum[:]))
 }
@@ -156,7 +156,7 @@ func TestValidateInputHandoffRoot(t *testing.T) {
 	t.Parallel()
 
 	require.NoError(t, validateInputHandoffRoot(""))
-	require.NoError(t, validateInputHandoffRoot(filepath.Join(string(filepath.Separator), "srv", "handoff")))
+	require.NoError(t, validateInputHandoffRoot(absTestPath("srv", "handoff")))
 	require.EqualError(t, validateInputHandoffRoot("handoff"), "InputHandoffRoot must be an absolute path")
 }
 
@@ -372,7 +372,7 @@ func TestHandoffUnderDeclaredFileIsRejectedAndForwardsNoBytes(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, oversized, 0o600))
 
 	sum := sha256.Sum256(oversized)
-	block := handoffBlockForURI("file://"+path, make([]byte, 448), hex.EncodeToString(sum[:]))
+	block := handoffBlockForURI(fileTestURI(path), make([]byte, 448), hex.EncodeToString(sum[:]))
 
 	blocks, err := mapHandoffThroughReader(t, root, block, mapper.ImageInputLimits{MaxBytesPerImage: gate})
 	require.Nil(t, blocks)
@@ -413,13 +413,13 @@ func TestHandoffURIPathDefectsResolveToLocationVerdicts(t *testing.T) {
 		},
 		{
 			name:    "percent-encoded traversal",
-			uri:     "file://" + root + "/%2e%2e/%2e%2e/etc/passwd",
+			uri:     fileTestURI(root) + "/%2e%2e/%2e%2e/etc/passwd",
 			verdict: "path_not_allowed",
 			message: "handoff path is not allowed inside the configured handoff root",
 		},
 		{
 			name:    "root itself",
-			uri:     "file:///",
+			uri:     fileTestURI(absTestPath()),
 			verdict: "path_not_allowed",
 			message: "handoff path is not allowed inside the configured handoff root",
 		},
@@ -541,7 +541,7 @@ func TestHandoffMessagesAreConstants(t *testing.T) {
 			name: "declared size disagrees",
 			root: root,
 			block: func() acp.ContentBlock {
-				return handoffBlockForURI("file://"+good, png[:len(png)-1], hex.EncodeToString(digest[:]))
+				return handoffBlockForURI(fileTestURI(good), png[:len(png)-1], hex.EncodeToString(digest[:]))
 			},
 			verdict: "handoff_digest_mismatch",
 			message: "handoff file does not match the declared envelope",

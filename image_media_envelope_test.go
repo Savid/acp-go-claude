@@ -237,7 +237,7 @@ func TestPromptHandoffImageNeverForwardsTheHostPath(t *testing.T) {
 		{"type": "result", "subtype": "success", "is_error": false, "stop_reason": "end_turn"},
 	}
 
-	uri := "file://" + path
+	uri := fileTestURI(path)
 	handoff := acp.ContentBlock{Image: &acp.ContentBlockImage{
 		Type:     "image",
 		MimeType: "image/png",
@@ -267,7 +267,7 @@ func TestPromptHandoffImageRejectedWithoutARoot(t *testing.T) {
 	session, _, cleanup := newPromptFlowSession(t)
 	defer cleanup()
 
-	uri := "file:///srv/handoff/a.png"
+	uri := fileTestURI(absTestPath("srv", "handoff", "a.png"))
 	handoff := acp.ContentBlock{Image: &acp.ContentBlockImage{
 		Type:     "image",
 		MimeType: "image/png",

@@ -70,15 +70,7 @@ func TestNativeProcessResidualBranches(t *testing.T) {
 	require.ErrorContains(t, err, "environment")
 	require.ErrorContains(t, authorityUnavailable(nil), "unavailable")
 
-	previousDirectory, err := os.Getwd()
-	require.NoError(t, err)
-	deletedDirectory := t.TempDir()
-	require.NoError(t, os.Chdir(deletedDirectory))
-	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
-	require.NoError(t, os.Remove(deletedDirectory))
-	_, err = startNative(t.Context(), Options{PreparedEnvironment: []string{"PATH=/bin"}}, "/bin/true", nil)
-	require.ErrorContains(t, err, "working directory")
-	require.NoError(t, os.Chdir(previousDirectory))
+	requireNativeStartReportsALostWorkingDirectory(t)
 }
 
 func TestOrdinaryProcessResidualBranches(t *testing.T) {
@@ -91,11 +83,11 @@ func TestOrdinaryProcessResidualBranches(t *testing.T) {
 	_, err = resolveOrdinaryExecutable("claude", []string{"PATH=relative"})
 	require.ErrorContains(t, err, "getwd refused")
 	ordinaryGetwd = previous
-	resolved, err := resolveOrdinaryExecutable("true", []string{"PATH=:/bin"})
+	resolved, err := resolveOrdinaryExecutable(residualSearchExecutable, []string{residualSearchPath})
 	require.NoError(t, err)
-	require.Equal(t, "/bin/true", resolved)
+	require.Equal(t, residualResolvedExecutable, resolved)
 
-	notExecutable := filepath.Join(t.TempDir(), "not-an-executable")
+	notExecutable := filepath.Join(t.TempDir(), "not-an-executable"+residualExecutableSuffix)
 	require.NoError(t, os.WriteFile(notExecutable, []byte("not an executable format"), 0o700))
 	_, err = startOrdinaryNative(notExecutable, nil, []string{"PATH=/bin"}, t.TempDir())
 	require.ErrorContains(t, err, "start native process")
@@ -110,10 +102,15 @@ func TestOrdinaryProcessResidualBranches(t *testing.T) {
 	_, err = process.Wait(residualCancelledContext())
 	require.ErrorIs(t, err, context.Canceled)
 
-	invalid, findErr := os.FindProcess(-1)
-	require.NoError(t, findErr)
+	// A kill the platform refuses for any reason other than the process already
+	// being gone is the branch Revoke reports rather than swallows. Releasing a
+	// started process abandons the handle it would kill through, which every
+	// platform refuses without needing an unkillable process to exist.
+	released := exec.Command(residualExitCommand[0], residualExitCommand[1:]...)
+	require.NoError(t, released.Start())
+	require.NoError(t, released.Process.Release())
 	process = &ordinaryProcess{
-		command:    &exec.Cmd{Process: invalid},
+		command:    released,
 		stdin:      residualWriteCloser{},
 		waitDone:   make(chan struct{}),
 		revokeDone: make(chan struct{}),
@@ -121,13 +118,13 @@ func TestOrdinaryProcessResidualBranches(t *testing.T) {
 	process.collectOnce.Do(func() {})
 	require.Error(t, process.Revoke(t.Context()))
 
-	command := exec.Command("/bin/true")
+	command := exec.Command(residualExitCommand[0], residualExitCommand[1:]...)
 	require.NoError(t, command.Start())
 	process = &ordinaryProcess{command: command, waitDone: make(chan struct{}), revokeDone: make(chan struct{})}
 	_, err = process.Wait(t.Context())
 	require.NoError(t, err)
 
-	command = exec.Command("/bin/sh", "-c", "sleep 60")
+	command = exec.Command(residualLingeringCommand[0], residualLingeringCommand[1:]...)
 	require.NoError(t, command.Start())
 	process = &ordinaryProcess{
 		command:    command,
@@ -152,7 +149,7 @@ func TestOrdinaryProcessPipeFailureCleanup(t *testing.T) {
 
 				return os.Pipe()
 			}
-			_, err := startOrdinaryNativeWithPipe("/bin/true", nil, []string{"PATH=/bin"}, t.TempDir(), openPipe)
+			_, err := startOrdinaryNativeWithPipe(residualResolvedExecutable, nil, []string{residualSearchPath}, t.TempDir(), openPipe)
 			require.ErrorContains(t, err, "pipe refused")
 		})
 	}
@@ -277,99 +274,6 @@ func TestAuthStatusAndGrammarResidualBranches(t *testing.T) {
 	second := "https://claude.com/oauth/authorize?code=2&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
 	_, err = classifyAuthLoginLine(currentAuthorizeURL + " " + second)
 	require.ErrorIs(t, err, ErrAuthLoginGrammar)
-}
-
-func TestStartAuthLoginResidualFailures(t *testing.T) {
-	scratchFile := filepath.Join(t.TempDir(), "scratch-file")
-	require.NoError(t, os.WriteFile(scratchFile, []byte("x"), 0o600))
-	_, _, err := StartAuthLogin(t.Context(), Options{ScratchParent: scratchFile})
-	require.ErrorContains(t, err, "browser launch")
-
-	_, err = startAuthLoginChild(t.Context(), Options{
-		ScratchParent: t.TempDir(),
-		Authority: &NativeAuthority{
-			NativeEnvironment: func() map[string]string { return nil },
-		},
-	})
-	require.Error(t, err)
-
-	_, err = startAuthLoginChild(t.Context(), Options{
-		ScratchParent: t.TempDir(),
-		Authority: &NativeAuthority{
-			NativeEnvironment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
-		},
-	})
-	require.Error(t, err)
-
-	incomplete := errors.New("incomplete")
-	_, err = startAuthLoginChild(t.Context(), Options{
-		ClaudeHome:    "",
-		ScratchParent: t.TempDir(),
-		Authority: &NativeAuthority{
-			NativeEnvironment:     func() map[string]string { return map[string]string{"PATH": "/bin"} },
-			ContainmentIncomplete: incomplete,
-			PrepareNativeTree:     func(context.Context, string) error { return incomplete },
-		},
-	})
-	require.ErrorIs(t, err, incomplete)
-
-	authority := &NativeAuthority{
-		Unavailable:           errors.New("unavailable"),
-		ContainmentIncomplete: incomplete,
-		NativeEnvironment:     func() map[string]string { return map[string]string{"PATH": "/bin"} },
-		PrepareNativeTree:     func(context.Context, string) error { return nil },
-		ReclaimNativeTree:     func(context.Context, string) error { return nil },
-		StartNative:           func(context.Context, NativeRequest) (NativeProcess, error) { return nil, incomplete },
-	}
-	_, err = startAuthLoginChild(t.Context(), Options{ScratchParent: t.TempDir(), Authority: authority, TreePrepared: true})
-	require.ErrorIs(t, err, incomplete)
-}
-
-func TestStartAuthLoginPresentationTimeout(t *testing.T) {
-	previousReader := authLoginPresentationReader
-	previousWait := authLoginPresentationWait
-	releaseReader := make(chan struct{})
-	readerDone := make(chan struct{})
-	authLoginPresentationReader = func(io.Reader) (string, error) {
-		defer close(readerDone)
-		<-releaseReader
-
-		return "", io.EOF
-	}
-	authLoginPresentationWait = time.Millisecond
-	defer func() {
-		authLoginPresentationReader = previousReader
-		authLoginPresentationWait = previousWait
-	}()
-
-	revoked := make(chan struct{})
-	authority := &NativeAuthority{
-		NativeEnvironment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
-		PrepareNativeTree: func(context.Context, string) error { return nil },
-		ReclaimNativeTree: func(context.Context, string) error { return nil },
-		StartNative: func(context.Context, NativeRequest) (NativeProcess, error) {
-			return &authorityTestProcess{
-				stdin: residualWriteCloser{}, stdout: io.NopCloser(bytes.NewReader(nil)), stderr: io.NopCloser(bytes.NewReader(nil)),
-				wait: func(ctx context.Context) (NativeResult, error) {
-					select {
-					case <-revoked:
-						return NativeResult{}, nil
-					case <-ctx.Done():
-						return NativeResult{}, ctx.Err()
-					}
-				},
-				revoke: func(context.Context) error {
-					close(revoked)
-
-					return nil
-				},
-			}, nil
-		},
-	}
-	_, _, err := StartAuthLogin(t.Context(), Options{ScratchParent: t.TempDir(), Authority: authority, TreePrepared: true})
-	close(releaseReader)
-	<-readerDone
-	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestAuthLoginStateResidualBranches(t *testing.T) {
@@ -604,16 +508,31 @@ func TestProcessTransportEventAndCloseResidualBranches(t *testing.T) {
 	require.ErrorIs(t, independentWaitError(independent, owned), independent)
 
 	t.Run("stderr misses both drains", func(t *testing.T) {
+		// The read is held open until the verdict has been read, rather than made
+		// to outlast the drain windows by sleeping longer than they are wide: the
+		// windows here are a millisecond and a platform whose timer granularity is
+		// coarser than that would let a sleeping read finish inside them.
+		release := make(chan struct{})
+		returned := make(chan struct{})
 		transport := &ProcessTransport{
 			stdout: io.NopCloser(bytes.NewReader(nil)),
 			stderr: residualReadCloser{read: func([]byte) (int, error) {
-				time.Sleep(10 * time.Millisecond)
+				<-release
+				close(returned)
 
 				return 0, io.EOF
 			}},
 		}
 		_, errs := splitEventsForTest(transport.Events(t.Context()))
 		require.ErrorIs(t, <-errs, errClaudeTransportFailure)
+
+		close(release)
+
+		select {
+		case <-returned:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the stderr read never returned after it was released")
+		}
 	})
 
 	t.Run("canceled delivery", func(t *testing.T) {

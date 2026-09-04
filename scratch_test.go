@@ -30,7 +30,7 @@ func TestEnsureScratchParent(t *testing.T) {
 	info, err := os.Stat(missing)
 	require.NoError(t, err)
 	require.True(t, info.IsDir())
-	require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+	requirePrivateMode(t, 0o700, info)
 
 	occupied := filepath.Join(t.TempDir(), "occupied")
 	require.NoError(t, os.WriteFile(occupied, []byte("x"), 0o600))

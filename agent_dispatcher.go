@@ -1191,15 +1191,11 @@ func sendLifecycleActionRequest[T any](
 	params any,
 	action actionWireAdmission,
 ) (T, error) {
-	if !action.present() {
-		var zero T
-		if err := ctx.Err(); err != nil {
-			return zero, err
-		}
-
-		return zero, errActionWireRegistration
-	}
-
+	// A callback with no lifecycle action behind it is still an ordinary ACP
+	// request the host has to answer, and it is written under the same
+	// registration every action request is: only the announcement below is
+	// skipped, because an absent admission has nothing to announce.
+	//
 	// The native tool identity is the ordinary ACP fact the callback exposes.
 	// Publish it before the correlated request; lifecycle action visibility waits
 	// for the request's exact id and complete transport write below.

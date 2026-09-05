@@ -164,19 +164,28 @@ JSON-RPC code **`-32603`** with a `data` object:
 | --- | --- |
 | `error` | `claude_turn_failed` |
 | `cause` | one of the causes below |
-| `message` | a stable adapter-owned classification with no provider-controlled text |
+| `message` | the real native cause text, never a fixed placeholder |
 
 The `cause` vocabulary:
 
 | Cause | Meaning |
 | --- | --- |
-| `process_exit` | The Claude process died; `message` carries only the exit status. |
-| `transport` | Stream close, malformed frame, or client-lifecycle break. |
-| `provider` | Claude reported an error in its result frame (including auth failures). |
+| `process_exit` | The Claude process died; `message` carries only the closed exit status, never captured stderr. |
+| `transport` | Stream close, malformed frame, or client-lifecycle break; `message` carries the cause the adapter observed. |
+| `provider` | Claude reported an error in its result frame (including auth failures); `message` carries the provider cause the frame named. |
 | `timeout` | A `WithTurnTimeout` deadline expired; the selected native containment boundary completed before settlement. |
 
-Provider failures expose only the fixed `claude provider turn failed` message;
-provider subtype and payload fields are not copied onto the wire.
+`message` on this envelope is the real cause, recovered before the failure is
+surfaced, because a host cannot act on "something broke". For a `provider`
+failure the adapter reads the result frame's singular `error` field, falling
+back to its `result` text — the field Claude actually populates for an auth
+refusal — and uses a constant only when the frame names no cause at all.
+
+Nothing else from the frame crosses: the subtype, the error list, the
+structured output, and the raw body are never copied onto the wire, process
+stderr is never retained, and no `providerCredential` member is emitted — the
+only credential signal Claude gives here is text, and that member may be
+derived only from a structured native signal.
 
 `session/close` has one refusal of its own. It settles behind the session's
 settlement barrier, so a caller whose wait for the in-flight turn ends before that

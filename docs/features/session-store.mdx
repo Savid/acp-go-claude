@@ -72,7 +72,7 @@ A store implements six methods:
 | --- | --- |
 | `Append` | Append session rows for a key. |
 | `Load` | Read all rows for a key. |
-| `Replace` | Atomically replace a full generation of a session's files. |
+| `Replace` | Atomically replace a full generation of **one** session's files. |
 | `Delete` | Remove a key (and its subkeys for the main key). |
 | `ListSessions` | Enumerate sessions for `session/list`. |
 | `ListSubkeys` | Enumerate a session's non-main subpaths. |
@@ -81,10 +81,23 @@ The main record uses the empty subpath (`SessionStoreMainSubpath`). Its first ro
 is the adapter-owned configuration row and every remaining row is native
 transcript. Subagent transcripts mirror under safe relative subpaths of the same
 session id.
-`Replace` MUST include the main key exactly once, and MUST refuse a set that
-names any key twice — naming the duplicate, before any key is written — rather
-than resolving the collision by last write. Session summaries report
-`UpdatedAtUnixMilli` in Unix milliseconds.
+**Every `Replace` is one session's.** It rewrites the generation the `main` key
+names and nothing else, so a store MUST refuse, **before any key is written**:
+
+- a replacement key whose `SessionID` differs from `main.SessionID` — the call
+  has no authority over another session's rows, and the whole-session sweep
+  behind a replace would otherwise fence one it never addressed;
+- a set that names one `{SessionID, Subpath}` twice — a generation states what
+  each key holds, so a set stating two things about one key states neither, and
+  resolving it by last write would durably commit an order the caller never
+  expressed.
+
+Both refusals name the offending key, and a refused generation writes nothing:
+the previous generation still stands in the addressed session *and* in any
+session a bad key named, no key the refused set mentioned is created, and the
+addressed session stays listable and replaceable. `Replace` MUST also include
+the main key exactly once. Session summaries report `UpdatedAtUnixMilli` in Unix
+milliseconds.
 
 One session-owned native pump drains and orders transcript mirror frames even
 between prompts. Every prompt exit commits the complete foreground prefix under

@@ -25,7 +25,15 @@ const (
 	failureCauseProvider    = "provider"
 	failureCauseTimeout     = "timeout"
 
+	// nativeTransportFailureMessage is the last resort, used only when the
+	// failure carries no native cause text at all. `message` is contractually the
+	// real native cause on this envelope, so a constant is never substituted for
+	// text that exists.
 	nativeTransportFailureMessage = "claude transport failed"
+	// providerFailureFallbackMessage is the same last resort on the provider arm:
+	// a result frame that reports an error while carrying neither an `error` nor
+	// a `result` string leaves nothing truthful to name.
+	providerFailureFallbackMessage = "claude reported a provider error with no cause text"
 
 	authLoginMarker = "Please run /login"
 )
@@ -123,7 +131,11 @@ func turnFailureError(cause string, message string) *acp.RequestError {
 // nativeTurnFailure classifies an error observed while reading the Claude turn
 // stream into the uniform failure shape. Process death maps to process_exit with
 // only its closed status classification; provider stderr is never retained or
-// returned. Everything else maps to the transport classification.
+// returned. Everything else maps to the transport classification, carrying the
+// real cause the adapter observed rather than a fixed placeholder — the native
+// client's own errors are already reduced to adapter-owned sentinels and closed
+// process status, so the text names the failure without carrying a native
+// payload.
 func nativeTurnFailure(err error) error {
 	if err == nil {
 		return nil
@@ -148,6 +160,10 @@ func nativeTurnFailure(err error) error {
 
 	if errors.Is(err, ErrContainmentIncomplete) {
 		return turnFailureError(failureCauseTransport, ErrContainmentIncomplete.Error())
+	}
+
+	if cause := strings.TrimSpace(err.Error()); cause != "" {
+		return turnFailureError(failureCauseTransport, cause)
 	}
 
 	return turnFailureError(failureCauseTransport, nativeTransportFailureMessage)
@@ -287,13 +303,24 @@ func providerTurnFailure(result *claude.ResultMessage) error {
 		return nil
 	}
 
-	data := map[string]any{
-		jsonFieldError:    turnFailedError,
-		failureFieldCause: failureCauseProvider,
-		jsonFieldMessage:  "claude provider turn failed",
+	return turnFailureError(failureCauseProvider, providerFailureMessage(result))
+}
+
+// providerFailureMessage recovers the real native cause from the result frame.
+// The singular `error` field is the harness's own cause text and is preferred;
+// Claude leaves it empty and puts the cause in `result` often enough that the
+// fallback is load-bearing — that is the same field the auth marker is read
+// from. Nothing else from the frame crosses: no raw body, no structured output,
+// no per-model usage, and no `providerCredential`, which this adapter never
+// derives because the only credential signal Claude gives here is text.
+func providerFailureMessage(result *claude.ResultMessage) string {
+	for _, candidate := range []string{result.Error, result.Result} {
+		if cause := strings.TrimSpace(candidate); cause != "" {
+			return cause
+		}
 	}
 
-	return acp.NewInternalError(data)
+	return providerFailureFallbackMessage
 }
 
 func isProviderAuthError(result *claude.ResultMessage) bool {

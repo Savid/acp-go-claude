@@ -41,6 +41,10 @@ func (a *callbackHostAuthority) PrepareNativeTree(ctx context.Context, root stri
 	return a.prepare(ctx, root)
 }
 
+func (a *callbackHostAuthority) WriteNativeAppendLog(context.Context, string, [][]byte) error {
+	return ErrHostAuthorityUnavailable
+}
+
 func (a *callbackHostAuthority) ReadNativeAppendLog(ctx context.Context, path string, offset uint64) ([][]byte, error) {
 	return a.read(ctx, path, offset)
 }
@@ -74,6 +78,10 @@ func (a *fakeHostAuthority) PrepareNativeTree(_ context.Context, root string) er
 	}
 
 	return a.prepare
+}
+
+func (*fakeHostAuthority) WriteNativeAppendLog(context.Context, string, [][]byte) error {
+	return ErrHostAuthorityUnavailable
 }
 
 func (*fakeHostAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
@@ -126,6 +134,10 @@ func (valueHostAuthority) NativeEnvironment() map[string]string {
 	return map[string]string{"PATH": "/bin"}
 }
 func (valueHostAuthority) PrepareNativeTree(context.Context, string) error { return nil }
+func (valueHostAuthority) WriteNativeAppendLog(context.Context, string, [][]byte) error {
+	return ErrHostAuthorityUnavailable
+}
+
 func (valueHostAuthority) ReadNativeAppendLog(context.Context, string, uint64) ([][]byte, error) {
 	return nil, nil
 }

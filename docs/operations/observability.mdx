@@ -25,8 +25,8 @@ full shape; use the `cause` to route the investigation:
 | Cause | First thing to check |
 | --- | --- |
 | `process_exit` | The `message` carries only the exit status; confirm the `claude` CLI is installed, is version 2.0.0+, and is authenticated. |
-| `transport` | A stream broke mid-turn; check for client disconnects or a Claude process killed out from under the adapter. |
-| `provider` | Claude itself reported an error (including auth); inspect provider-side logs because payload details are not copied onto the wire. |
+| `transport` | A stream broke mid-turn; the `message` names the cause the adapter observed. Check for client disconnects or a Claude process killed out from under the adapter. |
+| `provider` | Claude itself reported an error (including auth); the `message` carries the cause its result frame named. Inspect provider-side logs for anything beyond it, because the rest of the frame is not copied onto the wire. |
 | `timeout` | A `WithTurnTimeout` deadline expired; raise the bound or investigate why the turn ran long. |
 
 <Note>

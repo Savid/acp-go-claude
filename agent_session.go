@@ -355,7 +355,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		}
 
 		if replayErr := active.replayTranscriptEntries(ctx, storeEntries); replayErr != nil {
-			return acp.LoadSessionResponse{}, replayErr
+			return acp.LoadSessionResponse{}, restoreFailure(replayErr)
 		}
 
 		if updateErr := active.emitCurrentUsageUpdate(ctx); updateErr != nil {
@@ -386,7 +386,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if replayErr := session.replayTranscriptEntries(ctx, storeEntries); replayErr != nil {
 		a.removeSession(ctx, params.SessionId, session)
 
-		return acp.LoadSessionResponse{}, replayErr
+		return acp.LoadSessionResponse{}, restoreFailure(replayErr)
 	}
 
 	if err := session.emitCurrentUsageUpdate(ctx); err != nil {
@@ -767,17 +767,21 @@ func (a *Agent) ensureOpen() error {
 }
 
 // configurationError reports refused construction options at every entry point.
-// Negative public concurrency fields retain their normative invalid-params
-// verdict; runtime configuration failures remain internal because the caller's
-// method params did not cause them. An in-process host may never call initialize,
-// so neither class is allowed to serve work through another door.
+// A construction verdict is the agent's own state rather than a defect in the
+// caller's request, so it is never invalid params: both classes answer -32603
+// with the closed claude_invalid_options token. A negative concurrency field is
+// refused one at a time and names itself; the joined runtime-configuration
+// verdict covers several validators at once and names none, because picking one
+// of them would be a guess about which the operator must fix. An in-process host
+// may never call initialize, so neither class is allowed to serve work through
+// another door.
 func (a *Agent) configurationError() error {
-	if a.activeLimitErr != nil {
-		return acp.NewInvalidParams(map[string]any{jsonFieldError: a.activeLimitErr.Error()})
+	if a.activeLimitField != "" {
+		return refusedOptionsError(a.activeLimitField)
 	}
 
 	if a.configurationErr != nil {
-		return acp.NewInternalError(map[string]any{jsonFieldError: a.configurationErr.Error()})
+		return refusedOptionsError("")
 	}
 
 	return nil
@@ -1610,6 +1614,10 @@ type storedSessionState struct {
 	Configuration sessionConfiguration
 }
 
+// storedSession reads the durable state a load, a resume, or a fork restores
+// from. A session id nothing holds is unknown; an id the store holds and this
+// adapter cannot read back is a restore failure, and the entry is left exactly
+// as it was so the next attempt addresses the same session.
 func (a *Agent) storedSession(ctx context.Context, sessionID acp.SessionId) (storedSessionState, error) {
 	if a.isDeleted(sessionID) {
 		a.retryDeleteResidualNativeTranscript(ctx, sessionID)
@@ -1619,7 +1627,7 @@ func (a *Agent) storedSession(ctx context.Context, sessionID acp.SessionId) (sto
 
 	entries, err := a.loadStoreEntries(ctx, a.sessionStore(), SessionKey{SessionID: string(sessionID)})
 	if err != nil {
-		return storedSessionState{}, err
+		return storedSessionState{}, restoreFailure(err)
 	}
 
 	if len(entries) == 0 {
@@ -1630,7 +1638,7 @@ func (a *Agent) storedSession(ctx context.Context, sessionID acp.SessionId) (sto
 
 	configuration, err := unmarshalSessionConfiguration(entries[0])
 	if err != nil {
-		return storedSessionState{}, sessionResumeIncompatibleError(acpFieldSessionID)
+		return storedSessionState{}, restoreFailure(err)
 	}
 
 	return storedSessionState{

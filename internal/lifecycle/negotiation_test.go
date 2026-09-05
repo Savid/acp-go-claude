@@ -70,13 +70,21 @@ func TestDecodePromptCorrelationRequiresTheKeyWhileNegotiated(t *testing.T) {
 	require.Nil(t, refusal)
 	require.Equal(t, Submission{}, submission)
 
+	// The key on a connection that negotiated nothing is present where it may
+	// not be: `unsupported` on the bare path.
 	_, refusal = DecodePromptCorrelation(correlationMeta(map[string]any{}), Negotiated{})
 	require.NotNil(t, refusal)
 	require.Equal(t, MetaPath, refusal.Field)
+	require.False(t, refusal.Missing)
+	require.Equal(t, "unsupported "+MetaPath, refusal.Error())
 
+	// The key omitted on a connection that negotiated version 1 is the other
+	// fact entirely: the host owed it and left it out.
 	_, refusal = DecodePromptCorrelation(nil, negotiated)
 	require.NotNil(t, refusal)
 	require.Equal(t, MetaPath, refusal.Field)
+	require.True(t, refusal.Missing)
+	require.Equal(t, "missing "+MetaPath, refusal.Error())
 }
 
 // TestDecodePromptCorrelationStrictness pins the value's fixed shape: two members

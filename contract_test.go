@@ -151,6 +151,47 @@ func requireExactUnsupportedField(t *testing.T, err error, field string) {
 	}, reqErr.Data)
 }
 
+// requireExactMissingField asserts the `missing` verdict: a reserved key the
+// contract requires on this surface and the caller left out. It is a different
+// wire fact from requireExactUnsupportedField and the two are never merged.
+func requireExactMissingField(t *testing.T, err error, field string) {
+	t.Helper()
+
+	require.Error(t, err)
+	var reqErr *acp.RequestError
+	require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
+	require.Equal(t, -32602, reqErr.Code)
+	require.Equal(t, "Invalid params", reqErr.Message)
+	require.Equal(t, map[string]any{
+		jsonFieldError: validationMissing,
+		jsonFieldField: field,
+	}, reqErr.Data)
+}
+
+// requireClosedOffPromptFailure asserts the uniform off-prompt -32603 shape: the
+// JSON-RPC constant message, one closed vendor-prefixed token in `data.error`,
+// exactly the extra members that token documents, and nothing else — no
+// `message` member, no Go error text, no native harness text.
+func requireClosedOffPromptFailure(t *testing.T, err error, data map[string]any) {
+	t.Helper()
+
+	require.Error(t, err)
+	var reqErr *acp.RequestError
+	require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
+	require.Equal(t, -32603, reqErr.Code)
+	require.Equal(t, "Internal error", reqErr.Message)
+	require.Equal(t, data, reqErr.Data)
+	require.NotContains(t, data, jsonFieldMessage)
+}
+
+// requireClosedInternalFailure is requireClosedOffPromptFailure for a token that
+// carries no additional member.
+func requireClosedInternalFailure(t *testing.T, err error, token string) {
+	t.Helper()
+
+	requireClosedOffPromptFailure(t, err, map[string]any{jsonFieldError: token})
+}
+
 // requireAgentClosedRefusal asserts the closed-agent verdict every entry point
 // shares: the request cannot be accepted at all, so it is -32600 and not the
 // -32603 a refused construction option answers.
@@ -352,14 +393,23 @@ func TestConcurrencyLimitValidation(t *testing.T) {
 	} {
 		agent := NewAgent(WithConcurrencyLimits(limits))
 
+		// A construction verdict is the agent's own state rather than a defect in
+		// the caller's request, so it is never -32602, and a concurrency field is
+		// refused one at a time and names itself.
 		var constructionErr *acp.RequestError
 		require.ErrorAs(t, agent.configurationError(), &constructionErr)
-		require.Equal(t, -32602, constructionErr.Code)
+		require.Equal(t, -32603, constructionErr.Code)
+		require.Equal(t, "Internal error", constructionErr.Message)
+		require.Equal(t, map[string]any{
+			jsonFieldError: invalidOptionsError,
+			jsonFieldField: refusedConcurrencyLimit(limits),
+		}, constructionErr.Data)
 
 		_, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
 		var initializeErr *acp.RequestError
 		require.ErrorAs(t, err, &initializeErr)
-		require.Equal(t, -32602, initializeErr.Code)
+		require.Equal(t, -32603, initializeErr.Code)
+		require.Equal(t, constructionErr.Data, initializeErr.Data)
 	}
 }
 
@@ -805,4 +855,68 @@ func TestProviderAuthLedgerIsValuesFree(t *testing.T) {
 
 		return nil
 	}))
+}
+
+// requirePoisonedSession asserts the closed poisoned-session refusal: -32603 with
+// the vendor-prefixed token and one documented `cause`, and nothing else.
+func requirePoisonedSession(t *testing.T, err error, cause string) {
+	t.Helper()
+
+	requireClosedOffPromptFailure(t, err, map[string]any{
+		jsonFieldError:    sessionPoisonedError,
+		failureFieldCause: cause,
+	})
+}
+
+// TestRelativeCwdIsRefusedOnEverySessionEstablishingSurface pins the uniform
+// rejection in one place: `session/new`, `session/load`, `session/resume`, and
+// the fork route each answer the identical `{"error":"unsupported","field":"cwd"}`
+// before any native process or store entry exists. No surface substitutes a
+// token of its own or a message-shaped data object here.
+func TestRelativeCwdIsRefusedOnEverySessionEstablishingSurface(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	const sessionID = acp.SessionId("11111111-1111-4111-8111-111111111111")
+
+	for _, tc := range []struct {
+		name string
+		call func(*Agent) error
+	}{
+		{"session/new", func(agent *Agent) error {
+			_, err := agent.NewSession(ctx, NewSessionRequest("relative"))
+
+			return err
+		}},
+		{"session/load", func(agent *Agent) error {
+			_, err := agent.LoadSession(ctx, LoadSessionRequest(sessionID, "relative"))
+
+			return err
+		}},
+		{"session/resume", func(agent *Agent) error {
+			_, err := agent.ResumeSession(ctx, ResumeSessionRequest(sessionID, "relative"))
+
+			return err
+		}},
+		{ForkSessionMethod, func(agent *Agent) error {
+			raw, marshalErr := json.Marshal(ForkSessionRequest(sessionID, "relative"))
+			require.NoError(t, marshalErr)
+			_, err := agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
+
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			agent := NewAgent(WithHome(t.TempDir()))
+			t.Cleanup(func() { require.NoError(t, agent.Close()) })
+
+			requireExactUnsupportedField(t, tc.call(agent), jsonFieldCwd)
+
+			agent.mu.Lock()
+			defer agent.mu.Unlock()
+			require.Empty(t, agent.sessions, "a refused cwd installs no session")
+		})
+	}
 }

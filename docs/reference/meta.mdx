@@ -89,7 +89,8 @@ emission, its lifecycle event, or its durable prefix fails, the incarnation that
 produced it is contained: pending permissions and elicitations are answered, the
 native process is closed behind the reader, no further content is emitted on
 that stream, and later `session/prompt` or `session/load` addressed to that same
-incarnation is answered `-32603` naming `claude_autonomous_stream_failed`. A
+incarnation is answered `-32603` with
+`{"error":"claude_internal_failure","class":"autonomous_stream_failed"}`. A
 relaunched process opens a new incarnation and clears the refusal.
 
 ```json
@@ -153,6 +154,22 @@ Every `session/prompt` and every `session/cancel` MUST carry exactly
 `_meta["acp-go.dev/route"] = {"version":1,"turnNonce":"..."}`.
 Missing, extra, wrong-typed, unsupported-version, and stale values are rejected.
 The nonce is fresh and unguessable for each turn and is at most 4096 bytes.
+
+The refusal on `session/prompt` is the uniform `-32602` `{error, field}` object,
+and the two verdicts are distinct facts a host acts on differently:
+
+| Value | Answer |
+| --- | --- |
+| The key is absent | `{"error":"missing","field":"_meta[\"acp-go.dev/route\"]"}` |
+| The value is not an object | `{"error":"unsupported","field":"_meta[\"acp-go.dev/route\"]"}` |
+| `version` is missing or is not exactly `1` | `{"error":"unsupported","field":"_meta[\"acp-go.dev/route\"].version"}` |
+| `turnNonce` is missing, empty, non-string, or over 4096 bytes | `{"error":"unsupported","field":"_meta[\"acp-go.dev/route\"].turnNonce"}` |
+| Any other member is present | `{"error":"unsupported","field":"_meta[\"acp-go.dev/route\"].<member>"}` |
+
+`missing` says the host forgot a key it owes and should add it; `unsupported`
+says the host sent a value that is present and refused. The two are never
+collapsed. Route validation runs before the lifecycle correlation value is read,
+so a prompt that gets both wrong reports the route refusal alone.
 A cancel is authenticated on every turn state, never only while a turn runs: a
 session with no active turn holds no nonce that can authorize one, so its cancel
 is refused with no native effect at all — Claude is not interrupted, pending
@@ -189,12 +206,27 @@ The lifecycle key is refused on `session/new`, `session/load`, `session/resume`,
 `logout`, `_claude/session/fork`, `_claude/rateLimits`, and every
 `_claude/auth/*` method. Refusals name `_meta["acp-go.dev/lifecycle"]`, except
 on `session/cancel`, where the route is the authenticator and is validated
-first: an absent or malformed route, a nonce that no longer names the running
-turn, and a session with no active turn are each refused naming
-`_meta["acp-go.dev/route"]`, and only a cancel whose route names the running
-turn is refused for the lifecycle key it carries. Either verdict refuses before
-interrupting Claude. The route nonce authenticates admission to the current
-session turn, while the lifecycle value supplies submission and action identity.
+first: an absent route is refused `missing` on
+`_meta["acp-go.dev/route"]`, a malformed one and a nonce that no longer names
+the running turn are refused `unsupported` on the member that failed, and only a
+cancel whose route names the running turn is refused for the lifecycle key it
+carries. Either verdict refuses before interrupting Claude. `session/cancel` is
+a notification and answers nothing, so its refusal is wire-silent; the prompt
+shapes above are the only ones a host reads for these keys. The route nonce
+authenticates admission to the current session turn, while the lifecycle value
+supplies submission and action identity.
+
+On `session/prompt`, the lifecycle correlation value splits three ways on one
+field path, and a host reads a different fact from each:
+
+| Value | Answer |
+| --- | --- |
+| The key is absent while the capability is enabled | `{"error":"missing","field":"_meta[\"acp-go.dev/lifecycle\"]"}` |
+| The key is present while the capability was not negotiated | `{"error":"unsupported","field":"_meta[\"acp-go.dev/lifecycle\"]"}` |
+| The value is malformed — a non-object, a `version` other than `1`, an empty or over-4096-byte identifier, or an unknown member | `{"error":"unsupported","field":"_meta[\"acp-go.dev/lifecycle\"].<member path>"}` |
+
+Every one of these fires before the prompt is dispatched, so a refused prompt
+writes no frame to the harness.
 
 ## Session options
 

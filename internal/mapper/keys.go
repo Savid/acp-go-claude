@@ -7,6 +7,7 @@ const (
 	keyEnv        = "env"
 	keyFilePath   = "file_path"
 	keyHeaders    = "headers"
+	keyID         = "id"
 	keyMCPServers = "mcpServers"
 	keyMediaType  = "media_type"
 	keyMessage    = "message"

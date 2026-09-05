@@ -336,17 +336,20 @@ func TestInvariantGuardPoisonsSession(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		cause     string
 		queryMsgs []map[string]any
 	}{
 		{
-			name: "conversation reset frame",
+			name:  "conversation reset frame",
+			cause: poisonCauseConversationReset,
 			queryMsgs: []map[string]any{
 				{"type": "conversation_reset"},
 				{"type": "transcript_mirror", "filePath": "/tmp/ignored.jsonl", "entries": []any{map[string]any{"type": "user"}}},
 			},
 		},
 		{
-			name: "native session id drift",
+			name:  "native session id drift",
+			cause: poisonCauseSessionIDDrift,
 			queryMsgs: []map[string]any{
 				{
 					"type":       "assistant",
@@ -380,7 +383,7 @@ func TestInvariantGuardPoisonsSession(t *testing.T) {
 			require.NoError(t, session.emitAvailableCommandsUpdate(ctx, true))
 
 			_, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
-			require.ErrorContains(t, err, "native session invariant failed")
+			requirePoisonedSession(t, err, tc.cause)
 
 			conn, ok := session.agent.connection().(*recordingAgentClient)
 			require.True(t, ok)
@@ -390,10 +393,10 @@ func TestInvariantGuardPoisonsSession(t *testing.T) {
 			require.Empty(t, updates[1].AvailableCommands)
 
 			_, err = session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "again"))
-			require.ErrorContains(t, err, "native session invariant failed")
+			requirePoisonedSession(t, err, tc.cause)
 
 			_, err = session.agent.SetSessionConfigOption(ctx, SetModelRequest(session.id, "opus"))
-			require.ErrorContains(t, err, "native session invariant failed")
+			requirePoisonedSession(t, err, tc.cause)
 		})
 	}
 }
@@ -1535,15 +1538,10 @@ func TestResultUsageHelpers(t *testing.T) {
 func requireStoreCommitFailure(t *testing.T, err error) {
 	t.Helper()
 
-	var reqErr *acp.RequestError
-
-	require.ErrorAs(t, err, &reqErr)
-	require.Equal(t, -32603, reqErr.Code)
-
-	data, ok := reqErr.Data.(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, "claude_store_commit_failed", data[jsonFieldError])
-	require.Equal(t, "session store commit failed", data[jsonFieldMessage])
+	requireClosedOffPromptFailure(t, err, map[string]any{
+		jsonFieldError:    internalFailureError,
+		failureFieldClass: failureClassStoreCommit,
+	})
 }
 
 func TestInterruptAfterEmitContainmentResidualBranch(t *testing.T) {

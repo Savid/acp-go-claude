@@ -147,7 +147,7 @@ func (s *agentSession) takeForeground() func() {
 // The caller holds the session's foreground while it uses the result, which is
 // what keeps this single-threaded mapping state single-threaded.
 func (s *agentSession) sessionToolUpdateOptions() mapper.ToolUpdateOptions {
-	if s.toolUpdates.Workflow == nil {
+	if s.toolUpdates.Workflow == nil || s.toolUpdates.Assistant == nil {
 		s.resetSessionToolUpdateOptions()
 	}
 
@@ -163,6 +163,7 @@ func (s *agentSession) resetSessionToolUpdateOptions() {
 		SupportsTerminalOutput: s.agent.clientSupportsTerminalOutput(),
 		ToolUses:               make(map[string]claude.ToolUseBlock),
 		Workflow:               mapper.NewWorkflowTracker(),
+		Assistant:              mapper.NewAssistantStream(),
 	}
 }
 
@@ -329,10 +330,7 @@ func autonomousStreamError(cause error) error {
 		return nil
 	}
 
-	return acp.NewInternalError(map[string]any{
-		jsonFieldError:   "claude_autonomous_stream_failed",
-		jsonFieldMessage: "the native incarnation could not be projected",
-	})
+	return internalFailure(failureClassAutonomousStream, "the native incarnation could not be projected", cause)
 }
 
 // mapAutonomousFrame is the between-prompt half of the prompt loop. It reports

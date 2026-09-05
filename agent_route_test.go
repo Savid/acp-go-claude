@@ -119,17 +119,35 @@ func TestRouteEnvelopeHardCutover(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, generatedRequestID, 32)
 
-	for _, meta := range []map[string]any{
-		nil,
-		{routeMetaKey: "bad"},
-		{routeMetaKey: map[string]any{routeFieldVer: 2, routeFieldTurn: "turn"}},
-		{routeMetaKey: map[string]any{routeFieldVer: 1, routeFieldTurn: ""}},
-		{routeMetaKey: map[string]any{routeFieldVer: 1.5, routeFieldTurn: "turn"}},
-		{routeMetaKey: map[string]any{routeFieldVer: 1, routeFieldTurn: strings.Repeat("n", routeTurnNonceMaxBytes+1)}},
-		{routeMetaKey: map[string]any{routeFieldVer: 1, routeFieldTurn: "turn", "extra": true}},
+	// An omitted key is `missing` on the bare path; every present-and-refused
+	// value is `unsupported` on the member that failed, with the bare path only
+	// when the value as a whole is not an object.
+	_, routeErr := parseInboundTurnRoute(nil)
+	requireExactMissingField(t, routeErr, routeMetaPath)
+
+	for _, tc := range []struct {
+		meta  map[string]any
+		field string
+	}{
+		{map[string]any{routeMetaKey: "bad"}, routeMetaPath},
+		{map[string]any{routeMetaKey: map[string]any{routeFieldVer: 2, routeFieldTurn: "turn"}}, routeMemberPath(routeFieldVer)},
+		{map[string]any{routeMetaKey: map[string]any{routeFieldVer: 1.5, routeFieldTurn: "turn"}}, routeMemberPath(routeFieldVer)},
+		{map[string]any{routeMetaKey: map[string]any{routeFieldTurn: "turn"}}, routeMemberPath(routeFieldVer)},
+		{map[string]any{routeMetaKey: map[string]any{routeFieldVer: 1, routeFieldTurn: ""}}, routeMemberPath(routeFieldTurn)},
+		{map[string]any{routeMetaKey: map[string]any{routeFieldVer: 1}}, routeMemberPath(routeFieldTurn)},
+		{
+			map[string]any{routeMetaKey: map[string]any{
+				routeFieldVer: 1, routeFieldTurn: strings.Repeat("n", routeTurnNonceMaxBytes+1),
+			}},
+			routeMemberPath(routeFieldTurn),
+		},
+		{
+			map[string]any{routeMetaKey: map[string]any{routeFieldVer: 1, routeFieldTurn: "turn", "extra": true}},
+			routeMemberPath("extra"),
+		},
 	} {
-		_, routeErr := parseInboundTurnRoute(meta)
-		requireExactUnsupportedField(t, routeErr, routeMetaKey)
+		_, refused := parseInboundTurnRoute(tc.meta)
+		requireExactUnsupportedField(t, refused, tc.field)
 	}
 
 	meta, err := stampRouteMeta(map[string]any{"claude": map[string]any{"native": true}}, elicitationScope{

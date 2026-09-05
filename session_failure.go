@@ -18,16 +18,105 @@ const (
 	turnFailedError = "claude_turn_failed"
 
 	failureFieldCause = "cause"
+	failureFieldClass = "class"
 
 	failureCauseProcessExit = "process_exit"
 	failureCauseTransport   = "transport"
 	failureCauseProvider    = "provider"
 	failureCauseTimeout     = "timeout"
 
+	// nativeTransportFailureMessage is the last resort, used only when the
+	// failure carries no native cause text at all. `message` is contractually the
+	// real native cause on this envelope, so a constant is never substituted for
+	// text that exists.
 	nativeTransportFailureMessage = "claude transport failed"
+	// providerFailureFallbackMessage is the same last resort on the provider arm:
+	// a result frame that reports an error while carrying neither an `error` nor
+	// a `result` string leaves nothing truthful to name.
+	providerFailureFallbackMessage = "claude reported a provider error with no cause text"
 
 	authLoginMarker = "Please run /login"
 )
+
+// Every -32603 this adapter emits away from a prompt turn carries exactly one
+// token from this closed, vendor-prefixed vocabulary in `data.error`, and its
+// JSON-RPC `message` stays the constant "Internal error". The data never carries
+// a `message` member, a joined Go error text, native harness text, or a bare
+// unprefixed token: a more specific fact rides a documented closed `class` or
+// `cause` token, or the adapter's own log, and never the wire.
+//
+// claude_runtime_unavailable is deliberately absent. It names a shared native
+// runtime that is gone and cannot be replaced, and this adapter runs one native
+// `claude` process per logical session rather than multiplexing sessions over a
+// shared one, so the condition the token exists for cannot arise here.
+const (
+	// invalidOptionsError is the construction verdict. NewAgent returns no error,
+	// so a refused option set is delivered on the wire at initialize and at every
+	// session-establishing entry point instead.
+	invalidOptionsError = "claude_invalid_options"
+	// restoreFailedError names a store entry session/load or session/resume found
+	// and could not restore. The entry is neither deleted nor tombstoned by the
+	// failure.
+	restoreFailedError = "claude_restore_failed"
+	// sessionPoisonedError names a session a native invariant violation poisoned.
+	// It refuses every operation but session/close and session/delete, and it is
+	// never answered -32600.
+	sessionPoisonedError = "claude_session_poisoned"
+	// internalFailureError names every failure the tokens above cannot classify.
+	internalFailureError = "claude_internal_failure"
+)
+
+// The closed `class` tokens claude_internal_failure documents. A host switches on
+// them; nothing else ever appears in that member.
+const (
+	failureClassCancelled          = "cancelled"
+	failureClassDeadline           = "deadline"
+	failureClassInternal           = "internal"
+	failureClassContainment        = "containment_incomplete"
+	failureClassLifecycleViolation = "lifecycle_violation"
+	failureClassAutonomousStream   = "autonomous_stream_failed"
+	failureClassStoreCommit        = "store_commit_failed"
+	failureClassDeleteUntombstoned = "session_delete_untombstoned"
+)
+
+// The closed `cause` tokens claude_session_poisoned documents. Each names one
+// native invariant this adapter checks on every frame.
+const (
+	poisonCauseConversationReset = "conversation_reset"
+	poisonCauseSessionIDDrift    = "session_id_drift"
+)
+
+// refusedOptionsError is the construction verdict every entry point delivers. A
+// field is carried only when exactly one option was refused; a joined verdict
+// over several validators names none, because naming one of them would be a
+// guess about which the caller must fix.
+func refusedOptionsError(field string) error {
+	data := map[string]any{jsonFieldError: invalidOptionsError}
+	if field != "" {
+		data[jsonFieldField] = field
+	}
+
+	return acp.NewInternalError(data)
+}
+
+// restoreFailure is the uniform refusal for a store entry a load or a resume
+// found and could not replay. The entry survives the failure untouched, so a
+// later attempt addresses exactly the same session.
+func restoreFailure(cause error) error {
+	return newSafeRequestFailure(acp.NewInternalError(map[string]any{jsonFieldError: restoreFailedError}), cause)
+}
+
+// internalFailure is the uniform -32603 for a condition the closed tokens above
+// cannot name. The class is one of the documented tokens. The detail is this
+// adapter's own compile-time constant naming the condition and the cause is the
+// Go error behind it; both stay inside the process — reachable through
+// errors.Is and the log — and neither is ever rendered into the data object.
+func internalFailure(class string, detail string, cause error) error {
+	return newDetailedRequestFailure(acp.NewInternalError(map[string]any{
+		jsonFieldError:    internalFailureError,
+		failureFieldClass: class,
+	}), cause, detail)
+}
 
 // turnFailureError builds the uniform -32603 claude_turn_failed error with a
 // stable, adapter-owned message. Provider payloads and paths never cross it.
@@ -42,7 +131,11 @@ func turnFailureError(cause string, message string) *acp.RequestError {
 // nativeTurnFailure classifies an error observed while reading the Claude turn
 // stream into the uniform failure shape. Process death maps to process_exit with
 // only its closed status classification; provider stderr is never retained or
-// returned. Everything else maps to the transport classification.
+// returned. Everything else maps to the transport classification, carrying the
+// real cause the adapter observed rather than a fixed placeholder — the native
+// client's own errors are already reduced to adapter-owned sentinels and closed
+// process status, so the text names the failure without carrying a native
+// payload.
 func nativeTurnFailure(err error) error {
 	if err == nil {
 		return nil
@@ -67,6 +160,10 @@ func nativeTurnFailure(err error) error {
 
 	if errors.Is(err, ErrContainmentIncomplete) {
 		return turnFailureError(failureCauseTransport, ErrContainmentIncomplete.Error())
+	}
+
+	if cause := strings.TrimSpace(err.Error()); cause != "" {
+		return turnFailureError(failureCauseTransport, cause)
 	}
 
 	return turnFailureError(failureCauseTransport, nativeTransportFailureMessage)
@@ -206,13 +303,24 @@ func providerTurnFailure(result *claude.ResultMessage) error {
 		return nil
 	}
 
-	data := map[string]any{
-		jsonFieldError:    turnFailedError,
-		failureFieldCause: failureCauseProvider,
-		jsonFieldMessage:  "claude provider turn failed",
+	return turnFailureError(failureCauseProvider, providerFailureMessage(result))
+}
+
+// providerFailureMessage recovers the real native cause from the result frame.
+// The singular `error` field is the harness's own cause text and is preferred;
+// Claude leaves it empty and puts the cause in `result` often enough that the
+// fallback is load-bearing — that is the same field the auth marker is read
+// from. Nothing else from the frame crosses: no raw body, no structured output,
+// no per-model usage, and no `providerCredential`, which this adapter never
+// derives because the only credential signal Claude gives here is text.
+func providerFailureMessage(result *claude.ResultMessage) string {
+	for _, candidate := range []string{result.Error, result.Result} {
+		if cause := strings.TrimSpace(candidate); cause != "" {
+			return cause
+		}
 	}
 
-	return acp.NewInternalError(data)
+	return providerFailureFallbackMessage
 }
 
 func isProviderAuthError(result *claude.ResultMessage) bool {

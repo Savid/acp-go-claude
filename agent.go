@@ -56,6 +56,13 @@ const (
 	validationUnsupported    = "unsupported"
 	validationDuplicate      = "duplicate"
 
+	// validationMissing is the distinct verdict for a reserved key the contract
+	// requires and the caller left out. It is never collapsed into
+	// validationUnsupported: `unsupported` names a value that is present and
+	// refused, `missing` names one the caller owed and did not send, and a host
+	// fixes its own request from the difference.
+	validationMissing = "missing"
+
 	listSessionsPageSize = 50
 )
 
@@ -85,7 +92,7 @@ type Agent struct {
 	lifecycle           lifecycle.Negotiated
 	lifecycleCarrier    *bool
 	permissionCache     map[acp.SessionId]map[string]string
-	activeLimitErr      error
+	activeLimitField    string
 	configurationErr    error
 	containmentErr      error
 	authorityFanoutDone chan struct{}
@@ -134,7 +141,7 @@ func NewAgent(opts ...Option) *Agent {
 		permissionCache:  make(map[acp.SessionId]map[string]string),
 		lifecycleFlights: make(map[acp.SessionId]*sessionLifecycleFlight),
 		lifecycleCancels: make(map[uint64]context.CancelCauseFunc),
-		activeLimitErr:   validateConcurrencyLimits(options.ConcurrencyLimits),
+		activeLimitField: refusedConcurrencyLimit(options.ConcurrencyLimits),
 		configurationErr: errors.Join(
 			validateHostAuthorityOptions(options),
 			validateImageLimits(options.ImageLimits),

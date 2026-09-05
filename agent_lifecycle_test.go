@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -271,12 +272,12 @@ func TestLifecycleKeyOnCancelFailsClosedWireSilently(t *testing.T) {
 		{
 			name:  "a stale route outranks the reserved key",
 			meta:  withLifecycleMeta(turnRouteMeta("nonce-0"), lifecycleKeyMeta()),
-			field: routeMetaKey,
+			field: routeMemberPath(routeFieldTurn),
 		},
 		{
 			name:  "an absent route outranks the reserved key",
 			meta:  lifecycleKeyMeta(),
-			field: routeMetaKey,
+			field: routeMetaPath,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -359,7 +360,7 @@ func TestLifecycleKeyOnPromptYieldsToTheRouteVerdict(t *testing.T) {
 		{
 			name:  "an invalid route outranks the forbidden key",
 			meta:  withLifecycleMeta(map[string]any{routeMetaKey: "bad"}, lifecycleKeyMeta()),
-			field: routeMetaKey,
+			field: routeMetaPath,
 		},
 		{
 			name:       "a negotiated connection refuses a malformed correlation on its own",
@@ -375,7 +376,7 @@ func TestLifecycleKeyOnPromptYieldsToTheRouteVerdict(t *testing.T) {
 			meta: withLifecycleMeta(map[string]any{routeMetaKey: "bad"}, map[string]any{
 				lifecycle.MetaKey: map[string]any{"version": 1, "unknown": true},
 			}),
-			field: routeMetaKey,
+			field: routeMetaPath,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -396,6 +397,134 @@ func TestLifecycleKeyOnPromptYieldsToTheRouteVerdict(t *testing.T) {
 				Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
 			})
 			requireRequestError(t, err, -32602, tc.field)
+			for _, payload := range transport.Sent() {
+				frame, isFrame := payload.(map[string]any)
+				require.False(t, isFrame && frame["type"] == claude.MessageTypeUser,
+					"a refused prompt writes no native frame")
+			}
+		})
+	}
+}
+
+// promptCorrelationMeta stamps a route beside one lifecycle correlation value so
+// a prompt reaches the correlation check instead of stopping at the route.
+func promptCorrelationMeta(correlation any) map[string]any {
+	return withLifecycleMeta(turnRouteMeta("nonce-1"), map[string]any{lifecycle.MetaKey: correlation})
+}
+
+// TestReservedPromptKeyRefusalShapes is the conformance battery over the two
+// reserved keys `session/prompt` carries. The same six classes run against each
+// key — absent, non-object, wrong version, empty identifier, over-bound
+// identifier, unknown member — and each names the exact verdict and field path a
+// host reads, so `missing` and `unsupported` can never be collapsed and a member
+// refusal can never degrade to the bare path.
+//
+// Every case runs on a connection that negotiated the lifecycle capability,
+// which is the only configuration where the lifecycle key is required rather
+// than forbidden, and no case reaches the harness.
+func TestReservedPromptKeyRefusalShapes(t *testing.T) {
+	overBound := strings.Repeat("i", lifecycle.IdentifierBound+1)
+	submission := func(members map[string]any) map[string]any {
+		return map[string]any{"version": 1, "submission": members}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		meta    map[string]any
+		missing bool
+		field   string
+	}{
+		// The route envelope.
+		{
+			name: "route absent",
+			meta: map[string]any{
+				lifecycle.MetaKey: submission(map[string]any{"submissionId": "s", "clientNonce": "c"}),
+			},
+			missing: true,
+			field:   routeMetaPath,
+		},
+		{
+			name:  "route non-object",
+			meta:  map[string]any{routeMetaKey: "bad"},
+			field: routeMetaPath,
+		},
+		{
+			name:  "route wrong version",
+			meta:  map[string]any{routeMetaKey: map[string]any{routeFieldVer: 2, routeFieldTurn: "nonce-1"}},
+			field: routeMemberPath(routeFieldVer),
+		},
+		{
+			name:  "route empty nonce",
+			meta:  turnRouteMeta(""),
+			field: routeMemberPath(routeFieldTurn),
+		},
+		{
+			name:  "route over-bound nonce",
+			meta:  turnRouteMeta(strings.Repeat("n", routeTurnNonceMaxBytes+1)),
+			field: routeMemberPath(routeFieldTurn),
+		},
+		{
+			name: "route unknown member",
+			meta: map[string]any{routeMetaKey: map[string]any{
+				routeFieldVer: 1, routeFieldTurn: "nonce-1", "sessionId": "s",
+			}},
+			field: routeMemberPath("sessionId"),
+		},
+		// The lifecycle prompt correlation.
+		{
+			name:    "lifecycle absent",
+			meta:    turnRouteMeta("nonce-1"),
+			missing: true,
+			field:   lifecycle.MetaPath,
+		},
+		{
+			name:  "lifecycle non-object",
+			meta:  promptCorrelationMeta([]any{1}),
+			field: lifecycle.MetaPath,
+		},
+		{
+			name:  "lifecycle wrong version",
+			meta:  promptCorrelationMeta(map[string]any{"version": 2, "submission": map[string]any{"submissionId": "s", "clientNonce": "c"}}),
+			field: lifecycle.MetaPath + ".version",
+		},
+		{
+			name:  "lifecycle empty identifier",
+			meta:  promptCorrelationMeta(submission(map[string]any{"submissionId": "", "clientNonce": "c"})),
+			field: lifecycle.MetaPath + ".submission.submissionId",
+		},
+		{
+			name:  "lifecycle over-bound identifier",
+			meta:  promptCorrelationMeta(submission(map[string]any{"submissionId": "s", "clientNonce": overBound})),
+			field: lifecycle.MetaPath + ".submission.clientNonce",
+		},
+		{
+			name:  "lifecycle unknown member",
+			meta:  promptCorrelationMeta(map[string]any{"version": 1, "streamId": "s"}),
+			field: lifecycle.MetaPath + ".streamId",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			session, transport, cleanup := newPromptFlowSession(t)
+			defer cleanup()
+
+			_, err := session.agent.Initialize(ctx, acp.InitializeRequest{Meta: lifecycleOfferMeta(1)})
+			require.NoError(t, err)
+
+			session.agent.sessions[session.id] = session
+
+			_, err = session.agent.Prompt(ctx, acp.PromptRequest{
+				SessionId: session.id,
+				Meta:      tc.meta,
+				Prompt:    []acp.ContentBlock{acp.TextBlock("hello")},
+			})
+
+			if tc.missing {
+				requireExactMissingField(t, err, tc.field)
+			} else {
+				requireExactUnsupportedField(t, err, tc.field)
+			}
+
 			for _, payload := range transport.Sent() {
 				frame, isFrame := payload.(map[string]any)
 				require.False(t, isFrame && frame["type"] == claude.MessageTypeUser,

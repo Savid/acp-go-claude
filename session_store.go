@@ -36,6 +36,16 @@ type SessionStoreReplacement struct {
 	Entries []SessionStoreEntry
 }
 
+// SessionStore is the adapter's durable authority for session rows. An
+// implementation supplied through WithSessionStore must hold the same contract
+// InMemorySessionStore does.
+//
+// Replace is the one method with a refusal contract of its own: **every Replace
+// is one session's**. It atomically rewrites the generation `main` names and
+// nothing else, so before writing any key it must refuse a replacement key whose
+// SessionID differs from main.SessionID, and a set naming one
+// {SessionID, Subpath} twice — each with an error naming the offending key. A
+// refused generation writes nothing at all.
 type SessionStore interface {
 	Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
 	Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
@@ -138,8 +148,12 @@ func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, rep
 	mainCount := 0
 
 	for _, replacement := range replacements {
+		// Every Replace is one session's. A key naming another session would have
+		// this generation rewrite rows the caller never addressed, and the
+		// whole-session tombstone sweep below would fence a session this call has
+		// no authority over. It is refused by name before anything is written.
 		if replacement.Key.SessionID != main.SessionID {
-			return fmt.Errorf("replacement session id %q does not match main session id %q", replacement.Key.SessionID, main.SessionID)
+			return fmt.Errorf("replacement key %+v does not belong to main session %q", replacement.Key, main.SessionID)
 		}
 
 		// Two replacements naming one key are refused before anything is written.

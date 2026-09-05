@@ -34,6 +34,16 @@ func MCPServersToClaude(servers []acp.McpServer) (string, error) {
 }
 
 // StableMCPServers converts unstable MCP declarations to the stable shape.
+// UnsupportedMCPServerError names the request index of an unstable MCP server
+// entry that carries no transport this mapper can render in the stable form. The
+// index is what a caller needs to name the offending request member back.
+type UnsupportedMCPServerError struct{ Index int }
+
+// Error implements error.
+func (e *UnsupportedMCPServerError) Error() string {
+	return fmt.Sprintf("unsupported unstable MCP server at index %d", e.Index)
+}
+
 func StableMCPServers(servers []acp.UnstableMcpServer) ([]acp.McpServer, error) {
 	out := make([]acp.McpServer, 0, len(servers))
 	for i, server := range servers {
@@ -70,7 +80,7 @@ func StableMCPServers(servers []acp.UnstableMcpServer) ([]acp.McpServer, error) 
 				},
 			})
 		default:
-			return nil, fmt.Errorf("unsupported unstable MCP server at index %d", i)
+			return nil, &UnsupportedMCPServerError{Index: i}
 		}
 	}
 

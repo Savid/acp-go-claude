@@ -142,6 +142,103 @@ func TestInMemorySessionStoreReplaceNeverResurrectsATombstone(t *testing.T) {
 	require.Empty(t, summaries, "a deleted session is never listable again")
 }
 
+// TestSessionStoreReplaceIsOneSessions is the store-contract conformance case
+// for the one-session rule: every Replace rewrites exactly one session's rows.
+// A replacement key naming another session and a replacement set naming one key
+// twice are both refused by name, both before any write, so a refused generation
+// leaves the committed one exactly as it stood — in the addressed session and in
+// the session the bad key named.
+func TestSessionStoreReplaceIsOneSessions(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	main := SessionKey{SessionID: "s"}
+	sub := SessionKey{SessionID: "s", Subpath: "sub/a.jsonl"}
+	foreign := SessionKey{SessionID: "other"}
+	foreignSub := SessionKey{SessionID: "other", Subpath: "sub/b.jsonl"}
+
+	for _, tc := range []struct {
+		name         string
+		replacements []SessionStoreReplacement
+		wantErr      string
+	}{
+		{
+			name: "a foreign session id",
+			replacements: []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
+				{Key: foreign, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
+			},
+			wantErr: `replacement key {SessionID:other Subpath:} does not belong to main session "s"`,
+		},
+		{
+			name: "a foreign session id on a subkey",
+			replacements: []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
+				{Key: foreignSub, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
+			},
+			wantErr: `replacement key {SessionID:other Subpath:sub/b.jsonl} does not belong to main session "s"`,
+		},
+		{
+			name: "the foreign key alone, without the main key",
+			replacements: []SessionStoreReplacement{
+				{Key: foreign, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
+			},
+			wantErr: `replacement key {SessionID:other Subpath:} does not belong to main session "s"`,
+		},
+		{
+			name: "one key named twice",
+			replacements: []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
+				{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
+				{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"d":4}`)}},
+			},
+			wantErr: `duplicate replacement key {SessionID:s Subpath:sub/a.jsonl}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := NewInMemorySessionStore()
+			require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{[]byte(`{"a":1}`)}))
+			require.NoError(t, store.Append(ctx, foreign, []SessionStoreEntry{[]byte(`{"z":0}`)}))
+
+			require.EqualError(t, store.Replace(ctx, main, tc.replacements), tc.wantErr)
+
+			// Nothing was written: both sessions still hold their committed rows,
+			// and no key the refused set named was created.
+			entries, err := store.Load(ctx, main)
+			require.NoError(t, err)
+			require.Equal(t, []SessionStoreEntry{[]byte(`{"a":1}`)}, entries)
+
+			foreignEntries, err := store.Load(ctx, foreign)
+			require.NoError(t, err)
+			require.Equal(t, []SessionStoreEntry{[]byte(`{"z":0}`)}, foreignEntries,
+				"a refused generation never touches the session its bad key named")
+
+			subkeys, err := store.ListSubkeys(ctx, main)
+			require.NoError(t, err)
+			require.Empty(t, subkeys)
+
+			foreignSubkeys, err := store.ListSubkeys(ctx, foreign)
+			require.NoError(t, err)
+			require.Empty(t, foreignSubkeys)
+
+			// The session the refused generation addressed is still listable and
+			// still replaceable: a refusal fences nothing.
+			summaries, err := store.ListSessions(ctx)
+			require.NoError(t, err)
+			require.Len(t, summaries, 2)
+
+			require.NoError(t, store.Replace(ctx, main, []SessionStoreReplacement{
+				{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
+			}))
+			entries, err = store.Load(ctx, main)
+			require.NoError(t, err)
+			require.Equal(t, []SessionStoreEntry{[]byte(`{"b":2}`)}, entries)
+		})
+	}
+}
+
 // TestInMemorySessionStoreReplaceRefusesDuplicateKeys pins the one answer a
 // generation that names a key twice gets. A generation states what each key
 // holds, so a set stating two things about one key states neither; resolving it

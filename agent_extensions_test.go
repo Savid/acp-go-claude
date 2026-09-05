@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-claude/internal/mapper"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,13 +23,15 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	cwd := t.TempDir()
 
 	agent := newForkTestAgent(t, nil)
+	// Params this extension route cannot decode, and params that fail validation
+	// as a whole, both name `params` itself rather than the Go decoder's prose.
 	_, err := agent.HandleExtensionMethod(ctx, ForkSessionMethod, json.RawMessage(`{bad`))
-	require.Error(t, err)
+	requireExactUnsupportedField(t, err, jsonFieldParams)
 
 	raw, err := json.Marshal(acp.UnstableForkSessionRequest{})
 	require.NoError(t, err)
 	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
-	require.Error(t, err)
+	requireExactUnsupportedField(t, err, jsonFieldParams)
 
 	raw, err = json.Marshal(ForkSessionRequest("parent", "relative"))
 	require.NoError(t, err)
@@ -71,7 +74,12 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	raw, err = json.Marshal(ForkSessionRequest("parent", cwd))
 	require.NoError(t, err)
 	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
-	require.ErrorContains(t, err, "stable conversion failed")
+	requireExactUnsupportedField(t, err, "mcpServers")
+	stableMCPServers = func([]acp.UnstableMcpServer) ([]acp.McpServer, error) {
+		return nil, &mapper.UnsupportedMCPServerError{Index: 2}
+	}
+	_, err = agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
+	requireExactUnsupportedField(t, err, "mcpServers[2]")
 	stableMCPServers = previousStableMCPServers
 
 	previousUUIDRandom := uuidRandom

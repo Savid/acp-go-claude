@@ -22,10 +22,27 @@ func TestFailureBoundariesKeepSecretsOutAndCausalIdentityIn(t *testing.T) {
 	require.ErrorIs(t, storeFailure, cause)
 	require.NotContains(t, storeFailure.Error(), secret)
 
+	// The prompt-turn envelope is the one place native cause text is contractual:
+	// `message` names the real provider cause so a host is not left guessing. What
+	// stays out is everything else the frame carried — its subtype, its error
+	// list, its structured output, and its raw body.
+	const providerCause = "PROVIDER_CAUSE_rate_limit_exceeded"
+
 	providerFailure := providerTurnFailure(&claude.ResultMessage{
-		IsError: true, Error: secret, Result: secret, Subtype: secret,
+		IsError: true, Error: providerCause, Result: secret, Subtype: secret,
+		Errors: []string{secret}, StructuredOutput: map[string]any{"leak": secret},
+		Raw: map[string]any{"leak": secret}, RawJSONText: secret,
 	})
+	require.Contains(t, providerFailure.Error(), providerCause)
 	require.NotContains(t, providerFailure.Error(), secret)
+
+	var providerWire *acp.RequestError
+	require.ErrorAs(t, providerFailure, &providerWire)
+	require.Equal(t, map[string]any{
+		jsonFieldError:    turnFailedError,
+		failureFieldCause: failureCauseProvider,
+		jsonFieldMessage:  providerCause,
+	}, providerWire.Data, "the envelope carries the cause and nothing else")
 
 	deadlineFailure := errors.Join(context.DeadlineExceeded, cause)
 	wireDeadline := requestError(context.Background(), deadlineFailure)
@@ -81,9 +98,49 @@ func TestNativeTurnFailureClassification(t *testing.T) {
 	requireTurnFailure(t, nativeTurnFailure(context.Canceled), -32603, failureCauseTransport, context.Canceled.Error())
 	requireTurnFailure(t, nativeTurnFailure(context.DeadlineExceeded), -32603, failureCauseTransport, context.DeadlineExceeded.Error())
 	requireTurnFailure(t, nativeTurnFailure(claude.ErrProcessExited), -32603, failureCauseProcessExit, "claude exited")
-	data := requireTurnFailure(t, nativeTurnFailure(errors.New("provider-store-tool-user-secret")), -32603,
+
+	// The transport arm names the cause the adapter actually observed. The native
+	// client reduces every failure it reports to an adapter-owned sentinel or a
+	// closed process status before it gets here, so the text is a real cause
+	// rather than a native payload.
+	requireTurnFailure(t, nativeTurnFailure(errors.New("stdout reader failed")), -32603,
+		failureCauseTransport, "stdout reader failed")
+
+	// The constant survives only where there is no cause text at all.
+	data := requireTurnFailure(t, nativeTurnFailure(errors.New("   ")), -32603,
 		failureCauseTransport, nativeTransportFailureMessage)
-	require.NotContains(t, data[jsonFieldMessage], "provider-store-tool-user-secret")
+	require.Equal(t, nativeTransportFailureMessage, data[jsonFieldMessage])
+}
+
+// TestProviderFailureMessageRecoversTheRealCause pins the recovery order the
+// contract requires: the result frame's singular `error` field first, then its
+// `result` text — the field Claude actually populates for an auth refusal — and
+// the constant only when the frame names no cause at all.
+func TestProviderFailureMessageRecoversTheRealCause(t *testing.T) {
+	t.Parallel()
+
+	require.Nil(t, providerTurnFailure(nil))
+
+	for _, tc := range []struct {
+		name   string
+		result claude.ResultMessage
+		want   string
+	}{
+		{"error field wins", claude.ResultMessage{IsError: true, Error: "upstream 429", Result: "ignored"}, "upstream 429"},
+		{"result text is the fallback", claude.ResultMessage{IsError: true, Result: "context window exceeded"}, "context window exceeded"},
+		{"whitespace is not a cause", claude.ResultMessage{IsError: true, Error: " \n ", Result: "real cause"}, "real cause"},
+		{"no cause text at all", claude.ResultMessage{IsError: true}, providerFailureFallbackMessage},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			requireTurnFailure(t, providerTurnFailure(&tc.result), -32603, failureCauseProvider, tc.want)
+		})
+	}
+
+	// A clean frame is no failure, and max_tokens settles as a stop reason.
+	require.Nil(t, providerTurnFailure(&claude.ResultMessage{Result: "fine"}))
+	require.Nil(t, providerTurnFailure(&claude.ResultMessage{IsError: true, StopReason: stopReasonMaxTokens}))
 }
 
 func TestReceiveTurnFailureRecordsUnexpectedNativeExitBeforeSanitizing(t *testing.T) {
@@ -91,7 +148,7 @@ func TestReceiveTurnFailureRecordsUnexpectedNativeExitBeforeSanitizing(t *testin
 	_, err := session.receiveTurnFailure(
 		t.Context(), t.Context(), nil, claude.ErrMessageStreamClosed, false,
 	)
-	requireTurnFailure(t, err, -32603, failureCauseTransport, nativeTransportFailureMessage)
+	requireTurnFailure(t, err, -32603, failureCauseTransport, claude.ErrMessageStreamClosed.Error())
 }
 
 // A relaunch that fails to start surfaces as a transport failure at the next
@@ -125,9 +182,10 @@ func TestEnsureClientAliveRelaunchError(t *testing.T) {
 	require.NoError(t, session.client.Close())
 	require.False(t, session.client.Alive())
 
+	// The relaunch cause is the real cause of the failed turn, so it is named
+	// rather than replaced by a placeholder.
 	_, err = agent.Prompt(ctx, TextPromptRequest(sid, "test-turn", "hello"))
-	data := requireTurnFailure(t, err, -32603, failureCauseTransport, nativeTransportFailureMessage)
-	require.NotContains(t, data[jsonFieldMessage], "relaunch failed")
+	requireTurnFailure(t, err, -32603, failureCauseTransport, "relaunch failed")
 	require.Contains(t, agent.sessions, sid)
 }
 
@@ -155,10 +213,9 @@ func TestTurnFailureProviderError(t *testing.T) {
 
 		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.Empty(t, resp.StopReason)
-		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "claude provider turn failed")
-		require.NotContains(t, data[jsonFieldMessage], "rate limit exceeded")
+		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "rate limit exceeded")
 
-		// The failure data carries only adapter-owned uniform fields.
+		// The failure data carries the cause and the uniform fields, nothing else.
 		require.NotContains(t, data, jsonFieldSubtype)
 		require.NotContains(t, data, "errors")
 		require.NotContains(t, data, "errorKind")
@@ -177,11 +234,12 @@ func TestTurnFailureProviderError(t *testing.T) {
 
 		resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "hello"))
 		require.Empty(t, resp.StopReason)
-		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "claude provider turn failed")
-		require.NotContains(t, data[jsonFieldMessage], "Please run /login")
+		data := requireTurnFailure(t, err, -32603, failureCauseProvider, "Please run /login")
 
-		// An empty subtype is omitted entirely rather than emitted as "".
+		// An empty subtype is omitted entirely rather than emitted as "", and the
+		// login marker is text: it never derives a providerCredential member.
 		require.NotContains(t, data, jsonFieldSubtype)
+		require.NotContains(t, data, "providerCredential")
 	})
 }
 

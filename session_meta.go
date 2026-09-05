@@ -331,6 +331,17 @@ func unsupportedField(path string) error {
 	})
 }
 
+// missingField refuses a reserved key the contract requires on this surface and
+// the caller omitted. It is a different verdict from unsupportedField and the
+// two are never merged: a host reading `missing` adds the key it forgot, and a
+// host reading `unsupported` on the same bare path stops sending the key there.
+func missingField(path string) error {
+	return acp.NewInvalidParams(map[string]any{
+		jsonFieldError: validationMissing,
+		jsonFieldField: path,
+	})
+}
+
 func validateClaudeOptions(options ClaudeOptions) (ClaudeOptions, error) {
 	if strings.TrimSpace(options.PermissionMode) != "" && !validClaudePermissionMode(options.PermissionMode) {
 		return ClaudeOptions{}, unsupportedField(metaOptionPath(metaPermissionModeKey))

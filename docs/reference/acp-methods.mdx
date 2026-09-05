@@ -10,6 +10,11 @@ create/load/resume/list/delete, prompt, cancel, close, authenticate, logout, and
 the session configuration methods. Unsupported methods return a uniform JSON-RPC
 method-not-found error.
 
+`session/new`, `session/load`, `session/resume`, and `_claude/session/fork` all
+require an absolute `cwd`. A relative one is rejected with `-32602`
+`{"error":"unsupported","field":"cwd"}` before any native process or store entry
+exists.
+
 ## Extensions
 
 | Method | Direction |
@@ -25,6 +30,14 @@ method-not-found error.
 | `_claude/auth/inventory` | client to agent |
 | `_claude/auth/credential` | client to agent |
 | `_claude/auth/disconnect` | client to agent |
+
+Every `_claude/*` request whose params cannot be decoded, or which fail
+validation as a whole, is rejected with `-32602`
+`{"error":"unsupported","field":"params"}`; when one member is at fault, `field`
+names that member instead — for example
+`{"error":"unsupported","field":"mcpServers[0]"}` on a fork whose MCP server
+entry declares no transport this adapter can carry. The decoder's own Go error
+text never reaches the wire.
 
 ### `_claude/auth/*`
 
@@ -151,19 +164,28 @@ JSON-RPC code **`-32603`** with a `data` object:
 | --- | --- |
 | `error` | `claude_turn_failed` |
 | `cause` | one of the causes below |
-| `message` | a stable adapter-owned classification with no provider-controlled text |
+| `message` | the real native cause text, never a fixed placeholder |
 
 The `cause` vocabulary:
 
 | Cause | Meaning |
 | --- | --- |
-| `process_exit` | The Claude process died; `message` carries only the exit status. |
-| `transport` | Stream close, malformed frame, or client-lifecycle break. |
-| `provider` | Claude reported an error in its result frame (including auth failures). |
+| `process_exit` | The Claude process died; `message` carries only the closed exit status, never captured stderr. |
+| `transport` | Stream close, malformed frame, or client-lifecycle break; `message` carries the cause the adapter observed. |
+| `provider` | Claude reported an error in its result frame (including auth failures); `message` carries the provider cause the frame named. |
 | `timeout` | A `WithTurnTimeout` deadline expired; the selected native containment boundary completed before settlement. |
 
-Provider failures expose only the fixed `claude provider turn failed` message;
-provider subtype and payload fields are not copied onto the wire.
+`message` on this envelope is the real cause, recovered before the failure is
+surfaced, because a host cannot act on "something broke". For a `provider`
+failure the adapter reads the result frame's singular `error` field, falling
+back to its `result` text — the field Claude actually populates for an auth
+refusal — and uses a constant only when the frame names no cause at all.
+
+Nothing else from the frame crosses: the subtype, the error list, the
+structured output, and the raw body are never copied onto the wire, process
+stderr is never retained, and no `providerCredential` member is emitted — the
+only credential signal Claude gives here is text, and that member may be
+derived only from a structured native signal.
 
 `session/close` has one refusal of its own. It settles behind the session's
 settlement barrier, so a caller whose wait for the in-flight turn ends before that
@@ -233,3 +255,42 @@ host authority, `NativeProcess.Wait` must reach terminal settlement after the
 protocol shutdown or `Revoke`. An incomplete selected boundary is a
 `transport` failure, retains prepared trees, and cannot be lazily relaunched.
 </Note>
+
+## Internal-error contract
+
+Every `-32603` this adapter emits away from a prompt turn — on `initialize`, a
+session lifecycle request, `session/close`, `session/delete`, a slash-command
+route, or an extension method — carries exactly one closed, vendor-prefixed token
+in `data.error`, and the JSON-RPC `message` stays the constant `Internal error`.
+The data carries no `message` member, no Go error text, and no native harness
+text: a more specific fact rides a documented closed `class` or `cause` token, or
+the adapter's log, and never the wire.
+
+| `data.error` | Condition | Additional members |
+| --- | --- | --- |
+| `claude_invalid_options` | The agent was constructed with an option set it will not serve under. `NewAgent` returns no error, so the verdict is delivered on the wire at `initialize` and at every session-establishing entry point. | Optional `field` naming the refused option when exactly one option is refused, such as `concurrencyLimits.maxActiveSessions`. |
+| `claude_restore_failed` | `session/load` or `session/resume` found a store entry for the session and could not restore it — the store could not be read, the stored session configuration could not be decoded, or the stored transcript could not be replayed. The entry is neither deleted nor tombstoned by the failure. | none |
+| `claude_session_poisoned` | A native invariant violation poisoned the session, which then refuses every operation but `session/close` and `session/delete`. | `cause`, exactly one of `conversation_reset` or `session_id_drift`. |
+| `claude_internal_failure` | Every failure the tokens above cannot classify. | `class`, one of `cancelled`, `deadline`, `internal`, `containment_incomplete`, `lifecycle_violation`, `autonomous_stream_failed`, `store_commit_failed`, `session_delete_untombstoned`. |
+
+The `class` values, and what a host does with each:
+
+| `class` | Meaning |
+| --- | --- |
+| `cancelled` | The work was abandoned by a cancellation this answer could not report as `-32800`. |
+| `deadline` | A handler or client-call deadline expired. |
+| `internal` | An unclassified adapter failure. Retry is reasonable. |
+| `containment_incomplete` | A native process tree could not be contained, so the agent is latched until the host recovers the identity. Retrying the same request will not clear it. |
+| `lifecycle_violation` | A lifecycle-stream invariant broke — an action lost its owner, an announcement was not written, or an event could not be delivered. |
+| `autonomous_stream_failed` | The addressed incarnation was contained because its between-prompt output could not be projected. A relaunch clears it. |
+| `store_commit_failed` | A turn streamed content the session store then failed to hold. The harness produced the turn correctly; the adapter's durability boundary is what broke. |
+| `session_delete_untombstoned` | A `session/delete` whose durable tombstone never landed. Nothing was deleted and the id still names whatever it named. |
+
+`claude_turn_failed` above is the prompt turn's own token and is the only one
+that carries a `message`. This adapter runs one native `claude` process per
+logical session rather than multiplexing sessions over a shared runtime, so it
+emits no shared-runtime-loss token: a process that exits is relaunched by the
+next operation that needs it.
+
+A construction verdict is never `-32602` and a poisoned session is never
+`-32600`: neither is a defect in the caller's request.

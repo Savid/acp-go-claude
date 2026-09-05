@@ -199,9 +199,7 @@ func TestInputHandoffRootMustBeAbsolute(t *testing.T) {
 		require.Equal(t, -32603, requestErr.Code)
 		require.Equal(t, "Internal error", requestErr.Message)
 
-		details, ok := requestErr.Data.(map[string]any)
-		require.True(t, ok)
-		require.Contains(t, details[jsonFieldError], "InputHandoffRoot must be an absolute path")
+		require.Equal(t, map[string]any{jsonFieldError: invalidOptionsError}, requestErr.Data)
 	}
 
 	_, err := NewAgent(WithInputHandoffRoot("relative")).Initialize(context.Background(), acp.InitializeRequest{})

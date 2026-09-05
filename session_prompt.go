@@ -681,10 +681,7 @@ func (s *agentSession) settleTurnLifecycle(
 // turn streamed. It is not a native turn failure: the harness produced the turn
 // correctly and the durability boundary that failed is the adapter's own.
 func storeCommitError(err error) error {
-	return newSafeRequestFailure(acp.NewInternalError(map[string]any{
-		jsonFieldError:   "claude_store_commit_failed",
-		jsonFieldMessage: "session store commit failed",
-	}), err)
+	return internalFailure(failureClassStoreCommit, "session store commit failed", err)
 }
 
 // turnContainmentError reports the selected containment boundary's failure for

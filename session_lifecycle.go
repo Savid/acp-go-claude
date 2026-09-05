@@ -89,10 +89,7 @@ func sessionDeleteTombstoneError(err error) error {
 		return fmt.Errorf("claude_session_delete_untombstoned: %w", err)
 	}
 
-	return newSafeRequestFailure(acp.NewInternalError(map[string]any{
-		jsonFieldError:   "claude_session_delete_untombstoned",
-		jsonFieldMessage: "session delete tombstone failed",
-	}), err)
+	return internalFailure(failureClassDeleteUntombstoned, "session delete tombstone failed", err)
 }
 
 // finalizeSessionRuntimeResources removes adapter-owned roots only after the
@@ -443,7 +440,7 @@ func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) er
 	s.mu.Unlock()
 
 	if !active || route.turnNonce != activeNonce {
-		return unsupportedField(routeMetaKey)
+		return unsupportedField(routeMemberPath(routeFieldTurn))
 	}
 
 	if err := rejectLifecycleMeta(meta); err != nil {

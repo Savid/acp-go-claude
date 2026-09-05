@@ -91,10 +91,23 @@ func (a *Agent) negotiatedLifecycle() lifecycle.Negotiated {
 func (a *Agent) readPromptCorrelation(meta map[string]any) (lifecycle.Submission, error) {
 	submission, refusal := lifecycle.DecodePromptCorrelation(meta, a.negotiatedLifecycle())
 	if refusal != nil {
-		return lifecycle.Submission{}, unsupportedField(refusal.Field)
+		return lifecycle.Submission{}, promptCorrelationRefusal(refusal)
 	}
 
 	return submission, nil
+}
+
+// promptCorrelationRefusal renders the three distinct facts a host reads from one
+// field path: `missing` on the bare path when it forgot the key on an enabled
+// connection, `unsupported` on the bare path when it sent the key where the key
+// has no meaning, and `unsupported` on a member path when it sent a malformed
+// value.
+func promptCorrelationRefusal(refusal *lifecycle.ParamError) error {
+	if refusal.Missing {
+		return missingField(refusal.Field)
+	}
+
+	return unsupportedField(refusal.Field)
 }
 
 // rejectLifecycleMeta refuses the lifecycle key on a surface that never carries

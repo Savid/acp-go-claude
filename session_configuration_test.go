@@ -202,9 +202,11 @@ func TestTranscriptOnlyStoreIsNotARecoverableSessionRecord(t *testing.T) {
 		[]byte(`{"type":"user"}`),
 	}))
 
+	// A store holding rows this adapter cannot read a session configuration out
+	// of is an entry it found and cannot restore, not a caller-owned mismatch.
 	agent := NewAgent(WithSessionStore(store))
 	_, err := agent.storedSession(t.Context(), sessionID)
-	requireSessionResumeIncompatible(t, err, acpFieldSessionID)
+	requireClosedInternalFailure(t, err, restoreFailedError)
 }
 
 func TestActiveResumeInheritsConfigurationWhenFieldsAreOmitted(t *testing.T) {

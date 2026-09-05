@@ -227,14 +227,22 @@ func TestCancelRouteAuthenticatesOnEveryTurnState(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name   string
-		meta   map[string]any
-		active bool
+		name    string
+		meta    map[string]any
+		active  bool
+		missing bool
+		field   string
 	}{
-		{name: "no route envelope on the active turn", active: true},
-		{name: "a stale nonce on the active turn", meta: turnRouteMeta("nonce-0"), active: true},
-		{name: "the current nonce with no active turn", meta: turnRouteMeta("nonce-1")},
-		{name: "neither a route envelope nor an active turn"},
+		{name: "no route envelope on the active turn", active: true, missing: true, field: routeMetaPath},
+		{
+			name: "a stale nonce on the active turn", meta: turnRouteMeta("nonce-0"), active: true,
+			field: routeMemberPath(routeFieldTurn),
+		},
+		{
+			name: "the current nonce with no active turn", meta: turnRouteMeta("nonce-1"),
+			field: routeMemberPath(routeFieldTurn),
+		},
+		{name: "neither a route envelope nor an active turn", missing: true, field: routeMetaPath},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -254,7 +262,11 @@ func TestCancelRouteAuthenticatesOnEveryTurnState(t *testing.T) {
 			}
 
 			err := session.agent.Cancel(t.Context(), acp.CancelNotification{SessionId: session.id, Meta: tc.meta})
-			requireExactUnsupportedField(t, err, routeMetaKey)
+			if tc.missing {
+				requireExactMissingField(t, err, tc.field)
+			} else {
+				requireExactUnsupportedField(t, err, tc.field)
+			}
 
 			require.Zero(t, interruptCalls(transport), "an unauthenticated cancel never interrupts the native process")
 			require.Zero(t, transport.CloseCalls(), "an unauthenticated cancel never closes the native client")
@@ -332,7 +344,7 @@ func TestRepeatedCancelOfTheSameTurnIsIdempotent(t *testing.T) {
 	// running turn still fails closed, and the reserved key still outranks the
 	// repeat behind it.
 	requireExactUnsupportedField(t,
-		session.agent.Cancel(t.Context(), CancelRequest(session.id, "nonce-0")), routeMetaKey)
+		session.agent.Cancel(t.Context(), CancelRequest(session.id, "nonce-0")), routeMemberPath(routeFieldTurn))
 	requireRequestError(t,
 		session.agent.Cancel(t.Context(), acp.CancelNotification{
 			SessionId: session.id,

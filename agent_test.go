@@ -465,7 +465,7 @@ func TestAgentLifecycleWithFakeClaude(t *testing.T) {
 
 	// The turn has already settled, so no nonce can authorize a cancel: the
 	// idle session refuses it and stays open for the close that follows.
-	requireExactUnsupportedField(t, agent.Cancel(ctx, acp.CancelNotification{SessionId: newResp.SessionId}), routeMetaKey)
+	requireExactMissingField(t, agent.Cancel(ctx, acp.CancelNotification{SessionId: newResp.SessionId}), routeMetaPath)
 	_, err = agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: newResp.SessionId})
 	require.NoError(t, err)
 	_, err = agent.Prompt(ctx, TextPromptRequest(newResp.SessionId, "test-turn", "after close"))

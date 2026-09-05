@@ -1296,7 +1296,7 @@ func TestAgentShutdownSettlesCleanlyAfterTheHostHungUp(t *testing.T) {
 		conn.sessionUpdateErr = errors.New("host disconnected")
 
 		err := agent.Close()
-		require.ErrorContains(t, err, "claude_lifecycle_violation")
+		require.ErrorContains(t, err, failureClassLifecycleViolation)
 		require.ErrorContains(t, err, "lifecycle delivery failed")
 		require.True(t, stream.fenced)
 	})

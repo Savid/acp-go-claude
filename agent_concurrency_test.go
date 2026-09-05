@@ -12,11 +12,13 @@ import (
 func TestConcurrencyLimitBranches(t *testing.T) {
 	t.Parallel()
 
-	require.ErrorContains(t, validateConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}), "active sessions")
-	require.ErrorContains(t, validateConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: -1}), "client calls")
-	require.NoError(t, validateConcurrencyLimits(ConcurrencyLimits{}))
+	require.Equal(t, "concurrencyLimits.maxActiveSessions",
+		refusedConcurrencyLimit(ConcurrencyLimits{MaxActiveSessions: -1}))
+	require.Equal(t, "concurrencyLimits.maxConcurrentClientCalls",
+		refusedConcurrencyLimit(ConcurrencyLimits{MaxConcurrentClientCalls: -1}))
+	require.Empty(t, refusedConcurrencyLimit(ConcurrencyLimits{}))
 
-	require.NoError(t, validateConcurrencyLimits(ConcurrencyLimits{
+	require.Empty(t, refusedConcurrencyLimit(ConcurrencyLimits{
 		MaxActiveSessions: 64, MaxConcurrentClientCalls: 32,
 	}))
 

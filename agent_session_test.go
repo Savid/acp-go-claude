@@ -92,7 +92,7 @@ func TestResumeSessionEdgeBranches(t *testing.T) {
 
 	loadErrAgent := NewAgent(WithSessionStore(&faultSessionStore{SessionStore: NewInMemorySessionStore(), loadErr: errors.New("load failed")}))
 	_, err = loadErrAgent.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
-	require.ErrorContains(t, err, "load failed")
+	requireClosedInternalFailure(t, err, restoreFailedError)
 
 	_, err = NewAgent(WithSessionStore(NewInMemorySessionStore())).ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
 	requireUnknownSession(t, err)
@@ -163,7 +163,7 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 
 	loadErrAgent := NewAgent(WithSessionStore(&faultSessionStore{SessionStore: NewInMemorySessionStore(), loadErr: errors.New("load failed")}))
 	_, err = loadErrAgent.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
-	require.ErrorContains(t, err, "load failed")
+	requireClosedInternalFailure(t, err, restoreFailedError)
 
 	_, err = NewAgent(WithSessionStore(NewInMemorySessionStore())).LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
 	requireUnknownSession(t, err)
@@ -256,8 +256,11 @@ func TestLoadSessionEdgeBranches(t *testing.T) {
 	)))
 	replayErrAgent, replayErrConn, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(replayErrStore))
 	replayErrConn.sessionUpdateErr = errors.New("replay update failed")
+	// A store entry this adapter found and could not replay is the restore
+	// failure, and the entry survives it untouched.
 	_, err = replayErrAgent.LoadSession(ctx, LoadSessionRequest("55555555-5555-4555-8555-555555555555", cwd))
-	require.ErrorContains(t, err, "replay update failed")
+	requireClosedInternalFailure(t, err, restoreFailedError)
+	require.ErrorContains(t, errors.Unwrap(err), "replay update failed")
 	require.Empty(t, replayErrAgent.sessions)
 }
 
@@ -485,8 +488,9 @@ func requireExpiredCloseRefusal(t *testing.T, ctx context.Context, err error) {
 	require.Equal(t, -32603, mapped.Code)
 	mappedData, ok := mapped.Data.(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "request_deadline_exceeded", mappedData[jsonFieldError])
-	require.Equal(t, "deadline", mappedData["class"])
+	require.Equal(t, internalFailureError, mappedData[jsonFieldError])
+	require.Equal(t, failureClassDeadline, mappedData[failureFieldClass])
+	require.NotContains(t, mappedData, jsonFieldMessage)
 }
 
 // TestCloseSessionKeepsAnUnsettledSessionAddressable proves removal follows the
@@ -968,9 +972,12 @@ func TestStoredSession(t *testing.T) {
 	requireUnknownSession(t, err)
 	deleteNativeTranscript = previousDeleteNativeTranscript
 
+	// A store the adapter cannot read back is a restore failure, and the Go cause
+	// stays inside the process: the wire answer is the closed token alone.
 	errAgent := NewAgent(WithSessionStore(&faultSessionStore{SessionStore: NewInMemorySessionStore(), loadErr: errors.New("load failed")}))
 	_, err = errAgent.storedSession(ctx, sessionID)
-	require.ErrorContains(t, err, "load failed")
+	requireClosedInternalFailure(t, err, restoreFailedError)
+	require.ErrorContains(t, errors.Unwrap(err), "load failed")
 }
 
 func TestListStoreSessionsTitleAndPaginationBranches(t *testing.T) {
@@ -1683,8 +1690,9 @@ func requireExpiredDeleteRefusal(t *testing.T, ctx context.Context, err error) {
 	require.Equal(t, -32603, mapped.Code)
 	mappedData, ok := mapped.Data.(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "request_deadline_exceeded", mappedData[jsonFieldError])
-	require.Equal(t, "deadline", mappedData["class"])
+	require.Equal(t, internalFailureError, mappedData[jsonFieldError])
+	require.Equal(t, failureClassDeadline, mappedData[failureFieldClass])
+	require.NotContains(t, mappedData, jsonFieldMessage)
 }
 
 // ladderProbeTransport reports the state of the shutdown ladder at the moment a
@@ -1836,10 +1844,10 @@ func TestDeleteWhoseTombstoneNeverLandedIsToldApartFromAnUnsettledTeardown(t *te
 		require.ErrorAs(t, err, &reqErr)
 		require.Equal(t, -32603, reqErr.Code)
 
-		data, ok := reqErr.Data.(map[string]any)
-		require.True(t, ok)
-		require.Equal(t, "claude_session_delete_untombstoned", data[jsonFieldError])
-		require.Equal(t, "session delete tombstone failed", data[jsonFieldMessage])
+		requireClosedOffPromptFailure(t, err, map[string]any{
+			jsonFieldError:    internalFailureError,
+			failureFieldClass: failureClassDeleteUntombstoned,
+		})
 	})
 }
 
@@ -2231,10 +2239,21 @@ func TestResumeAndLoadResidualBranches(t *testing.T) {
 				conn.sessionUpdateErr = errors.New(phase + " update refused")
 			}
 			_, err = agent.LoadSession(t.Context(), LoadSessionRequest(created.SessionId, cwd))
-			if phase == "success" {
+			switch phase {
+			case "success":
 				require.NoError(t, err)
-			} else {
+			case "replay":
+				// The store entry was found and could not be replayed.
+				requireClosedInternalFailure(t, err, restoreFailedError)
+				require.ErrorContains(t, errors.Unwrap(err), "update refused")
+			default:
+				// The entry restored; the usage emission after it is what broke,
+				// so the dispatcher classifies it as an unclassified failure.
 				require.ErrorContains(t, err, "update refused")
+				requireClosedOffPromptFailure(t, requestError(t.Context(), err), map[string]any{
+					jsonFieldError:    internalFailureError,
+					failureFieldClass: failureClassInternal,
+				})
 			}
 			conn.sessionUpdateErr = nil
 			require.NoError(t, agent.Close())

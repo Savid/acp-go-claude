@@ -944,11 +944,12 @@ func settlementContext(ctx context.Context) (context.Context, context.CancelFunc
 	return context.WithTimeout(context.WithoutCancel(ctx), sessionSettlementTimeout)
 }
 
-func lifecycleViolationError(message string) error {
-	return acp.NewInternalError(map[string]any{
-		jsonFieldError:   "claude_lifecycle_violation",
-		jsonFieldMessage: message,
-	})
+// lifecycleViolationError is the uniform refusal for a broken lifecycle
+// invariant. The detail names the exact invariant for this adapter's own logs
+// and error text and never reaches the wire: the host reads the closed
+// `lifecycle_violation` class, which is the whole of what it can act on.
+func lifecycleViolationError(detail string) error {
+	return internalFailure(failureClassLifecycleViolation, detail, nil)
 }
 
 // sessionLifecycleAction is one lifecycle action after its ownership has been

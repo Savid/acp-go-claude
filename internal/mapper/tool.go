@@ -81,6 +81,7 @@ const (
 
 	streamEventContentBlockDelta = "content_block_delta"
 	streamEventContentBlockStart = "content_block_start"
+	streamEventMessageStart      = "message_start"
 	streamEventThinkingDelta     = "thinking_delta"
 	streamEventTextDelta         = "text_delta"
 
@@ -112,6 +113,10 @@ type ToolUpdateOptions struct {
 	ToolUses                map[string]claude.ToolUseBlock
 	ParentToolUseID         string
 	Workflow                *WorkflowTracker
+	// Assistant records which assistant messages were already delivered as
+	// streamed chunks, so the terminal `assistant` frame does not repeat text the
+	// host has. A nil stream suppresses nothing, which is what replay wants.
+	Assistant *AssistantStream
 }
 
 // ToolInfo describes ACP-facing metadata for a Claude tool call.
@@ -255,16 +260,23 @@ func streamEventUpdates(msg *claude.StreamEventMessage, options ToolUpdateOption
 	}
 
 	switch msg.EventType {
+	case streamEventMessageStart:
+		// The opening frame is the only one that names the API message id; the
+		// block frames under it carry none, so the id is held until the message
+		// ends. It maps to no update of its own.
+		options.Assistant.begin(msg.ParentToolUseID, streamEventMessageID(msg.Event))
+
+		return nil
 	case streamEventContentBlockStart:
 		blockRaw, ok := mapInput(msg.Event, "content_block")
 		if !ok || blockRaw == nil {
 			return nil
 		}
 
-		return assistantUpdates(&claude.AssistantMessage{
+		return recordStreamedAssistantContent(assistantUpdates(&claude.AssistantMessage{
 			Content:         []claude.ContentBlock{claude.ParseContentBlock(blockRaw)},
 			ParentToolUseID: msg.ParentToolUseID,
-		}, options)
+		}, options), msg.ParentToolUseID, options)
 	case streamEventContentBlockDelta:
 		deltaRaw, ok := mapInput(msg.Event, keyDelta)
 		if !ok || deltaRaw == nil {
@@ -276,13 +288,29 @@ func streamEventUpdates(msg *claude.StreamEventMessage, options ToolUpdateOption
 			return nil
 		}
 
-		return assistantUpdates(&claude.AssistantMessage{
+		return recordStreamedAssistantContent(assistantUpdates(&claude.AssistantMessage{
 			Content:         []claude.ContentBlock{block},
 			ParentToolUseID: msg.ParentToolUseID,
-		}, options)
+		}, options), msg.ParentToolUseID, options)
 	default:
 		return nil
 	}
+}
+
+// recordStreamedAssistantContent marks the in-flight message as delivered when
+// the mapped stream frame actually produced assistant text or thinking. A frame
+// that opened a tool-use block produces neither and marks nothing, so its
+// terminal `assistant` frame still emits whatever text accompanies the tool call.
+func recordStreamedAssistantContent(
+	updates []acp.SessionUpdate,
+	parentToolUseID string,
+	options ToolUpdateOptions,
+) []acp.SessionUpdate {
+	if carriesAssistantContent(updates) {
+		options.Assistant.recordEmitted(parentToolUseID)
+	}
+
+	return updates
 }
 
 func deltaContentBlock(raw map[string]any) claude.ContentBlock {
@@ -305,17 +333,24 @@ func assistantUpdates(msg *claude.AssistantMessage, options ToolUpdateOptions) [
 		options.ToolUses = make(map[string]claude.ToolUseBlock)
 	}
 
+	// A terminal `assistant` frame restates the complete content of a message the
+	// partial-message stream already delivered chunk by chunk. Its text and
+	// thinking are dropped exactly when this stream proved it emitted them, so the
+	// host receives each assistant message once. Every other block, and every
+	// other field of this frame's handling, is unchanged.
+	streamed := options.Assistant.alreadyEmitted(assistantAPIMessageID(msg))
+
 	updates := make([]acp.SessionUpdate, 0, len(msg.Content))
 	for _, block := range msg.Content {
 		switch typed := block.(type) {
 		case claude.TextBlock:
-			if localCommandMarkerText(typed.Text) {
+			if streamed || localCommandMarkerText(typed.Text) {
 				continue
 			}
 
 			updates = append(updates, withParentToolUseID(acp.UpdateAgentMessageText(typed.Text), options.ParentToolUseID))
 		case claude.ThinkingBlock:
-			if typed.Thinking != "" {
+			if !streamed && typed.Thinking != "" {
 				updates = append(updates, withParentToolUseID(acp.UpdateAgentThoughtText(typed.Thinking), options.ParentToolUseID))
 			}
 		case claude.ToolUseBlock:

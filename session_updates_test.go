@@ -103,22 +103,23 @@ func TestPoisonBranches(t *testing.T) {
 		advertisedCommands: []acp.AvailableCommand{{Name: "help"}},
 	}
 
-	err := session.poison(ctx, "first cause")
-	require.ErrorContains(t, err, "native session invariant failed")
-	require.ErrorContains(t, session.poisonedError(), "native session invariant failed")
+	err := session.poison(ctx, poisonCauseConversationReset)
+	requirePoisonedSession(t, err, poisonCauseConversationReset)
+	requirePoisonedSession(t, session.poisonedError(), poisonCauseConversationReset)
 	select {
 	case <-cancelled:
 	default:
 		t.Fatal("poison did not cancel active turn")
 	}
 
-	err = session.poison(ctx, "second cause")
-	require.ErrorContains(t, err, "native session invariant failed")
+	// The first cause is the session's cause for good: a later violation never
+	// rewrites what poisoned it.
+	err = session.poison(ctx, poisonCauseSessionIDDrift)
+	requirePoisonedSession(t, err, poisonCauseConversationReset)
 
 	nilAgent := &agentSession{id: "session-2"}
-	err = nilAgent.poison(ctx, "nil agent cause")
-	require.ErrorContains(t, err, "native session invariant failed")
-	require.NotContains(t, err.Error(), "nil agent cause")
+	err = nilAgent.poison(ctx, poisonCauseSessionIDDrift)
+	requirePoisonedSession(t, err, poisonCauseSessionIDDrift)
 }
 
 func TestPoisonBeforeAdvertisementEmitsNoCommandUpdate(t *testing.T) {
@@ -129,8 +130,8 @@ func TestPoisonBeforeAdvertisementEmitsNoCommandUpdate(t *testing.T) {
 	agent.setConnection(conn)
 	session := &agentSession{agent: agent, id: "session-1"}
 
-	err := session.poison(context.Background(), "native reset before advertisement")
-	require.ErrorContains(t, err, "native session invariant failed")
+	err := session.poison(context.Background(), poisonCauseConversationReset)
+	requirePoisonedSession(t, err, poisonCauseConversationReset)
 	require.Empty(t, availableCommandUpdates(conn.Updates()))
 }
 

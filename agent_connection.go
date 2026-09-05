@@ -73,14 +73,29 @@ type elicitationScope struct {
 type safeRequestError struct {
 	request *acp.RequestError
 	cause   error
+	// detail is adapter-authored text naming the condition. It joins this
+	// error's Go string, where it serves this process's own diagnosis, and it is
+	// never part of `request` — the wire answer stays the closed data object.
+	detail string
 }
 
 func newSafeRequestFailure(request *acp.RequestError, cause error) error {
 	return &safeRequestError{request: request, cause: cause}
 }
 
+// newDetailedRequestFailure is newSafeRequestFailure plus an adapter-authored
+// detail for the Go error string. The detail is a compile-time constant chosen by
+// the call site, never native text and never a caller value.
+func newDetailedRequestFailure(request *acp.RequestError, cause error, detail string) error {
+	return &safeRequestError{request: request, cause: cause, detail: detail}
+}
+
 func (e *safeRequestError) Error() string {
-	return e.request.Error()
+	if e.detail == "" {
+		return e.request.Error()
+	}
+
+	return e.request.Error() + ": " + e.detail
 }
 
 func (e *safeRequestError) Unwrap() error {
@@ -163,8 +178,8 @@ func requestError(ctx context.Context, err error) *acp.RequestError {
 
 	if context.Cause(ctx) == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
 		return acp.NewInternalError(map[string]any{
-			jsonFieldError: "request_deadline_exceeded",
-			"class":        "deadline",
+			jsonFieldError:    internalFailureError,
+			failureFieldClass: failureClassDeadline,
 		})
 	}
 
@@ -174,18 +189,25 @@ func requestError(ctx context.Context, err error) *acp.RequestError {
 	}
 
 	return acp.NewInternalError(map[string]any{
-		jsonFieldError: "claude_internal_failure",
-		"class":        safeErrorClass(err),
+		jsonFieldError:    internalFailureError,
+		failureFieldClass: safeErrorClass(err),
 	})
 }
 
+// safeErrorClass names the closed class a failure this adapter could not
+// classify more precisely reports. The un-containable native tree gets a class of
+// its own because a host acts on it differently from an ordinary internal
+// failure: the agent is latched until the host recovers the identity, and no
+// retry of the same request will clear it.
 func safeErrorClass(err error) string {
 	switch {
 	case errors.Is(err, context.Canceled):
-		return "cancelled"
+		return failureClassCancelled
 	case errors.Is(err, context.DeadlineExceeded):
-		return "deadline"
+		return failureClassDeadline
+	case errors.Is(err, ErrContainmentIncomplete), errors.Is(err, ErrHostAuthorityUnavailable):
+		return failureClassContainment
 	default:
-		return "internal"
+		return failureClassInternal
 	}
 }

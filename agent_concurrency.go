@@ -2,7 +2,6 @@ package claudeacp
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -23,16 +22,19 @@ type clientCallPermitContextKey struct{}
 
 type clientCallPermit struct{ agent *Agent }
 
-func validateConcurrencyLimits(limits ConcurrencyLimits) error {
-	if limits.MaxActiveSessions < 0 {
-		return fmt.Errorf("max active sessions must be non-negative")
+// refusedConcurrencyLimit names the one concurrency option the agent will not
+// serve under, or the empty string when both are servable. It returns the option
+// path rather than an error because the construction verdict carries the refused
+// option's name and never the text a Go validator happened to write.
+func refusedConcurrencyLimit(limits ConcurrencyLimits) string {
+	switch {
+	case limits.MaxActiveSessions < 0:
+		return "concurrencyLimits.maxActiveSessions"
+	case limits.MaxConcurrentClientCalls < 0:
+		return "concurrencyLimits.maxConcurrentClientCalls"
+	default:
+		return ""
 	}
-
-	if limits.MaxConcurrentClientCalls < 0 {
-		return fmt.Errorf("max concurrent client calls must be non-negative")
-	}
-
-	return nil
 }
 
 // turnTimeout is the configured per-turn deadline. Zero means no deadline.

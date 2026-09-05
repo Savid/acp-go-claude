@@ -14,6 +14,12 @@ Claude stream events map to ACP session updates for assistant text, thoughts,
 tool calls, tool results, plans, usage counters, and session info (title and
 state). The full mapping table lives in [Updates](/docs/reference/updates).
 
+Assistant chunks are append-only: Claude restates each finished message in a
+terminal frame after streaming it, and the adapter drops that restatement, so
+concatenating a turn's assistant chunks yields the message once. A message that
+was never streamed is still emitted once by its terminal frame — see
+[Updates](/docs/reference/updates).
+
 Two interactive flows are layered on top of the stream:
 
 - **Permission requests** are surfaced as ACP permission prompts — see

@@ -5,12 +5,18 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 )
 
 const (
-	routeMetaKey           = "acp-go.dev/route"
+	routeMetaKey = "acp-go.dev/route"
+	// routeMetaPath is the request path a route refusal names. A refusal names
+	// the `_meta` member the host actually wrote, so the bare key alone is never
+	// the answer.
+	routeMetaPath          = `_meta["` + routeMetaKey + `"]`
 	routeVersion           = 1
 	routeTurnNonceMaxBytes = 4 * 1024
 	routeFieldVer          = "version"
@@ -38,18 +44,44 @@ type controlCallbackAdmission struct {
 
 var routeRandRead = rand.Read
 
+// parseInboundTurnRoute reads the reserved route envelope a prompt or an active
+// cancel carries. The two refusals are distinct facts and are never collapsed: a
+// key the host omitted is `missing` on the bare path, and a value that is present
+// and unacceptable is `unsupported` on the offending member — `version`,
+// `turnNonce`, or the unknown key — with the bare path only when the value as a
+// whole is not an object. Unknown members are read in sorted order so one request
+// always names the same member back.
 func parseInboundTurnRoute(meta map[string]any) (inboundTurnRoute, error) {
-	object, ok := meta[routeMetaKey].(map[string]any)
-	if !ok || len(object) != 2 || !routeVersionIsOne(object[routeFieldVer]) {
-		return inboundTurnRoute{}, unsupportedField(routeMetaKey)
+	raw, present := meta[routeMetaKey]
+	if !present {
+		return inboundTurnRoute{}, missingField(routeMetaPath)
+	}
+
+	object, ok := raw.(map[string]any)
+	if !ok {
+		return inboundTurnRoute{}, unsupportedField(routeMetaPath)
+	}
+
+	for _, key := range slices.Sorted(maps.Keys(object)) {
+		if key != routeFieldVer && key != routeFieldTurn {
+			return inboundTurnRoute{}, unsupportedField(routeMemberPath(key))
+		}
+	}
+
+	if !routeVersionIsOne(object[routeFieldVer]) {
+		return inboundTurnRoute{}, unsupportedField(routeMemberPath(routeFieldVer))
 	}
 
 	nonce, ok := object[routeFieldTurn].(string)
 	if !ok || strings.TrimSpace(nonce) == "" || len(nonce) > routeTurnNonceMaxBytes {
-		return inboundTurnRoute{}, unsupportedField(routeMetaKey)
+		return inboundTurnRoute{}, unsupportedField(routeMemberPath(routeFieldTurn))
 	}
 
 	return inboundTurnRoute{turnNonce: nonce}, nil
+}
+
+func routeMemberPath(member string) string {
+	return routeMetaPath + "." + member
 }
 
 func routeVersionIsOne(value any) bool {

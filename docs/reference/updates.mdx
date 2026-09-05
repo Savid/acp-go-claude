@@ -20,6 +20,34 @@ updates:
 | usage | Claude usage counters (`_meta.claude.usage`) |
 | session info | title and state changes |
 
+## Assistant chunks are append-only and never repeated
+
+Claude runs with partial messages enabled, so one assistant message arrives from
+the harness twice: as the `stream_event` frames that carry it token by token, and
+then as a terminal `assistant` frame restating the finished content. Only the
+streamed frames become `agent_message_chunk` and `agent_thought_chunk` updates.
+The terminal frame's text and thinking are dropped for exactly the message ids
+the stream already delivered, so **concatenating every assistant chunk of a turn
+reconstructs the assistant message once**, never twice.
+
+This is a guarantee a host can build on: `agent_message_chunk` and
+`agent_thought_chunk` are append-only deltas, never a snapshot, a repeat, or a
+correction of text already sent in the same turn. Render a turn's assistant text
+as the in-order concatenation of every chunk received and it is exactly right.
+
+The suppression is evidence-based, not unconditional. An assistant message that
+reached the adapter with no preceding stream frames — a non-streaming reply, and
+every message replayed by `session/load` — is still emitted by its terminal
+frame, once. A turn carrying several native assistant messages emits each of them
+once, in native order, deduplicated on the native message identity rather than on
+the text, so two messages that happen to say the same thing both arrive. Every
+other block of a terminal frame is unaffected: its tool calls, tool results,
+images, usage, stop reason, and `_meta.claude.messageId` identity are emitted
+exactly as before.
+
+The rule binds text content only. Agent images ride one chunk each, and
+`tool_call_update.content` is a whole-array replacement by ACP definition.
+
 ## Related channels
 
 - Raw Claude frames, when enabled, arrive separately on `_claude/rawEvent` and

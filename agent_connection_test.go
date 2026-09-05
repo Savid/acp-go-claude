@@ -151,7 +151,23 @@ func TestSafeRequestFailureExposesOnlyItsTypedWireError(t *testing.T) {
 	var unrelated *safeStageError
 	require.False(t, errors.As(failure, &unrelated))
 
-	require.Equal(t, "cancelled", safeErrorClass(context.Canceled))
-	require.Equal(t, "deadline", safeErrorClass(context.DeadlineExceeded))
-	require.Equal(t, "internal", safeErrorClass(cause))
+	// The class vocabulary is closed and every value is one a host switches on.
+	require.Equal(t, failureClassCancelled, safeErrorClass(context.Canceled))
+	require.Equal(t, failureClassDeadline, safeErrorClass(context.DeadlineExceeded))
+	require.Equal(t, failureClassInternal, safeErrorClass(cause))
+	require.Equal(t, failureClassContainment, safeErrorClass(ErrContainmentIncomplete))
+	require.Equal(t, failureClassContainment, safeErrorClass(ErrHostAuthorityUnavailable))
+
+	// A detailed failure keeps the adapter's own condition in its Go string and
+	// out of the wire answer, which stays the closed data object.
+	detailed := internalFailure(failureClassInternal, "adapter-authored detail", cause)
+	var detailedWire *acp.RequestError
+	require.ErrorAs(t, detailed, &detailedWire)
+	require.Equal(t, map[string]any{
+		jsonFieldError:    internalFailureError,
+		failureFieldClass: failureClassInternal,
+	}, detailedWire.Data)
+	require.ErrorIs(t, detailed, cause)
+	require.Contains(t, detailed.Error(), "adapter-authored detail")
+	require.NotContains(t, detailed.Error(), cause.Error())
 }

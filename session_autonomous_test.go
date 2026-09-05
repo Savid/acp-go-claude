@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
+
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/savid/acp-go-claude/internal/mapper"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/goleak"
 )
 
 const (
@@ -1909,7 +1910,10 @@ func TestLoadRefusesAnExactContainedIncarnation(t *testing.T) {
 	agent.sessions[id] = session
 
 	_, err := agent.LoadSession(t.Context(), acp.LoadSessionRequest{SessionId: id, Cwd: cwd})
-	require.ErrorContains(t, err, "claude_autonomous_stream_failed")
+	requireClosedOffPromptFailure(t, err, map[string]any{
+		jsonFieldError:    internalFailureError,
+		failureFieldClass: failureClassAutonomousStream,
+	})
 }
 
 func TestContainedIncarnationCannotRetireItsReplacement(t *testing.T) {
@@ -1930,4 +1934,150 @@ func TestContainedIncarnationCannotRetireItsReplacement(t *testing.T) {
 	require.NoError(t, session.producers.closeAndWait(t.Context()))
 	require.True(t, incarnation.failed.Load())
 	require.Same(t, replacement, session.nativePumpHandle().incarnation)
+}
+
+// partialMessageTurn is the frame sequence the real `claude` CLI produces for one
+// streamed assistant reply under `--include-partial-messages`: an opening frame
+// naming the API message id, the block frames that carry the text, then the
+// terminal `assistant` frame restating the finished content, then the result.
+// The terminal frame's `uuid` is the durable transcript identity and is
+// deliberately different from `message.id`.
+func partialMessageTurn(messageID string, chunks []string, full string) []map[string]any {
+	frames := []map[string]any{
+		{
+			"type": "stream_event",
+			"event": map[string]any{
+				"type": "message_start",
+				"message": map[string]any{
+					"id":    messageID,
+					"model": "sonnet",
+					"usage": map[string]any{"input_tokens": 1, "output_tokens": 1},
+				},
+			},
+		},
+		{
+			"type": "stream_event",
+			"event": map[string]any{
+				"type":          "content_block_start",
+				"index":         0,
+				"content_block": map[string]any{"type": "text", "text": ""},
+			},
+		},
+	}
+
+	for _, chunk := range chunks {
+		frames = append(frames, map[string]any{
+			"type": "stream_event",
+			"event": map[string]any{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]any{"type": "text_delta", "text": chunk},
+			},
+		})
+	}
+
+	return append(frames,
+		map[string]any{
+			"type": "assistant",
+			"uuid": "44444444-4444-4444-8444-444444444444",
+			"message": map[string]any{
+				"id":          messageID,
+				"model":       "sonnet",
+				"stop_reason": nil,
+				"content":     []any{map[string]any{"type": "text", "text": full}},
+			},
+		},
+		map[string]any{
+			"type":        "result",
+			"subtype":     "success",
+			"is_error":    false,
+			"stop_reason": "end_turn",
+			"usage":       map[string]any{"input_tokens": 1, "output_tokens": 2},
+		},
+	)
+}
+
+func agentMessageTexts(updates []acp.SessionNotification) []string {
+	texts := make([]string, 0, len(updates))
+	for _, notification := range updates {
+		chunk := notification.Update.AgentMessageChunk
+		if chunk == nil || chunk.Content.Text == nil {
+			continue
+		}
+
+		texts = append(texts, chunk.Content.Text.Text)
+	}
+
+	return texts
+}
+
+// TestPromptDeliversStreamedAssistantTextOnce drives the whole prompt pump the
+// way a host does and proves the wire contract the mapper state exists for: the
+// concatenation of every `agent_message_chunk` a turn emits is the assistant
+// message, not the assistant message twice.
+//
+// Before the terminal-frame suppression this turn put the complete text on the
+// wire a second time, so a host appending chunks rendered "SMOKE-OK" doubled.
+func TestPromptDeliversStreamedAssistantTextOnce(t *testing.T) {
+	t.Parallel()
+
+	session, transport, cleanup := newPromptFlowSession(t)
+	defer cleanup()
+
+	transport.queryMsgs = partialMessageTurn("msg_stream_1",
+		[]string{"SMOKE", "-", "OK"}, "SMOKE-OK")
+
+	client, ok := session.agent.connection().(*recordingAgentClient)
+	require.True(t, ok)
+
+	resp, err := session.Prompt(context.Background(),
+		TextPromptRequest(session.id, "test-turn", "hello"))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+
+	texts := agentMessageTexts(client.Updates())
+	require.Equal(t, []string{"", "SMOKE", "-", "OK"}, texts,
+		"the streamed chunks are the only assistant text on the wire")
+	require.Equal(t, "SMOKE-OK", strings.Join(texts, ""),
+		"a host appending every chunk reconstructs the message exactly once")
+}
+
+// TestPromptDeliversUnstreamedAssistantTextOnce is the other half of the
+// contract: a turn whose assistant message arrived with no partial-message
+// frames still reaches the host, because suppression is evidence-based rather
+// than unconditional.
+func TestPromptDeliversUnstreamedAssistantTextOnce(t *testing.T) {
+	t.Parallel()
+
+	session, transport, cleanup := newPromptFlowSession(t)
+	defer cleanup()
+
+	transport.queryMsgs = []map[string]any{
+		{
+			"type": "assistant",
+			"uuid": "55555555-5555-4555-8555-555555555555",
+			"message": map[string]any{
+				"id":          "msg_unstreamed_1",
+				"model":       "sonnet",
+				"stop_reason": "end_turn",
+				"content":     []any{map[string]any{"type": "text", "text": "no deltas"}},
+			},
+		},
+		{
+			"type":        "result",
+			"subtype":     "success",
+			"is_error":    false,
+			"stop_reason": "end_turn",
+			"usage":       map[string]any{"input_tokens": 1, "output_tokens": 2},
+		},
+	}
+
+	client, ok := session.agent.connection().(*recordingAgentClient)
+	require.True(t, ok)
+
+	resp, err := session.Prompt(context.Background(),
+		TextPromptRequest(session.id, "test-turn", "hello"))
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
+	require.Equal(t, []string{"no deltas"}, agentMessageTexts(client.Updates()))
 }

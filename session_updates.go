@@ -376,10 +376,13 @@ func (s *agentSession) poison(ctx context.Context, cause string) error {
 	return poisonedSessionError(cause)
 }
 
-func poisonedSessionError(string) error {
+// poisonedSessionError is the uniform refusal a poisoned session answers with.
+// The cause is one of the closed tokens this adapter documents, so a host can
+// tell the two native invariant violations apart without reading prose.
+func poisonedSessionError(cause string) error {
 	return acp.NewInternalError(map[string]any{
-		jsonFieldError:   "session poisoned",
-		jsonFieldMessage: "native session invariant failed",
+		jsonFieldError:    sessionPoisonedError,
+		failureFieldCause: cause,
 	})
 }
 

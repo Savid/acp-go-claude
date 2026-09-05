@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
@@ -214,13 +215,17 @@ func (a *Agent) handleForkSession(
 	ctx context.Context,
 	raw json.RawMessage,
 ) (acp.UnstableForkSessionResponse, error) {
+	// Params this route cannot decode, or that fail validation as a whole, are
+	// refused by naming `params` itself. The Go decoder's prose is never the wire
+	// answer: a caller reads which member it got wrong, not how this adapter
+	// happens to spell the complaint.
 	var params acp.UnstableForkSessionRequest
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+		return acp.UnstableForkSessionResponse{}, unsupportedField(jsonFieldParams)
 	}
 
 	if err := params.Validate(); err != nil {
-		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+		return acp.UnstableForkSessionResponse{}, unsupportedField(jsonFieldParams)
 	}
 
 	metaOptions, err := claudeOptionsFromMetaWithProviderAuth(params.Meta, a.providerAuth != nil)
@@ -237,7 +242,7 @@ func (a *Agent) handleForkSession(
 
 	mcpServers, err := stableMCPServers(params.McpServers)
 	if err != nil {
-		return acp.UnstableForkSessionResponse{}, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+		return acp.UnstableForkSessionResponse{}, unsupportedMCPServerField(err)
 	}
 
 	sessionID, err := newUUID()
@@ -301,4 +306,16 @@ func (a *Agent) handleForkSession(
 		Meta:          sessionResponseMeta(session),
 		ConfigOptions: sessionUnstableConfigOptions(session),
 	}, nil
+}
+
+// unsupportedMCPServerField names the failing `mcpServers` entry when the mapper
+// could identify one, and the whole member otherwise. Either way the answer is
+// the uniform refusal rather than the mapper's own error text.
+func unsupportedMCPServerField(err error) error {
+	var unsupported *mapper.UnsupportedMCPServerError
+	if errors.As(err, &unsupported) {
+		return unsupportedField(fmt.Sprintf("mcpServers[%d]", unsupported.Index))
+	}
+
+	return unsupportedField("mcpServers")
 }

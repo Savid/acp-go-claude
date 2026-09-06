@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 const (
@@ -347,10 +346,8 @@ func validateClaudeOptions(options ClaudeOptions) (ClaudeOptions, error) {
 		return ClaudeOptions{}, unsupportedField(metaOptionPath(metaPermissionModeKey))
 	}
 
-	for key := range options.Env {
-		if !validSettingsEnvName(key) || blockedClaudeEnvKey(key) {
-			return ClaudeOptions{}, unsupportedField(metaOptionPath(settingsFieldEnv) + "." + key)
-		}
+	if err := validateSessionEnv(options.Env, metaOptionPath(settingsFieldEnv)); err != nil {
+		return ClaudeOptions{}, err
 	}
 
 	for index, dir := range options.ExtraPathDirs {
@@ -371,27 +368,6 @@ func validateClaudeOptions(options ClaudeOptions) (ClaudeOptions, error) {
 	}
 
 	return options, nil
-}
-
-// blockedClaudeEnvKey reports whether a host-supplied session env key names a
-// variable the adapter refuses to forward. Every name here is one the native
-// process, its loader, or its shell reads under an exact platform spelling, so
-// the comparison goes through the platform seam: on Unix `path` and `env` are
-// variables of the host's own, and refusing them would break a legitimate
-// session over a name nothing dangerous ever reads.
-func blockedClaudeEnvKey(key string) bool {
-	if privateAdapterEnvName(key) || managedClaudeRootEnvKey(key) {
-		return true
-	}
-
-	name := claude.EnvironmentKey(key)
-
-	switch name {
-	case "PATH", "NODE_OPTIONS", "BASH_ENV", "ENV", "CLAUDECODE": //nolint:goconst // Protocol allowlist is clearer with literal names.
-		return true
-	default:
-		return strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_")
-	}
 }
 
 func validClaudePermissionMode(mode string) bool {

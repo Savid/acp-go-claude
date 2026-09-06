@@ -257,12 +257,22 @@ of that session's Claude process. They precede every inherited entry, so an
 executable placed in one shadows the one PATH would otherwise resolve. A
 relative or empty entry fails the session-lifecycle request. Raw `PATH` stays
 rejected in `env`; this is the supported way to extend the child's search path.
-`CLAUDE_CONFIG_DIR`, `HOME`, and the XDG cache, config, data, runtime, and state
-root variables are also rejected in session `env`. The host-selected
-`WithHome` and, when supplied, `HostAuthority.NativeEnvironment` remain authoritative.
-Every one of those names is matched the way the platform names variables: exact
-case on Unix, where `PATH` and `path` are two variables, and case-insensitively
-on Windows, where they are one.
+The host-selected `WithHome` and, when supplied,
+`HostAuthority.NativeEnvironment` remain authoritative.
+
+Session `env` names are checked in sorted key order on every establishing
+request, so the first refusal is the same each time. A key is accepted when
+it is non-empty and free of `=` and NUL and its value is free of NUL; case is
+not a rule, so `https_proxy` and `HTTPS_PROXY` are two ordinary variables.
+Blocked names fail as `{"error":"unsupported","field":"_meta.claude.options.env.<key>"}`
+naming the key exactly as sent: `PATH`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `CLAUDECODE`, any `LD_` or `DYLD_` prefix, `CLAUDE_CONFIG_DIR`, `HOME`, the XDG cache, config, data, runtime, and state roots, and `ACP_GO_CLAUDE_INTERNAL_*`. All but the adapter's own
+namespace compare through the platform identity, exact on Unix and
+case-insensitive on Windows; the adapter namespace is refused under every
+spelling. Two keys that resolve to one variable under that identity fail as
+`{"error":"ambiguous","field":"_meta.claude.options.env.<later key in sorted order>"}`.
+An empty value is delivered as `KEY=`. `ValidateClaudeSessionMeta` runs this
+parsing on a `_meta` map without an agent, so a host can check a request
+before sending it.
 
 `outputSchema` must be a non-empty JSON Schema object. An empty object is
 rejected rather than read as "no schema", so a request asking for structured

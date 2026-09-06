@@ -208,9 +208,24 @@ func TestClaudeOptionsValidationBranches(t *testing.T) {
 			wantField: "_meta.claude.options.env.XDG_CONFIG_HOME",
 		},
 		{
-			name:      "invalid env key",
-			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"BAD-NAME": "x"}}}},
-			wantField: "_meta.claude.options.env.BAD-NAME",
+			name:      "env key empty",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"": "x"}}}},
+			wantField: "_meta.claude.options.env.",
+		},
+		{
+			name:      "env key carries an equals sign",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"A=B": "x"}}}},
+			wantField: "_meta.claude.options.env.A=B",
+		},
+		{
+			name:      "env key carries a NUL",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"A\x00B": "x"}}}},
+			wantField: "_meta.claude.options.env.A\x00B",
+		},
+		{
+			name:      "env value carries a NUL",
+			meta:      map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{settingsFieldEnv: map[string]any{"A": "x\x00y"}}}},
+			wantField: "_meta.claude.options.env.A",
 		},
 		{
 			name:      "extra path dirs not array",
@@ -261,10 +276,10 @@ func TestClaudeMetaSmallHelpers(t *testing.T) {
 
 	require.Equal(t, []string{absTestPath("a"), absTestPath("b")}, sessionAdditionalDirectories([]string{absTestPath("a"), absTestPath("b")}))
 	require.True(t, blockedClaudeEnvKey("LD_PRELOAD"))
-	// The blocklist compares through the platform seam, so a lowercase spelling
-	// is a distinct variable on Unix and the same one on Windows.
+	// The blocklist compares through the platform identity, so a lowercase
+	// spelling is a distinct variable on Unix and the same one on Windows.
 	require.Equal(t,
-		claude.EnvironmentKey("dyld_library_path") == "DYLD_LIBRARY_PATH",
+		sessionEnvIdentity("dyld_library_path") == "DYLD_LIBRARY_PATH",
 		blockedClaudeEnvKey("dyld_library_path"),
 	)
 	require.True(t, blockedClaudeEnvKey(privateAdapterEnvPrefix+"TEST"))

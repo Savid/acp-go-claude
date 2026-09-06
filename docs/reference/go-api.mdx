@@ -75,7 +75,9 @@ behavior is unaffected.
 
 Request builders such as `NewSessionRequest`, `TextPromptRequest`, and
 `DeleteSessionRequest` construct ACP request values with the adapter metadata
-shape.
+shape. `ValidateClaudeSessionMeta(meta)` returns the refusal a
+session-establishing request carrying that `_meta` map would receive, or nil,
+without an agent; see [Metadata](/docs/reference/meta).
 
 `PromptRequest(sessionID, turnNonce, blocks...)` and
 `TextPromptRequest(sessionID, turnNonce, text)` require a fresh non-empty turn

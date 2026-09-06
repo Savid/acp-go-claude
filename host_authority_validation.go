@@ -3,8 +3,6 @@ package claudeacp
 import (
 	"fmt"
 	"strings"
-
-	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 const (
@@ -58,7 +56,7 @@ func privateAdapterEnvName(key string) bool {
 }
 
 func managedClaudeRootEnvKey(key string) bool {
-	switch claude.EnvironmentKey(key) {
+	switch sessionEnvIdentity(key) {
 	case claudeConfigDirEnv, homeEnv, "XDG_CACHE_HOME", xdgConfigHomeEnv, "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
 		return true
 	default:

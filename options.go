@@ -122,7 +122,10 @@ type Options struct {
 	AllowSkipPermissionsFlag bool
 	// InitializeTimeout bounds the Claude control-protocol initialize request.
 	InitializeTimeout time.Duration
-	// ControlHandlerTimeout bounds one inbound Claude control request.
+	// ControlHandlerTimeout bounds one inbound Claude control request the
+	// adapter answers on its own, such as a hook callback. A permission or
+	// elicitation request waits on the ACP client instead and is bounded only by
+	// the session's cancellation and teardown.
 	ControlHandlerTimeout time.Duration
 	// TurnTimeout bounds one Claude prompt turn. Zero (the default) means no
 	// deadline. On expiry the turn is aborted and fails with cause "timeout".
@@ -416,7 +419,9 @@ func WithClaudeInitializeTimeout(timeout time.Duration) Option {
 	}
 }
 
-// WithClaudeControlHandlerTimeout bounds one inbound Claude control request.
+// WithClaudeControlHandlerTimeout bounds one inbound Claude control request the
+// adapter answers on its own. It does not bound a permission or elicitation
+// request, which waits on the ACP client's answer.
 func WithClaudeControlHandlerTimeout(timeout time.Duration) Option {
 	return func(options *Options) {
 		options.ControlHandlerTimeout = timeout

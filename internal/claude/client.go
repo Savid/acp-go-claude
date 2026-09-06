@@ -148,8 +148,11 @@ func (c *Client) Start(ctx context.Context) error {
 
 	controller := NewController(c.log, clientControllerTransport{Transport: c.transport, close: c.closeTransport})
 	controller.SetHandlerTimeout(c.options.ControlHandlerTimeout)
-	controller.RegisterHandler("can_use_tool", c.handleCanUseTool)
-	controller.RegisterHandler("elicitation", c.handleElicitation)
+	// A permission decision and an elicitation answer come from the ACP client,
+	// which owns how long its question stays open; only a hook callback is the
+	// adapter's own work to bound.
+	controller.RegisterHostBoundHandler("can_use_tool", c.handleCanUseTool)
+	controller.RegisterHostBoundHandler("elicitation", c.handleElicitation)
 	controller.RegisterHandler("hook_callback", c.handleHookCallback)
 	controller.Start(runCtx)
 

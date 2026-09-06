@@ -36,7 +36,10 @@ err := claudeacp.Serve(ctx, input, output,
 Each permission prompt carries the tool request and a set of options; the host
 answers by selecting an option id. The chosen decision is remembered for the rest
 of the session and is copied to a forked session only through intentional fork
-behavior.
+behavior. A prompt stays open for as long as the host keeps it open: the
+control-handler timeout bounds only requests the adapter answers on its own, and
+a pending prompt ends with the host's answer, `session/cancel`, or session
+teardown.
 
 <Note>
 Elicitation is a separate channel from permissions. Tool-access decisions always

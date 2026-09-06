@@ -28,6 +28,12 @@ Elicitation is not the permission channel. Tool-access approvals always use
 questions only.
 </Note>
 
+A forwarded question stays open for as long as the client keeps it open. The
+control-handler timeout (`WithClaudeControlHandlerTimeout`) bounds only the
+requests the adapter answers on its own, such as hook callbacks; a pending
+elicitation ends with the client's answer, `session/cancel`, or session
+teardown.
+
 Because behavior depends on the client's advertised capability, tests cover
 nil, empty, both-null, URL-only, form-only, and both-mode shapes.
 

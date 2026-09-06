@@ -875,6 +875,98 @@ func TestControllerInboundRequestHandlerTimeout(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+// A host-bound handler waits on the ACP client's answer, so the handler timeout
+// must not end it: the question stays open past the timeout and answers late.
+func TestControllerHostBoundHandlerOutlivesTheHandlerTimeout(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+
+	transport := newFakeTransport()
+	controller := NewController(nil, transport)
+	controller.SetHandlerTimeout(10 * time.Millisecond)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var handlerErr error
+	controller.RegisterHostBoundHandler("ask", func(handlerCtx context.Context, _ *ControlRequest) (map[string]any, error) {
+		close(started)
+		<-release
+		handlerErr = handlerCtx.Err()
+
+		return map[string]any{"answered": true}, nil
+	})
+	startControllerForTest(t, controller, ctx)
+
+	transport.sendMessage(map[string]any{
+		keyType:      controlRequestType,
+		keyRequestID: "req-1",
+		keyRequest: map[string]any{
+			keySubtype: "ask",
+		},
+	})
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	require.Empty(t, transport.sentPayloads(), "no timeout response while the client still owns the question")
+
+	close(release)
+	require.Eventually(t, func() bool {
+		return len(transport.sentPayloads()) == 1
+	}, time.Second, 10*time.Millisecond)
+
+	resp, ok := transport.sentPayloads()[0].(ControlResponse)
+	require.True(t, ok)
+	require.Equal(t, responseSubtypeSuccess, resp.Response[keySubtype])
+	require.Equal(t, map[string]any{"answered": true}, resp.Response[keyResponse])
+	require.NoError(t, handlerErr, "the handler context was never cancelled by a timer")
+}
+
+// A host-bound handler still ends with the routing context: cancellation and
+// teardown are the client's fence, and they reach it.
+func TestControllerHostBoundHandlerEndsWithRoutingContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	transport := newFakeTransport()
+	controller := NewController(nil, transport)
+	controller.SetHandlerTimeout(time.Hour)
+
+	started := make(chan struct{})
+	controller.RegisterHostBoundHandler("ask", func(handlerCtx context.Context, _ *ControlRequest) (map[string]any, error) {
+		close(started)
+		<-handlerCtx.Done()
+
+		return nil, handlerCtx.Err()
+	})
+	startControllerForTest(t, controller, ctx)
+
+	transport.sendMessage(map[string]any{
+		keyType:      controlRequestType,
+		keyRequestID: "req-1",
+		keyRequest: map[string]any{
+			keySubtype: "ask",
+		},
+	})
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	cancel()
+	require.Eventually(t, func() bool {
+		return len(controller.handlerSem) == 0
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestControllerTimeoutKeepsTrueWorkersBoundedAtSixtyFour(t *testing.T) {
 	transport := newFakeTransport()
 	controller := NewController(nil, transport)

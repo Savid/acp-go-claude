@@ -26,6 +26,16 @@ const (
 
 type controlHandler func(context.Context, *ControlRequest) (map[string]any, error)
 
+// registeredControlHandler is one inbound control-request handler and whether
+// its completion waits on the ACP client. A host-bound handler holds a
+// permission or elicitation request open until the client answers, and the
+// client owns how long that takes: it ends with the session's cancellation and
+// teardown, never with the wall-clock handler timeout.
+type registeredControlHandler struct {
+	handle    controlHandler
+	hostBound bool
+}
+
 type controlHandlerResult struct {
 	payload map[string]any
 	err     error
@@ -55,7 +65,7 @@ type Controller struct {
 	pending   map[string]chan *ControlResponse
 
 	handlersMu     sync.RWMutex
-	handlers       map[string]controlHandler
+	handlers       map[string]registeredControlHandler
 	handlerSem     chan struct{}
 	handlerWG      sync.WaitGroup
 	handlerTimeout time.Duration
@@ -103,7 +113,7 @@ func NewController(log *slog.Logger, transport Transport) *Controller {
 		log:            log,
 		transport:      transport,
 		pending:        make(map[string]chan *ControlResponse),
-		handlers:       make(map[string]controlHandler),
+		handlers:       make(map[string]registeredControlHandler),
 		handlerSem:     make(chan struct{}, maxConcurrentControlHandlers),
 		handlerTimeout: defaultControlHandlerTimeout,
 		fatal:          make(chan error, 1),
@@ -222,10 +232,24 @@ func (c *Controller) submitFatal(cause error) {
 	}
 }
 
-// RegisterHandler registers an incoming control-request handler. Handlers must
-// honor the provided context; the controller can return a timeout response, but
-// Go cannot force-stop a handler goroutine that ignores cancellation.
+// RegisterHandler registers an incoming control-request handler the adapter
+// answers on its own, bounded by the handler timeout. Handlers must honor the
+// provided context; the controller can return a timeout response, but Go cannot
+// force-stop a handler goroutine that ignores cancellation.
 func (c *Controller) RegisterHandler(subtype string, handler controlHandler) {
+	c.registerHandler(subtype, registeredControlHandler{handle: handler})
+}
+
+// RegisterHostBoundHandler registers an incoming control-request handler whose
+// answer comes from the ACP client — a permission decision or an elicitation
+// response. The handler timeout does not apply: a question stays open for as
+// long as the client keeps it open, and ends with the session's cancellation or
+// teardown context instead.
+func (c *Controller) RegisterHostBoundHandler(subtype string, handler controlHandler) {
+	c.registerHandler(subtype, registeredControlHandler{handle: handler, hostBound: true})
+}
+
+func (c *Controller) registerHandler(subtype string, handler registeredControlHandler) {
 	c.handlersMu.Lock()
 	defer c.handlersMu.Unlock()
 
@@ -436,7 +460,7 @@ func (c *Controller) handleRequest(ctx context.Context, msg map[string]any) {
 	subtype, _ := request[keySubtype].(string)
 
 	c.handlersMu.RLock()
-	handler := c.handlers[subtype]
+	handler, registered := c.handlers[subtype]
 	c.handlersMu.RUnlock()
 
 	var (
@@ -445,7 +469,7 @@ func (c *Controller) handleRequest(ctx context.Context, msg map[string]any) {
 		wait    = func() {}
 	)
 
-	if handler == nil {
+	if !registered {
 		err = fmt.Errorf("no handler registered for %q", subtype)
 	} else {
 		req := &ControlRequest{
@@ -491,10 +515,10 @@ func (c *Controller) sendControlResponse(ctx context.Context, response map[strin
 func (c *Controller) runHandler(
 	ctx context.Context,
 	subtype string,
-	handler controlHandler,
+	handler registeredControlHandler,
 	req *ControlRequest,
 ) (map[string]any, func(), error) {
-	handlerCtx, cancel := context.WithTimeout(ctx, c.handlerTimeout)
+	handlerCtx, cancel := c.handlerContext(ctx, handler)
 	defer cancel()
 
 	resultCh := make(chan controlHandlerResult, 1)
@@ -511,7 +535,7 @@ func (c *Controller) runHandler(
 			}
 		}()
 
-		payload, err := handler(handlerCtx, req)
+		payload, err := handler.handle(handlerCtx, req)
 		resultCh <- controlHandlerResult{payload: payload, err: err}
 	}()
 
@@ -534,6 +558,20 @@ func (c *Controller) runHandler(
 
 		return nil, func() { <-workerDone }, closedControlHandlerError(handlerCtx.Err())
 	}
+}
+
+// handlerContext bounds one handler invocation: the wall-clock handler timeout
+// for a request the adapter answers itself, only the routing context for one
+// that waits on the ACP client.
+func (c *Controller) handlerContext(
+	ctx context.Context,
+	handler registeredControlHandler,
+) (context.Context, context.CancelFunc) {
+	if handler.hostBound {
+		return context.WithCancel(ctx)
+	}
+
+	return context.WithTimeout(ctx, c.handlerTimeout)
 }
 
 func closedControlHandlerError(err error) error {

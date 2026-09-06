@@ -279,7 +279,7 @@ func TestClaudeMetaSmallHelpers(t *testing.T) {
 	// The blocklist compares through the platform identity, so a lowercase
 	// spelling is a distinct variable on Unix and the same one on Windows.
 	require.Equal(t,
-		sessionEnvIdentity("dyld_library_path") == "DYLD_LIBRARY_PATH",
+		claude.EnvironmentKey("dyld_library_path") == "DYLD_LIBRARY_PATH",
 		blockedClaudeEnvKey("dyld_library_path"),
 	)
 	require.True(t, blockedClaudeEnvKey(privateAdapterEnvPrefix+"TEST"))

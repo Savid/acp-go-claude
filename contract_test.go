@@ -146,7 +146,7 @@ func requireExactUnsupportedField(t *testing.T, err error, field string) {
 	require.Equal(t, -32602, reqErr.Code)
 	require.Equal(t, "Invalid params", reqErr.Message)
 	require.Equal(t, map[string]any{
-		jsonFieldError: validationUnsupported,
+		jsonFieldError: valUnsupported,
 		jsonFieldField: field,
 	}, reqErr.Data)
 }
@@ -163,7 +163,7 @@ func requireExactMissingField(t *testing.T, err error, field string) {
 	require.Equal(t, -32602, reqErr.Code)
 	require.Equal(t, "Invalid params", reqErr.Message)
 	require.Equal(t, map[string]any{
-		jsonFieldError: validationMissing,
+		jsonFieldError: valMissing,
 		jsonFieldField: field,
 	}, reqErr.Data)
 }
@@ -556,7 +556,7 @@ func TestValidateMCPServersRejectsSSEAndACP(t *testing.T) {
 			name:    "sse",
 			servers: []acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "events"}}},
 			data: map[string]any{
-				jsonFieldError:  validationUnsupported,
+				jsonFieldError:  valUnsupported,
 				jsonFieldField:  "mcpServers[0]",
 				jsonFieldServer: "events",
 			},
@@ -565,7 +565,7 @@ func TestValidateMCPServersRejectsSSEAndACP(t *testing.T) {
 			name:    "acp",
 			servers: []acp.McpServer{{Acp: &acp.McpServerAcpInline{Name: "bridge"}}},
 			data: map[string]any{
-				jsonFieldError:  validationUnsupported,
+				jsonFieldError:  valUnsupported,
 				jsonFieldField:  "mcpServers[0]",
 				jsonFieldServer: "bridge",
 			},
@@ -604,14 +604,14 @@ func TestValidateMCPServersNameRules(t *testing.T) {
 		{
 			name:    "empty name",
 			servers: []acp.McpServer{{Stdio: &acp.McpServerStdio{Command: "mcp"}}},
-			data:    map[string]any{"mcpServers[0].name": validationRequired},
+			data:    map[string]any{"mcpServers[0].name": valRequired},
 		},
 		{
 			name: "whitespace-only name",
 			servers: []acp.McpServer{
 				{Http: &acp.McpServerHttpInline{Name: "   ", Url: "https://example.com/mcp"}},
 			},
-			data: map[string]any{"mcpServers[0].name": validationRequired},
+			data: map[string]any{"mcpServers[0].name": valRequired},
 		},
 		{
 			name: "empty name at later index",
@@ -619,7 +619,7 @@ func TestValidateMCPServersNameRules(t *testing.T) {
 				{Stdio: &acp.McpServerStdio{Name: "fs", Command: "mcp"}},
 				{Http: &acp.McpServerHttpInline{Name: "", Url: "https://example.com/mcp"}},
 			},
-			data: map[string]any{"mcpServers[1].name": validationRequired},
+			data: map[string]any{"mcpServers[1].name": valRequired},
 		},
 		{
 			name: "duplicate name reports later entry",
@@ -627,7 +627,7 @@ func TestValidateMCPServersNameRules(t *testing.T) {
 				{Stdio: &acp.McpServerStdio{Name: "dup", Command: "one"}},
 				{Http: &acp.McpServerHttpInline{Name: "dup", Url: "https://example.com/mcp"}},
 			},
-			data: map[string]any{"mcpServers[1].name": validationDuplicate},
+			data: map[string]any{"mcpServers[1].name": valDuplicate},
 		},
 	}
 	for _, tc := range tests {

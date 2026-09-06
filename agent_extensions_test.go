@@ -64,7 +64,7 @@ func TestHandleForkSessionBranches(t *testing.T) {
 	var forkNameErr *acp.RequestError
 	require.True(t, errors.As(err, &forkNameErr), "error = %T %[1]v", err)
 	require.Equal(t, -32602, forkNameErr.Code)
-	require.Equal(t, map[string]any{"mcpServers[0].name": validationRequired}, forkNameErr.Data)
+	require.Equal(t, map[string]any{"mcpServers[0].name": valRequired}, forkNameErr.Data)
 
 	previousStableMCPServers := stableMCPServers
 	stableMCPServers = func([]acp.UnstableMcpServer) ([]acp.McpServer, error) {

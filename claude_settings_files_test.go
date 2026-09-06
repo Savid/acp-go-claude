@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
 
@@ -200,21 +201,25 @@ func TestSettingsHelpers(t *testing.T) {
 	))
 	logs := new(bytes.Buffer)
 	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	require.Equal(t, map[string]string{"GOOD_1": "yes"}, stringMapSetting(context.Background(), map[string]any{
+	require.Equal(t, map[string]string{
+		"GOOD_1":      "yes",
+		"https_proxy": "",
+		"1_DIGIT":     "digit",
+		"WITH-DASH":   "dash",
+	}, stringMapSetting(context.Background(), map[string]any{
 		"env": map[string]any{
-			"GOOD_1":    "yes",
-			"bad":       "lowercase",
-			"1_BAD":     "digit",
-			"BAD-DASH":  "dash",
-			"BAD_EMPTY": "",
-			"BAD_NUL":   "bad\x00value",
+			"GOOD_1":      "yes",
+			"https_proxy": "",
+			"1_DIGIT":     "digit",
+			"WITH-DASH":   "dash",
+			"BAD=EQUALS":  "equals",
+			"BAD_NUL":     "bad\x00value",
 		},
 	}, "env", logger))
-	require.Contains(t, logs.String(), "ignoring invalid settings env key")
-	require.Contains(t, logs.String(), "bad")
-	require.NotContains(t, logs.String(), "lowercase")
-	require.False(t, validSettingsEnvName(""))
-	require.False(t, validSettingsEnvName("bad"))
+	require.Contains(t, logs.String(), "ignoring invalid settings env entry")
+	require.Contains(t, logs.String(), "BAD=EQUALS")
+	require.Contains(t, logs.String(), "BAD_NUL")
+	require.NotContains(t, logs.String(), "equals\"")
 
 	allowlist, ok := settingsAvailableModelAllowlist(
 		modelConfig{AvailableModels: []string{"opus", "sonnet"}},
@@ -233,13 +238,13 @@ func TestSettingsHelpers(t *testing.T) {
 	require.Equal(t, "b", firstNonEmptyString("", "b", "c"))
 	require.NotEmpty(t, defaultManagedSettingsPath())
 
-	previousGOOS := runtimeGOOS
-	t.Cleanup(func() { runtimeGOOS = previousGOOS })
-	runtimeGOOS = "darwin"
+	previousGOOS := claude.Platform
+	t.Cleanup(func() { claude.Platform = previousGOOS })
+	claude.Platform = "darwin"
 	require.Contains(t, defaultManagedSettingsPath(), "/Library/Application Support/")
-	runtimeGOOS = "windows"
+	claude.Platform = "windows"
 	require.Contains(t, defaultManagedSettingsPath(), `C:\Program Files`)
-	runtimeGOOS = "linux"
+	claude.Platform = "linux"
 	require.Equal(t, "/etc/claude-code/managed-settings.json", defaultManagedSettingsPath())
 	_, ok = loadSettingsFile(context.Background(), "", nil)
 	require.False(t, ok)

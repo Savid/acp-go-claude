@@ -325,7 +325,7 @@ func cloneProviderAuthBindings(source map[string]ProviderAuthBinding) map[string
 
 func unsupportedField(path string) error {
 	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: validationUnsupported,
+		jsonFieldError: valUnsupported,
 		jsonFieldField: path,
 	})
 }
@@ -336,7 +336,7 @@ func unsupportedField(path string) error {
 // host reading `unsupported` on the same bare path stops sending the key there.
 func missingField(path string) error {
 	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: validationMissing,
+		jsonFieldError: valMissing,
 		jsonFieldField: path,
 	})
 }

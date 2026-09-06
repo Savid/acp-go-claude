@@ -1,15 +1,18 @@
 package claudeacp
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 const (
-	validationAmbiguous = "ambiguous"
+	valAmbiguous = "ambiguous"
 
 	envPathKey        = "PATH"
 	envNodeOptionsKey = "NODE_OPTIONS"
@@ -18,38 +21,59 @@ const (
 	envClaudeCodeKey  = "CLAUDECODE"
 )
 
-// sessionEnvIdentity is the name the target platform resolves an environment
-// key by: the exact bytes on Unix, where PATH and path are two variables, and
-// the upper-cased spelling on Windows, where they are one.
-func sessionEnvIdentity(key string) string {
-	if runtimeGOOS == platformWindows {
-		return strings.ToUpper(key)
-	}
-
-	return key
-}
-
 func validEnvName(key string) bool {
 	return key != "" && !strings.ContainsAny(key, "=\x00")
 }
 
-// blockedClaudeEnvKey reports whether a host-supplied session env key names a
-// variable the adapter refuses to forward. The private adapter namespace is
-// refused under every spelling. Every other name is one the native process,
-// its loader, or its shell reads under an exact platform spelling, so the
-// comparison goes through the platform identity: on Unix `path` and `env` are
-// variables of the host's own.
-func blockedClaudeEnvKey(key string) bool {
+// blockedAgentEnvKey reports whether a caller-supplied env key names a
+// variable the adapter refuses on every surface. The private adapter
+// namespace is refused under every spelling. Every other name is one the
+// native process, its loader, or its shell reads under an exact platform
+// spelling, so the comparison goes through the platform identity: on Unix
+// `path` and `env` are variables of the host's own.
+func blockedAgentEnvKey(key string) bool {
 	if privateAdapterEnvName(key) || managedClaudeRootEnvKey(key) {
 		return true
 	}
 
-	switch name := sessionEnvIdentity(key); name {
-	case envPathKey, envNodeOptionsKey, envBashEnvKey, envShellEnvKey, envClaudeCodeKey:
+	switch name := claude.EnvironmentKey(key); name {
+	case envNodeOptionsKey, envBashEnvKey, envShellEnvKey, envClaudeCodeKey:
 		return true
 	default:
 		return strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_")
 	}
+}
+
+// blockedClaudeEnvKey additionally refuses PATH in a session env: the ordered
+// extraPathDirs option is the only session-scoped search-path authority.
+func blockedClaudeEnvKey(key string) bool {
+	return blockedAgentEnvKey(key) || claude.EnvironmentKey(key) == envPathKey
+}
+
+// validateAgentEnv applies the session name rule to the static Agent-scoped
+// environment, with PATH allowed because that surface establishes the native
+// base search path. A refusal fails Agent construction.
+func validateAgentEnv(env map[string]string) error {
+	seen := make(map[string]string, len(env))
+
+	for _, key := range slices.Sorted(maps.Keys(env)) {
+		if !validEnvName(key) || strings.ContainsRune(env[key], '\x00') {
+			return fmt.Errorf("environment key %q is not a variable name", key)
+		}
+
+		if blockedAgentEnvKey(key) {
+			return fmt.Errorf("environment key %q is reserved", key)
+		}
+
+		identity := claude.EnvironmentKey(key)
+		if previous, duplicate := seen[identity]; duplicate {
+			return fmt.Errorf("environment keys %q and %q name the same variable", previous, key)
+		}
+
+		seen[identity] = key
+	}
+
+	return nil
 }
 
 // validateSessionEnv checks a session environment in sorted key order, so the
@@ -66,7 +90,7 @@ func validateSessionEnv(env map[string]string, path string) error {
 			return unsupportedField(path + "." + key)
 		}
 
-		identity := sessionEnvIdentity(key)
+		identity := claude.EnvironmentKey(key)
 		if _, duplicate := seen[identity]; duplicate {
 			return ambiguousField(path + "." + key)
 		}
@@ -79,7 +103,7 @@ func validateSessionEnv(env map[string]string, path string) error {
 
 func ambiguousField(path string) error {
 	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: validationAmbiguous,
+		jsonFieldError: valAmbiguous,
 		jsonFieldField: path,
 	})
 }

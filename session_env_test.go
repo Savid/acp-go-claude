@@ -3,16 +3,17 @@ package claudeacp
 import (
 	"testing"
 
+	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
 
 func simulatePlatform(t *testing.T, platform string) {
 	t.Helper()
 
-	previous := runtimeGOOS
-	t.Cleanup(func() { runtimeGOOS = previous })
+	previous := claude.Platform
+	t.Cleanup(func() { claude.Platform = previous })
 
-	runtimeGOOS = platform
+	claude.Platform = platform
 }
 
 func envMeta(env map[string]any) map[string]any {

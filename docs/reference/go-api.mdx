@@ -55,7 +55,7 @@ Omitting it selects ordinary same-identity execution.
 
 | Option group | Options |
 | --- | --- |
-| Native paths and environment | `WithExecutablePath`, `WithHome`, `WithScratchDir`, `WithEnv`, `WithSeedFiles` |
+| Native paths and environment | `WithExecutablePath`, `WithHome`, `WithScratchDir`, `WithEnv`, `WithSeedFiles`. `WithEnv` also refuses `CLAUDECODE`, `CLAUDE_CONFIG_DIR`, `HOME`, and the XDG roots. Names follow the session `env` rule with `PATH` allowed: a key is non-empty and free of `=` and NUL, the value is free of NUL, the injection names `NODE_OPTIONS`, `BASH_ENV`, `ENV`, and any `LD_` or `DYLD_` prefix are refused under the platform identity, the private adapter namespace is refused under every spelling, and two spellings of one Windows variable are refused; a refusal fails Agent construction. |
 | Host boundaries | `WithHostAuthority`, `WithInputHandoffRoot` |
 | Session behavior | `WithDefaultModel`, `WithTurnTimeout`, `WithConcurrencyLimits`, `WithImageLimits` |
 | Durable sessions | `WithSessionStore`, `WithSessionStoreLoadTimeout` |

@@ -362,10 +362,16 @@ func TestHostAuthorityLateEnvironmentPanicReturnsUnavailableBase(t *testing.T) {
 func TestHostAuthorityRejectsReservedAndManagedEnvironmentKeys(t *testing.T) {
 	t.Parallel()
 
-	for _, key := range []string{privateAdapterEnvPrefix + "SECRET", "HOME", "XDG_CONFIG_HOME"} {
+	for _, key := range []string{
+		privateAdapterEnvPrefix + "SECRET", "acp_go_claude_internal_secret", "HOME", "XDG_CONFIG_HOME",
+		"NODE_OPTIONS", "BASH_ENV", "ENV", "CLAUDECODE", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "", "A=B",
+	} {
 		agent := NewAgent(WithEnv(map[string]string{key: "value"}))
 		require.Error(t, agent.configurationErr, key)
 	}
+
+	require.Error(t, NewAgent(WithEnv(map[string]string{"A": "x\x00y"})).configurationErr)
+	require.NoError(t, NewAgent(WithEnv(map[string]string{"PATH": "/usr/bin", "https_proxy": "", "ld_preload": "own"})).configurationErr)
 }
 
 func TestHostAuthorityNativeEnvironmentPanicFailsConstructionBeforeMutation(t *testing.T) {

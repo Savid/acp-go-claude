@@ -9,8 +9,9 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+
+	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 const (
@@ -38,7 +39,6 @@ var managedSettingsPath = defaultManagedSettingsPath
 var (
 	filepathAbs          = filepath.Abs
 	filepathEvalSymlinks = filepath.EvalSymlinks
-	runtimeGOOS          = runtime.GOOS
 	userHomeDir          = os.UserHomeDir
 )
 
@@ -247,7 +247,7 @@ func userSettingsPath(claudeHome string) string {
 }
 
 func defaultManagedSettingsPath() string {
-	switch runtimeGOOS {
+	switch claude.Platform {
 	case platformDarwin:
 		return "/Library/Application Support/ClaudeCode/managed-settings.json"
 	case platformWindows:
@@ -287,38 +287,19 @@ func stringMapSetting(ctx context.Context, raw map[string]any, key string, log *
 
 	result := make(map[string]string, len(values))
 	for key, value := range values {
-		text, _ := value.(string)
-
-		if !validSettingsEnvName(key) {
+		text, ok := value.(string)
+		if !ok || !validEnvName(key) || strings.ContainsRune(text, '\x00') {
 			if log != nil {
-				log.DebugContext(ctx, "ignoring invalid settings env key", slog.String("key", key))
+				log.DebugContext(ctx, "ignoring invalid settings env entry", slog.String("key", key))
 			}
 
 			continue
 		}
 
-		if text != "" && !strings.ContainsRune(text, '\x00') {
-			result[key] = text
-		}
+		result[key] = text
 	}
 
 	return result
-}
-
-func validSettingsEnvName(key string) bool {
-	if key == "" {
-		return false
-	}
-
-	for index, char := range key {
-		if char == '_' || (char >= 'A' && char <= 'Z') || (index > 0 && char >= '0' && char <= '9') {
-			continue
-		}
-
-		return false
-	}
-
-	return true
 }
 
 func mergeEnv(base map[string]string, override map[string]string) map[string]string {

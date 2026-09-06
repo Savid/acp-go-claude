@@ -52,16 +52,16 @@ const (
 
 	clientMetaTerminalOutput = "terminal_output"
 	permissionPromptTool     = "stdio"
-	validationRequired       = "required"
-	validationUnsupported    = "unsupported"
-	validationDuplicate      = "duplicate"
+	valRequired              = "required"
+	valUnsupported           = "unsupported"
+	valDuplicate             = "duplicate"
 
-	// validationMissing is the distinct verdict for a reserved key the contract
+	// valMissing is the distinct verdict for a reserved key the contract
 	// requires and the caller left out. It is never collapsed into
-	// validationUnsupported: `unsupported` names a value that is present and
+	// valUnsupported: `unsupported` names a value that is present and
 	// refused, `missing` names one the caller owed and did not send, and a host
 	// fixes its own request from the difference.
-	validationMissing = "missing"
+	valMissing = "missing"
 
 	listSessionsPageSize = 50
 )

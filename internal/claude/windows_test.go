@@ -30,9 +30,10 @@ func TestWindowsOrdinaryChildObservesEnvironment(t *testing.T) {
 	// Resolving from the ambient or base PATH would find this invalid image.
 	require.NoError(t, os.WriteFile(filepath.Join(ignored, "claude-child.exe"), []byte("wrong executable"), 0o700))
 	t.Setenv("PATH", ignored)
+	// HOME belongs to the selected base; an overlay cannot replace it.
 	environment := BuildEnv(Options{
-		OrdinaryEnvironment: map[string]string{"Path": ignored, "PATHEXT": ".CMD", "SystemRoot": os.Getenv("SystemRoot")},
-		Env:                 map[string]string{"PATH": selected, "PathExt": ".EXE", "HOME": home},
+		OrdinaryEnvironment: map[string]string{"Path": ignored, "PATHEXT": ".CMD", "SystemRoot": os.Getenv("SystemRoot"), "HOME": home},
+		Env:                 map[string]string{"PATH": selected, "PathExt": ".EXE", "HOME": ignored},
 	})
 	process, err := startOrdinaryNative("claude-child", []string{"-test.run=^TestWindowsOrdinaryChildObservesEnvironment$", "--", "windows-environment-child"}, environment, cwd)
 	require.NoError(t, err)

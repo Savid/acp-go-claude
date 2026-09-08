@@ -24,7 +24,7 @@ func validateHostAuthorityOptions(options Options) error {
 			return err
 		}
 
-		if environment == nil {
+		if claude.EffectiveEnvironment(claude.Options{OrdinaryEnvironment: environment}) == nil {
 			return fmt.Errorf("%w: native environment is unavailable", ErrHostAuthorityUnavailable)
 		}
 	}

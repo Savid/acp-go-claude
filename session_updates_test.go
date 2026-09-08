@@ -170,8 +170,8 @@ func TestRawAndUsageUpdateHelpers(t *testing.T) {
 	require.Equal(t, originKindTaskNotification, resultOriginKind(&claude.ResultMessage{Origin: map[string]any{"kind": originKindTaskNotification}}))
 
 	require.Nil(t, mergeUsage(nil, nil))
-	left := &acp.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3, CachedReadTokens: acp.Ptr(4)}
-	right := &acp.Usage{InputTokens: 10, OutputTokens: 20, TotalTokens: 30, CachedReadTokens: acp.Ptr(5), CachedWriteTokens: acp.Ptr(5), ThoughtTokens: acp.Ptr(6)}
+	left := &acp.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3, CachedReadTokens: new(4)}
+	right := &acp.Usage{InputTokens: 10, OutputTokens: 20, TotalTokens: 30, CachedReadTokens: new(5), CachedWriteTokens: new(5), ThoughtTokens: new(6)}
 	merged := mergeUsage(left, right)
 	require.Equal(t, 11, merged.InputTokens)
 	require.Equal(t, 9, *merged.CachedReadTokens)
@@ -184,8 +184,8 @@ func TestRawAndUsageUpdateHelpers(t *testing.T) {
 	require.Equal(t, 4, *left.CachedReadTokens)
 	require.Nil(t, cloneUsage(nil))
 	require.Nil(t, optionalIntSum(nil, nil))
-	require.Equal(t, 4, *optionalIntSum(acp.Ptr(4), nil))
-	require.Equal(t, 5, *optionalIntSum(nil, acp.Ptr(5)))
+	require.Equal(t, 4, *optionalIntSum(new(4), nil))
+	require.Equal(t, 5, *optionalIntSum(nil, new(5)))
 }
 
 func TestSystemMessageSideEffects(t *testing.T) {
@@ -221,10 +221,10 @@ func TestSessionUpdateEdgeBranches(t *testing.T) {
 	require.Error(t, session.emitRawClaudeMessage(ctx, &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
 	agent.closed = false
 
-	cloned := cloneUsage(&acp.Usage{CachedWriteTokens: acp.Ptr(1), ThoughtTokens: acp.Ptr(2)})
+	cloned := cloneUsage(&acp.Usage{CachedWriteTokens: new(1), ThoughtTokens: new(2)})
 	*cloned.CachedWriteTokens = 3
 	*cloned.ThoughtTokens = 4
-	require.Equal(t, 1, *cloneUsage(&acp.Usage{CachedWriteTokens: acp.Ptr(1)}).CachedWriteTokens)
+	require.Equal(t, 1, *cloneUsage(&acp.Usage{CachedWriteTokens: new(1)}).CachedWriteTokens)
 
 	conn := newRecordingAgentClient()
 	agent.setConnection(conn)

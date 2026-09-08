@@ -279,9 +279,18 @@ func tagPostResponseHookRequest(line []byte) []byte {
 		return line
 	}
 
-	hookID, _ := json.Marshal(responseHookID(msg.ID))
-	params[postResponseHookIDParam] = hookID
-	msg.Params, _ = json.Marshal(params)
+	// Keep the original members: rebuilding the object through a map would
+	// erase repeated metadata before its owner can validate the wire request.
+	hook, _ := json.Marshal(map[string]string{postResponseHookIDParam: responseHookID(msg.ID)})
+	raw := bytes.TrimSpace(msg.Params)
+
+	taggedParams := append([]byte(nil), raw[:len(raw)-1]...)
+	if len(params) > 0 {
+		taggedParams = append(taggedParams, ',')
+	}
+
+	taggedParams = append(taggedParams, hook[1:]...)
+	msg.Params = taggedParams
 
 	tagged, _ := json.Marshal(msg)
 	if bytes.HasSuffix(line, []byte("\n")) {
@@ -1027,6 +1036,10 @@ func (w *hostWriteOwner) interrupt() error {
 		if w.closer != nil {
 			if err := w.closer.Close(); err != nil {
 				errs = append(errs, errors.New("host writer close interruption failed"))
+			} else {
+				// Closing is a complete interruption boundary even when the
+				// writer exposes unsupported deadlines, as OS stdio can.
+				return
 			}
 		}
 
@@ -1073,12 +1086,57 @@ func localNotification[Req any, ReqPtr localAgentParams[Req]](
 
 func decodeLocalAgentParams[Req any, ReqPtr localAgentParams[Req]](params json.RawMessage) (Req, *acp.RequestError) {
 	var value Req
-	if err := json.Unmarshal(params, &value); err != nil {
+
+	_, prompt := any(&value).(*acp.PromptRequest)
+	_, cancel := any(&value).(*acp.CancelNotification)
+
+	safe, retained := preserveLocalRequestMetadata(params, prompt || cancel, prompt)
+	if err := json.Unmarshal(safe, &value); err != nil {
 		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
 	}
 
 	if err := ReqPtr(&value).Validate(); err != nil {
 		return value, acp.NewInvalidParams(map[string]any{jsonFieldError: err.Error()})
+	}
+
+	var meta *map[string]any
+
+	switch request := any(&value).(type) {
+	case *acp.InitializeRequest:
+		meta = &request.Meta
+	case *acp.PromptRequest:
+		meta = &request.Meta
+		retained.restoreRoute(request.Meta)
+		retained.restoreHandoffs(request.Prompt)
+	case *acp.AuthenticateRequest:
+		meta = &request.Meta
+	case *acp.LogoutRequest:
+		meta = &request.Meta
+	case *acp.CancelNotification:
+		meta = &request.Meta
+		retained.restoreRoute(request.Meta)
+	case *acp.CloseSessionRequest:
+		meta = &request.Meta
+	case *acp.UnstableDeleteSessionRequest:
+		meta = &request.Meta
+	case *acp.ListSessionsRequest:
+		meta = &request.Meta
+	case *acp.LoadSessionRequest:
+		meta = &request.Meta
+	case *acp.NewSessionRequest:
+		meta = &request.Meta
+	case *acp.ResumeSessionRequest:
+		meta = &request.Meta
+	case *acp.SetSessionConfigOptionRequest:
+		if request.Boolean != nil {
+			meta = &request.Boolean.Meta
+		} else if request.ValueId != nil {
+			meta = &request.ValueId.Meta
+		}
+	}
+
+	if meta != nil {
+		*meta = lifecycle.RetainRequestMetadata(*meta, params)
 	}
 
 	return value, nil

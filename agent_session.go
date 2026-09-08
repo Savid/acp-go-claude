@@ -922,11 +922,10 @@ func (a *Agent) closeRejectedSession(
 	return refusal
 }
 
-// closeReplacedSession settles the instance a same-id install is replacing. A
-// close its settlement barrier did not admit leaves live native work behind an id
-// that is about to name something else, so that install is refused and the
-// replacement is torn down instead: the replaced instance keeps the id, stays
-// addressable, and can still be closed.
+// closeReplacedSession settles the instance a same-id install is replacing.
+// Any close failure leaves settlement or cleanup owned by the predecessor, so
+// the install is refused and the replacement is torn down. The predecessor
+// keeps the id so a later close can retry the work it still owns.
 func (a *Agent) closeReplacedSession(ctx context.Context, session *agentSession, previous *agentSession) error {
 	closeErr := previous.Close(ctx)
 	if closeErr == nil {
@@ -936,11 +935,11 @@ func (a *Agent) closeReplacedSession(ctx context.Context, session *agentSession,
 	a.recordContainmentError(closeErr)
 	a.log.WarnContext(ctx, "close replaced Claude session failed", slog.String("class", safeErrorClass(closeErr)))
 
-	if !errors.Is(closeErr, errSessionCloseUnsettled) {
-		return nil
+	if errors.Is(closeErr, errSessionCloseUnsettled) {
+		closeErr = sessionCloseUnsettledError(closeErr)
 	}
 
-	return a.closeRejectedSession(ctx, session, "replaced_session_unsettled", sessionCloseUnsettledError(closeErr))
+	return a.closeRejectedSession(ctx, session, "replaced_session_unsettled", closeErr)
 }
 
 func (a *Agent) startAndStoreSession(
@@ -1255,6 +1254,8 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		return nil, err
 	}
 
+	a.prepareManagedImageRoots(start.Cwd, imageScratchDir)
+
 	imageArtifacts, err := a.loadImageArtifacts(ctx, start.ResumeID)
 	if err != nil {
 		return nil, err
@@ -1298,6 +1299,12 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	}
 
 	env = a.observe.InjectTraceEnv(ctx, env)
+	effectiveEnv := a.effectiveNativeEnvironment(env)
+
+	modelConfig, hasModelConfig, err := modelConfigFromEnv(effectiveEnv)
+	if err != nil {
+		return nil, err
+	}
 
 	if len(start.StoreEntries) > 0 {
 		rehydrated, rehydrateErr := rehydrateTranscriptImageEntries(start.StoreEntries, imageArtifacts)
@@ -1350,11 +1357,6 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		if prepareErr := materialized.prepare(ctx, a.options.HostAuthority, processClaudeHome, mcpConfigDir); prepareErr != nil {
 			return nil, prepareErr
 		}
-	}
-
-	modelConfig, hasModelConfig, err := modelConfigFromEnv(env)
-	if err != nil {
-		return nil, err
 	}
 
 	modelOverrides := map[string]string(nil)
@@ -1498,7 +1500,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 
 	selectedModel := selectInitialModel(
 		defaultModel,
-		envValue(env, envAnthropicModel),
+		effectiveEnv[claude.EnvironmentKey(envAnthropicModel)],
 		firstNonEmptyString(settings.Applied.Model, discoveredSettings.Model),
 		availableModels,
 	)

@@ -3,7 +3,20 @@ set -euo pipefail
 
 provider=claude
 packages=(./internal/claude)
-selector='^(TestOrdinaryWindowsExecutableAndEnvironmentBehavior|TestWindowsEnvironmentCollapsesRepeatedSpellingsDeterministically)$'
+selector='^(TestOrdinaryWindowsExecutableAndEnvironmentBehavior|TestWindowsEnvironmentCollapsesRepeatedSpellingsDeterministically|TestWindowsOrdinaryChildObservesEnvironment)$'
+
+# The hosted image supplies MinGW-w64; Go's race runtime requires its
+# synchronization library (https://go.dev/doc/articles/race_detector).
+if [ "${RUNNER_OS:-}" = Windows ]; then
+  export PATH="/c/mingw64/bin:$PATH"
+  export CGO_ENABLED=1
+  export CC="${CC:-gcc}"
+  synchronization="$("$CC" --print-file-name libsynchronization.a)"
+  [ "$synchronization" != libsynchronization.a ] && [ -f "$synchronization" ] || {
+    echo 'Windows race proof requires a MinGW-w64 compiler with libsynchronization.a' >&2
+    exit 1
+  }
+fi
 
 result_log="$(mktemp)"
 cleanup() { rm -f "$result_log"; }
@@ -11,7 +24,8 @@ trap cleanup EXIT HUP INT TERM
 
 expected=0
 for package in "${packages[@]}"; do
-  discovered="$(go test -list "$selector" "$package" | grep -Ec '^Test' || true)"
+  listed="$(go test -count=1 -timeout="${GO_TEST_TIMEOUT:-10m}" -list "$selector" "$package")"
+  discovered="$(printf '%s\n' "$listed" | grep -Ec '^Test' || true)"
   [ "$discovered" -gt 0 ] || {
     printf '%s: selector discovered no tests in %s\n' "$provider" "$package" >&2
     exit 1
@@ -20,11 +34,7 @@ for package in "${packages[@]}"; do
 done
 
 status=0
-if [ "$provider" = amp ]; then
-  go test -race -count=1 -json -timeout="${GO_TEST_TIMEOUT:-40m}" -run "$selector" "${packages[@]}" >"$result_log" || status="$?"
-else
-  go test -count=1 -json -run "$selector" "${packages[@]}" >"$result_log" || status="$?"
-fi
+go test -race -count=1 -json -timeout="${GO_TEST_TIMEOUT:-10m}" -run "$selector" "${packages[@]}" >"$result_log" || status="$?"
 cat "$result_log"
 [ "$status" -eq 0 ] || exit "$status"
 

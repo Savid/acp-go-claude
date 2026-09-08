@@ -139,7 +139,7 @@ func rejectLifecycleExtensionMeta(params json.RawMessage) error {
 		return nil //nolint:nilerr // The method-specific decoder owns malformed params.
 	}
 
-	if _, present := envelope.Meta[lifecycle.MetaKey]; !present {
+	if _, present := lifecycle.RetainRequestMetadata(nil, params)[lifecycle.MetaKey]; !present {
 		return nil
 	}
 

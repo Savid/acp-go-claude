@@ -1266,7 +1266,7 @@ func TestNativePumpPendingDeliveryHonorsItsWithdrawnReader(t *testing.T) {
 	sink := newNativeTurnSink("route", incarnation)
 	require.True(t, sink.beginDispatch())
 	sink.accept()
-	for index := 0; index < nativePumpQueue; index++ {
+	for range nativePumpQueue {
 		sink.admit(nativeOwnedFrame{route: "route", message: &claude.AssistantMessage{}})
 	}
 	pump.sink = sink

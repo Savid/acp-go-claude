@@ -69,7 +69,6 @@ func TestAgentModelMetaAndOptions(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, available[0].Value, foundInfo.Value)
 	require.Equal(t, []string{"a", "b"}, nonEmptyModelStrings([]string{"", "a", "a", "b"}))
-	require.Equal(t, acp.SessionConfigOptionCategoryModel, *configCategory(acp.SessionConfigOptionCategoryModel))
 
 	options := configOptions(modeAuto, "claude-sonnet-4-5", available, "default", []string{"default", "concise"}, effortHigh, true, true)
 	require.Len(t, options, 4)

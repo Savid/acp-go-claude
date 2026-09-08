@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-claude/internal/jsonvalue"
 )
 
 const (
@@ -234,22 +235,23 @@ func parseHandoffEnvelope(meta map[string]any, index int) (handoffEnvelope, erro
 }
 
 func handoffVersionSupported(value any) bool {
+	if number, ok := value.(json.Number); ok {
+		version, integer := jsonvalue.Int64(number)
+
+		return integer && version == HandoffVersion
+	}
+
 	version, ok := handoffNumber(value)
 
 	return ok && version == HandoffVersion
 }
 
-// handoffNumber accepts every shape a JSON decoder may hand back for an
-// envelope number, so which decoder options the transport happens to enable
-// cannot decide whether a conforming block is accepted.
+// handoffNumber handles direct Go numeric values. Wire json.Number values use
+// exact integer parsing in the version and size validators.
 func handoffNumber(value any) (float64, bool) {
 	switch number := value.(type) {
 	case float64:
 		return number, true
-	case json.Number:
-		parsed, err := number.Float64()
-
-		return parsed, err == nil
 	case int:
 		return float64(number), true
 	case int64:
@@ -273,11 +275,23 @@ func lowercaseHexDigest(digest string) bool {
 	return true
 }
 
-// handoffSizeBytes admits a declared size only after checking it as a float.
-// Converting first would hand the range check a value Go leaves undefined: on
-// one architecture an out-of-range float truncates to a negative int64 and on
-// another it saturates to the largest one.
+// handoffSizeBytes checks exact wire integers without rounding and bounds direct
+// Go floats before converting them to int64.
 func handoffSizeBytes(value any) (int64, bool) {
+	if number, ok := value.(json.Number); ok {
+		size, integer := jsonvalue.Int64(number)
+
+		return size, integer && size >= 0
+	}
+
+	if size, ok := value.(int64); ok {
+		return size, size >= 0
+	}
+
+	if size, ok := value.(int); ok {
+		return int64(size), size >= 0
+	}
+
 	size, ok := handoffNumber(value)
 	if !ok || size != math.Trunc(size) || size < 0 || size >= maxHandoffSizeBytes {
 		return 0, false

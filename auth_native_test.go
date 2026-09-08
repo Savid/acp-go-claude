@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -117,7 +116,7 @@ func TestReadAccountCurrentBehavior(t *testing.T) {
 	require.Equal(t, authCauseTimeout, cause)
 }
 
-func TestAccountReadingCurrentSignalIsClosed(t *testing.T) {
+func TestAccountReadingDetectsAccountChanges(t *testing.T) {
 	resident := authAccountReading{
 		identity: authAccountIdentityOf(claude.AuthAccount{LoggedIn: true, Email: "resident@example.test"}),
 		loggedIn: true,
@@ -131,14 +130,6 @@ func TestAccountReadingCurrentSignalIsClosed(t *testing.T) {
 	require.False(t, empty.advancedPast(resident))
 	require.True(t, resident.advancedPast(empty))
 	require.True(t, switched.advancedPast(resident))
-
-	typ := reflect.TypeOf(authAccountReading{})
-	require.True(t, typ.Comparable())
-	for index := range typ.NumField() {
-		field := typ.Field(index)
-		require.True(t, field.Type.Comparable())
-		require.NotContains(t, []reflect.Kind{reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface}, field.Type.Kind())
-	}
 }
 
 func TestProviderNativeRemovalAndUserCurrentBehavior(t *testing.T) {

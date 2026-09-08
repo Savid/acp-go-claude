@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -174,9 +175,7 @@ func (s *agentSession) snapshotImageArtifacts() map[string]storedImageArtifact {
 	defer s.imageMu.Unlock()
 
 	snapshot := make(map[string]storedImageArtifact, len(s.imageArtifacts))
-	for subpath, artifact := range s.imageArtifacts {
-		snapshot[subpath] = artifact
-	}
+	maps.Copy(snapshot, s.imageArtifacts)
 
 	return snapshot
 }
@@ -220,17 +219,20 @@ func (s *agentSession) persistTranscriptImageArtifact(
 	)
 }
 
-func (s *agentSession) imageArtifactByIdentity(identity string) (storedImageArtifact, bool) {
+// imageArtifactByContent selects the exact version recorded in the transcript.
+// A tool can replace an image without changing its native content position.
+func (s *agentSession) imageArtifactByContent(identity string, data string) (storedImageArtifact, bool) {
+	decoded, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return storedImageArtifact{}, false
+	}
+
 	s.imageMu.Lock()
 	defer s.imageMu.Unlock()
 
-	for _, artifact := range s.imageArtifacts {
-		if artifact.Identity == identity {
-			return artifact, true
-		}
-	}
+	artifact, ok := s.imageArtifacts[imageArtifactKey(identity, imageFingerprint(decoded))]
 
-	return storedImageArtifact{}, false
+	return artifact, ok
 }
 
 func (s *agentSession) imageArtifactByFingerprint(prefix string, fingerprint string) (storedImageArtifact, bool) {

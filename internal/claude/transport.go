@@ -255,10 +255,7 @@ func (t *ProcessTransport) scanEvents(ctx context.Context, events chan<- Transpo
 
 	scanner := bufio.NewScanner(t.stdout)
 
-	initialBuffer := 64 * 1024
-	if maxJSONLineBytes < initialBuffer {
-		initialBuffer = maxJSONLineBytes
-	}
+	initialBuffer := min(maxJSONLineBytes, 64*1024)
 
 	scanner.Buffer(make([]byte, 0, initialBuffer), maxJSONLineBytes)
 

@@ -830,7 +830,9 @@ func TestSessionMapCleanupCloseErrors(t *testing.T) {
 	newSession, newCleanup := newStartedAgentSessionForTest(t, replacementAgent, "same")
 	defer newCleanup()
 	require.NoError(t, replacementAgent.storeStartedSession(ctx, oldSession))
-	require.NoError(t, replacementAgent.storeStartedSession(ctx, newSession))
+	require.ErrorIs(t, replacementAgent.storeStartedSession(ctx, newSession), closeErr)
+	require.Same(t, oldSession, replacementAgent.sessions[oldSession.id])
+	require.True(t, newSession.isClosing(), "the refused replacement is contained")
 }
 
 func newFakeLifecycleAgent(t *testing.T, transport *fakeClaudeTransport, opts ...Option) (*Agent, *recordingAgentClient, *fakeClaudeTransport) {
@@ -1064,9 +1066,9 @@ func TestPromptResultForObserverBranches(t *testing.T) {
 		InputTokens:       1,
 		OutputTokens:      2,
 		TotalTokens:       3,
-		CachedReadTokens:  acp.Ptr(4),
-		CachedWriteTokens: acp.Ptr(5),
-		ThoughtTokens:     acp.Ptr(6),
+		CachedReadTokens:  new(4),
+		CachedWriteTokens: new(5),
+		ThoughtTokens:     new(6),
 	}}, errors.New("prompt failed"), "sonnet")
 	require.Equal(t, "sonnet", result.Model)
 	require.Equal(t, 1, result.InputTokens)

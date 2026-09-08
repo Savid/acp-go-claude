@@ -557,15 +557,15 @@ func cloneUsage(usage *acp.Usage) *acp.Usage {
 
 	cloned := *usage
 	if usage.CachedReadTokens != nil {
-		cloned.CachedReadTokens = acp.Ptr(*usage.CachedReadTokens)
+		cloned.CachedReadTokens = new(*usage.CachedReadTokens)
 	}
 
 	if usage.CachedWriteTokens != nil {
-		cloned.CachedWriteTokens = acp.Ptr(*usage.CachedWriteTokens)
+		cloned.CachedWriteTokens = new(*usage.CachedWriteTokens)
 	}
 
 	if usage.ThoughtTokens != nil {
-		cloned.ThoughtTokens = acp.Ptr(*usage.ThoughtTokens)
+		cloned.ThoughtTokens = new(*usage.ThoughtTokens)
 	}
 
 	return &cloned

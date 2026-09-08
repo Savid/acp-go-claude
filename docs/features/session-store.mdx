@@ -125,6 +125,10 @@ tool update carries the tool call's complete content array because ACP clients
 replace that array; repeated native lifecycle frames never duplicate an
 artifact.
 
+Replay selects artifacts by native content identity and checksum. When one
+tool-result position carries different images over time, each transcript entry
+retains its own bytes.
+
 Each image is validated, bounded, and stored before its update reaches the wire.
 Records live in private `_artifacts/images/<digest>.json` subkeys of the owning
 session, and mirrored transcript rows hold an artifact reference instead of a

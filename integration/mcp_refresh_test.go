@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -270,9 +271,7 @@ func (p *claudeMCPProbe) executeSnapshot() []map[string]any {
 
 func cloneProbeArguments(arguments map[string]any) map[string]any {
 	cloned := make(map[string]any, len(arguments))
-	for key, value := range arguments {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, arguments)
 
 	return cloned
 }

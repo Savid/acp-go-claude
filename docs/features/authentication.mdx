@@ -3,9 +3,9 @@ title: "Authentication"
 description: "How to supply Claude credentials, and how to broker a login over ACP"
 ---
 
-The adapter does not manage Claude Code account state. Authentication is owned by
-the local Claude Code installation selected by `-home` (`WithHome`), so there is
-nothing for a host to log into through ACP.
+Claude Code owns its credentials. The adapter accepts configured credentials
+or brokers a login through the optional `_claude/auth/*` methods. Standard ACP
+authentication remains unadvertised.
 
 ## Credential input
 
@@ -81,6 +81,11 @@ durable connection beside one would advertise a credential the agent cannot
 use. It is also absent in bare mode and when agent-wide user, managed, seeded,
 or overlay settings configure one of those variables or `apiKeyHelper`.
 
+Environment admission uses the same effective native environment as launch:
+the captured ordinary environment or `HostAuthority.NativeEnvironment`, followed
+by `WithEnv`. An explicit empty value clears an inherited value for this check;
+the adapter's ambient credentials do not affect a managed native identity.
+
 | Option | Effect |
 | --- | --- |
 | `WithProviderAuthRoot(path)` | Absolute, durable, host-owned directory holding the values-free ledger. Required: unset, relative, unusable, bare mode, or agent-wide static authentication leaves every method unadvertised and answering method-not-found. |
@@ -96,10 +101,11 @@ err := claudeacp.Serve(ctx, input, output,
 
 Both sides of the consent gate are resolved when the agent starts, and every
 native call this surface makes runs against the directory that resolution found.
-`disconnect` clears an account and its platform keystore items and cannot be
-undone, so it first checks that the configured path still names that same
+Native-login `disconnect` clears the account and its platform keystore items,
+so it first checks that the configured path still names that same
 directory; a path repointed while the agent runs answers `policy` and removes
-nothing.
+nothing. All eight legs remain advertised without this consent. Secret-binding
+disconnect only releases the ledger binding and needs no native-home consent.
 
 The flow is `_claude/auth/methods` → `_claude/auth/authorize` →
 `_claude/auth/callback` → `_claude/auth/status`, with `_claude/auth/cancel` to
@@ -142,7 +148,7 @@ including an `authorize` that was already in flight. A `session/load`,
 `session/resume`, or `session/fork` that rebuilds a session under that id serves
 the surface again; only `session/delete` refuses it for good.
 
-`disconnect` cancels every pending login on the config directory before it
+Native-login `disconnect` cancels every pending login on the config directory before it
 clears the account, because the harness arms its loopback listener
 unconditionally: a browser tab reaching a still-running login child installs a
 credential with no method call driving it, and an absence proof taken beside one

@@ -210,7 +210,3 @@ func nonEmptyModelStrings(values []string) []string {
 
 	return result
 }
-
-func configCategory(category acp.SessionConfigOptionCategory) *acp.SessionConfigOptionCategory {
-	return &category
-}

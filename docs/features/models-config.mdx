@@ -25,6 +25,12 @@ Session configuration uses typed option categories:
 Use `session/set_config_option` with a selected option value. Boolean mode
 payloads are rejected; clients should send the selected mode value.
 
+`ANTHROPIC_MODEL` and `CLAUDE_MODEL_CONFIG` are read from the effective native
+environment used for launch, including settings, static, and session overlays.
+Managed sessions use the authority's base environment; ordinary sessions use
+the ambient environment captured when the agent was constructed. Explicit empty
+overrides remain empty.
+
 ## Image prompts
 
 The adapter advertises standard ACP image prompt support

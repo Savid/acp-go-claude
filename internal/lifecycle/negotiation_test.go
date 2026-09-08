@@ -55,6 +55,24 @@ func TestDecodeCapabilityExactVersion(t *testing.T) {
 	}
 }
 
+func TestLifecycleVersionDoesNotWrapAtNativeIntWidth(t *testing.T) {
+	t.Parallel()
+
+	// These unsupported versions would both narrow to version 1 on 32-bit hosts.
+	for _, version := range []json.Number{"4294967297", "-4294967295"} {
+		offered, refusal := DecodeCapability(capabilityMeta(version))
+		require.False(t, offered)
+		require.Equal(t, &ParamError{Field: MetaPath + ".version"}, refusal)
+
+		submission, refusal := DecodePromptCorrelation(correlationMeta(map[string]any{
+			"version":    version,
+			"submission": map[string]any{"submissionId": "sub-1", "clientNonce": "non-1"},
+		}), Negotiated{Version: Version})
+		require.Empty(t, submission)
+		require.Equal(t, &ParamError{Field: MetaPath + ".version"}, refusal)
+	}
+}
+
 func correlationMeta(value any) map[string]any {
 	return map[string]any{MetaKey: value}
 }

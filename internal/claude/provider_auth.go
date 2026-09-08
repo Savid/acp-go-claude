@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -211,13 +212,8 @@ func authCommandOutput(
 // reads is nil beside the cost of forwarding one.
 func authScrubbedEnvKey(key string) bool {
 	upper := strings.ToUpper(key)
-	for _, scrubbed := range authScrubbedEnvNames {
-		if upper == scrubbed {
-			return true
-		}
-	}
 
-	return false
+	return slices.Contains(authScrubbedEnvNames, upper)
 }
 
 // AuthLoginURL validates a candidate authorization URL independently of, and

@@ -104,6 +104,29 @@ func compactJSON(value any) string {
 }
 
 func BuildEnv(options Options) []string {
+	values := EffectiveEnvironment(options)
+	if values == nil {
+		return nil
+	}
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+
+	slices.Sort(keys)
+
+	environment := make([]string, 0, len(keys))
+	for _, key := range keys {
+		environment = append(environment, key+"="+values[key])
+	}
+
+	return environment
+}
+
+// EffectiveEnvironment composes the native base and overlays for both launch
+// and configuration decisions. A nil result means the base is unavailable.
+func EffectiveEnvironment(options Options) map[string]string {
 	base := options.OrdinaryEnvironment
 	if options.Authority != nil {
 		if options.Authority.NativeEnvironment == nil {
@@ -166,19 +189,7 @@ func BuildEnv(options Options) []string {
 		set(envSearchPath, prependSearchPath(options.ExtraPathDirs, values[EnvironmentKey(envSearchPath)]))
 	}
 
-	keys = keys[:0]
-	for key := range values {
-		keys = append(keys, key)
-	}
-
-	slices.Sort(keys)
-
-	environment := make([]string, 0, len(keys))
-	for _, key := range keys {
-		environment = append(environment, key+"="+values[key])
-	}
-
-	return environment
+	return values
 }
 
 func validateEnvironmentMap(environment map[string]string) error {

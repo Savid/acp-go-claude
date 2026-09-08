@@ -7,6 +7,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -49,6 +52,24 @@ func (failingInterruptWriter) Close() error { return errors.New("opaque close fa
 
 func (failingInterruptWriter) SetWriteDeadline(time.Time) error {
 	return errors.New("opaque deadline failure")
+}
+
+func TestHostWriteOwnerClosesWritersWithoutDeadlineSupport(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "output")
+	file, err := os.Create(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = file.Close() })
+	require.ErrorIs(t, file.SetWriteDeadline(time.Now()), os.ErrNoDeadline)
+	owner := newHostWriteOwner(file)
+	_, err = owner.Write([]byte("complete response\n"))
+	require.NoError(t, err)
+	require.NoError(t, owner.close())
+	_, err = owner.Write([]byte("late response\n"))
+	require.ErrorIs(t, err, errHostWriterClosed)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "complete response\n", string(data))
 }
 
 func newInterruptFullHostWriter() *interruptFullHostWriter {
@@ -1765,9 +1786,7 @@ func TestPostResponseHookRequestReaderTagsLifecycleRequests(t *testing.T) {
 
 func postResponseHookParams(values map[string]string, responseID string) json.RawMessage {
 	params := map[string]string{postResponseHookIDParam: responseID}
-	for key, value := range values {
-		params[key] = value
-	}
+	maps.Copy(params, values)
 
 	raw, _ := json.Marshal(params)
 
@@ -1799,4 +1818,118 @@ func TestConnectionInputGate(t *testing.T) {
 	require.Equal(t, []byte("test"), <-done)
 	require.NoError(t, writer.Close())
 	require.NoError(t, reader.Close())
+}
+
+func TestServePreservesStrictLifecycleMetadata(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, metadata, field string
+	}{
+		{"duplicate version", `"_meta":{"acp-go.dev/lifecycle":{"version":2,"version":1}}`, lifecycle.MetaPath + ".version"},
+		{"rounded fraction", `"_meta":{"acp-go.dev/lifecycle":{"version":1.0000000000000001}}`, lifecycle.MetaPath + ".version"},
+		{"large exponent", `"_meta":{"acp-go.dev/lifecycle":{"version":1e400}}`, lifecycle.MetaPath + ".version"},
+		{"SDK metadata spelling", `"_META":{"acp-go.dev/lifecycle":{"version":2,"version":1}}`, lifecycle.MetaPath + ".version"},
+		{"mixed metadata spelling", `"_meta":{"acp-go.dev/lifecycle":{"version":1}},"_META":{}`, lifecycle.MetaPath},
+		{"duplicate namespace", `"_meta":{"acp-go.dev/lifecycle":{"version":2},"acp-go.dev/lifecycle":{"version":1}}`, lifecycle.MetaPath},
+		{"hidden namespace", `"_meta":{"acp-go.dev/lifecycle":{"version":1}},"_meta":{}`, lifecycle.MetaPath},
+		{"foreign duplicates", `"_meta":{"foreign":{"version":2,"version":1},"acp-go.dev/lifecycle":{"version":1}}`, ""},
+		{"foreign duplicate metadata", `"_meta":{"foreign":1},"_meta":{"foreign":2}`, ""},
+		{"namespace spelling stays exact", `"_meta":{"ACP-GO.DEV/lifecycle":{"version":2,"version":1}}`, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			params := `{"protocolVersion":1,"clientCapabilities":{},` + test.metadata + `}`
+			response := lifecycleWireResponses(t, nil, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+params+`}`)[0]
+			if test.field == "" {
+				require.Nil(t, response.Error)
+
+				return
+			}
+			require.NotNil(t, response.Error)
+			require.Equal(t, -32602, response.Error.Code)
+			require.Equal(t, "Invalid params", response.Error.Message)
+			require.Equal(t, map[string]any{"error": "unsupported", "field": test.field}, response.Error.Data)
+		})
+	}
+}
+
+func TestServeKeepsConstructionAndReservedNamespacePrecedence(t *testing.T) {
+	t.Parallel()
+	request := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"_meta":{"acp-go.dev/lifecycle":{"version":2,"version":1}}}}`
+	response := lifecycleWireResponses(t, []Option{WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1})}, request)[0]
+	require.NotNil(t, response.Error)
+	require.Equal(t, -32603, response.Error.Code)
+
+	cwd, err := json.Marshal(t.TempDir())
+	require.NoError(t, err)
+	authority := newFakeHostAuthority()
+	responses := lifecycleWireResponses(t, []Option{WithHostAuthority(authority)},
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"session/list","params":{"_meta":{"acp-go.dev/lifecycle":{}},"_meta":{}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"_unknown/method","params":{"_meta":{"acp-go.dev/lifecycle":{}},"_meta":{}}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"session/new","params":{"cwd":`+string(cwd)+`,"mcpServers":[],"_meta":{"acp-go.dev/lifecycle":{}},"_meta":{}}}`,
+		`{"jsonrpc":"2.0","id":5,"method":"session/load","params":{"sessionId":"missing","cwd":`+string(cwd)+`,"mcpServers":[],"_meta":{"acp-go.dev/lifecycle":{}},"_meta":{}}}`,
+		`{"jsonrpc":"2.0","id":6,"method":"session/resume","params":{"sessionId":"missing","cwd":`+string(cwd)+`,"mcpServers":[],"_meta":{"acp-go.dev/lifecycle":{}},"_meta":{}}}`,
+		`{"jsonrpc":"2.0","id":7,"method":"_claude/session/fork","params":{"sessionId":"missing","cwd":`+string(cwd)+`,"mcpServers":[],"_meta":{"acp-go.dev/lifecycle":{}},"_meta":{}}}`,
+	)
+	for _, response := range responses[1:] {
+		require.NotNil(t, response.Error)
+		require.Equal(t, -32602, response.Error.Code)
+		require.Equal(t, map[string]any{"error": "unsupported", "field": lifecycle.MetaPath}, response.Error.Data)
+	}
+	require.Empty(t, authority.snapshot())
+}
+
+func TestPromptRawLifecycleValidationKeepsRoutePrecedence(t *testing.T) {
+	t.Parallel()
+	params := json.RawMessage(`{"sessionId":"session","prompt":[{"type":"text","text":"test"}],"_meta":{"acp-go.dev/lifecycle":{"version":1,"submission":{"submissionId":"old","submissionId":"new","clientNonce":"nonce"}}}}`)
+	request, err := decodeLocalAgentParams[acp.PromptRequest, *acp.PromptRequest](params)
+	require.Nil(t, err)
+	agent := NewAgent()
+	agent.retainNegotiatedLifecycle(lifecycle.Negotiated{Version: 1})
+	session := &agentSession{agent: agent}
+	_, promptErr := session.Prompt(t.Context(), request)
+	var requestErr *acp.RequestError
+	require.ErrorAs(t, promptErr, &requestErr)
+	require.Equal(t, map[string]any{"error": "missing", "field": routeMetaPath}, requestErr.Data)
+	request.Meta[routeMetaKey] = map[string]any{routeFieldVer: 1, routeFieldTurn: "turn"}
+	_, promptErr = session.Prompt(t.Context(), request)
+	require.ErrorAs(t, promptErr, &requestErr)
+	require.Equal(t, map[string]any{"error": "unsupported", "field": lifecycle.MetaPath + ".submission.submissionId"}, requestErr.Data)
+}
+
+type lifecycleWireResponse struct {
+	Error *acp.RequestError `json:"error"`
+}
+
+func lifecycleWireResponses(t *testing.T, options []Option, requests ...string) []lifecycleWireResponse {
+	t.Helper()
+	input, writer := io.Pipe()
+	reader, output := io.Pipe()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, input, output, options...) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = writer.Close()
+		_ = reader.Close()
+		_ = input.Close()
+		_ = output.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("Serve did not stop after closing its pipes")
+		}
+	})
+	decoder := json.NewDecoder(reader)
+	responses := make([]lifecycleWireResponse, 0, len(requests))
+	for _, request := range requests {
+		_, err := io.WriteString(writer, request+"\n")
+		require.NoError(t, err)
+		var response lifecycleWireResponse
+		require.NoError(t, decoder.Decode(&response))
+		responses = append(responses, response)
+	}
+
+	return responses
 }

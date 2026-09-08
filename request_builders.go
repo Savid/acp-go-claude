@@ -400,6 +400,7 @@ func cloneClaudeOptions(options ClaudeOptions) ClaudeOptions {
 	cloned.Env = cloneStringMap(options.Env)
 	cloned.ExtraPathDirs = slices.Clone(options.ExtraPathDirs)
 	cloned.OutputSchema = cloneAnyMap(options.OutputSchema)
+	cloned.ProviderAuth = cloneProviderAuthBindings(options.ProviderAuth)
 
 	return cloned
 }

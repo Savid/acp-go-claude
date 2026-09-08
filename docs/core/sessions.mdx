@@ -18,10 +18,9 @@ is reused as the durable store key, so a host can address the same session
 across restarts. Forking an existing session is exposed only through the
 `_claude/session/fork` extension method — there is no separate fork ACP method.
 
-Close is terminal and bounded. It waits, bounded, for an in-flight turn to
-finish before it tears the native process down, so the process is never closed
-under a turn still reading from it; a busy session is waited for rather than
-answered with backpressure. Once close has begun the session admits nothing
+Close stops admission and waits for an in-flight turn's full settlement before
+tearing down the native process. The caller's context bounds that wait;
+individual teardown operations have their own limits. Once close has begun the session admits nothing
 further — a prompt, a relaunch, an MCP registry refresh, and reuse by load,
 resume, or fork all answer the unknown-session error — and a close repeated
 behind one that completed observes that result without repeating any teardown.

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,6 +69,26 @@ func TestProviderAuthInjectionConflictsWithAnyConfiguredAuthOwner(t *testing.T) 
 		result := broker.inject(t.Context(), env, map[string]ProviderAuthBinding{authProviderID: binding})
 		require.Equal(t, authInjectionConflict, result.outcome, name)
 		require.NotEqual(t, "secret-value", env[providerAuthEnvAnthropicAPIKey], name)
+	}
+}
+
+func TestProviderAuthInjectionChecksEffectiveNativeOwner(t *testing.T) {
+	newAuthSeams(t)
+	broker, _ := newAuthBroker(t)
+	previousPlatform := claude.Platform
+	t.Cleanup(func() { claude.Platform = previousPlatform })
+	claude.Platform = "windows"
+	bindings := map[string]ProviderAuthBinding{authProviderID: testProviderAuthBinding(providerAuthEnvAnthropicAPIKey)}
+	env := map[string]string{"anthropic_api_key": "session-owner"}
+	require.Equal(t, authInjectionConflict, broker.inject(t.Context(), env, bindings).outcome)
+	require.NotContains(t, env, providerAuthEnvAnthropicAPIKey)
+
+	broker.agent.options.hostAuthoritySet = true
+	for _, base := range []map[string]string{nil, {providerAuthEnvAnthropicToken: "native-owner"}} {
+		broker.agent.options.HostAuthority = &callbackHostAuthority{environment: func() map[string]string { return base }}
+		env = map[string]string{}
+		require.Equal(t, authInjectionConflict, broker.inject(t.Context(), env, bindings).outcome)
+		require.Empty(t, env)
 	}
 }
 

@@ -107,6 +107,27 @@ func TestRequestBuilderClones(t *testing.T) {
 	require.NotNil(t, unstable[3].Acp)
 }
 
+func TestRequestBuilderSnapshotsProviderAuth(t *testing.T) {
+	t.Parallel()
+	binding := testProviderAuthBinding(providerAuthEnvAnthropicAPIKey)
+	bindings := map[string]ProviderAuthBinding{authProviderID: binding}
+	option := WithSessionClaudeOptions(ClaudeOptions{ProviderAuth: bindings})
+
+	binding.Credential.API.Key = "changed"
+	binding.Credential.API.Metadata[settingsFieldEnv] = providerAuthEnvClaudeOAuthToken
+	delete(bindings, authProviderID)
+
+	request := NewSessionRequest("/repo", option)
+	options, err := claudeOptionsFromMetaWithProviderAuth(request.Meta, true)
+	require.NoError(t, err)
+	require.Equal(t, testProviderAuthBinding(providerAuthEnvAnthropicAPIKey), options.ProviderAuth[authProviderID])
+
+	options.ProviderAuth[authProviderID].Credential.API.Key = "second change"
+	next, err := claudeOptionsFromMetaWithProviderAuth(NewSessionRequest("/repo", option).Meta, true)
+	require.NoError(t, err)
+	require.Equal(t, testProviderAuthBinding(providerAuthEnvAnthropicAPIKey), next.ProviderAuth[authProviderID])
+}
+
 func TestTurnRequestBuildersFailClosedOnInvalidNonce(t *testing.T) {
 	t.Parallel()
 

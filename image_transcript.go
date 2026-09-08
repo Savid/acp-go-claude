@@ -114,7 +114,7 @@ func (s *agentSession) replaceTranscriptImageData(ctx context.Context, block map
 		return nil
 	}
 
-	artifact, ok := s.imageArtifactByIdentity(identity)
+	artifact, ok := s.imageArtifactByContent(identity, data)
 	if !ok {
 		artifact, ok = s.toolArtifactByFingerprint(identity, data)
 	}

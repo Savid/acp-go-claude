@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+
+	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 const (
@@ -57,8 +59,13 @@ func (p *providerAuth) inject(ctx context.Context, env map[string]string, bindin
 		method = authMethodAPIKey
 	}
 
+	effectiveEnv := p.agent.effectiveNativeEnvironment(env)
+	if effectiveEnv == nil {
+		return authInjectionResult{outcome: authInjectionConflict}
+	}
+
 	for _, name := range providerAuthCredentialEnvNames {
-		if env[name] != "" {
+		if effectiveEnv[claude.EnvironmentKey(name)] != "" {
 			return authInjectionResult{outcome: authInjectionConflict}
 		}
 	}

@@ -21,14 +21,17 @@ const (
 	envSearchPath           = "PATH"
 	envClaudeConfigDir      = "CLAUDE_CONFIG_DIR"
 	envHome                 = "HOME"
+	envXDGConfigHome        = "XDG_CONFIG_HOME"
 	cliArgOutputFormat      = "--output-format"
+	cliArgVerbose           = "--verbose"
+	cliArgVersion           = "--version"
 	defaultCLIExecutable    = "claude"
 	minClaudeVersion        = "2.0.0"
 	privateAdapterEnvPrefix = "ACP_GO_CLAUDE_INTERNAL_"
 )
 
 func BuildArgs(options Options) []string {
-	args := []string{cliArgOutputFormat, streamJSON, "--input-format", streamJSON, "--include-partial-messages", "--verbose", "--include-hook-events"}
+	args := []string{cliArgOutputFormat, streamJSON, "--input-format", streamJSON, "--include-partial-messages", cliArgVerbose, "--include-hook-events"}
 	if options.SessionMirror {
 		args = append(args, "--session-mirror")
 	}
@@ -212,7 +215,7 @@ func privateAdapterEnvName(key string) bool {
 
 func managedRootEnvKey(key string) bool {
 	switch EnvironmentKey(key) {
-	case envClaudeConfigDir, envHome, "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
+	case envClaudeConfigDir, envHome, "XDG_CACHE_HOME", envXDGConfigHome, "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
 		return true
 	default:
 		return false
@@ -229,7 +232,7 @@ func prependSearchPath(dirs []string, search string) string {
 }
 
 func validateClaudeVersion(ctx context.Context, options Options) error {
-	output, result, err := runNativeOutput(ctx, options, options.CLIPath, []string{"--version"})
+	output, result, err := runNativeOutput(ctx, options, options.CLIPath, []string{cliArgVersion})
 	if err != nil {
 		return fmt.Errorf("probe claude version: %w", err)
 	}

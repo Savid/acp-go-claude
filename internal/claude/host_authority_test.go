@@ -86,6 +86,11 @@ func TestProcessTransportRoutesProbeAndSessionThroughAuthorityAndWaitsAfterEOF(t
 	require.Equal(t, "/workspace", requests[1].WorkingDirectory)
 	require.Contains(t, requests[1].Environment, "BASE=host")
 	require.Contains(t, requests[1].Environment, "OVERLAY=yes")
+	captured := transport.rateLimitsEnvironment()
+	require.Equal(t, "host", captured["BASE"])
+	require.Equal(t, "yes", captured["OVERLAY"])
+	captured["BASE"] = "changed"
+	require.Equal(t, "host", transport.rateLimitsEnvironment()["BASE"])
 }
 
 func TestProcessTransportCloseUsesProtocolThenRevokeAndWait(t *testing.T) {
@@ -786,7 +791,7 @@ func TestUnusableManagedProcessTerminalWaitAvoidsFalseContainmentFailure(t *test
 	require.NotErrorIs(t, err, incomplete)
 }
 
-func TestAuthAndUsageLaunchThroughAuthority(t *testing.T) {
+func TestAuthLaunchThroughAuthority(t *testing.T) {
 	var requests []NativeRequest
 	authority := &NativeAuthority{
 		NativeEnvironment: func() map[string]string { return map[string]string{"PATH": "/native/bin"} },
@@ -795,9 +800,6 @@ func TestAuthAndUsageLaunchThroughAuthority(t *testing.T) {
 		StartNative: func(_ context.Context, request NativeRequest) (NativeProcess, error) {
 			requests = append(requests, request)
 			output := `{"loggedIn":true}`
-			if len(request.Arguments) > 0 && request.Arguments[0] == "/usage" {
-				output = `{"is_error":false,"result":""}`
-			}
 
 			return &authorityTestProcess{stdin: &authorityTestWriteCloser{}, stdout: io.NopCloser(bytes.NewBufferString(output)), stderr: io.NopCloser(bytes.NewReader(nil)), wait: func(context.Context) (NativeResult, error) { return NativeResult{}, nil }, revoke: func(context.Context) error { return nil }}, nil
 		},
@@ -806,9 +808,6 @@ func TestAuthAndUsageLaunchThroughAuthority(t *testing.T) {
 	account, _, err := AuthStatus(t.Context(), options)
 	require.NoError(t, err)
 	require.True(t, account.LoggedIn)
-	_, err = QueryRateLimits(t.Context(), options)
-	require.NoError(t, err)
-	require.Len(t, requests, 2)
+	require.Len(t, requests, 1)
 	require.Equal(t, []string{"auth", "status", "--json"}, requests[0].Arguments)
-	require.Equal(t, "/usage", requests[1].Arguments[0])
 }

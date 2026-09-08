@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,12 +41,13 @@ type TransportEvent struct {
 }
 
 type ProcessTransport struct {
-	log     *slog.Logger
-	options Options
-	process NativeProcess
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
-	stderr  io.ReadCloser
+	log               *slog.Logger
+	options           Options
+	launchEnvironment map[string]string
+	process           NativeProcess
+	stdin             io.WriteCloser
+	stdout            io.ReadCloser
+	stderr            io.ReadCloser
 
 	mu             sync.Mutex
 	stdinOnce      sync.Once
@@ -83,11 +86,15 @@ func NewProcessTransport(log *slog.Logger, options Options) *ProcessTransport {
 }
 
 func (t *ProcessTransport) Start(ctx context.Context) error {
+	return t.startWithArgs(ctx, BuildArgs(t.options))
+}
+
+func (t *ProcessTransport) startWithArgs(ctx context.Context, arguments []string) error {
 	if err := claudeVersionProbe(ctx, t.options); err != nil {
 		return err
 	}
 
-	process, err := startNative(ctx, t.options, t.options.CLIPath, BuildArgs(t.options))
+	process, err := startNativeObserved(ctx, t.options, t.options.CLIPath, arguments, t.captureLaunchEnvironment)
 	if err != nil {
 		return fmt.Errorf("start claude: %w", err)
 	}
@@ -600,4 +607,27 @@ func (t *ProcessTransport) drainStderr() {
 	if t.stderr != nil {
 		_, _ = io.Copy(io.Discard, t.stderr)
 	}
+}
+
+// captureLaunchEnvironment records the exact environment passed to the session
+// process, including the supplied host authority and explicit empty overrides.
+func (t *ProcessTransport) captureLaunchEnvironment(environment []string) {
+	values := make(map[string]string, len(environment))
+	for _, entry := range environment {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[EnvironmentKey(key)] = value
+		}
+	}
+
+	t.mu.Lock()
+	t.launchEnvironment = values
+	t.mu.Unlock()
+}
+
+func (t *ProcessTransport) rateLimitsEnvironment() map[string]string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return maps.Clone(t.launchEnvironment)
 }

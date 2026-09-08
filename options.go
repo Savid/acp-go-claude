@@ -94,12 +94,10 @@ type Options struct {
 	// layer on top of the base settings.json. It requires an explicit Home.
 	SettingsFile string
 
-	// DirectAPI allows the adapter to make its own outbound calls to the
-	// Anthropic API. It is only consulted by `_claude/rateLimits`, which falls
-	// back to the API when the harness reports no usage windows — that fallback
-	// may issue a billable one-token inference request against the configured
-	// account. Enabled by default; disable it to keep the adapter from
-	// contacting any network service on its own behalf.
+	// DirectAPI enables the setup-token quota header fallback for `_claude/rateLimits`.
+	// When native usage is empty it may make one billable Fable request and one
+	// Haiku fallback, each max_tokens:1.
+	// Enabled by default; WithClaudeDirectAPI(false) disables this fallback.
 	DirectAPI bool
 
 	// DefaultPermissionMode is the initial Claude permission mode.
@@ -392,16 +390,12 @@ func WithClaudeSettingsFile(relpath string) Option {
 	}
 }
 
-// WithClaudeDirectAPI controls whether the adapter may call the Anthropic API
-// itself. It is enabled by default and only affects `_claude/rateLimits`: when
-// the harness reports no usage windows the adapter reads them from the API,
-// which can cost a one-token inference request. Disable it to guarantee the
-// adapter never opens a connection of its own; `_claude/rateLimits` then
-// reports only what the harness prints.
+// WithClaudeDirectAPI enables the setup-token quota header fallback. It defaults
+// to true and may make one billable Fable request and one Haiku fallback, each
+// max_tokens:1, when native usage has no usable windows. False leaves only the
+// native structured quota reader.
 func WithClaudeDirectAPI(enabled bool) Option {
-	return func(options *Options) {
-		options.DirectAPI = enabled
-	}
+	return func(options *Options) { options.DirectAPI = enabled }
 }
 
 // WithClaudeAllowSkipPermissionsFlag permits adding Claude's skip-permissions capability flag.

@@ -13,40 +13,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestClaudeRateLimitsLive exercises `_claude/rateLimits` against the real
-// local Claude CLI. Assertions stay robust to account state: subscription
-// accounts report usage windows, API-billing accounts legitimately report
-// none — the wire shape must hold either way. This test exists to catch
-// upstream changes to the `claude /usage` output format.
+// TestClaudeRateLimitsLive exercises a structured native control read without a prompt.
 func TestClaudeRateLimitsLive(t *testing.T) {
 	parallelWhenPortableClaudeAuth(t)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-
 	client := &recordingClient{}
 	conn := connectLiveAgent(t, ctx, client, acp.InitializeRequest{})
-
-	raw, err := conn.CallExtension(ctx, claudeacp.RateLimitsMethod, struct{}{})
+	session, err := conn.NewSession(ctx, claudeacp.NewSessionRequest(t.TempDir()))
 	require.NoError(t, err)
-
-	var resp claudeacp.RateLimitsResponse
-	require.NoError(t, json.Unmarshal(raw, &resp))
-	require.NotNil(t, resp.Windows)
-
-	seen := make(map[string]struct{}, len(resp.Windows))
-	for _, window := range resp.Windows {
-		require.NotEmpty(t, window.ID)
-		require.NotContains(t, seen, window.ID)
-		seen[window.ID] = struct{}{}
-
-		require.GreaterOrEqual(t, window.UsedPercent, 0.0)
-		require.LessOrEqual(t, window.UsedPercent, 100.0)
-
-		if window.ResetsAt != "" {
-			resetsAt, parseErr := time.Parse(time.RFC3339, window.ResetsAt)
+	raw, err := conn.CallExtension(ctx, claudeacp.RateLimitsMethod, claudeacp.RateLimitsRequest{SessionID: session.SessionId})
+	require.NoError(t, err)
+	var result claudeacp.RateLimitsResponse
+	require.NoError(t, json.Unmarshal(raw, &result))
+	require.Equal(t, "anthropic", result.ProviderID)
+	require.Contains(t, []string{"available", "unavailable", "unsupported"}, result.Availability)
+	require.NotNil(t, result.Pools)
+	if result.Availability == "available" {
+		require.NotEmpty(t, result.Pools)
+	} else {
+		require.Empty(t, result.Pools)
+	}
+	for _, pool := range result.Pools {
+		require.NotEmpty(t, pool.ID)
+		require.NotEmpty(t, pool.Windows)
+		for _, window := range pool.Windows {
+			require.NotNil(t, window.UsedPercent)
+			require.GreaterOrEqual(t, *window.UsedPercent, 0.0)
+			_, parseErr := time.Parse(time.RFC3339Nano, window.ObservedAt)
 			require.NoError(t, parseErr)
-			require.True(t, resetsAt.After(time.Now().Add(-24*time.Hour)))
 		}
 	}
 }

@@ -71,6 +71,10 @@ func (f *nativeWaitFlight) cancelAndJoin(cause error) (NativeResult, error) {
 var nativeGetwd = os.Getwd
 
 func startNative(ctx context.Context, options Options, executable string, arguments []string) (NativeProcess, error) {
+	return startNativeObserved(ctx, options, executable, arguments, nil)
+}
+
+func startNativeObserved(ctx context.Context, options Options, executable string, arguments []string, observeEnvironment func([]string)) (NativeProcess, error) {
 	if executable == "" {
 		executable = defaultCLIExecutable
 	}
@@ -102,6 +106,9 @@ func startNative(ctx context.Context, options Options, executable string, argume
 	}
 
 	request := NativeRequest{Executable: executable, Arguments: append([]string(nil), arguments...), Environment: append([]string(nil), environment...), WorkingDirectory: cwd}
+	if observeEnvironment != nil {
+		observeEnvironment(environment)
+	}
 
 	if options.Authority != nil {
 		if options.Authority.StartNative == nil {

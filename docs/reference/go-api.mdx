@@ -64,9 +64,9 @@ Omitting it selects ordinary same-identity execution.
 | Identity and diagnostics | `WithAgentName`, `WithAgentTitle`, `WithAgentVersion`, `WithLogger` |
 | Telemetry | `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator` |
 
-`WithClaudeDirectAPI(false)` prevents the adapter itself from making the
-Anthropic fallback request used by `_claude/rateLimits`; native Claude network
-behavior is unaffected.
+`RateLimitsRequest`, `RateLimitsResponse`, `RateLimitPool`, `RateLimitWindow`,
+`RateLimitBalance`, and `RateLimitMoney` expose the quota request and response
+types described in [ACP methods](/docs/reference/acp-methods).
 
 `ConcurrencyLimits` caps active sessions and concurrent outbound client calls.
 `ImageLimits` controls decoded input and emitted output byte limits.

@@ -3,7 +3,6 @@ package claudeacp
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -188,10 +187,13 @@ func TestManagedAuthorityLossFansOutToTwoLiveSessions(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// The real usage-probe path reaches HostAuthority.StartNative after its
-	// temporary residence has been prepared. Its explicit authority-loss result
-	// must fence and close both already-live managed sessions.
-	_, err := agent.handleRateLimits(t.Context(), json.RawMessage(`{}`))
+	// A subsequent real session launch reaches HostAuthority.StartNative after
+	// its residence has been prepared. The explicit authority-loss result must
+	// fence and close both already-live managed sessions.
+	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+		return claude.NewClient(log, options, nil)
+	}
+	_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
 	require.ErrorIs(t, err, ErrHostAuthorityUnavailable)
 
 	agent.mu.Lock()

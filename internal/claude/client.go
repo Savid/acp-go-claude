@@ -43,6 +43,9 @@ type Client struct {
 	controlTurnMu    sync.RWMutex
 	controlTurnNonce string
 	controlAdmission ControlHandlerAdmission
+
+	rateLimitsProbeGate chan struct{}
+	rateLimitsProbes    map[*rateLimitsNativeProbe]struct{}
 }
 
 type clientCloseFlight struct {
@@ -83,8 +86,9 @@ type ContextUsage struct {
 
 // SettingsSnapshot contains the subset of Claude settings needed by ACP config options.
 type SettingsSnapshot struct {
-	Applied  AppliedSettings
-	FastMode *bool
+	Applied   AppliedSettings
+	FastMode  *bool
+	Effective map[string]any
 }
 
 // AppliedSettings contains runtime-resolved Claude settings.
@@ -104,10 +108,11 @@ func NewClient(log *slog.Logger, options Options, transport Transport) *Client {
 	}
 
 	return &Client{
-		log:              log,
-		options:          options,
-		transport:        transport,
-		controlAdmission: rejectControlHandlerAdmission,
+		log:                 log,
+		options:             options,
+		transport:           transport,
+		controlAdmission:    rejectControlHandlerAdmission,
+		rateLimitsProbeGate: make(chan struct{}, 1),
 	}
 }
 
@@ -668,9 +673,9 @@ func (c *Client) closeAttempt() error {
 	controller := c.controller
 	c.stateMu.Unlock()
 
-	var closeErr error
+	closeErr := c.closeRateLimitsProbes()
 	if c.transport != nil {
-		closeErr = closedTransportError(c.closeTransport())
+		closeErr = errors.Join(closeErr, closedTransportError(c.closeTransport()))
 	}
 
 	if controller != nil {
@@ -845,7 +850,7 @@ func parseSettings(raw map[string]any) *SettingsSnapshot {
 	fastMode, _ := effectiveRaw[keyFastMode].(bool)
 
 	if appliedRaw == nil {
-		settings := &SettingsSnapshot{}
+		settings := &SettingsSnapshot{Effective: effectiveRaw}
 		if _, ok := effectiveRaw[keyFastMode]; ok {
 			settings.FastMode = &fastMode
 		}
@@ -854,6 +859,7 @@ func parseSettings(raw map[string]any) *SettingsSnapshot {
 	}
 
 	settings := &SettingsSnapshot{
+		Effective: effectiveRaw,
 		Applied: AppliedSettings{
 			Model:  stringValue(appliedRaw[keyModel]),
 			Effort: stringValue(appliedRaw["effort"]),

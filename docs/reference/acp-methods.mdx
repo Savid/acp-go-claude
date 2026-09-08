@@ -100,58 +100,129 @@ rather than cleared.
 
 ### `_claude/rateLimits`
 
-Returns the account's subscription usage as reported percentage windows. The
-adapter runs `claude /usage` non-interactively and parses the usage panel; every
-value is reported by Claude, never derived from token counts. Params are an
-empty object. The response:
+Reads structured provider quota observations. `RateLimitsRequest` accepts optional
+`providerId` and `sessionId` strings. Absent params, `null`, and `{}` are
+accepted. A supplied session must identify an exact live session; it selects
+that session's effective authentication and endpoint. The omitted provider is
+`anthropic`, Claude's single provider identity. Other explicit provider IDs
+return `unsupported` with their spelling preserved.
 
 ```json
 {
-  "windows": [
-    { "id": "session", "usedPercent": 92, "resetsAt": "2026-07-09T13:40:00+10:00" },
-    { "id": "week-all-models", "usedPercent": 73, "resetsAt": "2026-07-11T06:00:00+10:00" }
-  ]
+  "providerId": "anthropic",
+  "availability": "available",
+  "pools": [{
+    "id": "subscription",
+    "planType": "max",
+    "windows": [{
+      "id": "five_hour",
+      "usedPercent": 92,
+      "observedAt": "2026-09-08T03:00:00Z",
+      "resetsAt": "2026-09-08T06:00:00Z"
+    }]
+  }]
 }
 ```
 
-Window `id` values are stable slugs of the panel's window labels (for example
-`session`, `week-all-models`, plus a per-model week window). `resetsAt` is
-RFC3339 and omitted when no reset time is reported. `windows` is empty when the
-account reports no subscription usage (for example on API billing) — an empty
-result is not an error, and any environment trouble — a failed probe run or an
-unresolvable Claude home — also degrades to empty windows rather than failing
-the request. Only malformed params are rejected; the method never fails for
-home, config, or probe reasons. Each call spawns one short-lived `claude`
-probe process, so hosts polling for routing decisions should cache results and
-use `resetsAt` for expiry.
+`availability` is `available`, `unavailable`, or `unsupported`. Available results
+contain at least one pool and no `reason`. Unavailable results have empty
+`pools` and a reason: `not_observed`, `not_authenticated`, `read_failed`,
+`disabled`, or `session_required`. Unsupported results have empty `pools` and
+no reason. Unknown request fields, duplicate fields, malformed JSON, and empty
+selectors produce invalid params with `{"error":"unsupported","field":"…"}`.
 
-#### Direct API fallback
+Each pool has an opaque `id`, optional `label` and `planType`, required `windows`,
+and optional monetary `balances`. Window fields are `id`, optional
+`usedPercent`, `durationSeconds`, and `status`, required `observedAt`, and
+optional `resetsAt`. A window reports a percentage or status (`ok`, `warning`,
+or `exhausted`); a supplied duration is a positive `int64` number of seconds.
+A balance has `id`, optional `used`, `limit`, `remaining`, `uncapped`, and `resetInterval`,
+required `observedAt`, and optional `resetsAt`; monetary values contain `amount`
+and a three-letter uppercase `currency`. Values use major currency units;
+`used` and `limit` are nonnegative, while `remaining` may be negative. Values
+within one balance share a currency. A balance reports at least one monetary
+value or `uncapped:true`; uncapped balances omit `limit` and `remaining`.
+`resetInterval` is `daily`, `weekly`, or `monthly`. Percentages above 100 are
+preserved. Numeric observations are finite. IDs are unique within their
+collection, and each pool contains a window or balance. Timestamps use UTC `Z`.
 
-The `/usage` panel is only populated for a Claude home logged in through
-`claude login`. A home authenticated by `ANTHROPIC_AUTH_TOKEN` or
-`CLAUDE_CODE_OAUTH_TOKEN` prints no windows, because the CLI reads usage only
-for an OAuth session it recognises. When the panel yields no windows and the
-adapter is permitted to make its own outbound calls, it reads the account's
-usage from the Anthropic API instead, in two steps:
+#### Claude sources and availability
 
-1. `GET /api/oauth/usage`, which reports every window. Tokens minted by
-   `claude setup-token` are inference-only and are refused here.
-2. The unified rate-limit response headers on a one-token `POST /v1/messages`
-   request, which report the session and all-models weekly windows. **This is a
-   billable inference request** against the configured account, using the
-   cheapest model (`ANTHROPIC_SMALL_FAST_MODEL`, else
-   `ANTHROPIC_DEFAULT_HAIKU_MODEL`, else `claude-haiku-4-5`).
+A live session uses Claude's experimental structured `get_usage` control
+request with `skip_behaviors:true`. It sends no user prompt and reads no
+slash-command prose. Normalization follows the structured usage schema in
+[Agent SDK 0.3.263](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk/v/0.3.263).
+Claude Code 2.1.263 accepted the control request; native responses can contain
+no quota observations. Older or incompatible native control implementations
+can return `unavailable/read_failed`.
 
-Both steps target `ANTHROPIC_BASE_URL`, defaulting to `https://api.anthropic.com`.
-When no base URL is set, a token that is not Anthropic-issued (no `sk-ant-`
-prefix) is never sent, so a gateway credential cannot leak to Anthropic. The
-result is memoized for 60 seconds to bound billable probes, and window `id`
-values match the panel's, so the wire shape does not depend on which source
-answered. A failing probe yields empty windows rather than an error.
+`five_hour` and `seven_day` windows belong to the `subscription` pool. Native
+`seven_day_oauth_apps`, `seven_day_opus`, and `seven_day_sonnet` allowances
+remain separate pools, each with a `seven_day` window. Other native
+`model_scoped` entries use `model:<display_name>` pool IDs and a `usage` window.
+The source supplies percentages directly. The known `Fable` entry has a
+`durationSeconds` of `604800`, matching its weekly allowance. Other model-scoped
+durations, status, and monetary balances are omitted: this reader has no verified
+mapping for those facts, including the units and currency of native `extra_usage`
+credit values.
+`subscription_type`, when present, becomes `planType`.
 
-Pass [`WithClaudeDirectAPI(false)`](/docs/reference/go-api) to forbid the adapter
-from contacting any network service on its own behalf; the method then reports
-only what the harness prints.
+Every quota read first uses the addressed session's native control connection.
+A call without a session returns `unavailable/session_required`. When native
+usage has no usable windows, the default `WithClaudeDirectAPI(true)` permits
+setup-token header probes: at most one Fable `POST /v1/messages`, then one Haiku
+request only if Fable supplies no usable quota. Both use billable `max_tokens:1`.
+The probes use the exact session process's captured `CLAUDE_CODE_OAUTH_TOKEN` and
+`ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`). Fable uses
+`ANTHROPIC_DEFAULT_FABLE_MODEL`, then `claude-fable-5-1`. The Haiku fallback uses
+`ANTHROPIC_SMALL_FAST_MODEL`, then `ANTHROPIC_DEFAULT_HAIKU_MODEL`, then
+`claude-haiku-4-5`. It makes no credential-store lookup, refresh, or login change.
+
+The Fable request runs through a temporary Claude process with its own empty
+home and working directory, tools disabled, and no session persistence. A private
+loopback bridge forwards only the first request matching the captured setup
+token, Fable model, and one-token limit. Further native attempts cannot reach the
+upstream endpoint. The native process supplies its own request format; the bridge
+discards generated content. Managed launches and temporary trees use the session's
+host authority. Process settlement and successful tree reclaim precede removal;
+failed cleanup retains its owner for client close and prevents fallback.
+
+The fallback requires a readable native `get_settings.effective` snapshot.
+It refuses differing authentication or routing overrides, `apiKeyHelper`, custom
+request headers, bare mode, and environment credentials or cloud selectors that
+take precedence over a setup token. It rechecks the settings after the probe and discards an
+observation if the effective context changed. This follows Claude's documented
+[authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence).
+`WithClaudeDirectAPI(false)` preserves usable native observations. If an eligible
+setup-token probe is the only acquisition path, disabling it returns
+`unavailable/disabled`. With no eligible fallback, native
+`rate_limits_available:false` remains `unsupported`, an empty supported snapshot
+is `unavailable/not_observed`, and a failed control read is
+`unavailable/read_failed`. HTTP 401 probe failures return
+`unavailable/not_authenticated` and stop further probes. Other final probe
+failures return `unavailable/read_failed`.
+Queued native probes honor caller cancellation while another probe is active.
+
+Successful responses and HTTP 429 responses can supply
+`anthropic-ratelimit-unified-5h-*`, `anthropic-ratelimit-unified-7d-*`, and
+`anthropic-ratelimit-unified-7d_oi-*` headers.
+Their utilization fractions become percentage points in the same `subscription`
+pool and `five_hour`/`seven_day` windows as the native reader. The `7d_oi` allowance
+uses `model:Fable` / `usage` with `durationSeconds:604800`, matching native Fable
+model-scoped usage and its [weekly allowance](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
+Invalid optional resets are omitted. The probe refuses redirects, discards the response body
+within a 1 MiB bound, and reports failures without remote error text. It opens
+a direct connection to the configured endpoint; native proxy, custom TLS, and
+custom header settings are not reproduced.
+
+Acquisition has a total 30-second deadline, shortened by the caller's deadline.
+Caller cancellation remains a request error. No adapter cache is maintained;
+`observedAt` records receipt of the native response or quota headers. Observations
+past their reset or 60-second freshness limit are omitted. A changed auth
+binding, session process, or configured environment discards an in-flight result.
+Closed, poisoned, and unknown sessions and agent/authority failures retain their
+usual request errors. The method emits no quota notifications and advertises no
+quota capability metadata.
 
 ## Turn-failure contract
 

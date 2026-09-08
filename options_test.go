@@ -41,6 +41,7 @@ func TestApplyOptionsBranches(t *testing.T) {
 		WithClaudeBareMode(true),
 		WithClaudeSettingSources(SettingSourceProject, SettingSourceLocal),
 		WithClaudeSettingsFile("custom.settings.json"),
+		WithClaudeDirectAPI(false),
 		WithClaudeAllowSkipPermissionsFlag(true),
 		WithClaudeInitializeTimeout(3 * time.Second),
 		WithClaudeControlHandlerTimeout(4 * time.Second),
@@ -77,6 +78,7 @@ func TestApplyOptionsBranches(t *testing.T) {
 	require.True(t, options.BareMode)
 	require.Equal(t, []SettingSource{SettingSourceProject, SettingSourceLocal}, options.SettingSources)
 	require.Equal(t, "custom.settings.json", options.SettingsFile)
+	require.False(t, options.DirectAPI)
 	require.True(t, options.AllowSkipPermissionsFlag)
 	require.Equal(t, 3*time.Second, options.InitializeTimeout)
 	require.Equal(t, 4*time.Second, options.ControlHandlerTimeout)
@@ -95,6 +97,7 @@ func TestApplyOptionsBranches(t *testing.T) {
 	require.Equal(t, []string{"project", "local"}, settingSourceArgs(options.SettingSources))
 
 	defaults := applyOptions(nil)
+	require.True(t, defaults.DirectAPI)
 	require.Equal(t, []SettingSource{SettingSourceUser, SettingSourceProject, SettingSourceLocal}, defaults.SettingSources)
 	require.Equal(t, ImageLimits{
 		MaxInputBytesPerImage:     defaultImageBytes,

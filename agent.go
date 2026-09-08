@@ -19,7 +19,6 @@ import (
 const (
 	ForkSessionMethod = "_claude/session/fork"
 	RawEventMethod    = "_claude/rawEvent"
-	RateLimitsMethod  = "_claude/rateLimits"
 	metaElicitation   = "elicitation"
 )
 
@@ -105,14 +104,12 @@ type Agent struct {
 	closeOnce           sync.Once
 	closeErr            error
 
-	rateLimitsCacheMu sync.Mutex
-	rateLimitsCache   rateLimitsCacheEntry
-	providerAuth      *providerAuth
-	managedImages     *managedImageRoots
+	rateLimitsEpoch uint64
+	providerAuth    *providerAuth
+	managedImages   *managedImageRoots
 
-	newClaudeClient    func(*slog.Logger, claude.Options) *claude.Client
-	queryRateLimits    func(context.Context, claude.Options) (claude.RateLimits, error)
-	queryRateLimitsAPI func(context.Context, claude.RateLimitsProbe) (claude.RateLimits, error)
+	newClaudeClient func(*slog.Logger, claude.Options) *claude.Client
+	queryRateLimits func(context.Context, *claude.Client) (claude.RateLimits, error)
 }
 
 var (
@@ -154,8 +151,13 @@ func NewAgent(opts ...Option) *Agent {
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
 			return claude.NewClient(log, options, nil)
 		},
-		queryRateLimits:    claude.QueryRateLimits,
-		queryRateLimitsAPI: claude.QueryRateLimitsAPI,
+		queryRateLimits: func(ctx context.Context, client *claude.Client) (claude.RateLimits, error) {
+			if client == nil {
+				return claude.RateLimits{}, claude.ErrClientNotStarted
+			}
+
+			return client.ReadRateLimitsWithFallback(ctx, options.DirectAPI)
+		},
 	}
 
 	// A configured root is validated before it is advertised: a leg that cannot

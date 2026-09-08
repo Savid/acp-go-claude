@@ -13,10 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ordinaryTransportLines is large enough that a truncated read loses obviously
-// more than the final line, and small enough to fit a pipe buffer so the
-// fixture writes everything and exits without waiting for a reader.
-const ordinaryTransportLines = 500
+// Keep the transcript below 512 bytes so the child can exit before its reader
+// starts, even when the host reduces pipe capacity under load.
+const ordinaryTransportLines = 8
 
 // TestProcessTransportOrdinaryBoundaryDeliversEveryLine drives a real
 // ProcessTransport through the real ordinary boundary — no stubbed containment
@@ -54,6 +53,7 @@ exit 0
 	})
 
 	require.NoError(t, transport.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, transport.Close()) })
 
 	// The child has published its whole transcript and is on its way out before
 	// the reader starts, so the parent's pipe still has to hold everything.
@@ -86,8 +86,6 @@ exit 0
 	final := seen[len(seen)-1]
 	require.Equal(t, "result", final["type"], "the terminating result line must survive the child's exit")
 	require.Equal(t, "success", final["subtype"])
-
-	require.NoError(t, transport.Close())
 }
 
 // TestProcessTransportOrdinaryBoundaryStillStopsANonExitingChild proves

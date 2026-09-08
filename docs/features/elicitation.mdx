@@ -51,14 +51,13 @@ Masking in the host is presentation, not permission — a masked answer still
 comes back to the adapter in plaintext — so the adapter declines to broker one
 rather than forwarding the form with a redaction hint.
 
-Provider authentication is a separate surface. Its API-key leg is a namespaced
-`_meta` extension this agent implements itself, not an ACP elicitation, and is
+Provider authentication uses the separate `_claude/auth/*` methods and is
 unaffected by this rule.
 
 ## Route correlation
 
 The initialize response advertises
-`_meta["acp-go.dev/route"] = {"version":1}`. Every emitted form or URL
+`agentCapabilities._meta["acp-go.dev/route"] = {"version":1}`. Every emitted form or URL
 elicitation carries version 1, the owning `sessionId`, the current
 `turnNonce`, and exactly one callback correlation (`toolCallId` or
 `requestId`) under that reserved key. Existing non-reserved metadata is

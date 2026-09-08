@@ -1,8 +1,11 @@
 package lifecycle
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
+	"strconv"
+	"strings"
 )
 
 // MetaPath is the request path a rejection names. Negotiation and correlation
@@ -35,12 +38,14 @@ func (e *ParamError) Error() string {
 }
 
 func paramError(members ...string) *ParamError {
-	field := MetaPath
+	var field strings.Builder
+	field.WriteString(MetaPath)
+
 	for _, member := range members {
-		field += "." + member
+		field.WriteString("." + member)
 	}
 
-	return &ParamError{Field: field}
+	return &ParamError{Field: field.String()}
 }
 
 // missingParamError refuses the required key on the bare path. Only the enabled
@@ -60,9 +65,9 @@ func DecodeCapability(meta map[string]any) (bool, *ParamError) {
 		return false, nil
 	}
 
-	fields, ok := raw.(map[string]any)
-	if !ok {
-		return false, paramError()
+	fields, refusal := negotiationObject(raw)
+	if refusal != nil {
+		return false, refusal
 	}
 
 	for key := range fields {
@@ -104,9 +109,9 @@ func DecodePromptCorrelation(meta map[string]any, negotiated Negotiated) (Submis
 		return Submission{}, missingParamError()
 	}
 
-	fields, ok := raw.(map[string]any)
-	if !ok {
-		return Submission{}, paramError()
+	fields, refusal := negotiationObject(raw)
+	if refusal != nil {
+		return Submission{}, refusal
 	}
 
 	for key := range fields {
@@ -162,7 +167,11 @@ func integerValue(raw any) (int, bool) {
 	case int:
 		return value, true
 	case json.Number:
-		number, err := value.Int64()
+		number, err := strconv.ParseInt(string(value), 10, strconv.IntSize)
+
+		return int(number), err == nil
+	case json.RawMessage:
+		number, err := strconv.ParseInt(string(bytes.TrimSpace(value)), 10, strconv.IntSize)
 
 		return int(number), err == nil
 	default:
@@ -171,9 +180,9 @@ func integerValue(raw any) (int, bool) {
 }
 
 func decodeSubmission(raw any) (Submission, *ParamError) {
-	fields, ok := raw.(map[string]any)
-	if !ok {
-		return Submission{}, paramError(fieldSubmission)
+	fields, refusal := negotiationObject(raw, fieldSubmission)
+	if refusal != nil {
+		return Submission{}, refusal
 	}
 
 	for key := range fields {
@@ -219,6 +228,10 @@ func correlationIdentifier(fields map[string]any, key string, required bool) (st
 	}
 
 	value, ok := raw.(string)
+	if encoded, isRaw := raw.(json.RawMessage); isRaw {
+		ok = json.Unmarshal(encoded, &value) == nil
+	}
+
 	if !ok || value == "" || len(value) > IdentifierBound {
 		return "", paramError(fieldSubmission, key)
 	}

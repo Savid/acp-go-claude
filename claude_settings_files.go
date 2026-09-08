@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -113,11 +114,7 @@ func loadDiscoveredSettings(ctx context.Context, cwd string, claudeHome string, 
 		}
 
 		if len(settings.Env) > 0 {
-			if merged.Env == nil {
-				merged.Env = make(map[string]string, len(settings.Env))
-			}
-
-			maps.Copy(merged.Env, settings.Env)
+			merged.Env = mergeEnv(merged.Env, settings.Env)
 		}
 	}
 
@@ -303,12 +300,16 @@ func stringMapSetting(ctx context.Context, raw map[string]any, key string, log *
 }
 
 func mergeEnv(base map[string]string, override map[string]string) map[string]string {
-	if len(base) == 0 {
-		return cloneStringMap(override)
+	if len(base)+len(override) == 0 {
+		return nil
 	}
 
-	merged := cloneStringMap(base)
-	maps.Copy(merged, override)
+	merged := make(map[string]string, len(base)+len(override))
+	for _, source := range []map[string]string{base, override} {
+		for _, key := range slices.Sorted(maps.Keys(source)) {
+			merged[claude.EnvironmentKey(key)] = source[key]
+		}
+	}
 
 	return merged
 }

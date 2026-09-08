@@ -200,7 +200,7 @@ func configOptions(
 				Select: &acp.SessionConfigOptionSelect{
 					Id:           configModel,
 					Name:         "Model",
-					Category:     configCategory(acp.SessionConfigOptionCategoryModel),
+					Category:     new(acp.SessionConfigOptionCategoryModel),
 					CurrentValue: acp.SessionConfigValueId(model),
 					Options: acp.SessionConfigSelectOptions{
 						Ungrouped: &values,
@@ -216,7 +216,7 @@ func configOptions(
 			Select: &acp.SessionConfigOptionSelect{
 				Id:           configMode,
 				Name:         "Mode",
-				Category:     configCategory(acp.SessionConfigOptionCategoryMode),
+				Category:     new(acp.SessionConfigOptionCategoryMode),
 				CurrentValue: acp.SessionConfigValueId(mode),
 				Options: acp.SessionConfigSelectOptions{
 					Ungrouped: &values,
@@ -231,7 +231,7 @@ func configOptions(
 			Select: &acp.SessionConfigOptionSelect{
 				Id:           configOutputStyle,
 				Name:         "Output Style",
-				Category:     configCategory(modelConfigCategory),
+				Category:     new(modelConfigCategory),
 				CurrentValue: acp.SessionConfigValueId(outputStyle),
 				Options: acp.SessionConfigSelectOptions{
 					Ungrouped: &values,
@@ -246,7 +246,7 @@ func configOptions(
 				Select: &acp.SessionConfigOptionSelect{
 					Id:           configEffort,
 					Name:         "Effort",
-					Category:     configCategory(acp.SessionConfigOptionCategoryThoughtLevel),
+					Category:     new(acp.SessionConfigOptionCategoryThoughtLevel),
 					CurrentValue: acp.SessionConfigValueId(effort),
 					Options: acp.SessionConfigSelectOptions{
 						Ungrouped: &values,
@@ -279,7 +279,7 @@ func unstableConfigOptions(
 					Id:           configModel,
 					Name:         "Model",
 					Type:         configTypeSelect,
-					Category:     configCategory(acp.SessionConfigOptionCategoryModel),
+					Category:     new(acp.SessionConfigOptionCategoryModel),
 					CurrentValue: acp.SessionConfigValueId(model),
 					Options: acp.SessionConfigSelectOptions{
 						Ungrouped: &values,
@@ -296,7 +296,7 @@ func unstableConfigOptions(
 				Id:           configMode,
 				Name:         "Mode",
 				Type:         configTypeSelect,
-				Category:     configCategory(acp.SessionConfigOptionCategoryMode),
+				Category:     new(acp.SessionConfigOptionCategoryMode),
 				CurrentValue: acp.SessionConfigValueId(mode),
 				Options: acp.SessionConfigSelectOptions{
 					Ungrouped: &values,
@@ -312,7 +312,7 @@ func unstableConfigOptions(
 				Id:           configOutputStyle,
 				Name:         "Output Style",
 				Type:         configTypeSelect,
-				Category:     configCategory(modelConfigCategory),
+				Category:     new(modelConfigCategory),
 				CurrentValue: acp.SessionConfigValueId(outputStyle),
 				Options: acp.SessionConfigSelectOptions{
 					Ungrouped: &values,
@@ -328,7 +328,7 @@ func unstableConfigOptions(
 					Id:           configEffort,
 					Name:         "Effort",
 					Type:         configTypeSelect,
-					Category:     configCategory(acp.SessionConfigOptionCategoryThoughtLevel),
+					Category:     new(acp.SessionConfigOptionCategoryThoughtLevel),
 					CurrentValue: acp.SessionConfigValueId(effort),
 					Options: acp.SessionConfigSelectOptions{
 						Ungrouped: &values,
@@ -607,16 +607,12 @@ func acpModeForPermission(mode string) acp.SessionModeId {
 }
 
 func selectPositionEncoding(encodings []acp.PositionEncodingKind) acp.PositionEncodingKind {
-	for _, encoding := range encodings {
-		if encoding == acp.PositionEncodingKindUtf8 {
-			return acp.PositionEncodingKindUtf8
-		}
+	if slices.Contains(encodings, acp.PositionEncodingKindUtf8) {
+		return acp.PositionEncodingKindUtf8
 	}
 
-	for _, encoding := range encodings {
-		if encoding == acp.PositionEncodingKindUtf16 {
-			return acp.PositionEncodingKindUtf16
-		}
+	if slices.Contains(encodings, acp.PositionEncodingKindUtf16) {
+		return acp.PositionEncodingKindUtf16
 	}
 
 	return acp.PositionEncodingKindUtf16

@@ -49,7 +49,7 @@ func TestImageOutputInlineStoreReplayAndDedup(t *testing.T) {
 	require.Len(t, subkeys, 1)
 	require.True(t, imageArtifactSubpath(subkeys[0]))
 
-	replay := acp.UpdateAgentMessage(acp.ImageBlock("ignored", "image/jpeg"))
+	replay := acp.UpdateAgentMessage(acp.ImageBlock(png, "image/jpeg"))
 	replay.AgentMessageChunk.Meta = map[string]any{claudeMetaKey: map[string]any{
 		"messageId":           "message-1",
 		"_internalImageIndex": 0,
@@ -465,7 +465,7 @@ func TestImageOutputReplayValidation(t *testing.T) {
 	block, _, err := session.prepareOutputContent(
 		t.Context(),
 		valid.Identity,
-		acp.ImageBlock("ignored", "image/jpeg"),
+		acp.ImageBlock(png, "image/jpeg"),
 		true,
 	)
 	require.NoError(t, err)
@@ -529,17 +529,61 @@ func TestImageOutputReplayValidation(t *testing.T) {
 			replay := &agentSession{
 				agent: agent,
 				imageArtifacts: map[string]storedImageArtifact{
-					imageArtifactKey(test.artifact.Identity, test.artifact.Fingerprint): test.artifact,
+					imageArtifactKey(test.artifact.Identity, fingerprint): test.artifact,
 				},
 			}
 			_, _, err := replay.prepareOutputContent(
 				t.Context(),
 				test.artifact.Identity,
-				acp.ImageBlock("ignored", "image/png"),
+				acp.ImageBlock(png, "image/png"),
 				true,
 			)
 			requireImageOutputError(t, err, test.reason)
 		})
+	}
+}
+
+func TestImageOutputReplayPreservesContentVersions(t *testing.T) {
+	t.Parallel()
+	session := &agentSession{agent: NewAgent(), id: "versions"}
+	t.Cleanup(func() { require.NoError(t, session.agent.Close()) })
+	identity := "tool:replace-image:0"
+	images := []acp.ContentBlock{
+		acp.ImageBlock(outputFixtureBase64(t, "valid.png"), "image/png"),
+		acp.ImageBlock(base64.StdEncoding.EncodeToString(validBMP()), "image/bmp"),
+	}
+	_, _, err := session.prepareOutputContent(t.Context(), identity, images[0], false)
+	require.NoError(t, err)
+	// The newer mirror frame can arrive before live emission stores its bytes.
+	newer := map[string]any{
+		jsonFieldType: imageContentType,
+		"source": map[string]any{
+			jsonFieldType:      transcriptSourceBase64,
+			jsonFieldMediaType: images[1].Image.MimeType,
+			jsonFieldData:      images[1].Image.Data,
+		},
+	}
+	require.NoError(t, session.replaceTranscriptImageData(t.Context(), newer, identity))
+	require.Len(t, session.imageArtifacts, 2)
+
+	for _, content := range images {
+		replayed, _, err := session.prepareOutputContent(t.Context(), identity, content, true)
+		require.NoError(t, err)
+		require.Equal(t, content, replayed)
+
+		block := map[string]any{
+			jsonFieldType: imageContentType,
+			"source": map[string]any{
+				jsonFieldType:      transcriptSourceBase64,
+				jsonFieldMediaType: content.Image.MimeType,
+				jsonFieldData:      content.Image.Data,
+			},
+		}
+		require.NoError(t, session.replaceTranscriptImageData(t.Context(), block, identity))
+		require.NoError(t, rehydrateTranscriptValue(block, session.imageArtifacts))
+		data, mimeType := diagnosticImageData(block)
+		require.Equal(t, content.Image.Data, data)
+		require.Equal(t, content.Image.MimeType, mimeType)
 	}
 }
 
@@ -991,10 +1035,10 @@ func TestImageArtifactStoreEdges(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, stored, again)
 
-	found, ok := session.imageArtifactByIdentity(valid.Identity)
+	found, ok := session.imageArtifactByContent(valid.Identity, valid.Data)
 	require.True(t, ok)
 	require.Equal(t, stored, found)
-	_, ok = session.imageArtifactByIdentity("missing")
+	_, ok = session.imageArtifactByContent("missing", valid.Data)
 	require.False(t, ok)
 	found, ok = session.imageArtifactByFingerprint("agent:", valid.Fingerprint)
 	require.True(t, ok)

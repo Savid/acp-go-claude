@@ -40,7 +40,8 @@ func openHandoffFile(root *os.Root, name string) (openedHandoffFile, error) {
 // the root to a file outside it is readable; the declared digest, not the root,
 // is what makes handed-over bytes trustworthy.
 type handoffImageReader struct {
-	root string
+	root    string
+	managed *managedImageRoots
 }
 
 var _ mapper.HandoffFileReader = (*handoffImageReader)(nil)
@@ -53,6 +54,14 @@ func newHandoffImageReader(root string) mapper.HandoffFileReader {
 	}
 
 	return &handoffImageReader{root: root}
+}
+
+func (a *Agent) handoffImageReader() mapper.HandoffFileReader {
+	if a.options.InputHandoffRoot == "" {
+		return nil
+	}
+
+	return &handoffImageReader{root: a.options.InputHandoffRoot, managed: a.managedImages}
 }
 
 func validateInputHandoffRoot(root string) error {
@@ -80,14 +89,13 @@ func (r *handoffImageReader) OpenHandoffImage(ctx context.Context, path string) 
 		)
 	}
 
-	root, err := os.OpenRoot(r.root)
+	file, err := r.openFile(path, name)
 	if err != nil {
-		return nil, handoffRefused(mapper.HandoffPathNotAllowed, "handoff read root cannot be opened")
-	}
-	defer root.Close()
+		var refused *mapper.HandoffPathError
+		if errors.As(err, &refused) {
+			return nil, err
+		}
 
-	file, err := handoffOpenFile(root, name)
-	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, handoffRefused(mapper.HandoffMissingFile, "handoff file does not exist")
 		}
@@ -105,6 +113,20 @@ func (r *handoffImageReader) OpenHandoffImage(ctx context.Context, path string) 
 	}
 
 	return file, nil
+}
+
+func (r *handoffImageReader) openFile(path, name string) (openedHandoffFile, error) {
+	if r.managed != nil {
+		return r.managed.open(path, []string{r.root})
+	}
+
+	root, err := os.OpenRoot(r.root)
+	if err != nil {
+		return nil, handoffRefused(mapper.HandoffPathNotAllowed, "handoff read root cannot be opened")
+	}
+	defer root.Close()
+
+	return handoffOpenFile(root, name)
 }
 
 // requireRegularHandoffFile refuses everything os.Root admits but this read

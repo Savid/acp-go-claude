@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"sync"
 
@@ -107,6 +108,7 @@ type Agent struct {
 	rateLimitsCacheMu sync.Mutex
 	rateLimitsCache   rateLimitsCacheEntry
 	providerAuth      *providerAuth
+	managedImages     *managedImageRoots
 
 	newClaudeClient    func(*slog.Logger, claude.Options) *claude.Client
 	queryRateLimits    func(context.Context, claude.Options) (claude.RateLimits, error)
@@ -159,6 +161,14 @@ func NewAgent(opts ...Option) *Agent {
 	// A configured root is validated before it is advertised: a leg that cannot
 	// record what it does must not be offered.
 	if agent.configurationErr == nil {
+		if options.hostAuthoritySet {
+			agent.managedImages = &managedImageRoots{
+				domainPaths: managedImageDomains(options),
+				handoff:     options.InputHandoffRoot,
+			}
+			agent.options.HostAuthority = &managedImageAuthority{HostAuthority: options.HostAuthority, images: agent.managedImages}
+		}
+
 		agent.providerAuth = newProviderAuth(agent)
 	}
 
@@ -195,6 +205,9 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 func (a *Agent) Close() error {
 	a.closeOnce.Do(func() {
 		a.closeErr = a.close()
+		if a.managedImages != nil {
+			a.managedImages.close()
+		}
 	})
 
 	return a.closeErr
@@ -255,14 +268,11 @@ func (a *Agent) close() error {
 	var closes sync.WaitGroup
 
 	for index, session := range sessions {
-		closes.Add(1)
-
-		go func() {
-			defer closes.Done()
+		closes.Go(func() {
 			defer recoverAgentGoroutine(context.Background(), a.log, "session close")
 
 			closeErrs[index] = session.Close(context.Background())
-		}()
+		})
 	}
 
 	closes.Wait()
@@ -347,9 +357,7 @@ func (a *Agent) recordContainmentError(err error) {
 	}
 
 	sessions := make(map[acp.SessionId]*agentSession, len(a.sessions))
-	for id, session := range a.sessions {
-		sessions[id] = session
-	}
+	maps.Copy(sessions, a.sessions)
 
 	done := make(chan struct{})
 	a.authorityFanoutDone = done
@@ -369,10 +377,7 @@ func (a *Agent) closeAuthorityFailedSessions(sessions map[acp.SessionId]*agentSe
 
 	var closes sync.WaitGroup
 	for id, session := range sessions {
-		closes.Add(1)
-
-		go func() {
-			defer closes.Done()
+		closes.Go(func() {
 			defer recoverAgentGoroutine(context.Background(), a.log, "authority-loss session close")
 
 			closeErr := session.Close(context.Background())
@@ -384,7 +389,7 @@ func (a *Agent) closeAuthorityFailedSessions(sessions map[acp.SessionId]*agentSe
 			if !errors.Is(closeErr, errSessionCloseUnsettled) {
 				a.dropSession(context.Background(), id, session)
 			}
-		}()
+		})
 	}
 
 	closes.Wait()

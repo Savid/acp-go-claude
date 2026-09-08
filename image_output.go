@@ -290,7 +290,7 @@ func (s *agentSession) prepareOutputContent(
 	}
 
 	if replay {
-		artifact, ok := s.imageArtifactByIdentity(identity)
+		artifact, ok := s.imageArtifactByContent(identity, content.Image.Data)
 		if !ok {
 			artifact, ok = s.toolArtifactByFingerprint(identity, content.Image.Data)
 		}
@@ -528,7 +528,16 @@ func localImagePath(location string) (string, error) {
 	}
 }
 
+func (a *Agent) prepareManagedImageRoots(cwd, imageScratchDir string) {
+	if a.managedImages != nil {
+		a.managedImages.prepare(cwd, imageScratchDir, os.TempDir())
+	}
+}
+
 func (s *agentSession) readAllowedImageFile(ctx context.Context, path string) ([]byte, error) {
+	if s.agent.managedImages != nil {
+		return s.readManagedImageFile(ctx, path)
+	}
 	// The harness sandbox already permits writing to the OS temp directory, so
 	// a root set without it refuses reads of files the model was allowed to
 	// create. A temp file stays subject to every check below: the temp
@@ -591,6 +600,34 @@ func (s *agentSession) readAllowedImageFile(ctx context.Context, path string) ([
 	}
 	defer file.Close()
 
+	return readImageFileBytes(ctx, file, limit)
+}
+
+func (s *agentSession) readManagedImageFile(ctx context.Context, path string) ([]byte, error) {
+	file, err := s.agent.managedImages.open(path, []string{s.cwd, s.imageScratchDir, os.TempDir()})
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, imageOutputFailure(imageOutputMissingFile, "image output file does not exist", 0, 0)
+		}
+
+		return nil, imageOutputFailure(imageOutputPathNotAllowed, "image output path is outside the allowed roots", 0, 0)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, imageOutputFailure(imageOutputPathNotAllowed, "image output path is not a regular file", 0, 0)
+	}
+
+	limit := effectiveOutputLimit(s.agent.options.ImageLimits.MaxOutputBytesPerImage)
+	if info.Size() > limit {
+		return nil, imageOutputFailure(imageOutputTooLarge, "image output exceeds the configured per-image limit", info.Size(), limit)
+	}
+
+	return readImageFileBytes(ctx, file, limit)
+}
+
+func readImageFileBytes(ctx context.Context, file io.Reader, limit int64) ([]byte, error) {
 	reader := io.LimitReader(file, limit+1)
 
 	data, err := imageOutputReadAll(reader)

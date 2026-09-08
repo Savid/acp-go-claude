@@ -390,7 +390,7 @@ func TestHandoffImageURIDefects(t *testing.T) {
 		{name: "absent", uri: nil, message: "handoff block carries no uri"},
 		{name: "blank", uri: &blank, message: "handoff block carries no uri"},
 		{name: "unparsable", uri: &unparsable, message: "handoff uri cannot be parsed"},
-		{name: "not a file uri", uri: ptr("https://example.test/a.png"), message: "handoff uri scheme must be file"},
+		{name: "not a file uri", uri: new("https://example.test/a.png"), message: "handoff uri scheme must be file"},
 		{name: "foreign host", uri: &remote, message: "handoff uri host is not local"},
 		{name: "relative path", uri: &opaque, message: "handoff uri path must be absolute"},
 	}
@@ -608,10 +608,6 @@ func fixtureHeaderPNG() []byte {
 	header[23] = 1
 
 	return header
-}
-
-func ptr(value string) *string {
-	return &value
 }
 
 // wrapBase64 breaks an encoded payload into lines the way a host emitting MIME

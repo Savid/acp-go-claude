@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -27,6 +28,7 @@ func TestOrdinaryExecutableResolutionPrecedesWorkingDirectoryChange(t *testing.T
 
 	process, err := startOrdinaryNative("claude", nil, []string{"PATH=."}, sessionDir)
 	require.NoError(t, err)
+	cleanupOrdinaryTestProcess(t, process)
 	require.NoError(t, process.Stdin().Close())
 	output, err := io.ReadAll(process.Stdout())
 	require.NoError(t, err)
@@ -39,6 +41,7 @@ func TestOrdinaryExecutableResolutionPrecedesWorkingDirectoryChange(t *testing.T
 func TestOrdinaryWaitPreservesBufferedOutput(t *testing.T) {
 	process, err := startOrdinaryNative("/bin/sh", []string{"-c", "printf trailing"}, []string{"PATH=/usr/bin:/bin"}, t.TempDir())
 	require.NoError(t, err)
+	cleanupOrdinaryTestProcess(t, process)
 	require.NoError(t, process.Stdin().Close())
 
 	result, err := process.Wait(t.Context())
@@ -53,6 +56,7 @@ func TestOrdinaryWaitPreservesBufferedOutput(t *testing.T) {
 func TestOrdinaryNativeResultPreservesNaturalAndRevokedOutcomes(t *testing.T) {
 	natural, err := startOrdinaryNative("/bin/sh", []string{"-c", "exit 7"}, []string{"PATH=/usr/bin:/bin"}, t.TempDir())
 	require.NoError(t, err)
+	cleanupOrdinaryTestProcess(t, natural)
 	require.NoError(t, natural.Stdin().Close())
 	result, err := natural.Wait(t.Context())
 	require.NoError(t, err)
@@ -66,6 +70,7 @@ func TestOrdinaryNativeResultPreservesNaturalAndRevokedOutcomes(t *testing.T) {
 
 	revoked, err := startOrdinaryNative("/bin/sh", []string{"-c", "while :; do sleep 1; done"}, []string{"PATH=/usr/bin:/bin"}, t.TempDir())
 	require.NoError(t, err)
+	cleanupOrdinaryTestProcess(t, revoked)
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 	revokeErr := revoked.Revoke(cancelled)
@@ -76,4 +81,18 @@ func TestOrdinaryNativeResultPreservesNaturalAndRevokedOutcomes(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, result.Revoked)
 	require.Equal(t, int(syscall.SIGKILL), result.Signal)
+}
+
+func cleanupOrdinaryTestProcess(t *testing.T, process NativeProcess) {
+	t.Helper()
+	t.Cleanup(func() {
+		defer process.Stdin().Close()
+		defer process.Stdout().Close()
+		defer process.Stderr().Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, process.Revoke(ctx))
+		_, err := process.Wait(ctx)
+		require.NoError(t, err)
+	})
 }

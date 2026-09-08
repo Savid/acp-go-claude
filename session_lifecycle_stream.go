@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strconv"
 	"sync"
@@ -1218,9 +1219,7 @@ func withLifecycleMeta(meta map[string]any, lifecycleMeta map[string]any) map[st
 		merged = map[string]any{}
 	}
 
-	for key, value := range lifecycleMeta {
-		merged[key] = value
-	}
+	maps.Copy(merged, lifecycleMeta)
 
 	return merged
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
+	"slices"
 )
 
 // AuthKeychainItem names one generic-password item the login Keychain may hold
@@ -75,11 +76,5 @@ func authKeychainAccount(user string) string {
 }
 
 func authKeychainAbsent(code int) bool {
-	for _, absent := range authKeychainAbsentExitCodes {
-		if code == absent {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(authKeychainAbsentExitCodes, code)
 }

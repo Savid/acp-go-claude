@@ -211,13 +211,13 @@ func TestWorkflowTerminalStatuses(t *testing.T) {
 		status     string
 		wantStatus *acp.ToolCallStatus
 	}{
-		{status: workflowStatusCompleted, wantStatus: ptrStatus(acp.ToolCallStatusCompleted)},
-		{status: workflowStatusFailed, wantStatus: ptrStatus(acp.ToolCallStatusFailed)},
-		{status: workflowStatusStopped, wantStatus: ptrStatus(acp.ToolCallStatusFailed)},
-		{status: workflowStatusKilled, wantStatus: ptrStatus(acp.ToolCallStatusFailed)},
-		{status: workflowStatusPending, wantStatus: ptrStatus(acp.ToolCallStatusInProgress)},
-		{status: workflowStatusRunning, wantStatus: ptrStatus(acp.ToolCallStatusInProgress)},
-		{status: workflowStatusPaused, wantStatus: ptrStatus(acp.ToolCallStatusInProgress)},
+		{status: workflowStatusCompleted, wantStatus: new(acp.ToolCallStatusCompleted)},
+		{status: workflowStatusFailed, wantStatus: new(acp.ToolCallStatusFailed)},
+		{status: workflowStatusStopped, wantStatus: new(acp.ToolCallStatusFailed)},
+		{status: workflowStatusKilled, wantStatus: new(acp.ToolCallStatusFailed)},
+		{status: workflowStatusPending, wantStatus: new(acp.ToolCallStatusInProgress)},
+		{status: workflowStatusRunning, wantStatus: new(acp.ToolCallStatusInProgress)},
+		{status: workflowStatusPaused, wantStatus: new(acp.ToolCallStatusInProgress)},
 		{status: "future", wantStatus: nil},
 	}
 
@@ -408,8 +408,4 @@ func requireWorkflowList(t *testing.T, value any) []map[string]any {
 	require.True(t, ok)
 
 	return raw
-}
-
-func ptrStatus(status acp.ToolCallStatus) *acp.ToolCallStatus {
-	return &status
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -59,10 +60,8 @@ func schemaSolicitsSecret(value any) bool {
 			}
 		}
 	case []any:
-		for _, nested := range typed {
-			if schemaSolicitsSecret(nested) {
-				return true
-			}
+		if slices.ContainsFunc(typed, schemaSolicitsSecret) {
+			return true
 		}
 	}
 
@@ -347,7 +346,7 @@ func askUserQuestionMessage(questions []askUserQuestion) string {
 
 func askUserQuestionSchema(questions []askUserQuestion) acp.UnstableElicitationSchema {
 	schema := acp.UnstableElicitationSchema{
-		Title:      acp.Ptr("Claude question"),
+		Title:      new("Claude question"),
 		Properties: make(map[string]any, len(questions)),
 		Required:   make([]string, 0, len(questions)),
 		Type:       acp.UnstableElicitationSchemaTypeObject,

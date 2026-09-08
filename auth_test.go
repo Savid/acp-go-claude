@@ -392,15 +392,85 @@ func TestProviderAuthUnadvertisedWithCredentialEnvironment(t *testing.T) {
 	}
 
 	t.Setenv(providerAuthEnvClaudeOAuthToken, "inherited")
-	require.True(t, providerAuthCredentialEnvironmentConfigured(Options{}))
-	require.False(t, providerAuthCredentialEnvironmentConfigured(Options{
-		Env: map[string]string{providerAuthEnvClaudeOAuthToken: ""},
-	}))
+	agent := NewAgent()
+	require.True(t, providerAuthCredentialEnvironmentConfigured(agent.effectiveNativeEnvironment(nil)))
+	require.False(t, providerAuthCredentialEnvironmentConfigured(agent.effectiveNativeEnvironment(
+		map[string]string{providerAuthEnvClaudeOAuthToken: ""},
+	)))
 
 	// The ambient arm answers for exactly the environment ordinary
 	// same-identity execution hands the child, so a host that scopes its
 	// worker environment keeps deciding what this surface sees.
 	require.Equal(t, "inherited", claude.OrdinaryEnvironment()[providerAuthEnvClaudeOAuthToken])
+	t.Setenv(providerAuthEnvClaudeOAuthToken, "")
+	require.True(t, providerAuthCredentialEnvironmentConfigured(agent.effectiveNativeEnvironment(nil)))
+}
+
+func TestProviderAuthAdvertisementUsesEffectiveNativeEnvironment(t *testing.T) {
+	for _, name := range providerAuthCredentialEnvNames {
+		t.Setenv(name, "")
+	}
+	// An adapter credential belongs to a different identity in managed mode.
+	t.Setenv(providerAuthEnvAnthropicToken, "adapter-only")
+
+	previousPlatform := claude.Platform
+	t.Cleanup(func() { claude.Platform = previousPlatform })
+	for _, platform := range []string{"linux", "windows"} {
+		t.Run(platform, func(t *testing.T) {
+			claude.Platform = platform
+			for _, test := range []struct {
+				name       string
+				base       map[string]string
+				overlay    map[string]string
+				advertised bool
+			}{
+				{name: "authority key", base: map[string]string{providerAuthEnvAnthropicAPIKey: "authority-only"}},
+				{name: "adapter key excluded", base: map[string]string{}, advertised: true},
+				{name: "empty override", base: map[string]string{providerAuthEnvAnthropicAPIKey: "authority-only"}, overlay: map[string]string{providerAuthEnvAnthropicAPIKey: ""}, advertised: true},
+				{name: "overlay key", base: map[string]string{}, overlay: map[string]string{providerAuthEnvAnthropicAPIKey: "explicit"}},
+				{name: "platform name", base: map[string]string{"anthropic_api_key": "authority-only"}, advertised: platform != "windows"},
+				{name: "platform empty override", base: map[string]string{providerAuthEnvAnthropicAPIKey: "authority-only"}, overlay: map[string]string{"anthropic_api_key": ""}, advertised: platform == "windows"},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					authority := &callbackHostAuthority{environment: func() map[string]string { return cloneStringMap(test.base) }}
+					agent := NewAgent(
+						WithHostAuthority(authority), WithEnv(test.overlay),
+						WithHome(t.TempDir()), WithProviderAuthRoot(t.TempDir()),
+						WithLogger(slog.New(slog.DiscardHandler)),
+					)
+					t.Cleanup(func() { require.NoError(t, agent.Close()) })
+					response, err := agent.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+					require.NoError(t, err)
+					vendor, ok := response.AgentCapabilities.Meta[claudeMetaKey].(map[string]any)
+					require.True(t, ok)
+					if test.advertised {
+						require.NotNil(t, agent.providerAuth)
+						require.Equal(t, agent.providerAuth.capability(), vendor[providerAuthCapabilityKey])
+						require.Len(t, agent.providerAuth.authMethodNames(), 8)
+						require.False(t, agent.providerAuth.directHome)
+					} else {
+						require.Nil(t, agent.providerAuth)
+						require.NotContains(t, vendor, providerAuthCapabilityKey)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestProviderAuthWithholdsAdvertisementWhenNativeEnvironmentDisappears(t *testing.T) {
+	calls := 0
+	authority := &callbackHostAuthority{environment: func() map[string]string {
+		calls++
+		if calls == 1 {
+			return map[string]string{}
+		}
+
+		return nil
+	}}
+	agent := NewAgent(WithHostAuthority(authority), WithHome(t.TempDir()), WithProviderAuthRoot(t.TempDir()), WithLogger(slog.New(slog.DiscardHandler)))
+	require.Nil(t, agent.providerAuth)
+	require.NoError(t, agent.Close())
 }
 
 func TestProviderAuthUnadvertisedWithAgentWideStaticAuthentication(t *testing.T) {

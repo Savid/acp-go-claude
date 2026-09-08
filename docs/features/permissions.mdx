@@ -34,9 +34,11 @@ err := claudeacp.Serve(ctx, input, output,
 ## Answering a prompt
 
 Each permission prompt carries the tool request and a set of options; the host
-answers by selecting an option id. The chosen decision is remembered for the rest
-of the session and is copied to a forked session only through intentional fork
-behavior. A prompt stays open for as long as the host keeps it open: the
+answers by selecting an option id. Ordinary tool prompts offer allow once,
+allow always, reject once, and reject always. Only the always choices persist
+for the session; fork intentionally copies those rules. `ExitPlanMode` instead
+offers the available mode transitions and a choice to keep planning, so its
+menu can have a different number of entries. A prompt stays open while the host keeps it open: the
 control-handler timeout bounds only requests the adapter answers on its own, and
 a pending prompt ends with the host's answer, `session/cancel`, or session
 teardown.

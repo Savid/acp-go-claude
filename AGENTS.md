@@ -1,137 +1,101 @@
 # AGENTS.md
 
-Shared instructions for automated coding agents working in this repository.
+Instructions for automated coding agents working in this repository.
 
 ## Purpose
 
-This project is a Go implementation of an ACP agent for Claude Code. It wraps
-the local `claude` CLI and builds directly on `github.com/coder/acp-go-sdk`.
+This Go ACP agent wraps the local Claude Code CLI using
+`github.com/coder/acp-go-sdk`. Session-scoped CLI processes own model execution;
+the adapter owns ACP dispatch, process boundaries, mapping, and durable state.
 
 ## Project Map
 
-Organized by domain. Public surface lives in the root package; implementation
-details live in `internal/`.
-
-- **Entrypoint** (`cmd/acp-go-claude`): process entrypoint, ACP stdio mode,
-  Claude passthrough mode, tracing setup, and signal handling.
-- **ACP agent surface** (root package, e.g. `agent.go`, `agent_connection.go`,
-  `agent_dispatcher.go`, `options.go`, `ids.go`): ACP method handlers, request
-  dispatch, agent options, and ID helpers.
-- **Session orchestration** (`session.go`, `session_meta.go`, `raw_events.go`,
-  `session_store.go`):
-  Claude turn lifecycle, prompts, cancellation, permissions, elicitation,
-  usage updates, transcript replay, session storage, and raw event handling.
-- **Configuration** (`claude_model_config.go`, `claude_settings_files.go`):
-  provider/model resolution and Claude settings-file handling.
-- **Claude CLI internals** (`internal/claude`): CLI process management,
-  stream-json protocol, control protocol, command construction, event decoding.
-- **Protocol mapping** (`internal/mapper`): ACP-to-Claude mapping for prompts,
-  MCP config, modes, models, and updates.
-- **Session state** (`internal/permissions`, `internal/transcript`): session
-  permission persistence and Claude transcript discovery/replay.
-- **Lifecycle protocol** (`internal/lifecycle`, `testdata/lifecycle`): strict
-  envelope decoding, reduction, emission, negotiation, and canonical vectors.
-- **Live tests** (`integration`): integration tests that launch the real local
-  `claude` CLI.
-- **Docs** (`docs/`, `docs.json`): Mintlify guide. Update alongside public API,
-  CLI flag, ACP method, or `_meta` field changes.
+- `cmd/acp-go-claude`: ACP stdio entrypoint, tracing, and signal handling.
+- Root `agent*.go`, `options.go`, `request_builders.go`: public API and dispatch.
+- `session*.go`, `raw_events.go`: prompt/lifecycle ownership, callbacks,
+  cancellation, transcript replay, and session storage.
+- `claude_*config.go`, `claude_environment.go`, `claude_settings_files.go`:
+  effective native environment, provider/model resolution, and settings.
+- `auth*.go`, `host_authority*.go`, `image*.go`: provider auth, borrowed
+  process/tree authority, and bounded media/handoff/artifact handling.
+- `internal/claude`: native command construction, process control, stream-json,
+  and control protocol. `internal/mapper`: ACP/native mapping.
+- `internal/permissions`, `internal/transcript`: permission persistence and
+  transcript discovery/replay.
+- `internal/lifecycle`, `testdata/lifecycle`: negotiation, decoding, reduction,
+  emission, and canonical vectors. `internal/observer`: instrumentation.
+- `integration`: explicitly gated native tests and deterministic MCP helpers.
+- `docs/`, `docs.json`, `examples/`: public guidance and embedding examples.
 
 ## Commands
 
-```sh
-go build ./...
-go test ./...
-go test -race ./...
-golangci-lint run ./...
-```
+- `make test`: race-enabled, shuffled unit suite with the configured timeout.
+- `make lint`: pinned golangci-lint; rules live in `.golangci.yml`.
+- `make coverage-check`: the full race/shuffle suite with coverage reporting.
+- `make docs-audit`: required documentation and CLI registration checks.
+- `make audit`: full local gate, including module tidy. Inspect the target and
+  select checks appropriate to the task.
 
-Lint details live in `.golangci.yml`.
-
-The Makefile wraps the main development checks:
-
-```sh
-make test
-make lint
-make audit
-```
-
-Run live integration tests only when a local Claude CLI is installed and
-authenticated:
-
-```sh
-ACP_GO_CLAUDE_RUN_INTEGRATION=1 ACP_GO_CLAUDE_RUN_LIVE_TOKENS=1 go test -race -count=1 -tags=integration -timeout=900s -parallel=4 -v ./integration/...
-```
-
-`ACP_GO_CLAUDE_RUN_INTEGRATION=1` gates the integration tier;
-`ACP_GO_CLAUDE_RUN_LIVE_TOKENS=1` additionally opts in to tests that spend
-model tokens (`make test-integration-smoke` omits it).
-Use `make test-integration-cover` for compiled `acp-go-claude` coverage through
-`GOCOVERDIR`. Set `ACP_GO_CLAUDE_MODEL` to override the model used by live
-tests. Live tests always launch Claude with an isolated temp
-`CLAUDE_CONFIG_DIR`. Set `ACP_GO_CLAUDE_HOME` to choose the source Claude config
-copied into that temp home. When `ACP_GO_CLAUDE_HOME` is unset and process env
-auth is available, tests use a fresh temp home. If neither env auth nor copied
-portable file auth is available, tests fail instead of using the normal Claude
-home.
+Native tests require explicit task authorization. Use the existing
+`test-integration-smoke`, `test-integration-native-browser`,
+`test-integration-live`, `test-integration-attended`, and
+`test-integration-keystore` targets for their respective proofs; none is part
+of `make audit`. The targets set execution gates, which do not themselves
+authorize model spend, account interaction, or browser execution.
+`make test-integration-cover` collects compiled-adapter coverage.
 
 ## Coding Rules
 
-- Follow standard Go idioms: `ctx` first, no `ctx` in structs, and `%w` for
-  wrapped errors.
-- Keep the public root package small; implementation details belong in
-  `internal/` unless they are part of the public API.
-- Prefer structured protocol types and JSON decoding over ad hoc string parsing.
-- Preserve ACP method names, request/response shapes, and validation behavior.
-- Keep protocol glue narrow, documented, and close to the ACP method it serves.
-- Keep shared code next to the domain it serves; avoid generic catch-all
-  packages such as `utils`, `helpers`, or `common`.
-- Follow existing package patterns before introducing new abstractions.
-- Advertise lifecycle facts only when the configured boundary proves them.
-- Settle a prompt in native-terminal, containment, durable-commit,
-  terminal-event order. At the close boundary the terminal events come first
-  instead: terminalize what the session still owns, then commit, then state the
-  quiescence fact, then fence.
-
-## Ask Before
-
-Unless explicitly requested, ask before:
-
-- Changing the permission or elicitation flow shape.
-- Adding new ACP extension methods or `_meta` fields.
-- Modifying MCP bridge token handling.
-- Changing the session-store contract.
+- Follow standard Go idioms: `ctx` first, no context stored in structs, and
+  `%w` for wrapped errors.
+- Keep the public API small and ACP-oriented; native protocol and process
+  details belong in `internal/claude`. Follow existing domain structure,
+  structured protocol types, and JSON decoding.
+- Preserve validation, error identities, state ownership, and current public
+  behavior. Update local docs for API, CLI, metadata, or storage changes.
+- Preserve native cleanup and owed durable commits before reporting the
+  corresponding completion. Advertise lifecycle facts only when the configured
+  boundary proves them; whole-tree quiescence requires authority evidence.
+  Follow the scoped prompt/close ordering in
+  [session behavior](docs/core/sessions.mdx) and
+  [managed execution](docs/operations/security.mdx).
+- Keep instructions and public documentation self-contained and current.
 
 ## Testing Rules
 
-- Use `testify/require` for assertions.
-- Prefer table-driven tests for mapper/protocol cases.
-- Run `go test ./...` for ordinary changes.
-- Run `go test -race ./...` or `make test` for session, MCP, concurrency, or
-  cancellation changes.
-- Run `golangci-lint run ./...` before considering work complete.
-- Live integration tests launch the actual `claude` binary from `PATH`.
-- Unit tests may use in-memory transports.
-- Keep every canonical lifecycle vector byte-identical and unedited.
-- Reduce emitted lifecycle events through the same reducer used by the vectors.
-- Local helper processes in integration tests are MCP servers with deterministic
-  responses.
-- Keep live prompts deterministic with exact sentinel replies, and assert the
-  ACP stop reason plus streamed updates where practical.
-- Do not rely on `Bash` to trigger permission prompts in live tests; user Claude
-  settings may globally allow it. Use editing tools such as `Write` when the
-  test needs a permission request.
+- Use `testify/require` and focused regressions for changed behavior. Prefer
+  table-driven protocol/mapping cases.
+- Use `make test` for session, MCP, concurrency, and cancellation changes;
+  run the pinned `make lint` before completion.
+- Review coverage for meaningful behavioral gaps; do not add padding to reach a
+  percentage. Preserve canonical lifecycle fixture bytes and reduce emitted
+  notifications through the same reducer used by the vectors.
+- Unit tests may use in-memory transports. Native compatibility evidence uses
+  the actual CLI; deterministic MCP servers/proxies do not establish native
+  behavior.
+- Keep live prompts deterministic and assert streamed updates and stop reason.
+  Use editing tools such as `Write` when a test needs a permission request;
+  user settings may allow `Bash` without prompting.
+- Native tests use an isolated temporary `CLAUDE_CONFIG_DIR`.
+  `ACP_GO_CLAUDE_HOME` selects the source config copied there;
+  `ACP_GO_CLAUDE_MODEL` overrides the live model. Without an explicit source
+  home, environment auth permits a fresh home. Missing environment or portable
+  file auth must fail without falling back to the operator's normal home.
 
 ## Security And Boundaries
 
-- **IMPORTANT**: Do not silently bypass permission prompts. Permission flow is
-  load-bearing for user trust in this agent.
-- **IMPORTANT**: Do not manage Claude CLI authentication state. ACP `logout`
-  only clears adapter-owned session state.
-- Do not log auth material, user secrets, prompts, tool input, tool output, or
-  raw Claude event bodies by default.
-- Keep permission rules session-scoped. Copy them only through intentional
-  session fork behavior.
-- Reject unsupported ACP extension/provider mutation methods with explicit
-  protocol errors unless this agent implements a namespaced extension.
-- Avoid broad filesystem or network behavior in tests unless the test is
-  explicitly about that boundary.
+- Honor authorization already provided by the task. Ask only before a material
+  scope expansion, including unrequested public extensions, permission-flow
+  changes, MCP token-policy changes, or session-store contract changes.
+- Keep stdout exclusively for ACP JSON-RPC; diagnostics belong on stderr.
+  Never log auth material, secrets, prompts, tool payloads, or raw native events
+  by default. Preserve session-scoped permission rules and intentional fork copies.
+- Every managed native launch uses the supplied `HostAuthority`, without
+  ordinary fallback. Prepared trees remain inaccessible until successful
+  reclaim; failed preparation leaves cleanup with the host.
+- ACP `logout` clears adapter-owned session state. Native account changes
+  belong to explicitly selected provider-auth operations. Native-login
+  disconnect requires exact resolved-home consent; secret-binding disconnect
+  is ledger-only.
+- Preserve permission prompts and explicit unsupported-method errors. Keep
+  filesystem/network test effects limited to the boundary under test.

@@ -411,13 +411,11 @@ func (c *Controller) pumpDataMessages() {
 func (c *Controller) routeRequest(ctx context.Context, msg map[string]any) {
 	select {
 	case c.handlerSem <- struct{}{}:
-		c.handlerWG.Add(1)
-		go func() {
-			defer c.handlerWG.Done()
+		c.handlerWG.Go(func() {
 			defer func() { <-c.handlerSem }()
 
 			c.handleRequest(ctx, msg)
-		}()
+		})
 	default:
 		c.rejectRequest(ctx, msg, "too many in-flight Claude control requests")
 	}

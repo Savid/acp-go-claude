@@ -129,9 +129,7 @@ func TestProcessTransportCloseUsesProtocolThenRevokeAndWait(t *testing.T) {
 	closeErrs := make(chan error, 8)
 
 	for range 8 {
-		closes.Add(1)
-
-		go func() { defer closes.Done(); closeErrs <- transport.Close() }()
+		closes.Go(func() { closeErrs <- transport.Close() })
 	}
 
 	closes.Wait()

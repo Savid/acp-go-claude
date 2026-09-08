@@ -516,7 +516,7 @@ func toolResultUpdates(block claude.ToolResultBlock, options ToolUpdateOptions) 
 	update.ToolCallUpdate.Meta = toolMeta(toolUse.Name, block.Raw)
 
 	if strings.EqualFold(toolUse.Name, toolExitPlanMode) && !block.IsError {
-		update.ToolCallUpdate.Title = stringPtr("Exited Plan Mode")
+		update.ToolCallUpdate.Title = new("Exited Plan Mode")
 	}
 
 	return []acp.SessionUpdate{withParentToolUseID(update, options.ParentToolUseID)}
@@ -1587,10 +1587,6 @@ func stringSliceInput(input map[string]any, key string) []string {
 	default:
 		return nil
 	}
-}
-
-func stringPtr(value string) *string {
-	return &value
 }
 
 func nonEmptyStrings(values ...string) []string {

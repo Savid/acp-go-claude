@@ -70,7 +70,7 @@ func (s *agentSession) Prompt( //nolint:gocyclo // Turn admission and its single
 	content, err := mapper.PromptToClaude(ctx, prompt, advertisedCommands, mapper.ImageInputLimits{
 		MaxBytesPerImage:  s.agent.options.ImageLimits.MaxInputBytesPerImage,
 		MaxBytesPerPrompt: s.agent.options.ImageLimits.MaxInputBytesPerPrompt,
-	}, newHandoffImageReader(s.agent.options.InputHandoffRoot))
+	}, s.agent.handoffImageReader())
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
@@ -927,9 +927,9 @@ func streamUsageMeta(usage usageSnapshot) map[string]any {
 		OutputTokens: usage.outputTokens,
 		TotalTokens:  usage.total(),
 	}
-	acpUsage.CachedReadTokens = acp.Ptr(usage.cacheReadTokens)
-	acpUsage.CachedWriteTokens = acp.Ptr(usage.cacheCreationTokens)
-	acpUsage.ThoughtTokens = acp.Ptr(usage.reasoningOutputToken)
+	acpUsage.CachedReadTokens = new(usage.cacheReadTokens)
+	acpUsage.CachedWriteTokens = new(usage.cacheCreationTokens)
+	acpUsage.ThoughtTokens = new(usage.reasoningOutputToken)
 
 	return map[string]any{
 		claudeMetaKey: map[string]any{

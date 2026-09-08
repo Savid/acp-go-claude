@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/savid/acp-go-claude/internal/jsonvalue"
 )
 
 const (
@@ -90,6 +93,10 @@ func routeVersionIsOne(value any) bool {
 		return version == routeVersion
 	case float64:
 		return version == routeVersion
+	case json.Number:
+		integer, ok := jsonvalue.Int64(version)
+
+		return ok && integer == routeVersion
 	default:
 		return false
 	}

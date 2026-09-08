@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -129,16 +130,12 @@ func (m *materializedSession) prepare(ctx context.Context, authority HostAuthori
 }
 
 func (m *materializedSession) owns(root string) bool {
-	for _, prepared := range m.prepared {
-		if prepared == root {
-			return true
-		}
+	if slices.Contains(m.prepared, root) {
+		return true
 	}
 
-	for _, cleanup := range m.cleanup {
-		if cleanup == root {
-			return true
-		}
+	if slices.Contains(m.cleanup, root) {
+		return true
 	}
 
 	if _, opaque := m.opaque[root]; opaque {

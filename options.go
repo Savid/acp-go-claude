@@ -53,8 +53,8 @@ type Options struct {
 	// unadvertised.
 	ProviderAuthRoot string
 	// ProviderAuthDirectHome is the exact canonical Claude config directory the
-	// operator consents to a provider-auth leg clearing. Empty, or unequal to
-	// Home, leaves `_claude/auth/disconnect` unadvertised.
+	// operator consents to native-login disconnect clearing. Empty or unequal
+	// to Home refuses that operation; all eight broker legs remain advertised.
 	ProviderAuthDirectHome string
 	// DefaultModel is passed to newly created Claude sessions when non-empty.
 	DefaultModel string
@@ -306,11 +306,10 @@ func WithProviderAuthRoot(path string) Option {
 }
 
 // WithProviderAuthDirectHome names the exact canonical Claude config directory
-// the operator consents to `_claude/auth/disconnect` clearing, which is an
-// account-level removal in a home the operator also uses. The leg is advertised
-// and answers only while this equals the configured Home after path cleaning;
-// it authorizes exactly that directory, never a parent, a child, or a symlink
-// target of it. Unset (the default) advertises six legs instead of seven.
+// the operator consents to native-login disconnect clearing. Both paths must
+// resolve to the same directory, whose identity is checked again at removal.
+// The broker advertises all eight legs with or without consent. Disconnecting
+// a secret binding only updates the ledger and needs no native-home consent.
 func WithProviderAuthDirectHome(path string) Option {
 	return func(options *Options) {
 		options.ProviderAuthDirectHome = path

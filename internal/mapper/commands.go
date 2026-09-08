@@ -1,6 +1,7 @@
 package mapper
 
 import (
+	"maps"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -16,8 +17,7 @@ const (
 	alternativeSetConfigOption = "session/set_config_option"
 )
 
-// goal left suppression on 2026-07-05: TestClaudeGoalCommandLiveProbe proved
-// the full /goal loop emits a single terminal result on Claude Code 2.1.200.
+// Commands without a supported ACP interaction are omitted from the catalog.
 var suppressedCommands = map[string]struct{}{
 	"cost":             {},
 	"heapdump":         {},
@@ -117,9 +117,7 @@ func DeniedPromptCommand(prompt []acp.ContentBlock, commands ...[]claude.SlashCo
 
 func denyInvokeCommandAlternatives(commandSets ...[]claude.SlashCommand) map[string]string {
 	alternatives := make(map[string]string, len(denyInvokeCommands))
-	for name, alternative := range denyInvokeCommands {
-		alternatives[name] = alternative
-	}
+	maps.Copy(alternatives, denyInvokeCommands)
 
 	for _, commands := range commandSets {
 		for _, command := range commands {

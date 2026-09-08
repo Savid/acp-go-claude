@@ -32,6 +32,10 @@ func (a *Agent) ensureScratchParent() (string, error) {
 	return ensureScratchParent(a.options.ScratchDir)
 }
 
+func managedImageDomains(options Options) []string {
+	return []string{options.Home, scratchParent(options.ScratchDir)}
+}
+
 func createImageScratchDir(parent string) (string, error) {
 	if parent == "" {
 		return "", fmt.Errorf("create image scratch dir: empty scratch parent")

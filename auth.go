@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -96,9 +97,10 @@ var providerAuthCredentialEnvNames = [...]string{
 }
 
 const (
-	providerAuthUnavailableBareMode = "bare mode"
-	providerAuthUnavailableEnv      = "configured credential"
-	providerAuthUnavailableSettings = "static settings"
+	providerAuthUnavailableBareMode  = "bare mode"
+	providerAuthUnavailableEnv       = "configured credential"
+	providerAuthUnavailableSettings  = "static settings"
+	providerAuthUnavailableNativeEnv = "native environment unavailable"
 )
 
 // Native seams. Every provider-auth native read and mutation crosses one of
@@ -162,7 +164,7 @@ func newProviderAuth(agent *Agent) *providerAuth {
 	}
 
 	home := resolveProviderAuthHome(agent.options)
-	if reason := providerAuthUnavailableReason(agent.options, home); reason != "" {
+	if reason := agent.providerAuthUnavailableReason(home); reason != "" {
 		agent.log.Info("interactive provider auth disabled", slog.String("reason", reason))
 
 		return nil
@@ -194,33 +196,30 @@ func newProviderAuth(agent *Agent) *providerAuth {
 	return broker
 }
 
-func providerAuthUnavailableReason(options Options, home providerAuthHome) string {
-	if options.BareMode {
+func (a *Agent) providerAuthUnavailableReason(home providerAuthHome) string {
+	if a.options.BareMode {
 		return providerAuthUnavailableBareMode
 	}
 
-	if providerAuthCredentialEnvironmentConfigured(options) {
+	environment := a.effectiveNativeEnvironment(a.options.Env)
+	if environment == nil {
+		return providerAuthUnavailableNativeEnv
+	}
+
+	if providerAuthCredentialEnvironmentConfigured(environment) {
 		return providerAuthUnavailableEnv
 	}
 
-	if providerAuthStaticSettingsConfigured(options, home) {
+	if providerAuthStaticSettingsConfigured(a.options, home) {
 		return providerAuthUnavailableSettings
 	}
 
 	return ""
 }
 
-func providerAuthCredentialEnvironmentConfigured(options Options) bool {
+func providerAuthCredentialEnvironmentConfigured(environment map[string]string) bool {
 	for _, name := range providerAuthCredentialEnvNames {
-		if value, overridden := options.Env[name]; overridden {
-			if strings.TrimSpace(value) != "" {
-				return true
-			}
-
-			continue
-		}
-
-		if value, inherited := os.LookupEnv(name); inherited && strings.TrimSpace(value) != "" {
+		if strings.TrimSpace(environment[claude.EnvironmentKey(name)]) != "" {
 			return true
 		}
 	}
@@ -278,13 +277,7 @@ func providerAuthSettingsContentConfigured(content []byte) bool {
 		return true
 	}
 
-	for _, name := range providerAuthCredentialEnvNames {
-		if strings.TrimSpace(settings.Env[name]) != "" {
-			return true
-		}
-	}
-
-	return false
+	return providerAuthCredentialEnvironmentConfigured(mergeEnv(nil, settings.Env))
 }
 
 // providerAuthHome is the native config dir this surface acts on. It is
@@ -376,13 +369,7 @@ func (p *providerAuth) capability() map[string]any {
 }
 
 func (p *providerAuth) advertises(method string) bool {
-	for _, name := range p.authMethodNames() {
-		if name == method {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(p.authMethodNames(), method)
 }
 
 // handleAuthExtensionMethod dispatches an advertised leg. The second result

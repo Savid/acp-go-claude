@@ -416,6 +416,23 @@ func TestHostAuthorityNilNativeEnvironmentFailsConstructionBeforeMutation(t *tes
 	require.Zero(t, prepareCalls)
 }
 
+func TestHostAuthorityMalformedNativeEnvironmentFailsBeforeMutation(t *testing.T) {
+	t.Parallel()
+	for _, environment := range []map[string]string{
+		{"": "value"}, {"A=B": "value"}, {"A\x00B": "value"}, {"A": "value\x00"},
+	} {
+		authority := &callbackHostAuthority{environment: func() map[string]string { return environment }}
+		scratch := filepath.Join(t.TempDir(), "scratch")
+		agent := NewAgent(WithHostAuthority(authority), WithScratchDir(scratch))
+		require.ErrorIs(t, agent.configurationErr, ErrHostAuthorityUnavailable)
+		_, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))
+		requireClosedInternalFailure(t, err, invalidOptionsError)
+		_, err = os.Stat(scratch)
+		require.ErrorIs(t, err, os.ErrNotExist)
+		require.NoError(t, agent.Close())
+	}
+}
+
 func TestHostAuthorityAmbiguousCallbacksRetainPreparedTree(t *testing.T) {
 	tests := []struct {
 		name  string

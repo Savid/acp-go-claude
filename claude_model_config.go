@@ -3,7 +3,6 @@ package claudeacp
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 
@@ -71,15 +70,7 @@ func parseModelConfig(raw string) (modelConfig, bool, error) {
 }
 
 func modelConfigFromEnv(env map[string]string) (modelConfig, bool, error) {
-	return parseModelConfig(envValue(env, envClaudeModelConfig))
-}
-
-func envValue(env map[string]string, key string) string {
-	if value, ok := env[key]; ok {
-		return value
-	}
-
-	return os.Getenv(key)
+	return parseModelConfig(env[claude.EnvironmentKey(envClaudeModelConfig)])
 }
 
 func decodeStringMap(value any, field string) (map[string]string, error) {

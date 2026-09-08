@@ -707,7 +707,6 @@ func TestToolMappingHelpers(t *testing.T) {
 	require.Nil(t, value)
 	_, ok = mapInput(map[string]any{}, "x")
 	require.False(t, ok)
-	require.NotNil(t, stringPtr(""))
 	require.Equal(t, []string{"a", "b"}, nonEmptyStrings("", "a", "b"))
 	require.Equal(t, "", firstNonEmptyString("", ""))
 	require.Equal(t, "a", firstNonEmptyString("", "a"))

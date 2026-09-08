@@ -31,6 +31,20 @@ configuration, and browser-launcher shims before calling
 `ReclaimNativeTree` succeeds. Session-residence disposal owns removal of a
 prepared transcript tree; session deletion does not reopen it.
 
+Managed local image reads reserve the configured native home and complete
+scratch allocation directory before native launch. Workspace and handoff roots
+that overlap either domain are refused; this includes the broad system temp
+root when it is the scratch parent. Disjoint roots are opened before launch,
+and subsequent reads use those retained directory handles. A later workspace
+can supply local images only when it is beneath an already retained read root.
+Embedded image bytes and stored artifact replay do not need these read roots.
+
+The host must preserve the identities and disjoint placement of allocation and
+read directories. Its filesystem boundary must prevent native ancestor/root
+replacement or mount aliases from moving a prepared tree into a read domain.
+Directory-handle confinement enforces reads within the selected domain; it does
+not replace the host's namespace isolation responsibility.
+
 Shutdown first closes protocol stdin, then waits for the native process. If it
 does not exit within the grace period, the adapter calls `Revoke` and waits for
 terminal settlement. Stream frames remain readable until `Wait` completes.

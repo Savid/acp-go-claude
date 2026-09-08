@@ -2201,17 +2201,6 @@ func TestResumeAndLoadResidualBranches(t *testing.T) {
 		})
 	}
 
-	t.Run("stored resume mismatch", func(t *testing.T) {
-		store := NewInMemorySessionStore()
-		id := acp.SessionId("stored-mismatch")
-		oldOptions := carrierOptions("old")
-		require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(id)}, testStoredSessionEntries(t, oldOptions)))
-		agent := NewAgent(WithSessionStore(store))
-		_, err := agent.ResumeSession(t.Context(), ResumeSessionRequest(id, t.TempDir(),
-			WithSessionMeta(carrierOptions("new").Meta())))
-		require.Error(t, err)
-	})
-
 	t.Run("active load mismatch", func(t *testing.T) {
 		agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport())
 		created, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))

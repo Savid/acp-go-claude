@@ -71,7 +71,9 @@ whose teardown is still owed never hands its instance back.
 
 Loading, resuming, and forking an inactive session require an authoritative main
 record in the [session store](/docs/features/session-store). Its configuration
-row restores the session environment and ordered path directories; only its
+row supplies omitted environment and ordered path directories. Explicit cold
+load/resume carriers replace their stored values through the atomic commit
+boundary described in the session-store documentation; only the record's
 native transcript rows are materialized into an isolated temporary Claude
 config directory under the scratch directory (default: system temp) so the CLI
 can restore them.

@@ -91,40 +91,34 @@ func TestSessionConfigurationEnvironmentDecoderIsExact(t *testing.T) {
 	}
 }
 
-func TestResumeSessionConfigurationInheritsAndRejectsConflicts(t *testing.T) {
+func TestActiveLoadRejectsStoredConfigurationDrift(t *testing.T) {
 	t.Parallel()
 
-	stored := sessionConfiguration{
-		Env:           map[string]string{"TOKEN": "stored"},
-		ExtraPathDirs: []string{absTestPath("stored", "first"), absTestPath("stored", "second")},
+	for _, field := range []string{"env", "extraPathDirs"} {
+		t.Run(field, func(t *testing.T) {
+			t.Parallel()
+			cwd := t.TempDir()
+			store := NewInMemorySessionStore()
+			transport := newFakeClaudeTransport()
+			agent, _, _ := newFakeLifecycleAgent(t, transport, WithSessionStore(store))
+			t.Cleanup(func() { require.NoError(t, agent.Close()) })
+			created, err := agent.NewSession(t.Context(), NewSessionRequest(cwd))
+			require.NoError(t, err)
+			original := agent.sessions[created.SessionId]
+			storedOptions := ClaudeOptions{}
+			if field == "env" {
+				storedOptions.Env = map[string]string{"TOOL_TOKEN": "divergent"}
+			} else {
+				storedOptions.ExtraPathDirs = []string{absTestPath("tools", "divergent")}
+			}
+			require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(created.SessionId)},
+				testStoredSessionEntries(t, storedOptions, []byte(`{"type":"user"}`))))
+			_, err = agent.LoadSession(t.Context(), LoadSessionRequest(created.SessionId, cwd))
+			requireSessionResumeIncompatible(t, err, metaOptionPath(field))
+			require.Same(t, original, agent.sessions[created.SessionId])
+			require.Zero(t, transport.CloseCalls())
+		})
 	}
-
-	inherited, err := resumeSessionConfiguration(ClaudeOptions{}, sessionConfigurationPresence{}, stored)
-	require.NoError(t, err)
-	require.Equal(t, stored.Env, inherited.Env)
-	require.Equal(t, stored.ExtraPathDirs, inherited.ExtraPathDirs)
-
-	matching, err := resumeSessionConfiguration(ClaudeOptions{
-		Env:           map[string]string{"TOKEN": "stored"},
-		ExtraPathDirs: []string{absTestPath("stored", "first"), absTestPath("stored", "second")},
-	}, sessionConfigurationPresence{env: true, extraPathDirs: true}, stored)
-	require.NoError(t, err)
-	require.Equal(t, inherited.Env, matching.Env)
-	require.Equal(t, inherited.ExtraPathDirs, matching.ExtraPathDirs)
-
-	_, err = resumeSessionConfiguration(
-		ClaudeOptions{Env: map[string]string{"TOKEN": "changed"}},
-		sessionConfigurationPresence{env: true},
-		stored,
-	)
-	requireSessionResumeIncompatible(t, err, metaOptionPath(settingsFieldEnv))
-
-	_, err = resumeSessionConfiguration(
-		ClaudeOptions{ExtraPathDirs: []string{absTestPath("stored", "second"), absTestPath("stored", "first")}},
-		sessionConfigurationPresence{extraPathDirs: true},
-		stored,
-	)
-	requireSessionResumeIncompatible(t, err, metaOptionPath(metaExtraPathDirsKey))
 }
 
 func TestSessionMirrorWritesConfigurationOnceAheadOfTranscript(t *testing.T) {
@@ -183,14 +177,6 @@ func TestColdLoadReconstructsStoredEnvironmentAndOrderedPath(t *testing.T) {
 	require.NotContains(t, string(materialized), sessionConfigurationEntryType)
 	require.Contains(t, string(materialized), `"type":"user"`)
 	require.NoError(t, agent.Close())
-
-	conflicting, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithSessionStore(store))
-	_, err = conflicting.LoadSession(t.Context(), LoadSessionRequest(sessionID, cwd, WithSessionMeta(
-		ClaudeOptions{Env: map[string]string{"TOOL_TOKEN": "changed"}}.Meta(),
-	)))
-	requireSessionResumeIncompatible(t, err, metaOptionPath(settingsFieldEnv))
-	require.Empty(t, conflicting.sessions)
-	require.NoError(t, conflicting.Close())
 }
 
 func TestTranscriptOnlyStoreIsNotARecoverableSessionRecord(t *testing.T) {

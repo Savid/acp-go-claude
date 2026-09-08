@@ -71,20 +71,16 @@ func inheritSessionConfiguration(
 	return options
 }
 
-func resumeSessionConfiguration(
-	options ClaudeOptions,
-	presence sessionConfigurationPresence,
-	stored sessionConfiguration,
-) (ClaudeOptions, error) {
-	if presence.env && !maps.Equal(options.Env, stored.Env) {
-		return ClaudeOptions{}, sessionResumeIncompatibleError(metaOptionPath(settingsFieldEnv))
+func validateActiveSessionConfiguration(active, stored sessionConfiguration) error {
+	if !maps.Equal(active.Env, stored.Env) {
+		return sessionResumeIncompatibleError(metaOptionPath(settingsFieldEnv))
 	}
 
-	if presence.extraPathDirs && !slices.Equal(options.ExtraPathDirs, stored.ExtraPathDirs) {
-		return ClaudeOptions{}, sessionResumeIncompatibleError(metaOptionPath(metaExtraPathDirsKey))
+	if !slices.Equal(active.ExtraPathDirs, stored.ExtraPathDirs) {
+		return sessionResumeIncompatibleError(metaOptionPath(metaExtraPathDirsKey))
 	}
 
-	return inheritSessionConfiguration(options, presence, stored), nil
+	return nil
 }
 
 func explicitCarrierChange(

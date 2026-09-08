@@ -27,10 +27,26 @@ The adapter writes a strict session-configuration row ahead of the first Claude
 transcript row, then mirrors transcript rows as the turn streams. The store is
 the sole authority for `session/list`, `session/load`, `session/resume`, and
 inactive-session fork. The configuration row records the session environment
-and ordered `extraPathDirs`; recovery rebuilds both from that row. An explicit
-load or resume value must exactly match the stored value, while an omitted value
-inherits it. A missing, malformed, unsupported, or conflicting configuration
-row fails before native resume.
+and ordered `extraPathDirs`. Cold load and resume inherit each omitted field
+from that row and accept explicitly supplied fields as replacement values.
+Changing either field starts the native successor with the resulting complete
+configuration, then atomically replaces the stored configuration together with
+all existing main transcript rows and sub-session subkeys before publishing the
+session. Matching or omitted values require no replacement write.
+
+A failed native startup or failed `Replace` leaves the previous committed
+generation intact. A successful `Replace` followed by a publication failure
+leaves the new configuration committed; no partial store write is permitted.
+Missing, malformed, or unsupported configuration rows fail before native resume.
+Active load reuse also refuses a stored configuration that differs from its live
+process. Active carrier replacement retains the full start-fingerprint check;
+the cold store records env and path carriers, so it cannot establish equality
+of cwd, MCP servers, or additional directories with a previous process.
+
+Explicit raw metadata `"env": {}` or `"extraPathDirs": []` clears that carrier.
+`ClaudeOptions.Meta` omits zero-length maps and slices, so clearing requires
+`WithSessionMeta` with those explicit raw values. Omission always inherits on
+load and resume.
 
 The current schema does not store Claude's native `.credentials.json` or login
 Keychain material. It does store accepted session `env` values verbatim, and

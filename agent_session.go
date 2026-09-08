@@ -227,11 +227,9 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, storeErr
 	}
 
-	if !configurationChanged {
-		metaOptions, err = resumeSessionConfiguration(metaOptions, presence, stored.Configuration)
-		if err != nil {
-			return acp.ResumeSessionResponse{}, err
-		}
+	if predecessor == nil {
+		configurationChanged = explicitCarrierChange(metaOptions, presence, stored.Configuration)
+		metaOptions = inheritSessionConfiguration(metaOptions, presence, stored.Configuration)
 	}
 
 	start.StoreEntries = stored.Entries
@@ -329,10 +327,12 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, err
 	}
 
-	if !configurationChanged {
-		metaOptions, err = resumeSessionConfiguration(metaOptions, presence, stored.Configuration)
-		if err != nil {
-			return acp.LoadSessionResponse{}, err
+	if predecessor == nil {
+		configurationChanged = explicitCarrierChange(metaOptions, presence, stored.Configuration)
+		metaOptions = inheritSessionConfiguration(metaOptions, presence, stored.Configuration)
+	} else if active != nil {
+		if configurationErr := validateActiveSessionConfiguration(active.configuration, stored.Configuration); configurationErr != nil {
+			return acp.LoadSessionResponse{}, configurationErr
 		}
 	}
 

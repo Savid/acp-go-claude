@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -1367,17 +1368,18 @@ func TestNativePumpBarrierHonorsCancellationAndDrain(t *testing.T) {
 }
 
 func TestNativePumpDrainTimeoutStopsAndJoinsTheExactReader(t *testing.T) {
-	previous := sessionSettlementTimeout
-	sessionSettlementTimeout = 0
-	t.Cleanup(func() { sessionSettlementTimeout = previous })
-	done := make(chan struct{})
-	var once sync.Once
-	incarnation := &nativeIncarnation{
-		done: done,
-		stop: func() { once.Do(func() { close(done) }) },
-	}
-	pump := &nativePump{incarnation: incarnation, done: done}
-	require.ErrorIs(t, pump.drainReceiving(t.Context()), errNativeReceiveExited)
+	synctest.Test(t, func(t *testing.T) {
+		done := make(chan struct{})
+		var once sync.Once
+		incarnation := &nativeIncarnation{
+			done: done,
+			stop: func() { once.Do(func() { close(done) }) },
+		}
+		pump := &nativePump{incarnation: incarnation, done: done}
+		err := pump.drainReceiving(t.Context())
+		require.ErrorIs(t, err, errNativeReceiveExited)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	})
 }
 
 func TestNativeReaderContainsBothPanicAndUnexpectedExit(t *testing.T) {

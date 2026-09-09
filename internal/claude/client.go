@@ -69,13 +69,18 @@ type SlashCommand struct {
 	Aliases      []string
 }
 
-// AvailableModelInfo describes one Claude model choice returned by the CLI.
+// AvailableModelInfo describes one model choice and its authoritative metadata.
 type AvailableModelInfo struct {
 	Value                 string
+	ResolvedModel         string
 	DisplayName           string
 	Description           string
+	ContextWindow         int64
+	MaxOutputTokens       int64
 	SupportedEffortLevels []string
+	EffortUnsupported     bool
 	SupportsAutoMode      bool
+	Disabled              bool
 }
 
 // ContextUsage contains the current Claude context token usage.
@@ -289,7 +294,7 @@ func (c *Client) InitializeInfo() InitializeInfo {
 
 	return InitializeInfo{
 		Commands:              cloneSlashCommands(c.initializeInfo.Commands),
-		Models:                append([]AvailableModelInfo(nil), c.initializeInfo.Models...),
+		Models:                CloneAvailableModels(c.initializeInfo.Models),
 		OutputStyle:           c.initializeInfo.OutputStyle,
 		AvailableOutputStyles: append([]string(nil), c.initializeInfo.AvailableOutputStyles...),
 	}
@@ -325,7 +330,7 @@ func (c *Client) setInitializeInfo(info InitializeInfo) {
 
 	c.initializeInfo = InitializeInfo{
 		Commands:              cloneSlashCommands(info.Commands),
-		Models:                append([]AvailableModelInfo(nil), info.Models...),
+		Models:                CloneAvailableModels(info.Models),
 		OutputStyle:           info.OutputStyle,
 		AvailableOutputStyles: append([]string(nil), info.AvailableOutputStyles...),
 	}
@@ -399,12 +404,21 @@ func parseAvailableModels(value any) []AvailableModelInfo {
 
 		displayName, _ := raw["displayName"].(string)
 		description, _ := raw["description"].(string)
+
+		effort := stringSlice(raw["supportedEffortLevels"])
+		if raw["supportsEffort"] == false {
+			effort = nil
+		}
+
 		models = append(models, AvailableModelInfo{
 			Value:                 model,
+			ResolvedModel:         stringValue(raw["resolvedModel"]),
 			DisplayName:           displayName,
 			Description:           description,
-			SupportedEffortLevels: stringSlice(raw["supportedEffortLevels"]),
+			SupportedEffortLevels: effort,
+			EffortUnsupported:     raw["supportsEffort"] == false,
 			SupportsAutoMode:      boolValue(raw["supportsAutoMode"]),
+			Disabled:              boolValue(raw["disabled"]),
 		})
 	}
 

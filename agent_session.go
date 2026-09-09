@@ -1478,25 +1478,14 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	}
 
 	info := session.client.InitializeInfo()
-	availableModels := info.Models
 
-	availableModelAllowlist, hasAvailableModelAllowlist := settingsAvailableModelAllowlist(modelConfig, hasModelConfig, discoveredSettings)
-	if hasAvailableModelAllowlist {
-		availableModels = applyAvailableModelsAllowlist(availableModels, availableModelAllowlist)
+	availableModels, settings, settingsKnown := a.discoverSessionModels(ctx, session.client)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
-	initCtx, finishInitialize := a.observe.StartClaudeProcess(ctx, "initialize")
-	settings, err := session.client.GetSettings(initCtx)
-	finishInitialize(err)
-
-	settingsKnown := true
-
-	if err != nil {
-		a.log.DebugContext(ctx, "get Claude settings failed", slog.String("stage", "settings_read"))
-
-		settings = &claude.SettingsSnapshot{}
-		settingsKnown = false
-	}
+	session.modelAllowlist = slices.Clone(modelConfig.AvailableModels)
+	availableModels = reconcileSessionModels(availableModels, session.modelAllowlist, settings, modelOverrides)
 
 	selectedModel := selectInitialModel(
 		defaultModel,
@@ -1504,6 +1493,11 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		firstNonEmptyString(settings.Applied.Model, discoveredSettings.Model),
 		availableModels,
 	)
+	if claude.ModelDisabled(selectedModel.Model, availableModels) ||
+		claude.ModelDisabled(claudeModelID(selectedModel.Model, modelOverrides), availableModels) {
+		return nil, unsupportedField("model")
+	}
+
 	if selectedModel.ShouldApply {
 		if err := session.client.SetModel(ctx, claudeModelID(selectedModel.Model, modelOverrides)); err != nil {
 			return nil, err

@@ -17,6 +17,8 @@ func TestAgentModelMetaAndOptions(t *testing.T) {
 			Value:                 "claude-sonnet-4-5",
 			DisplayName:           "Sonnet",
 			Description:           "balanced",
+			ContextWindow:         333000,
+			MaxOutputTokens:       32000,
 			SupportedEffortLevels: []string{effortLow, effortHigh, effortHigh, ""},
 			SupportsAutoMode:      true,
 		},
@@ -51,18 +53,22 @@ func TestAgentModelMetaAndOptions(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []string{effortLow, effortHigh}, infoMeta[claudeModelMetaSupportedEffortKey])
 	require.Equal(t, true, infoMeta[claudeModelMetaSupportsAutoModeKey])
-	require.Equal(t, defaultContextWindow, infoMeta[claudeModelMetaContextWindowKey])
+	require.Equal(t, int64(333000), infoMeta[claudeModelMetaContextWindowKey])
+	require.Equal(t, int64(32000), infoMeta[claudeModelMetaMaxOutputTokensKey])
 	encodedInfo, err := json.Marshal(claudeModelInfoMeta(available[0]))
 	require.NoError(t, err)
 	require.NotContains(t, string(encodedInfo), `"capabilities"`)
 	require.Nil(t, claudeModelInfoMeta(claude.AvailableModelInfo{Value: "unknown"}))
-	require.Equal(t, largeContextWindow, modelContextWindowHint(available[1]))
-	require.Equal(t, largeContextWindow, modelContextWindowHint(claude.AvailableModelInfo{Description: "has 1m context"}))
-	require.Equal(t, largeContextWindow, modelContextWindowHint(claude.AvailableModelInfo{Value: modelTokenOpus}))
-	require.Equal(t, claudeModelFamilyHaiku, modelFamily(claude.AvailableModelInfo{Value: "claude-haiku"}))
-	require.Equal(t, claudeModelFamilyOpus, modelFamily(claude.AvailableModelInfo{DisplayName: "Opus"}))
-	require.Equal(t, "", modelFamily(claude.AvailableModelInfo{Value: "custom"}))
-	require.Equal(t, "value display description", modelHintText(claude.AvailableModelInfo{Value: "Value", DisplayName: "Display", Description: "Description"}))
+	// Names, aliases, and descriptions do not fabricate context limits.
+	for _, info := range []claude.AvailableModelInfo{
+		available[1],
+		{Value: "opus"},
+		{Value: "sonnet"},
+		{Value: "haiku"},
+		{Description: "has 1m context"},
+	} {
+		require.Nil(t, claudeModelInfoMeta(info))
+	}
 	_, ok = availableModelInfo("missing", available)
 	require.False(t, ok)
 	foundInfo, ok := availableModelInfo(available[0].Value, available)

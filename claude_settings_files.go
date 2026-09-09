@@ -44,22 +44,18 @@ var (
 )
 
 type discoveredSettings struct {
-	Model              string
-	Effort             string
-	PermissionMode     string
-	AvailableModels    []string
-	HasAvailableModels bool
-	Env                map[string]string
+	Model          string
+	Effort         string
+	PermissionMode string
+	Env            map[string]string
 }
 
 type settingsFile struct {
-	Model              string
-	Effort             string
-	PermissionMode     string
-	APIKeyHelper       string
-	AvailableModels    []string
-	HasAvailableModels bool
-	Env                map[string]string
+	Model          string
+	Effort         string
+	PermissionMode string
+	APIKeyHelper   string
+	Env            map[string]string
 }
 
 func loadDiscoveredSettings(ctx context.Context, cwd string, claudeHome string, log *slog.Logger) discoveredSettings {
@@ -71,8 +67,6 @@ func loadDiscoveredSettings(ctx context.Context, cwd string, claudeHome string, 
 	}
 
 	var merged discoveredSettings
-
-	seenModels := make(map[string]struct{})
 
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
@@ -98,19 +92,6 @@ func loadDiscoveredSettings(ctx context.Context, cwd string, claudeHome string, 
 
 		if settings.PermissionMode != "" {
 			merged.PermissionMode = settings.PermissionMode
-		}
-
-		if settings.HasAvailableModels {
-			merged.HasAvailableModels = true
-
-			for _, model := range settings.AvailableModels {
-				if _, ok := seenModels[model]; ok {
-					continue
-				}
-
-				merged.AvailableModels = append(merged.AvailableModels, model)
-				seenModels[model] = struct{}{}
-			}
 		}
 
 		if len(settings.Env) > 0 {
@@ -218,11 +199,6 @@ func decodeSettingsFile(ctx context.Context, raw map[string]any, log *slog.Logge
 		settings.PermissionMode = stringSetting(permissions, settingsFieldDefaultMode)
 	}
 
-	if _, ok := raw[settingsFieldAvailableModels]; ok {
-		settings.HasAvailableModels = true
-		settings.AvailableModels = stringSliceSetting(raw, settingsFieldAvailableModels)
-	}
-
 	return settings
 }
 
@@ -258,22 +234,6 @@ func stringSetting(raw map[string]any, key string) string {
 	value, _ := raw[key].(string)
 
 	return strings.TrimSpace(value)
-}
-
-func stringSliceSetting(raw map[string]any, key string) []string {
-	values, _ := raw[key].([]any)
-
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		text, _ := value.(string)
-
-		text = strings.TrimSpace(text)
-		if text != "" {
-			result = append(result, text)
-		}
-	}
-
-	return result
 }
 
 func stringMapSetting(ctx context.Context, raw map[string]any, key string, log *slog.Logger) map[string]string {
@@ -312,40 +272,6 @@ func mergeEnv(base map[string]string, override map[string]string) map[string]str
 	}
 
 	return merged
-}
-
-func settingsAvailableModelAllowlist(
-	modelConfig modelConfig,
-	hasModelConfig bool,
-	settings discoveredSettings,
-) ([]string, bool) {
-	var allowlist []string
-
-	seen := make(map[string]struct{})
-
-	if hasModelConfig && modelConfig.AvailableModels != nil {
-		for _, model := range modelConfig.AvailableModels {
-			if _, ok := seen[model]; ok {
-				continue
-			}
-
-			allowlist = append(allowlist, model)
-			seen[model] = struct{}{}
-		}
-	}
-
-	if settings.HasAvailableModels {
-		for _, model := range settings.AvailableModels {
-			if _, ok := seen[model]; ok {
-				continue
-			}
-
-			allowlist = append(allowlist, model)
-			seen[model] = struct{}{}
-		}
-	}
-
-	return allowlist, (hasModelConfig && modelConfig.AvailableModels != nil) || settings.HasAvailableModels
 }
 
 func firstNonEmptyString(values ...string) string {

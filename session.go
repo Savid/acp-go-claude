@@ -153,6 +153,7 @@ type agentSession struct {
 	configurationStored   bool
 	model                 string
 	availableModels       []claude.AvailableModelInfo
+	modelAllowlist        []string
 	modelOverrides        map[string]string
 	outputStyle           string
 	availableOutputStyles []string

@@ -16,11 +16,8 @@ import (
 )
 
 const (
-	rateLimitsSetupToken  = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // Environment variable name, not a credential.
-	rateLimitsAPIKeyEnv   = "ANTHROPIC_API_KEY"       //nolint:gosec // Environment variable name, not a credential.
-	rateLimitsBaseURL     = "ANTHROPIC_BASE_URL"
-	rateLimitsDefaultBase = "https://api.anthropic.com"
-	rateLimitsMaxBody     = 1 << 20
+	rateLimitsMaxBody           = 1 << 20
+	rateLimitsDefaultFableModel = "claude-fable-5-1"
 )
 
 type rateLimitsAPIAccess struct {
@@ -107,82 +104,37 @@ func (c *Client) rateLimitsAPIAccess(ctx context.Context) (rateLimitsAPIAccess, 
 		return rateLimitsAPIAccess{}, false
 	}
 
-	source, ok := c.transport.(interface{ rateLimitsEnvironment() map[string]string })
+	source, ok := c.transport.(interface{ LaunchEnvironment() map[string]string })
 	if !ok {
 		return rateLimitsAPIAccess{}, false
 	}
 
-	env := source.rateLimitsEnvironment()
-	if strings.TrimSpace(env[EnvironmentKey(rateLimitsSetupToken)]) == "" {
+	env := source.LaunchEnvironment()
+	if strings.TrimSpace(env[EnvironmentKey(directAPIOAuthTokenEnv)]) == "" {
 		return rateLimitsAPIAccess{}, false
 	}
 
 	settings, err := c.GetSettings(ctx)
-	if err != nil || settings.Effective == nil || !rateLimitsSettingsMatch(settings.Effective, env) {
+	if err != nil || settings.Effective == nil || !directAPISettingsMatch(settings.Effective, env) {
 		return rateLimitsAPIAccess{}, false
 	}
 
 	return resolveRateLimitsAPIAccess(env)
 }
 
-// Effective settings are a disk/settings merge, not the process environment.
-// Refuse differing credential or routing overrides rather than guessing which
-// of them Claude applied; matching overrides preserve the captured identity.
-func rateLimitsSettingsMatch(settings map[string]any, env map[string]string) bool {
-	if helper, exists := settings["apiKeyHelper"]; exists && helper != "" {
-		return false
-	}
-
-	if method, exists := settings["forceLoginMethod"]; exists && method == "gateway" {
-		return false
-	}
-
-	raw, exists := settings["env"]
-	if !exists {
-		return true
-	}
-
-	values, ok := raw.(map[string]any)
-	if !ok {
-		return false
-	}
-
-	for key, rawValue := range values {
-		value, valid := rawValue.(string)
-		if !valid {
-			return false
-		}
-
-		if rateLimitsIdentityEnv(key) && env[EnvironmentKey(key)] != value {
-			return false
-		}
-	}
-
-	return true
-}
-
-func rateLimitsIdentityEnv(key string) bool {
-	key = strings.ToUpper(key)
-
-	return strings.HasPrefix(key, "ANTHROPIC_") || strings.HasPrefix(key, "CLAUDE_CODE_") ||
-		strings.HasPrefix(key, "AWS_") || strings.HasPrefix(key, "AZURE_") || strings.HasPrefix(key, "GOOGLE_")
-}
-
 func resolveRateLimitsAPIAccess(env map[string]string) (rateLimitsAPIAccess, bool) {
-	for _, key := range []string{"ANTHROPIC_AUTH_TOKEN", rateLimitsAPIKeyEnv, "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_AWS_API_KEY", "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_GATEWAY", "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "ANTHROPIC_UNIX_SOCKET", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_CODE_REMOTE", "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR", "CLAUDE_CODE_WEBSOCKET_AUTH_TOKEN", "CLAUDE_SESSION_INGRESS_TOKEN_FILE"} {
-		if strings.TrimSpace(env[EnvironmentKey(key)]) != "" {
-			return rateLimitsAPIAccess{}, false
-		}
+	if directAPIHasRouteOverride(env) || strings.TrimSpace(env[EnvironmentKey(directAPIKeyEnv)]) != "" {
+		return rateLimitsAPIAccess{}, false
 	}
 
-	token := strings.TrimSpace(env[EnvironmentKey(rateLimitsSetupToken)])
+	token := strings.TrimSpace(env[EnvironmentKey(directAPIOAuthTokenEnv)])
 	if token == "" {
 		return rateLimitsAPIAccess{}, false
 	}
 
-	base := strings.TrimSpace(env[EnvironmentKey(rateLimitsBaseURL)])
+	base := strings.TrimSpace(env[EnvironmentKey(directAPIBaseURLEnv)])
 	if base == "" {
-		base = rateLimitsDefaultBase
+		base = directAPIDefaultBase
 	}
 
 	endpoint, err := url.Parse(base)
@@ -206,7 +158,7 @@ func resolveRateLimitsAPIAccess(env map[string]string) (rateLimitsAPIAccess, boo
 
 	fable := strings.TrimSpace(env[EnvironmentKey("ANTHROPIC_DEFAULT_FABLE_MODEL")])
 	if fable == "" {
-		fable = "claude-fable-5-1"
+		fable = rateLimitsDefaultFableModel
 	}
 
 	return rateLimitsAPIAccess{token: token, endpoint: endpoint.String(), model: model, fableModel: fable}, true

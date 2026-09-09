@@ -173,3 +173,61 @@ func newStartedConfigTestSession(
 
 	return agent, session, transport, conn, func() { require.NoError(t, client.Close()) }
 }
+
+func TestExactResolvedModelRetainsNativeCapabilitiesWithoutDirectDiscovery(t *testing.T) {
+	newAuthSeams(t)
+	const modelID = "claude-sonnet-5"
+	for _, initial := range []string{"sonnet", modelID} {
+		t.Run(initial, func(t *testing.T) {
+			h := newModelCatalogHarness(t, nil, WithClaudeDirectAPI(false))
+			construct := h.agent.newClaudeClient
+			h.agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
+				client := construct(log, options)
+				transport := h.launches[len(h.launches)-1]
+				transport.initialize["models"] = []any{map[string]any{
+					"value": "sonnet", "resolvedModel": modelID, "displayName": "Sonnet",
+					"supportedEffortLevels": []any{effortLow, effortHigh}, "supportsAutoMode": true,
+				}}
+				transport.settings["applied"] = map[string]any{"model": initial, "effort": effortLow}
+
+				return client
+			}
+			options := ClaudeOptions{Model: initial}
+			created, err := h.agent.NewSession(t.Context(), NewSessionRequest(t.TempDir(), WithSessionMeta(options.Meta())))
+			require.NoError(t, err)
+			_, err = h.agent.SetSessionConfigOption(t.Context(), SetConfigOptionRequest(created.SessionId, configMode, acp.SessionConfigValueId(modeAuto)))
+			require.NoError(t, err, "an exact resolved ID must retain native auto mode")
+			selected, err := h.agent.SetSessionConfigOption(t.Context(), SetModelRequest(created.SessionId, modelID))
+			require.NoError(t, err)
+			byConfig := map[acp.SessionConfigId]*acp.SessionConfigOptionSelect{}
+			for _, option := range selected.ConfigOptions {
+				if option.Select != nil {
+					byConfig[option.Select.Id] = option.Select
+				}
+			}
+			require.NotNil(t, byConfig[configEffort], "selecting the resolved ID must keep the effort selector")
+			require.Equal(t, acp.SessionConfigValueId(effortLow), byConfig[configEffort].CurrentValue)
+			require.Equal(t, acp.SessionConfigValueId(modeAuto), byConfig[configMode].CurrentValue)
+			require.Equal(t, acp.SessionConfigValueId(modelID), byConfig[configModel].CurrentValue)
+			var selectedMeta map[string]any
+			for _, option := range *byConfig[configModel].Options.Ungrouped {
+				if option.Value == acp.SessionConfigValueId(modelID) {
+					selectedMeta = option.Meta
+				}
+			}
+			require.Equal(t, map[string]any{claudeMetaKey: map[string]any{
+				claudeModelMetaSupportedEffortKey:  []string{effortLow, effortHigh},
+				claudeModelMetaSupportsAutoModeKey: true,
+			}}, selectedMeta)
+			var dispatched string
+			for _, sent := range h.launches[0].Sent() {
+				if request, ok := sent.(claude.ControlRequest); ok && request.Request["subtype"] == "set_model" {
+					dispatched, _ = request.Request["model"].(string)
+				}
+			}
+			require.Equal(t, modelID, dispatched, "capability lookup must not rewrite the requested ID")
+			accesses, _, _ := h.catalog.snapshot()
+			require.Empty(t, accesses)
+		})
+	}
+}

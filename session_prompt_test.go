@@ -1445,8 +1445,6 @@ func TestStreamUsageAndContextHelpers(t *testing.T) {
 	// An unknown context window is reported as 0, never fabricated from the model
 	// name.
 	require.Equal(t, 0, (&agentSession{model: "claude-sonnet-1m"}).currentContextWindow())
-	require.True(t, modelHasLargeContext("claude-sonnet-4-5-1m"))
-	require.False(t, modelHasLargeContext("claude-sonnet"))
 	require.Equal(t, map[string]any{"a": "b"}, mapValue(map[string]any{"a": "b"}))
 	require.Nil(t, mapValue("bad"))
 	require.Equal(t, "x", stringValue("x"))

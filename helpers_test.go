@@ -627,6 +627,8 @@ func (t *fakeClaudeTransport) respond(req claude.ControlRequest) {
 	switch subtype {
 	case "initialize":
 		response = t.initialize
+	case "list_models":
+		response = map[string]any{"models": t.initialize["models"]}
 	case "get_settings":
 		response = t.settings
 	case "get_context_usage":

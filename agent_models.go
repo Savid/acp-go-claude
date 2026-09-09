@@ -76,6 +76,12 @@ func (a *Agent) setSessionConfigValue(
 	switch params.ConfigId {
 	case configModel:
 		model, cliModel := session.modelSelection(string(params.Value))
+
+		_, _, available := session.modeInfo()
+		if claude.ModelDisabled(model, available) || claude.ModelDisabled(cliModel, available) {
+			return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
+		}
+
 		if err := session.client.SetModel(ctx, cliModel); err != nil {
 			return acp.SetSessionConfigOptionResponse{}, err
 		}
@@ -158,6 +164,16 @@ func selectInitialModel(
 		}
 
 		fromSettings := index == 2
+		if fromSettings && claude.ModelDisabled(preference, available) {
+			// Native settings report the concrete runtime model even when only
+			// the Default picker choice is permitted by availableModels.
+			for _, info := range available {
+				if info.Value == modelDefault && !info.Disabled && info.ResolvedModel == preference {
+					return initialModelSelection{Model: modelDefault}
+				}
+			}
+		}
+
 		if resolved := resolveModelPreference(available, preference); resolved != nil {
 			return initialModelSelection{
 				Model:       resolved.Value,
@@ -171,10 +187,12 @@ func selectInitialModel(
 		}
 	}
 
-	if len(available) > 0 {
-		return initialModelSelection{
-			Model:       available[0].Value,
-			ShouldApply: available[0].Value != defaultModel,
+	for _, model := range available {
+		if model.Value != "" && !model.Disabled {
+			return initialModelSelection{
+				Model:       model.Value,
+				ShouldApply: model.Value != defaultModel,
+			}
 		}
 	}
 
@@ -346,7 +364,7 @@ func configSelectOptions(model string, available []claude.AvailableModelInfo) ac
 	seen := make(map[string]struct{}, len(available)+1)
 
 	for _, info := range available {
-		if info.Value == "" {
+		if info.Value == "" || info.Disabled || claude.ModelDisabled(info.Value, available) {
 			continue
 		}
 
@@ -363,8 +381,12 @@ func configSelectOptions(model string, available []claude.AvailableModelInfo) ac
 		seen[info.Value] = struct{}{}
 	}
 
-	if _, ok := seen[model]; !ok {
+	if _, ok := seen[model]; !ok && !claude.ModelDisabled(model, available) {
 		info := claude.AvailableModelInfo{Value: model, DisplayName: model}
+		if resolved, found := availableModelInfo(model, available); found {
+			info = resolved
+		}
+
 		values = append(values, acp.SessionConfigSelectOption{
 			Name:  model,
 			Value: acp.SessionConfigValueId(model),
@@ -489,10 +511,9 @@ func effortSelectOptions(
 }
 
 func effortLevelsForModel(model string, available []claude.AvailableModelInfo) []string {
-	for _, info := range available {
-		if info.Value == model && len(info.SupportedEffortLevels) > 0 {
-			return append([]string(nil), info.SupportedEffortLevels...)
-		}
+	info, found := availableModelInfo(model, available)
+	if found && !info.Disabled && !info.EffortUnsupported && !claude.ModelDisabled(model, available) {
+		return info.SupportedEffortLevels
 	}
 
 	return nil
@@ -580,13 +601,9 @@ func bypassPermissionsAvailable() bool {
 }
 
 func modelSupportsAutoMode(model string, available []claude.AvailableModelInfo) bool {
-	for _, info := range available {
-		if info.Value == model {
-			return info.SupportsAutoMode
-		}
-	}
+	info, found := availableModelInfo(model, available)
 
-	return false
+	return found && !info.Disabled && !claude.ModelDisabled(model, available) && info.SupportsAutoMode
 }
 
 func acpModeForPermission(mode string) acp.SessionModeId {

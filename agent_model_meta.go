@@ -1,9 +1,6 @@
 package claudeacp
 
 import (
-	"slices"
-	"strings"
-
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
 )
@@ -12,13 +9,10 @@ const (
 	claudeModelMetaAvailableVariantsKey = "availableVariants"
 	claudeModelMetaContextWindowKey     = "contextWindow"
 	claudeModelMetaModelIDKey           = "modelId"
+	claudeModelMetaMaxOutputTokensKey   = "maxOutputTokens"
 	claudeModelMetaSupportedEffortKey   = "supportedEffortLevels"
 	claudeModelMetaSupportsAutoModeKey  = "supportsAutoMode"
 	claudeModelMetaVariantKey           = "variant"
-
-	claudeModelFamilyHaiku  = "haiku"
-	claudeModelFamilyOpus   = "opus"
-	claudeModelFamilySonnet = "sonnet"
 )
 
 // model_config follows the ACP model config category RFD until the SDK exposes
@@ -60,7 +54,7 @@ func sessionLoadResponseMeta(
 func sessionResponseMetaWithInjection(session *agentSession, override string) map[string]any {
 	session.mu.Lock()
 	model := session.model
-	available := append([]claude.AvailableModelInfo(nil), session.availableModels...)
+	available := claude.CloneAvailableModels(session.availableModels)
 	effort := session.effort
 	injection := session.providerAuthInjection
 	session.mu.Unlock()
@@ -111,7 +105,7 @@ func claudeModelVariantMeta(model string, available []claude.AvailableModelInfo,
 func claudeModelInfoMeta(info claude.AvailableModelInfo) map[string]any {
 	claudeMeta := make(map[string]any)
 
-	if levels := nonEmptyModelStrings(info.SupportedEffortLevels); len(levels) > 0 {
+	if levels := nonEmptyModelStrings(info.SupportedEffortLevels); len(levels) > 0 && !info.EffortUnsupported {
 		claudeMeta[claudeModelMetaSupportedEffortKey] = levels
 	}
 
@@ -119,8 +113,12 @@ func claudeModelInfoMeta(info claude.AvailableModelInfo) map[string]any {
 		claudeMeta[claudeModelMetaSupportsAutoModeKey] = true
 	}
 
-	if contextWindow := modelContextWindowHint(info); contextWindow > 0 {
-		claudeMeta[claudeModelMetaContextWindowKey] = contextWindow
+	if info.ContextWindow > 0 {
+		claudeMeta[claudeModelMetaContextWindowKey] = info.ContextWindow
+	}
+
+	if info.MaxOutputTokens > 0 {
+		claudeMeta[claudeModelMetaMaxOutputTokensKey] = info.MaxOutputTokens
 	}
 
 	if len(claudeMeta) == 0 {
@@ -130,62 +128,9 @@ func claudeModelInfoMeta(info claude.AvailableModelInfo) map[string]any {
 	return map[string]any{claudeMetaKey: claudeMeta}
 }
 
-func modelContextWindowHint(info claude.AvailableModelInfo) int {
-	if modelHasLargeContext(info.Value) {
-		return largeContextWindow
-	}
-
-	text := modelHintText(info)
-	if strings.Contains(text, "1m context") || strings.Contains(text, "1 million token") {
-		return largeContextWindow
-	}
-
-	if strings.EqualFold(strings.TrimSpace(info.Value), modelTokenOpus) {
-		return largeContextWindow
-	}
-
-	switch modelFamily(info) {
-	case claudeModelFamilyHaiku, claudeModelFamilySonnet:
-		return defaultContextWindow
-	default:
-		return 0
-	}
-}
-
-// modelHasLargeContext reports whether a model name carries the large-context
-// token (used only for the advertised model-capability hint, never for
-// usage_update.size).
-func modelHasLargeContext(model string) bool {
-	parts := strings.FieldsFunc(strings.ToLower(model), func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
-	})
-
-	return slices.Contains(parts, largeContextToken)
-}
-
-func modelFamily(info claude.AvailableModelInfo) string {
-	text := modelHintText(info)
-	switch {
-	case strings.Contains(text, claudeModelFamilyHaiku):
-		return claudeModelFamilyHaiku
-	case strings.Contains(text, claudeModelFamilySonnet):
-		return claudeModelFamilySonnet
-	case strings.Contains(text, claudeModelFamilyOpus):
-		return claudeModelFamilyOpus
-	default:
-		return ""
-	}
-}
-
-func modelHintText(info claude.AvailableModelInfo) string {
-	return strings.ToLower(info.Value + " " + info.DisplayName + " " + info.Description)
-}
-
 func availableModelInfo(model string, available []claude.AvailableModelInfo) (claude.AvailableModelInfo, bool) {
-	for _, info := range available {
-		if info.Value == model {
-			return info, true
-		}
+	if info := resolveModelPreference(available, model); info != nil {
+		return *info, true
 	}
 
 	return claude.AvailableModelInfo{}, false

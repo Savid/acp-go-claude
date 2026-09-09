@@ -298,7 +298,7 @@ func (p *providerAuth) recordAuthorizeIntent(ctx context.Context, request author
 		return authLedgerRecord{}, authFailed(authCauseProcess, request.providerID, request.method, "")
 	}
 
-	p.agent.invalidateRateLimits()
+	p.agent.invalidateProviderObservations()
 
 	return record, nil
 }
@@ -308,7 +308,7 @@ func (p *providerAuth) recordAuthorizeIntent(ctx context.Context, request author
 // not_confirmed however plainly the slot is occupied. Its caller holds the slot
 // gate, so the binding checked here cannot move before the write below lands.
 func (p *providerAuth) confirmAuthorize(flow *authFlow) error {
-	defer p.agent.invalidateRateLimits()
+	defer p.agent.invalidateProviderObservations()
 
 	if !p.lineageCurrent(flow) {
 		return authFailed(authCauseBindingConflict, flow.providerID, flow.method.ID, flow.id)
@@ -492,8 +492,8 @@ func (p *providerAuth) disconnect(ctx context.Context, params json.RawMessage) (
 		return nil, authFailed(authCauseProcess, providerID, "", "")
 	}
 
-	p.agent.invalidateRateLimits()
-	defer p.agent.invalidateRateLimits()
+	p.agent.invalidateProviderObservations()
+	defer p.agent.invalidateProviderObservations()
 
 	p.fenceLogins()
 

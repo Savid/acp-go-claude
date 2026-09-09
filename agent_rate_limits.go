@@ -214,8 +214,12 @@ func normalizeRateLimits(providerID string, source claude.RateLimits) RateLimits
 	return response
 }
 
-func (a *Agent) invalidateRateLimits() {
+func (a *Agent) invalidateProviderObservations() {
 	a.mu.Lock()
 	a.rateLimitsEpoch++
 	a.mu.Unlock()
+
+	if a.modelCatalog != nil {
+		a.modelCatalog.Invalidate()
+	}
 }

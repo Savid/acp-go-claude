@@ -44,14 +44,14 @@ func TestRateLimitsNativeProbeUsesCapturedIdentityAndSettlesBeforeReclaim(t *tes
 	require.Contains(t, fixture.requests[1].Arguments, "--safe-mode")
 	require.Contains(t, fixture.requests[1].Arguments, "--no-session-persistence")
 	env := rateLimitsFixtureEnvironment(fixture.requests[1].Environment)
-	require.Equal(t, "fixture-token", env[rateLimitsSetupToken])
+	require.Equal(t, "fixture-token", env[directAPIOAuthTokenEnv])
 	require.Equal(t, "1", env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"])
 	require.Equal(t, "0", env["CLAUDE_CODE_MAX_RETRIES"])
 	require.Empty(t, env["HTTPS_PROXY"])
 	require.Equal(t, filepath.Join(fixture.root, "home"), env["HOME"])
 	require.Equal(t, filepath.Join(fixture.root, "config"), env["CLAUDE_CONFIG_DIR"])
 	require.Equal(t, filepath.Join(fixture.root, "work"), fixture.requests[1].WorkingDirectory)
-	require.Equal(t, upstream.URL, fixture.transport.env[rateLimitsBaseURL])
+	require.Equal(t, upstream.URL, fixture.transport.env[directAPIBaseURLEnv])
 	entries, err := os.ReadDir(fixture.client.options.Cwd)
 	require.NoError(t, err)
 	require.Empty(t, entries)
@@ -87,7 +87,7 @@ func TestRateLimitsNativeProbeDoesNotTouchPreparedParentOrChangedIdentity(t *tes
 	require.Empty(t, result.Pools)
 	require.Empty(t, fixture.requests)
 	fixture.client.options.ClaudeHome = ""
-	fixture.transport.env[rateLimitsSetupToken] = "different-fixture-token"
+	fixture.transport.env[directAPIOAuthTokenEnv] = "different-fixture-token"
 	result, err = fixture.client.readRateLimitsNativeProbe(t.Context(), fixture.access)
 	require.NoError(t, err)
 	require.Empty(t, result.Pools)
@@ -258,7 +258,7 @@ func newRateLimitsNativeFixture(t *testing.T, endpoint string) *rateLimitsNative
 	fixture := &rateLimitsNativeFixture{
 		requestErr: make(chan error, 1), incomplete: errors.New("quota fixture containment incomplete"),
 		transport: &rateLimitsAPITransport{fakeTransport: newFakeTransport(), env: map[string]string{
-			rateLimitsSetupToken: "fixture-token", rateLimitsBaseURL: endpoint,
+			directAPIOAuthTokenEnv: "fixture-token", directAPIBaseURLEnv: endpoint,
 			"ANTHROPIC_DEFAULT_FABLE_MODEL": "fixture-fable", "HTTPS_PROXY": "https://unused.invalid",
 		}},
 	}
@@ -314,9 +314,9 @@ func (f *rateLimitsNativeFixture) process(ctx context.Context, request NativeReq
 					defer close(done)
 					defer output.Close()
 					env := rateLimitsFixtureEnvironment(request.Environment)
-					req, err := http.NewRequestWithContext(ctx, http.MethodPost, env[rateLimitsBaseURL]+"/v1/messages?beta=true", strings.NewReader(`{"model":"fixture-fable","max_tokens":1,"tools":[]}`))
+					req, err := http.NewRequestWithContext(ctx, http.MethodPost, env[directAPIBaseURLEnv]+"/v1/messages?beta=true", strings.NewReader(`{"model":"fixture-fable","max_tokens":1,"tools":[]}`))
 					if err == nil {
-						req.Header.Set("Authorization", "Bearer "+env[rateLimitsSetupToken])
+						req.Header.Set("Authorization", "Bearer "+env[directAPIOAuthTokenEnv])
 						var response *http.Response
 						response, err = http.DefaultClient.Do(req)
 						if err == nil {

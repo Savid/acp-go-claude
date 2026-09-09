@@ -83,6 +83,9 @@ func TestModelSelectionAndModeBranches(t *testing.T) {
 		effort:          effortHigh,
 	}
 	model, cliModel := session.modelSelection("Opus")
+	require.Equal(t, "Opus", model)
+	require.Equal(t, "Opus", cliModel)
+	model, cliModel = session.modelSelection("opus")
 	require.Equal(t, "opus", model)
 	require.Equal(t, "claude-opus-real", cliModel)
 
@@ -134,6 +137,39 @@ func TestReconcileEffortForModel(t *testing.T) {
 	got, changed = reconcileEffortForModel("missing", available, effortMedium)
 	require.Equal(t, "", got)
 	require.True(t, changed)
+}
+
+func TestResolvedModelCapabilityLookupPreservesExactRestrictions(t *testing.T) {
+	t.Parallel()
+	const modelID = "claude-sonnet-5"
+	alias := claude.AvailableModelInfo{
+		Value: "sonnet", ResolvedModel: modelID, SupportsAutoMode: true,
+		SupportedEffortLevels: []string{effortLow, effortHigh},
+	}
+	for _, test := range []struct {
+		name      string
+		selection string
+		models    []claude.AvailableModelInfo
+		wantAuto  bool
+		want      []string
+	}{
+		{"exact resolved identity", modelID, []claude.AvailableModelInfo{alias}, true, alias.SupportedEffortLevels},
+		{"different version", "claude-sonnet-4-6", []claude.AvailableModelInfo{alias}, false, nil},
+		{"explicit row wins", modelID, []claude.AvailableModelInfo{alias, {Value: modelID, EffortUnsupported: true}}, false, nil},
+		{"disabled alias", modelID, []claude.AvailableModelInfo{{Value: "sonnet", ResolvedModel: modelID, Disabled: true, SupportsAutoMode: true, SupportedEffortLevels: []string{effortHigh}}}, false, nil},
+		{"explicit effort refusal", modelID, []claude.AvailableModelInfo{{Value: "sonnet", ResolvedModel: modelID, EffortUnsupported: true, SupportsAutoMode: true, SupportedEffortLevels: []string{effortHigh}}}, true, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, test.wantAuto, modelSupportsAutoMode(test.selection, test.models))
+			levels := effortLevelsForModel(test.selection, test.models)
+			require.Equal(t, test.want, levels)
+			if len(levels) > 0 {
+				levels[0] = "changed"
+				require.Equal(t, effortLow, alias.SupportedEffortLevels[0], "lookup results must own their slices")
+			}
+		})
+	}
 }
 
 // TestBypassPermissionsAvailabilityFollowsThePrivilegeOfTheProcess proves the

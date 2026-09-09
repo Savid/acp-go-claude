@@ -71,6 +71,12 @@ types described in [ACP methods](/docs/reference/acp-methods).
 `ConcurrencyLimits` caps active sessions and concurrent outbound client calls.
 `ImageLimits` controls decoded input and emitted output byte limits.
 
+`WithClaudeDirectAPI` defaults to enabled. It controls the direct Anthropic
+[Models API catalog](/docs/features/models-config#model-catalog) and the
+potentially billable setup-token quota probe described in
+[Authentication](/docs/features/authentication#token-auth-and-usage-reporting).
+Disabling it retains native model discovery and native quota observations.
+
 ## Requests and session storage
 
 Request builders such as `NewSessionRequest`, `TextPromptRequest`, and

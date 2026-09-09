@@ -86,11 +86,11 @@ func TestProcessTransportRoutesProbeAndSessionThroughAuthorityAndWaitsAfterEOF(t
 	require.Equal(t, "/workspace", requests[1].WorkingDirectory)
 	require.Contains(t, requests[1].Environment, "BASE=host")
 	require.Contains(t, requests[1].Environment, "OVERLAY=yes")
-	captured := transport.rateLimitsEnvironment()
+	captured := transport.LaunchEnvironment()
 	require.Equal(t, "host", captured["BASE"])
 	require.Equal(t, "yes", captured["OVERLAY"])
 	captured["BASE"] = "changed"
-	require.Equal(t, "host", transport.rateLimitsEnvironment()["BASE"])
+	require.Equal(t, "host", transport.LaunchEnvironment()["BASE"])
 }
 
 func TestProcessTransportCloseUsesProtocolThenRevokeAndWait(t *testing.T) {

@@ -284,10 +284,19 @@ Session-lifecycle response metadata exposes the selected model under
 `_meta.claude.modelId`, its current effort variant under
 `_meta.claude.variant`, and the selectable variants under
 `_meta.claude.availableVariants`. Individual model options in the session
-configuration carry their native facts under
-`_meta.claude.supportedEffortLevels`, `_meta.claude.supportsAutoMode`, and
-`_meta.claude.contextWindow` when those values are known. See
-[Models and config](/docs/features/models-config).
+configuration carry known values under `_meta.claude`:
+
+| Key | Source and meaning |
+| --- | --- |
+| `supportedEffortLevels` | Supported effort values from the model catalog. |
+| `supportsAutoMode` | CLI auto-mode support from exact native model metadata. |
+| `contextWindow` | Positive input token maximum reported by the Models API. |
+| `maxOutputTokens` | Positive output token maximum reported by the Models API. |
+
+Unknown values are omitted. Token maxima do not populate runtime
+`usage_update.size`, and API capabilities do not become model modality fields
+or native capability advertisements. [Models and config](/docs/features/models-config#model-catalog)
+defines discovery eligibility, reconciliation, caching, and failure behavior.
 
 ## Update metadata
 

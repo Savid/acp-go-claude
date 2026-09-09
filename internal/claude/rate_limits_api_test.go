@@ -22,7 +22,7 @@ type rateLimitsAPITransport struct {
 	env map[string]string
 }
 
-func (t *rateLimitsAPITransport) rateLimitsEnvironment() map[string]string { return maps.Clone(t.env) }
+func (t *rateLimitsAPITransport) LaunchEnvironment() map[string]string { return maps.Clone(t.env) }
 
 func TestReadRateLimitsSetupTokenFallback(t *testing.T) {
 	t.Parallel()
@@ -47,7 +47,7 @@ func TestReadRateLimitsSetupTokenFallback(t *testing.T) {
 			}))
 			defer server.Close()
 			transport := &rateLimitsAPITransport{fakeTransport: newFakeTransport(), env: map[string]string{
-				rateLimitsSetupToken: "configured-setup-token", rateLimitsBaseURL: server.URL + "/proxy",
+				directAPIOAuthTokenEnv: "configured-setup-token", directAPIBaseURLEnv: server.URL + "/proxy",
 				"ANTHROPIC_DEFAULT_HAIKU_MODEL": "configured-haiku",
 			}}
 			client := NewClient(nil, Options{}, transport)
@@ -77,7 +77,7 @@ func TestReadRateLimitsFallbackRetainsNativeWithEitherDirectAPISetting(t *testin
 	for _, direct := range []bool{false, true} {
 		t.Run(strconv.FormatBool(direct), func(t *testing.T) {
 			t.Parallel()
-			transport := &rateLimitsAPITransport{fakeTransport: newFakeTransport(), env: map[string]string{rateLimitsSetupToken: "test-token"}}
+			transport := &rateLimitsAPITransport{fakeTransport: newFakeTransport(), env: map[string]string{directAPIOAuthTokenEnv: "test-token"}}
 			client := NewClient(nil, Options{}, transport)
 			go autoRespondInitialize(transport.fakeTransport)
 			startClientForTest(t, client)
@@ -110,7 +110,7 @@ func TestReadRateLimitsFallbackOptOutClassifiesApplicableAcquisition(t *testing.
 			server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
 			t.Cleanup(server.Close)
 			transport := &rateLimitsAPITransport{fakeTransport: newFakeTransport(), env: map[string]string{
-				rateLimitsSetupToken: "configured-token", rateLimitsBaseURL: server.URL,
+				directAPIOAuthTokenEnv: "configured-token", directAPIBaseURLEnv: server.URL,
 			}}
 			client := NewClient(nil, Options{}, transport)
 			go autoRespondInitialize(transport.fakeTransport)
@@ -138,7 +138,7 @@ func TestReadRateLimitsFallbackPreservesAuthenticationFailure(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	transport := &rateLimitsAPITransport{fakeTransport: newFakeTransport(), env: map[string]string{
-		rateLimitsSetupToken: "configured-token", rateLimitsBaseURL: server.URL,
+		directAPIOAuthTokenEnv: "configured-token", directAPIBaseURLEnv: server.URL,
 	}}
 	client := NewClient(nil, Options{}, transport)
 	go autoRespondInitialize(transport.fakeTransport)
@@ -158,7 +158,7 @@ func TestReadRateLimitsSetupTokenFallbackDiscardsChangedSettings(t *testing.T) {
 	}))
 	defer server.Close()
 	transport := &rateLimitsAPITransport{fakeTransport: newFakeTransport(), env: map[string]string{
-		rateLimitsSetupToken: "configured-token", rateLimitsBaseURL: server.URL,
+		directAPIOAuthTokenEnv: "configured-token", directAPIBaseURLEnv: server.URL,
 	}}
 	client := NewClient(nil, Options{}, transport)
 	go autoRespondInitialize(transport.fakeTransport)
@@ -176,7 +176,7 @@ func TestReadRateLimitsSetupTokenFallbackDiscardsChangedSettings(t *testing.T) {
 
 func TestRateLimitsFallbackRejectsDifferentIdentity(t *testing.T) {
 	t.Parallel()
-	base := map[string]string{rateLimitsSetupToken: "setup-token", rateLimitsBaseURL: "https://same.example"}
+	base := map[string]string{directAPIOAuthTokenEnv: "setup-token", directAPIBaseURLEnv: "https://same.example"}
 	for _, key := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"} {
 		env := maps.Clone(base)
 		env[key] = "configured"
@@ -186,20 +186,20 @@ func TestRateLimitsFallbackRejectsDifferentIdentity(t *testing.T) {
 	for _, settings := range []map[string]any{
 		{"apiKeyHelper": "secret-helper"},
 		{"forceLoginMethod": "gateway"},
-		{"env": map[string]any{rateLimitsSetupToken: "another-token"}},
-		{"env": map[string]any{rateLimitsBaseURL: "https://another.example"}},
+		{"env": map[string]any{directAPIOAuthTokenEnv: "another-token"}},
+		{"env": map[string]any{directAPIBaseURLEnv: "https://another.example"}},
 		{"env": map[string]any{"ANTHROPIC_API_KEY": "another-key"}},
-		{"env": map[string]any{rateLimitsSetupToken: 42}},
+		{"env": map[string]any{directAPIOAuthTokenEnv: 42}},
 	} {
-		require.False(t, rateLimitsSettingsMatch(settings, base))
+		require.False(t, directAPISettingsMatch(settings, base))
 	}
 	for _, endpoint := range []string{"https://name:password@example.test", "file:///secret", "https://example.test?key=other", "https://example.test#fragment"} {
 		env := maps.Clone(base)
-		env[rateLimitsBaseURL] = endpoint
+		env[directAPIBaseURLEnv] = endpoint
 		_, ok := resolveRateLimitsAPIAccess(env)
 		require.False(t, ok, endpoint)
 	}
-	require.True(t, rateLimitsSettingsMatch(map[string]any{"env": map[string]any{rateLimitsSetupToken: "setup-token"}}, base))
+	require.True(t, directAPISettingsMatch(map[string]any{"env": map[string]any{directAPIOAuthTokenEnv: "setup-token"}}, base))
 }
 
 func TestRateLimitsHeaderProbeRejectsRedirectsAndOversizeBodies(t *testing.T) {

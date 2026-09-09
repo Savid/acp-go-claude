@@ -96,13 +96,6 @@ func TestLoadDiscoveredSettingsMergeOrder(t *testing.T) {
 	require.Equal(t, "claude-managed", settings.Model)
 	require.Equal(t, "high", settings.Effort)
 	require.Equal(t, "dontAsk", settings.PermissionMode)
-	require.True(t, settings.HasAvailableModels)
-	require.Equal(t, []string{
-		"claude-haiku-4-5",
-		"claude-opus-4-7[1m]",
-		"claude-sonnet-4-6",
-		"claude-managed",
-	}, settings.AvailableModels)
 	require.Equal(t, map[string]string{
 		"FROM_USER":    "yes",
 		"OVERRIDE":     "project",
@@ -129,8 +122,6 @@ func TestLoadDiscoveredSettingsIgnoresInvalidFiles(t *testing.T) {
 	settings := loadDiscoveredSettings(context.Background(), cwd, home, nil)
 	require.Empty(t, settings.Model)
 	require.Empty(t, settings.PermissionMode)
-	require.True(t, settings.HasAvailableModels)
-	require.Empty(t, settings.AvailableModels)
 	require.Equal(t, map[string]string{"GOOD": "yes"}, settings.Env)
 }
 
@@ -221,20 +212,6 @@ func TestSettingsHelpers(t *testing.T) {
 	require.Contains(t, logs.String(), "BAD_NUL")
 	require.NotContains(t, logs.String(), "equals\"")
 
-	allowlist, ok := settingsAvailableModelAllowlist(
-		modelConfig{AvailableModels: []string{"opus", "sonnet"}},
-		true,
-		discoveredSettings{AvailableModels: []string{"sonnet", "haiku"}, HasAvailableModels: true},
-	)
-	require.True(t, ok)
-	require.Equal(t, []string{"opus", "sonnet", "haiku"}, allowlist)
-	allowlist, ok = settingsAvailableModelAllowlist(
-		modelConfig{AvailableModels: []string{"opus", "opus"}},
-		true,
-		discoveredSettings{},
-	)
-	require.True(t, ok)
-	require.Equal(t, []string{"opus"}, allowlist)
 	require.Equal(t, "b", firstNonEmptyString("", "b", "c"))
 	require.NotEmpty(t, defaultManagedSettingsPath())
 
@@ -246,6 +223,6 @@ func TestSettingsHelpers(t *testing.T) {
 	require.Contains(t, defaultManagedSettingsPath(), `C:\Program Files`)
 	claude.Platform = "linux"
 	require.Equal(t, "/etc/claude-code/managed-settings.json", defaultManagedSettingsPath())
-	_, ok = loadSettingsFile(context.Background(), "", nil)
+	_, ok := loadSettingsFile(context.Background(), "", nil)
 	require.False(t, ok)
 }

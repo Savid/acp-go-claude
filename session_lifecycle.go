@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -243,6 +244,7 @@ func (s *agentSession) refreshMCPRegistry(ctx context.Context) error {
 type relaunchConfig struct {
 	model          string
 	modelOverrides map[string]string
+	modelAllowlist []string
 	outputStyle    string
 	effort         string
 	mode           acp.SessionModeId
@@ -255,6 +257,7 @@ func (s *agentSession) currentRelaunchConfig() relaunchConfig {
 	return relaunchConfig{
 		model:          s.model,
 		modelOverrides: cloneStringMap(s.modelOverrides),
+		modelAllowlist: slices.Clone(s.modelAllowlist),
 		outputStyle:    s.outputStyle,
 		effort:         s.effort,
 		mode:           s.mode,
@@ -323,6 +326,24 @@ func (s *agentSession) relaunchClient(
 		return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
 	}
 
+	models, settings, settingsKnown := s.agent.discoverSessionModels(ctx, relaunched)
+	if err := ctx.Err(); err != nil {
+		return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
+	}
+
+	models = reconcileSessionModels(models, config.modelAllowlist, settings, config.modelOverrides)
+	if claude.ModelDisabled(config.model, models) || claude.ModelDisabled(opts.Model, models) {
+		return s.cleanupFailedRelaunch(unsupportedField("model"), relaunched, previousCloseErr)
+	}
+
+	config.effort, _ = reconcileEffortForModel(config.model, models, config.effort)
+	if !modeAvailableForModel(config.mode, config.model, models) {
+		config.mode = modeDefault
+		if err := relaunched.SetPermissionMode(ctx, string(modeDefault)); err != nil {
+			return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
+		}
+	}
+
 	if config.outputStyle != "" {
 		if err := relaunched.SetOutputStyle(ctx, config.outputStyle); err != nil {
 			return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
@@ -346,6 +367,14 @@ func (s *agentSession) relaunchClient(
 	}
 
 	s.client = relaunched
+	s.availableModels = models
+	s.effort = config.effort
+	s.mode = config.mode
+
+	s.fastModeKnown = settingsKnown
+	if settings.FastMode != nil {
+		s.fastMode = *settings.FastMode
+	}
 	// The replacement process ran command discovery of its own, so the catalog
 	// this session advertises is the one that process actually serves. Keeping the
 	// catalog the retired process reported would advertise commands nothing is
@@ -361,6 +390,12 @@ func (s *agentSession) relaunchClient(
 	// the failure travels to the caller and the next successful emission restates
 	// the catalog.
 	if emitErr := s.emitAvailableCommandsUpdate(ctx, true); emitErr != nil {
+		return errors.Join(previousCloseErr, emitErr)
+	}
+
+	if emitErr := s.emitUpdates(ctx, []acp.SessionUpdate{{
+		ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: sessionConfigOptions(s)},
+	}}); emitErr != nil {
 		return errors.Join(previousCloseErr, emitErr)
 	}
 

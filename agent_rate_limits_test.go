@@ -215,7 +215,7 @@ func TestHandleRateLimitsFencesChangedTarget(t *testing.T) {
 			session.mu.Lock()
 			switch mutation {
 			case "auth":
-				agent.invalidateRateLimits()
+				agent.invalidateProviderObservations()
 			case "client":
 				session.client = nil
 			case "environment":

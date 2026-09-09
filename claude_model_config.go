@@ -3,29 +3,21 @@ package claudeacp
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 const (
-	envAnthropicModel       = "ANTHROPIC_MODEL"
-	envClaudeModelConfig    = "CLAUDE_MODEL_CONFIG"
-	modelDefault            = "default"
-	modelTokenClaude        = "claude"
-	modelTokenOpus          = "opus"
-	modelTokenBest          = "best"
-	modelTokenOpusPlan      = "opusplan"
-	modelContextHintPattern = `(?i)\[(\d+m)\]$`
+	envAnthropicModel    = "ANTHROPIC_MODEL"
+	envClaudeModelConfig = "CLAUDE_MODEL_CONFIG"
+	modelDefault         = "default"
 )
 
 type modelConfig struct {
 	ModelOverrides  map[string]string `json:"modelOverrides,omitempty"`
 	AvailableModels []string          `json:"availableModels,omitempty"`
 }
-
-var modelContextHintRE = regexp.MustCompile(modelContextHintPattern)
 
 func parseModelConfig(raw string) (modelConfig, bool, error) {
 	if strings.TrimSpace(raw) == "" {
@@ -116,7 +108,7 @@ func applyAvailableModelsAllowlist(
 	allowlist []string,
 ) []claude.AvailableModelInfo {
 	if allowlist == nil {
-		return append([]claude.AvailableModelInfo(nil), available...)
+		return claude.CloneAvailableModels(available)
 	}
 
 	result := make([]claude.AvailableModelInfo, 0, len(allowlist)+1)
@@ -147,6 +139,17 @@ func applyAvailableModelsAllowlist(
 		seen[entry] = struct{}{}
 	}
 
+	// Retain explicit native refusals internally, including IDs outside the
+	// allowlist. Projection and selection must not reintroduce them.
+	for _, info := range available {
+		if info.Disabled {
+			if _, exists := seen[info.Value]; !exists {
+				result = append(result, *cloneModelInfo(info))
+				seen[info.Value] = struct{}{}
+			}
+		}
+	}
+
 	return result
 }
 
@@ -171,100 +174,30 @@ func withoutDefaultModel(available []claude.AvailableModelInfo) []claude.Availab
 	return filtered
 }
 
-func resolveModelPreference(
-	models []claude.AvailableModelInfo,
-	preference string,
-) *claude.AvailableModelInfo {
-	trimmed := strings.TrimSpace(preference)
-	if trimmed == "" {
+// resolveModelPreference preserves exact native aliases and full model IDs.
+// Similar names and neighboring versions are never interchangeable.
+func resolveModelPreference(models []claude.AvailableModelInfo, preference string) *claude.AvailableModelInfo {
+	value := strings.TrimSpace(preference)
+	if value == "" {
 		return nil
 	}
 
-	lower := strings.ToLower(trimmed)
 	for _, model := range models {
-		if model.Value == trimmed ||
-			strings.EqualFold(model.Value, trimmed) ||
-			strings.EqualFold(model.DisplayName, trimmed) {
+		if model.Value == value {
 			return cloneModelInfo(model)
 		}
 	}
 
 	for _, model := range models {
-		value := strings.ToLower(model.Value)
-		display := strings.ToLower(model.DisplayName)
+		if model.ResolvedModel == value {
+			resolved := cloneModelInfo(model)
+			resolved.Value = value
 
-		if strings.Contains(value, lower) || strings.Contains(display, lower) || strings.Contains(lower, value) {
-			return cloneModelInfo(model)
+			return resolved
 		}
 	}
 
-	tokens, contextHint := tokenizeModelPreference(trimmed)
-	if len(tokens) == 0 {
-		return nil
-	}
-
-	var best *claude.AvailableModelInfo
-
-	bestScore := 0
-	for _, model := range models {
-		if score := scoreModelMatch(model, tokens, contextHint); score > 0 && score > bestScore {
-			best = cloneModelInfo(model)
-			bestScore = score
-		}
-	}
-
-	return best
-}
-
-func tokenizeModelPreference(model string) ([]string, string) {
-	lower := strings.ToLower(strings.TrimSpace(model))
-
-	contextHint := ""
-	if match := modelContextHintRE.FindStringSubmatch(lower); len(match) > 1 {
-		contextHint = match[1]
-	}
-
-	normalized := modelContextHintRE.ReplaceAllString(lower, " $1 ")
-	fields := strings.FieldsFunc(normalized, func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
-	})
-
-	tokens := make([]string, 0, len(fields))
-	for _, token := range fields {
-		switch token {
-		case modelTokenOpusPlan:
-			token = modelTokenOpus
-		case modelTokenBest, modelDefault:
-			token = ""
-		}
-
-		if token == "" || token == modelTokenClaude {
-			continue
-		}
-
-		if strings.ContainsAny(token, "abcdefghijklmnopqrstuvwxyz") || strings.HasSuffix(token, "m") {
-			tokens = append(tokens, token)
-		}
-	}
-
-	return tokens, contextHint
-}
-
-func scoreModelMatch(model claude.AvailableModelInfo, tokens []string, contextHint string) int {
-	haystack := strings.ToLower(model.Value + " " + model.DisplayName)
-	score := 0
-
-	for _, token := range tokens {
-		if strings.Contains(haystack, token) {
-			if token == contextHint {
-				score += 3
-			} else {
-				score++
-			}
-		}
-	}
-
-	return score
+	return nil
 }
 
 func cloneModelInfo(model claude.AvailableModelInfo) *claude.AvailableModelInfo {

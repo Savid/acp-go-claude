@@ -625,7 +625,9 @@ func (t *ProcessTransport) captureLaunchEnvironment(environment []string) {
 	t.mu.Unlock()
 }
 
-func (t *ProcessTransport) rateLimitsEnvironment() map[string]string {
+// LaunchEnvironment returns an independent snapshot of the environment passed
+// to this process. It never re-reads the host authority or the ambient home.
+func (t *ProcessTransport) LaunchEnvironment() map[string]string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 

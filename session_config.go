@@ -53,7 +53,7 @@ func (s *agentSession) modeInfo() (acp.SessionModeId, string, []claude.Available
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.mode, s.model, append([]claude.AvailableModelInfo(nil), s.availableModels...)
+	return s.mode, s.model, claude.CloneAvailableModels(s.availableModels)
 }
 
 func (s *agentSession) configInfo() (acp.SessionModeId, string, []claude.AvailableModelInfo, string, []string, string, bool, bool) {
@@ -62,7 +62,7 @@ func (s *agentSession) configInfo() (acp.SessionModeId, string, []claude.Availab
 
 	return s.mode,
 		s.model,
-		append([]claude.AvailableModelInfo(nil), s.availableModels...),
+		claude.CloneAvailableModels(s.availableModels),
 		s.outputStyle,
 		append([]string(nil), s.availableOutputStyles...),
 		s.effort,

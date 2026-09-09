@@ -19,7 +19,8 @@ the adapter owns ACP dispatch, process boundaries, mapping, and durable state.
 - `auth*.go`, `host_authority*.go`, `image*.go`: provider auth, borrowed
   process/tree authority, and bounded media/handoff/artifact handling.
 - `internal/claude`: native command construction, process control, stream-json,
-  and control protocol. `internal/mapper`: ACP/native mapping.
+  control protocol, and credential-scoped model discovery. `internal/mapper`:
+  ACP/native mapping.
 - `internal/permissions`, `internal/transcript`: permission persistence and
   transcript discovery/replay.
 - `internal/lifecycle`, `testdata/lifecycle`: negotiation, decoding, reduction,
@@ -93,7 +94,7 @@ authorize model spend, account interaction, or browser execution.
 - Every managed native launch uses the supplied `HostAuthority`, without
   ordinary fallback. Prepared trees remain inaccessible until successful
   reclaim; failed preparation leaves cleanup with the host.
-- ACP `logout` clears adapter-owned session state. Native account changes
+- ACP `logout` clears adapter-owned provider observations. Native account changes
   belong to explicitly selected provider-auth operations. Native-login
   disconnect requires exact resolved-home consent; secret-binding disconnect
   is ledger-only.

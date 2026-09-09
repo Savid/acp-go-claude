@@ -994,7 +994,11 @@ func TestRefreshMCPRegistryAndRelaunchResidualBranches(t *testing.T) {
 					second.controlErr = map[string]error{}
 					second.controlErr["apply_flag_settings"] = errors.New("style refused")
 				} else {
+					session.model = "effort-model"
 					session.effort = "high"
+					second.initialize = map[string]any{"models": []any{
+						map[string]any{"value": "effort-model", "supportedEffortLevels": []any{"high"}},
+					}}
 					second.controlErr = map[string]error{}
 					second.controlErr["apply_flag_settings"] = errors.New("effort refused")
 				}

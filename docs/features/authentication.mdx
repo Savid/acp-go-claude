@@ -23,7 +23,7 @@ is fully materialized before the host prepares it.
 
 ACP initialize reports an empty `authMethods` list. A host never calls
 `authenticate` against this adapter, and ACP `logout` clears only
-adapter-owned session state — it never touches Claude account material. An
+adapter-owned provider observations — it never touches Claude account material. An
 authentication problem inside Claude surfaces as an ordinary turn failure with
 cause `provider`, not as an ACP auth challenge; see
 [ACP methods](/docs/reference/acp-methods).
@@ -51,6 +51,14 @@ custom Anthropic-compatible endpoint.
 
 ## Token auth and usage reporting
 
+An eligible setup token or API key in the session's effective launch
+environment also enables the direct Anthropic [model catalog](/docs/features/models-config#model-catalog).
+The adapter sends a bounded Models API GET, with no inference request. Native
+login files and credential helpers remain native discovery sources. An agent
+may start without credentials and discover models after a later session
+receives a typed credential binding. Catalog cache identities follow the
+captured session credential; provider-auth changes invalidate prior cache work.
+
 [`_claude/rateLimits`](/docs/reference/acp-methods) reads structured usage from
 the addressed live Claude session. Claude resolves the session's effective
 provider, authentication, and endpoint and reports whether a subscription quota
@@ -60,7 +68,8 @@ is empty and the session uses `CLAUDE_CODE_OAUTH_TOKEN`, the adapter can obtain
 quota headers with one Fable request, followed by one Haiku request only if Fable
 supplies no usable quota. Each request is billable and uses `max_tokens:1` at that
 session's configured Anthropic endpoint. `WithClaudeDirectAPI(false)` disables
-this fallback; usable native observations still take precedence. The fallback never selects a setup
+this quota fallback and Models API discovery; usable native observations still
+take precedence. The quota fallback never selects a setup
 token behind an API key, bearer credential, credential helper, cloud provider,
 or bare mode.
 

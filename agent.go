@@ -105,6 +105,7 @@ type Agent struct {
 	closeErr            error
 
 	rateLimitsEpoch uint64
+	modelCatalog    modelCatalogService
 	providerAuth    *providerAuth
 	managedImages   *managedImageRoots
 
@@ -133,6 +134,7 @@ func NewAgent(opts ...Option) *Agent {
 		log:              log,
 		observe:          observe,
 		ordinaryEnv:      captureOrdinaryEnvironment(options),
+		modelCatalog:     claude.NewModelCatalogCache(),
 		sessions:         make(map[acp.SessionId]*agentSession),
 		store:            NewInMemorySessionStore(),
 		deleted:          make(map[acp.SessionId]struct{}),
@@ -227,6 +229,10 @@ func (a *Agent) close() error {
 
 	for _, cancel := range lifecycleCancels {
 		cancel(acp.NewInvalidRequest(map[string]any{jsonFieldError: errAgentClosed.Error()}))
+	}
+
+	if a.modelCatalog != nil {
+		a.modelCatalog.Close()
 	}
 
 	connectionErr := a.interruptActiveHostWrite()

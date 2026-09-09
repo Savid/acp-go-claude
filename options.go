@@ -94,10 +94,10 @@ type Options struct {
 	// layer on top of the base settings.json. It requires an explicit Home.
 	SettingsFile string
 
-	// DirectAPI enables the setup-token quota header fallback for `_claude/rateLimits`.
-	// When native usage is empty it may make one billable Fable request and one
-	// Haiku fallback, each max_tokens:1.
-	// Enabled by default; WithClaudeDirectAPI(false) disables this fallback.
+	// DirectAPI enables Models API discovery with direct Anthropic credentials
+	// and the setup-token quota probe for `_claude/rateLimits`. Catalog GETs send
+	// no inference. The quota probe may make billable max_tokens:1 requests.
+	// Enabled by default; false confines both operations to native discovery.
 	DirectAPI bool
 
 	// DefaultPermissionMode is the initial Claude permission mode.
@@ -390,10 +390,10 @@ func WithClaudeSettingsFile(relpath string) Option {
 	}
 }
 
-// WithClaudeDirectAPI enables the setup-token quota header fallback. It defaults
-// to true and may make one billable Fable request and one Haiku fallback, each
-// max_tokens:1, when native usage has no usable windows. False leaves only the
-// native structured quota reader.
+// WithClaudeDirectAPI enables Models API discovery and the setup-token quota
+// probe. It defaults to true. Catalog requests send no inference; the quota
+// probe may make one billable Fable request and one Haiku fallback, each
+// max_tokens:1. False uses native model and quota discovery only.
 func WithClaudeDirectAPI(enabled bool) Option {
 	return func(options *Options) { options.DirectAPI = enabled }
 }

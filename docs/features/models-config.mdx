@@ -8,8 +8,68 @@ Session-lifecycle responses expose the selected model under
 `_meta.claude.variant`, and selectable variants under
 `_meta.claude.availableVariants`. Each model option may additionally carry
 `_meta.claude.supportedEffortLevels`, `_meta.claude.supportsAutoMode`, and
-`_meta.claude.contextWindow` when Claude reports or the adapter can identify
-those facts.
+the positive token limits `_meta.claude.contextWindow` and
+`_meta.claude.maxOutputTokens` when its discovery source supplies those facts.
+
+## Model catalog
+
+For direct Anthropic sessions with an unambiguous `CLAUDE_CODE_OAUTH_TOKEN` or
+`ANTHROPIC_API_KEY` in the effective launch environment, the adapter reads
+[`GET /v1/models`](https://platform.claude.com/docs/en/api/models/list) from
+`https://api.anthropic.com`. The API supplies model IDs, display names, input
+and output token maxima, and supported effort values. Native aliases and
+configured `availableModels` restrictions still apply; exact native effort
+choices and explicit effort refusals take precedence. A model missing from
+Claude Code's picker can appear through the API; an explicitly disabled native
+model remains excluded. Native family allowlists such as `["sonnet"]` include
+permitted versions throughout that model family. A specific version or full-ID
+entry for the same family narrows its wildcard according to [Claude's allowlist
+merge rules](https://code.claude.com/docs/en/model-config#merge-behavior).
+
+Reconciliation and capability lookups use exact model IDs and native
+`resolvedModel` identities. Selecting a full ID keeps the native effort and
+auto-mode facts reported by an alias resolving to that ID, including when
+direct API discovery is disabled. The requested ID remains unchanged.
+An unknown full model ID is sent unchanged unless an explicit
+`CLAUDE_MODEL_CONFIG.modelOverrides` mapping replaces it; a similar model name
+or version does not substitute for it. Claude Code alone supplies
+`supportsAutoMode`.
+API token maxima are catalog metadata: runtime `usage_update.size` stays
+unknown until the native session reports its context window. Model listings
+publish no modality fields or per-model `capabilities` array. Catalog presence
+does not establish successful inference, quota, or billing entitlement.
+
+Discovery uses the credentials captured for the launched session, including
+typed provider-auth injection. Starting the agent without credentials does not
+cache missing credentials, so a later authenticated session can discover models.
+Changing a provider binding invalidates the cache and fences earlier refreshes;
+it does not replace credentials inside an already running Claude process.
+Session start and native process relaunch each take a model-catalog snapshot.
+Background cache refresh becomes visible through subsequent discovery.
+
+The agent keeps an in-memory cache of at most 64 credential, endpoint, and
+authentication-kind identities, keyed by a hash. Successful catalogs are fresh
+for 10 minutes. Catalogs aged ten minutes to one hour return immediately while
+one shared background refresh runs; transient failures may retain them only
+within that hour from the successful read. A cold lookup waits at most three
+seconds. Transport failures and HTTP 429/5xx can use bounded stale data;
+HTTP 401/403, other HTTP failures, and malformed catalogs discard it. Failed
+reads apply a 30-second retry cooldown. Cancelling a caller stops that caller's
+wait; the shared fetch can finish for other sessions.
+Logout, authentication changes, and agent close fence in-flight work. Catalogs
+are not persisted.
+
+`WithClaudeDirectAPI(false)` disables these Models API reads and the separate
+setup-token quota probe. Native discovery continues when direct reads are
+disabled, unavailable, or ineligible. Bedrock,
+Vertex, Foundry, custom endpoints, ambiguous credentials, credential helpers,
+and native-home authentication use native discovery; the catalog reader does
+not inspect native credential files or execute helpers. Bare mode ignores OAuth,
+so a setup token does not enable direct discovery there; an explicit API key
+can still qualify. Adopting an API catalog
+also requires readable native settings and a fresh native `list_models`
+response so explicit restrictions can be preserved. HTTP reads refuse redirects
+and bound pagination and response size.
 
 ## Model and mode options
 
@@ -30,6 +90,70 @@ environment used for launch, including settings, static, and session overlays.
 Managed sessions use the authority's base environment; ordinary sessions use
 the ambient environment captured when the agent was constructed. Explicit empty
 overrides remain empty.
+
+### Defaults and storage
+
+`WithDefaultModel("claude-fable-5-1")` sets the agent's `Options.DefaultModel`
+launch default. A non-empty per-session `ClaudeOptions.Model` takes precedence.
+Either becomes Claude's native `--model` argument, including on cold load or
+resume. Without those explicit inputs, the adapter uses effective
+`ANTHROPIC_MODEL`, then the model reported by native settings, with native
+discovery supplying the default choice when no model is selected. A reused
+live session keeps its current model until its configuration changes.
+
+Claude also resolves `ANTHROPIC_DEFAULT_MODEL` as its default when higher-priority
+model selections do not apply. The model-family variables `ANTHROPIC_DEFAULT_FABLE_MODEL`,
+`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, and
+`ANTHROPIC_DEFAULT_HAIKU_MODEL` change the model behind their respective aliases.
+A persisted native `model` setting stays in Claude's selected user, project,
+local, managed, or overlay settings source. Native precedence and restrictions
+still apply; see [Claude's model configuration](https://code.claude.com/docs/en/model-config#setting-your-model).
+
+Storage follows the input's scope. Agent-wide defaults and environment remain
+host construction inputs. Accepted per-session `ClaudeOptions.Env` and
+`ExtraPathDirs` are stored in the `acp_session_configuration` row; a model
+environment variable supplied through that session `Env` is therefore restored
+with it. That row has no `model` field. The selected model lives in the active
+adapter/native session, with durable native model information carried by the
+mirrored transcript. `session/set_config_option` changes that live selection;
+it does not write an adapter default-model preference. See [Session store](/docs/features/session-store).
+
+Native `modelOverrides` settings remain Claude's dispatch responsibility. For
+a choice named in those settings, API metadata requires an exact native row
+with a resolved identity. The adapter does not guess whether that CLI version
+recognizes the mapping or copy facts from a potentially redirected source ID.
+Native labels and native facts remain intact.
+
+Defaults and alias overrides are reconciled against each native process. They
+do not become part of the provider catalog cache: that cache holds model facts
+for a credential and endpoint, independently of any session's selected model.
+
+### Custom model option
+
+To add a native picker entry for Fable 5.1 with your chosen label, pass these
+environment values before the native process starts:
+
+```go
+err := claudeacp.Serve(ctx, input, output,
+	claudeacp.WithEnv(map[string]string{
+		"ANTHROPIC_CUSTOM_MODEL_OPTION":      "claude-fable-5-1",
+		"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Fable 5.1",
+	}),
+)
+```
+
+`ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION` optionally sets the description.
+These variables add one selectable entry; they do not select it as the session
+default. Native `availableModels` restrictions must permit the custom model ID.
+Claude reads the variables at startup, so an existing native process must be
+replaced to adopt changed values. See the official [custom model option
+reference](https://code.claude.com/docs/en/model-config#add-a-custom-model-option).
+
+When the same exact ID also appears in the Models API, the adapter keeps one
+choice with the native custom label and description and adds the API token
+limits and eligible effort values. Native effort restrictions and auto-mode
+metadata still take precedence. A custom option also works through native
+discovery when direct API discovery is disabled or ineligible.
 
 ## Image prompts
 
@@ -133,9 +257,10 @@ host may delete one as soon as the prompt call returns. Without
 `WithInputHandoffRoot` the form is rejected, so an image block with empty `data`
 and no local uri stays a plain `missing_data` failure.
 
-Claude exposes no authoritative selected-model modality field, so a structurally
-valid image is forwarded and the harness or provider stays authoritative for
-whether the selected model can use those pixels.
+Claude Code exposes no authoritative selected-model modality field. Models API
+capabilities do not control this gate, so a structurally valid image is
+forwarded and the harness or provider stays authoritative for whether the
+selected model can use those pixels.
 
 Input failures use JSON-RPC `-32602 Invalid params`:
 

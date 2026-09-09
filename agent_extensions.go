@@ -18,6 +18,8 @@ func (a *Agent) Logout(_ context.Context, params acp.LogoutRequest) (acp.LogoutR
 		return acp.LogoutResponse{}, err
 	}
 
+	a.invalidateProviderObservations()
+
 	return acp.LogoutResponse{}, nil
 }
 

@@ -46,12 +46,12 @@ func (c *Client) readRateLimitsNativeProbe(ctx context.Context, access rateLimit
 		return RateLimits{}, nil
 	}
 
-	source, ok := c.transport.(interface{ rateLimitsEnvironment() map[string]string })
+	source, ok := c.transport.(interface{ LaunchEnvironment() map[string]string })
 	if !ok {
 		return RateLimits{}, nil
 	}
 
-	environment := source.rateLimitsEnvironment()
+	environment := source.LaunchEnvironment()
 
 	current, eligible := resolveRateLimitsAPIAccess(environment)
 	if !eligible || current != access {
@@ -194,7 +194,7 @@ func rateLimitsProbeEnvironment(environment map[string]string, root, baseURL str
 		envXDGConfigHome: filepath.Join(root, "config"), "XDG_CACHE_HOME": filepath.Join(root, "cache"),
 		"XDG_DATA_HOME": filepath.Join(root, "data"), "XDG_STATE_HOME": filepath.Join(root, "state"),
 		"TMPDIR": filepath.Join(root, "tmp"), "TEMP": filepath.Join(root, "tmp"), "TMP": filepath.Join(root, "tmp"),
-		rateLimitsBaseURL: baseURL, "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "1", "CLAUDE_CODE_MAX_RETRIES": "0",
+		directAPIBaseURLEnv: baseURL, "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "1", "CLAUDE_CODE_MAX_RETRIES": "0",
 		"CLAUDE_CODE_NO_MODEL_FALLBACK": "1", "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
 		"CLAUDE_CODE_DISABLE_CRON": "1", "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
@@ -204,7 +204,7 @@ func rateLimitsProbeEnvironment(environment map[string]string, root, baseURL str
 		values[EnvironmentKey(key)] = value
 	}
 
-	for _, key := range []string{"CLAUDE_CODE_EXTRA_BODY", "CLAUDE_CODE_EXTRA_METADATA", "ANTHROPIC_UNIX_SOCKET", "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR"} {
+	for _, key := range []string{"CLAUDE_CODE_EXTRA_BODY", "CLAUDE_CODE_EXTRA_METADATA", directAPIUnixSocketEnv, directAPISessionTokenEnv, directAPIWebSocketAuthFDEnv} {
 		delete(values, EnvironmentKey(key))
 	}
 

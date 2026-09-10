@@ -966,6 +966,12 @@ func (a *Agent) startAndStoreSessionWithPrepublish(
 		return nil, err
 	}
 
+	if start.ResumeID == "" {
+		if err := session.initializeDurability(ctx); err != nil {
+			return nil, a.closeRejectedSession(ctx, session, "initialize_durability", err)
+		}
+	}
+
 	if start.ForkSession {
 		session.persistPermissionRules(ctx)
 	}
@@ -1214,7 +1220,7 @@ func missingClaudeSessionError(err error) bool {
 func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessionStart) (_ *agentSession, err error) { //nolint:gocyclo // Session startup owns the complete resource unwind graph.
 	defer func() { a.recordContainmentError(err) }()
 
-	if start.ResumeID != "" && len(start.StoreEntries) == 0 && !start.ActiveSessionResume {
+	if start.ResumeID != "" && !start.StoreConfigurationLoaded && len(start.StoreEntries) == 0 && !start.ActiveSessionResume {
 		return nil, unknownSessionError()
 	}
 
@@ -1378,6 +1384,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	}
 
 	defaultModel := firstNonEmptyString(start.MetaOptions.Model, a.options.DefaultModel)
+
 	options := claude.Options{
 		CLIPath:                 a.options.ExecutablePath,
 		Cwd:                     start.Cwd,
@@ -1416,6 +1423,10 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 			},
 		},
 	}
+	if start.StoreConfigurationLoaded && len(start.StoreEntries) == 0 {
+		options.ResumeID = ""
+		options.ForkSession = false
+	}
 
 	permissionRules, err := a.permissionRulesForStart(ctx, id, start)
 	if err != nil {
@@ -1447,6 +1458,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		providerAuthResident:  injection.resident,
 	}
 	session.mirror = newSessionMirror(a.log, a.sessionStore(), processClaudeHome, session)
+	session.mirror.nativeWritten = len(start.StoreEntries) > 0 || start.ActiveSessionResume
 	options.PermissionHandler = session.handlePermission
 	options.ElicitationHandler = session.handleElicitation
 	options.HookHandler = session.handleHookCallback

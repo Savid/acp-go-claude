@@ -196,7 +196,6 @@ func (s *agentSession) ensureClientAlive(ctx context.Context) error {
 	}
 
 	opts := s.clientOptions
-	opts.ResumeID = string(s.id)
 	opts.ForkSession = false
 
 	return s.relaunchClient(ctx, client, opts)
@@ -317,6 +316,17 @@ func (s *agentSession) relaunchClient(
 		if retirementErr != nil {
 			return errors.Join(retirementErr, previousCloseErr)
 		}
+	}
+
+	opts.ResumeID = string(s.id)
+	opts.SessionID = string(s.id)
+
+	if s.mirror != nil {
+		s.mirror.configurationMu.Lock()
+		if !s.mirror.nativeWritten {
+			opts.ResumeID = ""
+		}
+		s.mirror.configurationMu.Unlock()
 	}
 
 	relaunched := s.agent.newClaudeClient(s.agent.log, opts)

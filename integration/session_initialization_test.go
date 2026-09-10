@@ -19,7 +19,9 @@ func TestClaudeCLIColdResumeBeforeFirstPrompt(t *testing.T) {
 	cwd := t.TempDir()
 	store := claudeacp.NewInMemorySessionStore()
 	connect := func(store claudeacp.SessionStore) *acp.ClientSideConnection {
-		pipes := serveLiveAgentInRuntimeForTest(t, ctx, emptyClaudeRuntime(t), claudeacp.WithSessionStore(store))
+		runtime := isolatedClaudeRuntimeConfig{home: t.TempDir(), env: emptyClaudeCredentialEnv()}
+		pipes := serveLiveAgentInRuntimeForTest(t, ctx, runtime,
+			claudeacp.WithSessionStore(store), claudeacp.WithScratchDir(t.TempDir()))
 		conn := acp.NewClientSideConnection(&recordingClient{}, pipes.clientInput, pipes.agentOutput)
 		_, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 		require.NoError(t, err)

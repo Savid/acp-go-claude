@@ -116,8 +116,10 @@ func TestActiveLoadRejectsStoredConfigurationDrift(t *testing.T) {
 			} else {
 				storedOptions.ExtraPathDirs = []string{absTestPath("tools", "divergent")}
 			}
-			require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(created.SessionId)},
-				testStoredSessionEntries(t, storedOptions, []byte(`{"type":"user"}`))))
+			key := SessionKey{SessionID: string(created.SessionId)}
+			require.NoError(t, store.Replace(t.Context(), key, []SessionStoreReplacement{{
+				Key: key, Entries: testStoredSessionEntries(t, storedOptions, []byte(`{"type":"user"}`)),
+			}}))
 			_, err = agent.LoadSession(t.Context(), LoadSessionRequest(created.SessionId, cwd))
 			requireSessionResumeIncompatible(t, err, metaOptionPath(field))
 			require.Same(t, original, agent.sessions[created.SessionId])
@@ -263,7 +265,7 @@ func TestActiveCarrierChangeRetiresThenDurablyPublishesReplacement(t *testing.T)
 	require.NoError(t, err)
 	original := agent.sessions[createdSession.SessionId]
 	require.NoError(t, store.Append(t.Context(), SessionKey{SessionID: string(createdSession.SessionId)},
-		testStoredSessionEntries(t, originalOptions, []byte(`{"type":"user"}`))))
+		[]SessionStoreEntry{[]byte(`{"type":"user"}`)}))
 
 	_, err = agent.ResumeSession(t.Context(), ResumeSessionRequest(
 		createdSession.SessionId, cwd, WithSessionMeta(requestedOptions.Meta()),

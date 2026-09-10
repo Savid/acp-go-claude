@@ -43,6 +43,7 @@ type sessionMirror struct {
 	configurationMu      sync.Mutex
 	configuration        sessionConfiguration
 	configurationWritten bool
+	nativeWritten        bool
 }
 
 func newSessionMirror(log *slog.Logger, store SessionStore, claudeHome string, session *agentSession) *sessionMirror {
@@ -105,6 +106,7 @@ func (m *sessionMirror) appendFrame(ctx context.Context, frame *claude.Transcrip
 
 	if key.Subpath == SessionStoreMainSubpath && m.session != nil {
 		m.configurationWritten = true
+		m.nativeWritten = m.nativeWritten || len(frame.Entries) > 0
 	}
 
 	return nil

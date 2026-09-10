@@ -350,7 +350,8 @@ func TestTurnFailureMalformedFrameRelaunches(t *testing.T) {
 	resp, err := session.Prompt(ctx, TextPromptRequest(session.id, "test-turn", "again"))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, resp.StopReason)
-	require.Equal(t, string(session.id), replacementOptions.ResumeID)
+	require.Equal(t, string(session.id), replacementOptions.SessionID)
+	require.Empty(t, replacementOptions.ResumeID)
 	require.False(t, replacementOptions.ForkSession)
 }
 

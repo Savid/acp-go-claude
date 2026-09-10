@@ -275,6 +275,7 @@ func TestActiveSessionMissingStoreLoadPreservesNativeTranscriptAndPrompt(t *test
 	require.NoError(t, err)
 	active := agent.sessions[newResp.SessionId]
 	nativePath := writeNativeTranscript(t, home, cwd, newResp.SessionId)
+	agent.store = NewInMemorySessionStore()
 
 	_, err = agent.LoadSession(ctx, LoadSessionRequest(newResp.SessionId, cwd))
 	requireUnknownSession(t, err)

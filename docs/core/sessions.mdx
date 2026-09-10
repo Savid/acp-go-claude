@@ -18,6 +18,11 @@ is reused as the durable store key, so a host can address the same session
 across restarts. Forking an existing session is exposed only through the
 `_claude/session/fork` extension method — there is no separate fork ACP method.
 
+Before publishing a new session ID, the adapter commits its configuration to
+the durable store. An initialized session without a transcript reopens with
+that exact native UUID through `--session-id`; once native transcript rows
+exist, recovery uses `--resume`. Neither path adds conversation content.
+
 Close stops admission and waits for an in-flight turn's full settlement before
 tearing down the native process. The caller's context bounds that wait;
 individual teardown operations have their own limits. Once close has begun the session admits nothing

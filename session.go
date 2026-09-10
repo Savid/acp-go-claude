@@ -158,15 +158,18 @@ type agentSession struct {
 	outputStyle           string
 	availableOutputStyles []string
 	mode                  acp.SessionModeId
-	effort                string
-	fastMode              bool
-	fastModeKnown         bool
-	availableCommands     []claude.SlashCommand
-	advertisedCommands    []acp.AvailableCommand
-	contextWindowSize     int
-	poisonCause           string
-	providerAuthInjection string
-	providerAuthResident  map[string]authInjectedLineage
+	// bypassPermissionsAvailable records whether the native process may skip
+	// permission prompts, decided from the environment it was launched with.
+	bypassPermissionsAvailable bool
+	effort                     string
+	fastMode                   bool
+	fastModeKnown              bool
+	availableCommands          []claude.SlashCommand
+	advertisedCommands         []acp.AvailableCommand
+	contextWindowSize          int
+	poisonCause                string
+	providerAuthInjection      string
+	providerAuthResident       map[string]authInjectedLineage
 
 	client *claude.Client
 	// clientOptions holds the fully-built options used to launch the Claude

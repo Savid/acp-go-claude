@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -147,22 +146,18 @@ func TestSessionMirrorRejectsForeignMainAndSubagentTranscripts(t *testing.T) {
 	require.False(t, mirror.configurationWritten)
 }
 
-func TestNewSessionMirrorAndDefaultClaudeConfigDir(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
-
+func TestNewSessionMirrorProjectsDirFollowsTheConfigDir(t *testing.T) {
 	home := t.TempDir()
 	mirror := newSessionMirror(nil, NewInMemorySessionStore(), home, nil)
 	require.Equal(t, filepath.Join(home, "projects"), mirror.projectsDir)
 	require.NotNil(t, mirror.log)
 
-	envHome := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", envHome)
-	require.Equal(t, filepath.Clean(envHome), defaultClaudeConfigDir(""))
-
-	userHome, err := os.UserHomeDir()
-	require.NoError(t, err)
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	require.Equal(t, filepath.Join(userHome, ".claude"), defaultClaudeConfigDir(""))
+	unresolved := newSessionMirror(nil, NewInMemorySessionStore(), "", nil)
+	require.Empty(t, unresolved.projectsDir)
+	require.NoError(t, unresolved.appendFrame(context.Background(), &claude.TranscriptMirrorMessage{
+		FilePath: filepath.Join(home, "projects", "repo", "11111111-1111-4111-8111-111111111111.jsonl"),
+		Entries:  []SessionStoreEntry{[]byte(`{}`)},
+	}), "a frame with no resolvable projects dir is dropped, not stored")
 }
 
 type blockingAppendStore struct{}

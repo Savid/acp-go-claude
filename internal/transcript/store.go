@@ -67,9 +67,8 @@ var (
 var errReplayTruncated = errors.New("transcript replay truncated")
 
 var (
-	storeAbs         = filepath.Abs
-	storeOpen        = func(path string) (transcriptFile, error) { return os.Open(path) }
-	storeUserHomeDir = os.UserHomeDir
+	storeAbs  = filepath.Abs
+	storeOpen = func(path string) (transcriptFile, error) { return os.Open(path) }
 )
 
 type transcriptFile interface {
@@ -77,10 +76,13 @@ type transcriptFile interface {
 	io.Reader
 }
 
-// Store reads Claude Code's local transcript files.
+// Store reads Claude Code's local transcript files under ClaudeHome, the Claude
+// config directory the session's native process uses.
 type Store struct {
 	ClaudeHome string
 }
+
+var errClaudeHomeRequired = errors.New("claude config dir is required")
 
 // Session contains transcript metadata and replayable updates.
 type Session struct {
@@ -260,8 +262,13 @@ func mustAssistantMessage(msg claude.Message) *claude.AssistantMessage {
 }
 
 func (s Store) listForCwd(ctx context.Context, cwd string) ([]Session, error) {
+	projectsDir, err := s.projectsDir()
+	if err != nil {
+		return nil, err
+	}
+
 	canonical := canonicalPath(cwd)
-	exact := filepath.Join(s.projectsDir(), ProjectDirName(canonical))
+	exact := filepath.Join(projectsDir, ProjectDirName(canonical))
 
 	var sessions []Session
 
@@ -295,7 +302,12 @@ func (s Store) listForCwd(ctx context.Context, cwd string) ([]Session, error) {
 }
 
 func (s Store) listAll(ctx context.Context) ([]Session, error) {
-	entries, err := os.ReadDir(s.projectsDir())
+	projectsDir, err := s.projectsDir()
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(projectsDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -315,7 +327,7 @@ func (s Store) listAll(ctx context.Context) ([]Session, error) {
 			continue
 		}
 
-		found, err := s.readSessionsFromDir(ctx, filepath.Join(s.projectsDir(), entry.Name()), "")
+		found, err := s.readSessionsFromDir(ctx, filepath.Join(projectsDir, entry.Name()), "")
 		if err != nil {
 			return nil, err
 		}
@@ -363,25 +375,12 @@ func (s Store) readSessionsFromDir(ctx context.Context, dir string, fallbackCwd 
 	return sessions, nil
 }
 
-func (s Store) configHome() string {
-	if strings.TrimSpace(s.ClaudeHome) != "" {
-		return filepath.Clean(s.ClaudeHome)
+func (s Store) projectsDir() (string, error) {
+	if strings.TrimSpace(s.ClaudeHome) == "" {
+		return "", errClaudeHomeRequired
 	}
 
-	if configDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); configDir != "" {
-		return filepath.Clean(configDir)
-	}
-
-	home, err := storeUserHomeDir()
-	if err != nil {
-		return filepath.Clean(".claude")
-	}
-
-	return filepath.Join(home, ".claude")
-}
-
-func (s Store) projectsDir() string {
-	return filepath.Join(s.configHome(), projectsDirName)
+	return filepath.Join(filepath.Clean(s.ClaudeHome), projectsDirName), nil
 }
 
 var errNoVisibleTranscript = errors.New("transcript has no visible session content")

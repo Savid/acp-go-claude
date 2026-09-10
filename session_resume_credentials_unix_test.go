@@ -259,7 +259,7 @@ func assertDarwinRemovalClearsPresentItems(t *testing.T, account string) {
 // keystore legs under: ordinary same-identity execution with the ambient
 // environment as its base.
 func darwinOrdinaryOptions() claude.Options {
-	return claude.Options{OrdinaryEnvironment: claude.OrdinaryEnvironment()}
+	return claude.Options{OrdinaryEnvironment: claude.OrdinaryEnvironment(os.Environ())}
 }
 
 // assertDarwinReadLegCarriesSeededItems drives the read leg against the seeded

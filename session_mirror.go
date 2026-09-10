@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -45,15 +44,20 @@ type sessionMirror struct {
 	configurationWritten bool
 }
 
-func newSessionMirror(log *slog.Logger, store SessionStore, claudeHome string, session *agentSession) *sessionMirror {
+func newSessionMirror(log *slog.Logger, store SessionStore, configDir string, session *agentSession) *sessionMirror {
 	if log == nil {
 		log = slog.Default()
+	}
+
+	projectsDir := ""
+	if configDir != "" {
+		projectsDir = filepath.Join(configDir, "projects")
 	}
 
 	mirror := &sessionMirror{
 		log:         log.With(slog.String("component", "session_mirror")),
 		store:       store,
-		projectsDir: filepath.Join(defaultClaudeConfigDir(claudeHome), "projects"),
+		projectsDir: projectsDir,
 		session:     session,
 	}
 	if session != nil {
@@ -202,21 +206,4 @@ func sessionKeyForMirrorPath(filePath string, projectsDir string) (*SessionKey, 
 	}
 
 	return &SessionKey{SessionID: sessionID, Subpath: subpath}, nil
-}
-
-func defaultClaudeConfigDir(claudeHome string) string {
-	if strings.TrimSpace(claudeHome) != "" {
-		return filepath.Clean(claudeHome)
-	}
-
-	if configDir := strings.TrimSpace(os.Getenv(claudeConfigDirEnv)); configDir != "" {
-		return filepath.Clean(configDir)
-	}
-
-	home, err := materializeUserHomeDir()
-	if err != nil {
-		return filepath.Clean(".claude")
-	}
-
-	return filepath.Join(home, ".claude")
 }

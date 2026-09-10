@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -142,14 +141,12 @@ func TestStoreWriteAllErrorBranches(t *testing.T) {
 	createTemp := storeCreateTemp
 	syncDir := storeSyncDir
 	rename := storeRename
-	userHomeDir := storeUserHomeDir
 	t.Cleanup(func() {
 		storeMkdirAll = mkdirAll
 		storeMarshalIndent = marshalIndent
 		storeCreateTemp = createTemp
 		storeSyncDir = syncDir
 		storeRename = rename
-		storeUserHomeDir = userHomeDir
 	})
 
 	store := Store{ClaudeHome: t.TempDir()}
@@ -212,11 +209,7 @@ func TestStoreWriteAllErrorBranches(t *testing.T) {
 	require.Error(t, store.writeAll(rules))
 	storeSyncDir = syncDir
 
-	storeUserHomeDir = func() (string, error) {
-		return "", errors.New("home failed")
-	}
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	require.Equal(t, filepath.Clean(".claude"), Store{}.configHome())
+	require.ErrorIs(t, Store{}.writeAll(rules), errClaudeHomeRequired)
 }
 
 type fakeTempFile struct {
@@ -246,11 +239,10 @@ func (f fakeTempFile) Name() string {
 	return f.name
 }
 
-func TestStoreConfigHomeAndNullFile(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "from-env"))
-
-	store := Store{}
-	require.Equal(t, filepath.Clean(os.Getenv("CLAUDE_CONFIG_DIR")), store.configHome())
+func TestStoreRequiresClaudeHomeAndReadsNullFile(t *testing.T) {
+	_, err := Store{}.Load(context.Background(), "session-1")
+	require.ErrorIs(t, err, errClaudeHomeRequired)
+	require.ErrorIs(t, Store{ClaudeHome: " "}.Save(context.Background(), "session-1", map[string]string{"Read": "allow"}), errClaudeHomeRequired)
 
 	home := t.TempDir()
 	storeDir := filepath.Join(home, "acp-go-claude")
@@ -260,14 +252,6 @@ func TestStoreConfigHomeAndNullFile(t *testing.T) {
 	rules, err := (Store{ClaudeHome: home}).Load(context.Background(), "session-1")
 	require.NoError(t, err)
 	require.Empty(t, rules)
-
-	if runtime.GOOS != "windows" {
-		homeDir := t.TempDir()
-		t.Setenv("CLAUDE_CONFIG_DIR", "")
-		t.Setenv("HOME", homeDir)
-
-		require.Equal(t, filepath.Join(homeDir, ".claude"), Store{}.configHome())
-	}
 }
 
 func TestClone(t *testing.T) {

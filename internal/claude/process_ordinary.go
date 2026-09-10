@@ -236,12 +236,10 @@ func (p *ordinaryProcess) Revoke(ctx context.Context) error {
 	}
 }
 
-var ordinaryEnviron = os.Environ
-
-func OrdinaryEnvironment() map[string]string {
+func OrdinaryEnvironment(entries []string) map[string]string {
 	base := map[string]string{}
 
-	for _, entry := range ordinaryEnviron() {
+	for _, entry := range entries {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok || key == "" || strings.ContainsRune(value, '\x00') || EnvironmentKey(key) == EnvironmentKey(envClaudeCodeNested) || privateAdapterEnvName(key) || authScrubbedEnvKey(key) {
 			continue

@@ -40,7 +40,6 @@ var managedSettingsPath = defaultManagedSettingsPath
 var (
 	filepathAbs          = filepath.Abs
 	filepathEvalSymlinks = filepath.EvalSymlinks
-	userHomeDir          = os.UserHomeDir
 )
 
 type discoveredSettings struct {
@@ -58,9 +57,9 @@ type settingsFile struct {
 	Env            map[string]string
 }
 
-func loadDiscoveredSettings(ctx context.Context, cwd string, claudeHome string, log *slog.Logger) discoveredSettings {
+func loadDiscoveredSettings(ctx context.Context, cwd string, configDir string, log *slog.Logger) discoveredSettings {
 	paths := []string{
-		userSettingsPath(claudeHome),
+		userSettingsPath(configDir),
 		filepath.Join(cwd, settingsDirName, settingsFileName),
 		filepath.Join(cwd, settingsDirName, settingsLocalFileName),
 		managedSettingsPath(),
@@ -202,21 +201,12 @@ func decodeSettingsFile(ctx context.Context, raw map[string]any, log *slog.Logge
 	return settings
 }
 
-func userSettingsPath(claudeHome string) string {
-	if strings.TrimSpace(claudeHome) != "" {
-		return filepath.Join(claudeHome, settingsFileName)
-	}
-
-	if configDir := strings.TrimSpace(os.Getenv(claudeConfigDirEnv)); configDir != "" {
-		return filepath.Join(configDir, settingsFileName)
-	}
-
-	home, err := userHomeDir()
-	if err != nil || home == "" {
+func userSettingsPath(configDir string) string {
+	if configDir == "" {
 		return ""
 	}
 
-	return filepath.Join(home, settingsDirName, settingsFileName)
+	return filepath.Join(configDir, settingsFileName)
 }
 
 func defaultManagedSettingsPath() string {

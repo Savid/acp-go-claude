@@ -213,23 +213,7 @@ func TestMaterializeStoreSessionErrors(t *testing.T) {
 	require.ErrorContains(t, writeJSONFile(filepath.Join(blocker, "child.json"), map[string]any{"ok": true}), "create metadata dir")
 }
 
-func TestConfigDirAndNativeTranscriptDeleteHelpers(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
-
-	envHome := t.TempDir()
-	require.Equal(t, filepath.Clean(envHome), sourceClaudeConfigDir("", map[string]string{"CLAUDE_CONFIG_DIR": envHome}))
-
-	explicitHome := t.TempDir()
-	require.Equal(t, filepath.Clean(explicitHome), sourceClaudeConfigDir(explicitHome, nil))
-
-	processHome := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", processHome)
-	require.Equal(t, filepath.Clean(processHome), sourceClaudeConfigDir("", nil))
-	require.Equal(t, filepath.Clean(processHome), defaultClaudeConfigDir(""))
-
-	overrideHome := t.TempDir()
-	require.Equal(t, filepath.Clean(overrideHome), defaultClaudeConfigDir(overrideHome))
-
+func TestNativeTranscriptDeleteHelpers(t *testing.T) {
 	dst := t.TempDir()
 	require.NoError(t, copyClaudeConfigFilesImpl(dst, dst, claude.Options{}))
 	require.NoFileExists(t, filepath.Join(dst, ".claude.json"))
@@ -275,7 +259,6 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 	originalGlob := materializeGlob
 	originalRemove := materializeRemove
 	originalRemoveAll := materializeRemoveAll
-	originalUserHome := materializeUserHomeDir
 	t.Cleanup(func() {
 		materializeMkdirTemp = originalMkdirTemp
 		materializeWriteFile = originalWriteFile
@@ -283,7 +266,6 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 		materializeGlob = originalGlob
 		materializeRemove = originalRemove
 		materializeRemoveAll = originalRemoveAll
-		materializeUserHomeDir = originalUserHome
 	})
 
 	materializeMkdirTemp = func(string, string) (string, error) { return "", errors.New("temp failed") }
@@ -330,12 +312,7 @@ func TestMaterializeFaultInjectionSeams(t *testing.T) {
 	materializeReadFile = originalReadFile
 	materializeWriteFile = originalWriteFile
 
-	materializeUserHomeDir = func() (string, error) { return "", errors.New("home failed") }
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	require.Equal(t, "", sourceClaudeConfigDir("", nil))
-	require.Equal(t, filepath.Clean(".claude"), defaultClaudeConfigDir(""))
-	require.NoError(t, deleteNativeTranscriptImpl(ctx, "", sessionID))
-	materializeUserHomeDir = originalUserHome
+	require.NoError(t, deleteNativeTranscriptImpl(ctx, "", sessionID), "no config dir means nothing to delete")
 
 	subkeyErrAgent := NewAgent(WithSessionStore(&faultSessionStore{SessionStore: store, loadSubpathErr: errors.New("subkey failed")}))
 	err = subkeyErrAgent.materializeStoreSubkeys(ctx, subkeyErrAgent.sessionStore(), t.TempDir(), SessionKey{SessionID: sessionID})

@@ -1,7 +1,6 @@
 package claudeacp
 
 import (
-	"os"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -11,32 +10,23 @@ import (
 
 func TestModelSelectionAndModeBranches(t *testing.T) {
 	previousGeteuid := osGeteuid
-	previousSandbox, hadSandbox := os.LookupEnv("IS_SANDBOX")
 	osGeteuid = func() int { return 0 }
-	require.NoError(t, os.Unsetenv("IS_SANDBOX"))
-	t.Cleanup(func() {
-		osGeteuid = previousGeteuid
-		if hadSandbox {
-			require.NoError(t, os.Setenv("IS_SANDBOX", previousSandbox))
-		} else {
-			require.NoError(t, os.Unsetenv("IS_SANDBOX"))
-		}
-	})
+	t.Cleanup(func() { osGeteuid = previousGeteuid })
 
 	available := []claude.AvailableModelInfo{
 		{Value: "sonnet", DisplayName: "Sonnet", SupportedEffortLevels: []string{effortLow}, SupportsAutoMode: true},
 		{Value: "opus", DisplayName: "Opus", SupportedEffortLevels: []string{effortHigh}},
 	}
 
-	require.False(t, bypassPermissionsAvailable())
-	require.False(t, modeAvailableForModel(modeBypassPermissions, "sonnet", available))
-	require.False(t, modeAvailableForModel("bad", "sonnet", available))
-	require.True(t, modeAvailableForModel(modeAuto, "sonnet", available))
-	require.False(t, modeAvailableForModel(modeAuto, "opus", available))
+	require.False(t, bypassPermissionsAvailable(map[string]string{}))
+	require.False(t, modeAvailableForModel(modeBypassPermissions, "sonnet", available, false))
+	require.True(t, modeAvailableForModel(modeBypassPermissions, "sonnet", available, true))
+	require.False(t, modeAvailableForModel("bad", "sonnet", available, true))
+	require.True(t, modeAvailableForModel(modeAuto, "sonnet", available, false))
+	require.False(t, modeAvailableForModel(modeAuto, "opus", available, false))
 	require.True(t, modelSupportsAutoMode("sonnet", available))
 	require.False(t, modelSupportsAutoMode("missing", available))
-	require.NoError(t, os.Setenv("IS_SANDBOX", "1"))
-	require.True(t, bypassPermissionsAvailable())
+	require.True(t, bypassPermissionsAvailable(map[string]string{"IS_SANDBOX": "1"}))
 
 	require.Equal(t, initialModelSelection{Model: "sonnet", ShouldApply: false}, selectInitialModel("sonnet", "", "", available))
 	require.Equal(t, initialModelSelection{Model: "opus", ShouldApply: true}, selectInitialModel("", "opus", "", available))
@@ -179,28 +169,27 @@ func TestResolvedModelCapabilityLookupPreservesExactRestrictions(t *testing.T) {
 // prompts as root means unreviewed tool calls run with full privilege.
 func TestBypassPermissionsAvailabilityFollowsThePrivilegeOfTheProcess(t *testing.T) {
 	previousGeteuid := osGeteuid
-	previousSandbox, hadSandbox := os.LookupEnv("IS_SANDBOX")
-
-	t.Cleanup(func() {
-		osGeteuid = previousGeteuid
-
-		if hadSandbox {
-			require.NoError(t, os.Setenv("IS_SANDBOX", previousSandbox))
-		} else {
-			require.NoError(t, os.Unsetenv("IS_SANDBOX"))
-		}
-	})
-
-	require.NoError(t, os.Unsetenv("IS_SANDBOX"))
+	t.Cleanup(func() { osGeteuid = previousGeteuid })
 
 	osGeteuid = func() int { return 1000 }
-	require.True(t, bypassPermissionsAvailable(), "an unprivileged agent may offer bypass mode")
+	require.True(t, bypassPermissionsAvailable(nil), "an unprivileged agent may offer bypass mode")
 
 	osGeteuid = func() int { return 0 }
-	require.False(t, bypassPermissionsAvailable(), "a root agent offered bypass mode outside a sandbox")
+	require.False(t, bypassPermissionsAvailable(nil), "a root agent offered bypass mode outside a sandbox")
+	require.False(t, bypassPermissionsAvailable(map[string]string{"IS_SANDBOX": " "}), "a blank marker declared a sandbox")
 
-	require.NoError(t, os.Setenv("IS_SANDBOX", "1"))
-	require.True(t, bypassPermissionsAvailable(), "a declared sandbox did not re-enable bypass mode")
+	require.True(t, bypassPermissionsAvailable(map[string]string{"IS_SANDBOX": "1"}), "a declared sandbox did not re-enable bypass mode")
+
+	// The marker is judged in the environment the native process inherits, so a
+	// host's ambient block decides it, not the adapter's own process.
+	t.Setenv("IS_SANDBOX", "")
+	sandboxed := NewAgent(WithAmbientEnvironment(map[string]string{"HOME": "/host/home", "IS_SANDBOX": "1"}))
+	require.True(t, bypassPermissionsAvailable(sandboxed.effectiveNativeEnvironment(nil)))
+	t.Setenv("IS_SANDBOX", "1")
+	unsandboxed := NewAgent(WithAmbientEnvironment(map[string]string{"HOME": "/host/home"}))
+	require.False(t, bypassPermissionsAvailable(unsandboxed.effectiveNativeEnvironment(nil)))
+	require.True(t, bypassPermissionsAvailable(unsandboxed.effectiveNativeEnvironment(map[string]string{"IS_SANDBOX": "1"})),
+		"a session overlay declaring the sandbox re-enables bypass mode")
 }
 
 // TestModeSelectOptionsOfferBypassOnlyWhenItIsAvailable proves the advertised
@@ -208,33 +197,15 @@ func TestBypassPermissionsAvailabilityFollowsThePrivilegeOfTheProcess(t *testing
 // that never sees the option cannot select it, so this is where the privilege
 // rule actually reaches the protocol.
 func TestModeSelectOptionsOfferBypassOnlyWhenItIsAvailable(t *testing.T) {
-	previousGeteuid := osGeteuid
-	previousSandbox, hadSandbox := os.LookupEnv("IS_SANDBOX")
-
-	t.Cleanup(func() {
-		osGeteuid = previousGeteuid
-
-		if hadSandbox {
-			require.NoError(t, os.Setenv("IS_SANDBOX", previousSandbox))
-		} else {
-			require.NoError(t, os.Unsetenv("IS_SANDBOX"))
-		}
-	})
-
-	require.NoError(t, os.Unsetenv("IS_SANDBOX"))
-
 	available := []claude.AvailableModelInfo{{Value: "opus", DisplayName: "Opus"}}
 	bypass := acp.SessionConfigSelectOption{
 		Name:  "Bypass Permissions",
 		Value: acp.SessionConfigValueId(modeBypassPermissions),
 	}
 
-	osGeteuid = func() int { return 0 }
-	require.NotContains(t, modeSelectOptions("opus", available), bypass)
+	require.NotContains(t, modeSelectOptions("opus", available, false), bypass)
 
-	osGeteuid = func() int { return 1000 }
-
-	offered := modeSelectOptions("opus", available)
+	offered := modeSelectOptions("opus", available, true)
 	require.Contains(t, offered, bypass)
 	require.Contains(t, offered, acp.SessionConfigSelectOption{
 		Name: modeNameDefault, Value: acp.SessionConfigValueId(modeDefault),

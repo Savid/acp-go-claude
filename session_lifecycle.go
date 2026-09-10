@@ -337,7 +337,9 @@ func (s *agentSession) relaunchClient(
 	}
 
 	config.effort, _ = reconcileEffortForModel(config.model, models, config.effort)
-	if !modeAvailableForModel(config.mode, config.model, models) {
+	bypassAvailable := bypassPermissionsAvailable(s.agent.effectiveNativeEnvironment(opts.Env))
+
+	if !modeAvailableForModel(config.mode, config.model, models, bypassAvailable) {
 		config.mode = modeDefault
 		if err := relaunched.SetPermissionMode(ctx, string(modeDefault)); err != nil {
 			return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
@@ -370,6 +372,7 @@ func (s *agentSession) relaunchClient(
 	s.availableModels = models
 	s.effort = config.effort
 	s.mode = config.mode
+	s.bypassPermissionsAvailable = bypassAvailable
 
 	s.fastModeKnown = settingsKnown
 	if settings.FastMode != nil {

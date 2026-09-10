@@ -64,7 +64,7 @@ func TestLoginNeverExecsABrowserLauncher(t *testing.T) {
 		"printf '" + AuthLoginPrompt + "'\n" +
 		"sleep 30\n"
 
-	options := Options{Cwd: dir, ScratchParent: t.TempDir(), OrdinaryEnvironment: OrdinaryEnvironment()}
+	options := Options{Cwd: dir, ScratchParent: t.TempDir(), OrdinaryEnvironment: OrdinaryEnvironment(os.Environ())}
 	options.CLIPath = writeShellScript(t, filepath.Join(dir, "login"), script)
 
 	login, authorizeURL, err := StartAuthLogin(t.Context(), options)
@@ -120,7 +120,7 @@ func TestStartAuthLoginFailsClosedWhenTheBrowserLaunchCannotBeContained(t *testi
 
 	browserShimMkdirTemp = func(string, string) (string, error) { return "", errAuthTest }
 
-	options := Options{CLIPath: "/bin/sh", Cwd: t.TempDir(), ScratchParent: t.TempDir(), OrdinaryEnvironment: OrdinaryEnvironment()}
+	options := Options{CLIPath: "/bin/sh", Cwd: t.TempDir(), ScratchParent: t.TempDir(), OrdinaryEnvironment: OrdinaryEnvironment(os.Environ())}
 
 	_, _, err := StartAuthLogin(t.Context(), options)
 	require.ErrorIs(t, err, errAuthTest)

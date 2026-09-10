@@ -210,7 +210,7 @@ func (a *Agent) providerAuthUnavailableReason(home providerAuthHome) string {
 		return providerAuthUnavailableEnv
 	}
 
-	if providerAuthStaticSettingsConfigured(a.options, home) {
+	if providerAuthStaticSettingsConfigured(a.options, home, a.claudeConfigDir(home.path)) {
 		return providerAuthUnavailableSettings
 	}
 
@@ -227,8 +227,8 @@ func providerAuthCredentialEnvironmentConfigured(environment map[string]string) 
 	return false
 }
 
-func providerAuthStaticSettingsConfigured(options Options, home providerAuthHome) bool {
-	if home.err == nil && providerAuthSettingsFileConfigured(userSettingsPath(home.path)) {
+func providerAuthStaticSettingsConfigured(options Options, home providerAuthHome, configDir string) bool {
+	if home.err == nil && providerAuthSettingsFileConfigured(userSettingsPath(configDir)) {
 		return true
 	}
 

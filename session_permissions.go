@@ -40,7 +40,7 @@ func (s *agentSession) setPermissionRule(ctx context.Context, toolName string, b
 	rules := s.clonePermissionRulesLocked()
 	s.mu.Unlock()
 
-	err := savePermissionRules(ctx, s.agent.options.Home, s.id, rules)
+	err := savePermissionRules(ctx, s.agent.claudeConfigDir(s.agent.options.Home), s.id, rules)
 	if err == nil {
 		s.agent.cachePermissionRules(s.id, rules)
 	}
@@ -75,7 +75,7 @@ func (s *agentSession) persistPermissionRules(ctx context.Context) {
 	rules := s.clonePermissionRulesLocked()
 	s.mu.Unlock()
 
-	err := savePermissionRules(ctx, s.agent.options.Home, s.id, rules)
+	err := savePermissionRules(ctx, s.agent.claudeConfigDir(s.agent.options.Home), s.id, rules)
 	if err == nil {
 		s.agent.cachePermissionRules(s.id, rules)
 	}
@@ -340,7 +340,7 @@ func (s *agentSession) handleExitPlanMode(
 	}
 
 	_, model, availableModels := s.modeInfo()
-	options := exitPlanModeOptions(model, availableModels)
+	options := exitPlanModeOptions(model, availableModels, s.bypassPermissionsOffered())
 	info := mapper.ToolCallInfo(request.ToolName, toolCallID, request.Input, mapper.ToolUpdateOptions{
 		Cwd:                    s.cwd,
 		SupportsTerminalOutput: s.agent.clientSupportsTerminalOutput(),
@@ -481,7 +481,7 @@ func (s *agentSession) emitPendingToolCall(
 	return s.emitUpdates(ctx, []acp.SessionUpdate{update})
 }
 
-func exitPlanModeOptions(model string, availableModels []claude.AvailableModelInfo) []acp.PermissionOption {
+func exitPlanModeOptions(model string, availableModels []claude.AvailableModelInfo, bypassAvailable bool) []acp.PermissionOption {
 	candidates := []acp.PermissionOption{
 		{
 			OptionId: acp.PermissionOptionId(modeBypassPermissions),
@@ -512,7 +512,7 @@ func exitPlanModeOptions(model string, availableModels []claude.AvailableModelIn
 
 	options := make([]acp.PermissionOption, 0, len(candidates))
 	for _, option := range candidates {
-		if modeAvailableForModel(acp.SessionModeId(option.OptionId), model, availableModels) {
+		if modeAvailableForModel(acp.SessionModeId(option.OptionId), model, availableModels, bypassAvailable) {
 			options = append(options, option)
 		}
 	}

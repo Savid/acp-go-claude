@@ -401,7 +401,7 @@ func TestProviderAuthUnadvertisedWithCredentialEnvironment(t *testing.T) {
 	// The ambient arm answers for exactly the environment ordinary
 	// same-identity execution hands the child, so a host that scopes its
 	// worker environment keeps deciding what this surface sees.
-	require.Equal(t, "inherited", claude.OrdinaryEnvironment()[providerAuthEnvClaudeOAuthToken])
+	require.Equal(t, "inherited", claude.OrdinaryEnvironment(os.Environ())[providerAuthEnvClaudeOAuthToken])
 	t.Setenv(providerAuthEnvClaudeOAuthToken, "")
 	require.True(t, providerAuthCredentialEnvironmentConfigured(agent.effectiveNativeEnvironment(nil)))
 }

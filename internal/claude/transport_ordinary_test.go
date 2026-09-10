@@ -48,7 +48,7 @@ exit 0
 	transport := NewProcessTransport(nil, Options{
 		CLIPath:             script,
 		Cwd:                 dir,
-		OrdinaryEnvironment: OrdinaryEnvironment(),
+		OrdinaryEnvironment: OrdinaryEnvironment(os.Environ()),
 		Env:                 map[string]string{"WROTE_MARK": wrote},
 	})
 
@@ -117,7 +117,7 @@ while :; do sleep 1; done
 	transport := NewProcessTransport(nil, Options{
 		CLIPath:             script,
 		Cwd:                 dir,
-		OrdinaryEnvironment: OrdinaryEnvironment(),
+		OrdinaryEnvironment: OrdinaryEnvironment(os.Environ()),
 		Env:                 map[string]string{"READY_MARK": ready},
 	})
 

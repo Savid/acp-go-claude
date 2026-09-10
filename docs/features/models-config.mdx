@@ -88,7 +88,8 @@ payloads are rejected; clients should send the selected mode value.
 `ANTHROPIC_MODEL` and `CLAUDE_MODEL_CONFIG` are read from the effective native
 environment used for launch, including settings, static, and session overlays.
 Managed sessions use the authority's base environment; ordinary sessions use
-the ambient environment captured when the agent was constructed. Explicit empty
+the ambient environment captured when the agent was constructed, from the
+adapter's process or from `WithAmbientEnvironment`. Explicit empty
 overrides remain empty.
 
 ### Defaults and storage

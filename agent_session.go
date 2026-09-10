@@ -633,7 +633,7 @@ func (a *Agent) UnstableDeleteSession(
 	}
 
 	if !a.options.hostAuthoritySet {
-		if err := deleteNativeTranscript(ctx, a.options.Home, string(params.SessionId)); err != nil {
+		if err := deleteNativeTranscript(ctx, a.claudeConfigDir(a.options.Home), string(params.SessionId)); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
@@ -1286,7 +1286,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	}
 
 	discoverCtx, finishDiscover := a.observe.StartClaudeProcess(ctx, "discover")
-	discoveredSettings := loadDiscoveredSettings(discoverCtx, start.Cwd, claudeHome, a.log)
+	discoveredSettings := loadDiscoveredSettings(discoverCtx, start.Cwd, a.claudeConfigDir(claudeHome), a.log)
 
 	finishDiscover(nil)
 
@@ -1300,6 +1300,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 
 	env = a.observe.InjectTraceEnv(ctx, env)
 	effectiveEnv := a.effectiveNativeEnvironment(env)
+	bypassAvailable := bypassPermissionsAvailable(effectiveEnv)
 
 	modelConfig, hasModelConfig, err := modelConfigFromEnv(effectiveEnv)
 	if err != nil {
@@ -1373,7 +1374,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		permissionMode = start.MetaOptions.PermissionMode
 	}
 
-	if acpModeForPermission(permissionMode) == modeBypassPermissions && !bypassPermissionsAvailable() {
+	if acpModeForPermission(permissionMode) == modeBypassPermissions && !bypassAvailable {
 		permissionMode = string(modeDefault)
 	}
 
@@ -1398,7 +1399,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		JSONSchema:              outputSchemaJSONSchema(start.MetaOptions.OutputSchema),
 		PermissionMode:          permissionMode,
 		PermissionPromptTool:    permissionPromptTool,
-		AllowSkipPermissionsArg: a.options.AllowSkipPermissionsFlag && bypassPermissionsAvailable(),
+		AllowSkipPermissionsArg: a.options.AllowSkipPermissionsFlag && bypassAvailable,
 		AddDirs:                 start.AdditionalDirectories,
 		MCPConfigPath:           mcpConfigPath,
 		SettingSources:          settingSourceArgs(a.options.SettingSources),
@@ -1423,30 +1424,31 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 	}
 
 	session := &agentSession{
-		agent:                 a,
-		id:                    id,
-		turn:                  make(chan struct{}, sessionTurnCapacity),
-		cwd:                   start.Cwd,
-		additionalDirectories: slices.Clone(start.AdditionalDirectories),
-		fingerprint:           sessionStartFingerprint(start),
-		configuration:         configurationFromOptions(start.MetaOptions),
-		configurationStored:   start.StoreConfigurationLoaded && start.ResumeID == string(id),
-		model:                 defaultModel,
-		modelOverrides:        cloneStringMap(modelOverrides),
-		mode:                  acpModeForPermission(permissionMode),
-		permissionRules:       permissions.Clone(permissionRules),
-		materialized:          materialized,
-		mcpConfigDir:          mcpConfigDir,
-		imageScratchDir:       imageScratchDir,
-		imageArtifacts:        imageArtifacts,
-		toolContent:           make(map[acp.ToolCallId][]acp.ToolCallContent),
-		emittedAgentImages:    make(map[string]struct{}),
-		rawMessages:           start.RawMessages,
-		mcpRefreshPending:     len(start.McpServers) > 0,
-		providerAuthInjection: injection.outcome,
-		providerAuthResident:  injection.resident,
+		agent:                      a,
+		id:                         id,
+		turn:                       make(chan struct{}, sessionTurnCapacity),
+		cwd:                        start.Cwd,
+		additionalDirectories:      slices.Clone(start.AdditionalDirectories),
+		fingerprint:                sessionStartFingerprint(start),
+		configuration:              configurationFromOptions(start.MetaOptions),
+		configurationStored:        start.StoreConfigurationLoaded && start.ResumeID == string(id),
+		model:                      defaultModel,
+		modelOverrides:             cloneStringMap(modelOverrides),
+		mode:                       acpModeForPermission(permissionMode),
+		bypassPermissionsAvailable: bypassAvailable,
+		permissionRules:            permissions.Clone(permissionRules),
+		materialized:               materialized,
+		mcpConfigDir:               mcpConfigDir,
+		imageScratchDir:            imageScratchDir,
+		imageArtifacts:             imageArtifacts,
+		toolContent:                make(map[acp.ToolCallId][]acp.ToolCallContent),
+		emittedAgentImages:         make(map[string]struct{}),
+		rawMessages:                start.RawMessages,
+		mcpRefreshPending:          len(start.McpServers) > 0,
+		providerAuthInjection:      injection.outcome,
+		providerAuthResident:       injection.resident,
 	}
-	session.mirror = newSessionMirror(a.log, a.sessionStore(), processClaudeHome, session)
+	session.mirror = newSessionMirror(a.log, a.sessionStore(), a.claudeConfigDir(processClaudeHome), session)
 	options.PermissionHandler = session.handlePermission
 	options.ElicitationHandler = session.handleElicitation
 	options.HookHandler = session.handleHookCallback
@@ -1528,7 +1530,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 
 	session.fastModeKnown = settingsKnown
 
-	if !modeAvailableForModel(session.mode, session.model, session.availableModels) {
+	if !modeAvailableForModel(session.mode, session.model, session.availableModels, bypassAvailable) {
 		session.mode = modeDefault
 	}
 	session.mu.Unlock()
@@ -1681,7 +1683,7 @@ func (a *Agent) retryDeleteNativeTranscript(ctx context.Context, sessionID acp.S
 		return
 	}
 
-	if err := deleteNativeTranscript(ctx, a.options.Home, string(sessionID)); err != nil {
+	if err := deleteNativeTranscript(ctx, a.claudeConfigDir(a.options.Home), string(sessionID)); err != nil {
 		a.log.DebugContext(ctx, "retry delete native Claude transcript failed",
 			slog.String(acpFieldSessionID, string(sessionID)), slog.String("class", safeErrorClass(err)))
 	}

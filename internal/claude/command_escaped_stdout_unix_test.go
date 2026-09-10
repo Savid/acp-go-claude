@@ -49,7 +49,7 @@ func TestRunNativeOutputCancellationClosesEscapedStdout(t *testing.T) {
 	started := time.Now()
 	_, _, err := runNativeOutput(ctx, Options{
 		Cwd:                 dir,
-		OrdinaryEnvironment: OrdinaryEnvironment(),
+		OrdinaryEnvironment: OrdinaryEnvironment(os.Environ()),
 		Env: map[string]string{
 			escapedStdoutRoleEnv: "parent",
 			escapedStdoutPIDEnv:  pidFile,

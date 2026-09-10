@@ -33,7 +33,7 @@ func (s *agentSession) setModelAndClampMode(model string) (bool, acp.SessionMode
 		s.effort = nextEffort
 	}
 
-	if !modeAvailableForModel(s.mode, s.model, s.availableModels) {
+	if !modeAvailableForModel(s.mode, s.model, s.availableModels, s.bypassPermissionsAvailable) {
 		s.mode = modeDefault
 
 		return true, modeDefault, effortChanged, nextEffort
@@ -54,6 +54,13 @@ func (s *agentSession) modeInfo() (acp.SessionModeId, string, []claude.Available
 	defer s.mu.Unlock()
 
 	return s.mode, s.model, claude.CloneAvailableModels(s.availableModels)
+}
+
+func (s *agentSession) bypassPermissionsOffered() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.bypassPermissionsAvailable
 }
 
 func (s *agentSession) configInfo() (acp.SessionModeId, string, []claude.AvailableModelInfo, string, []string, string, bool, bool) {

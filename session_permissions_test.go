@@ -455,7 +455,7 @@ func TestExitPlanModePermission(t *testing.T) {
 	t.Parallel()
 
 	available := []claude.AvailableModelInfo{{Value: "sonnet", SupportsAutoMode: true}}
-	options := exitPlanModeOptions("sonnet", available)
+	options := exitPlanModeOptions("sonnet", available, true)
 	require.NotEmpty(t, options)
 	require.True(t, exitPlanModeSelectionAllows(modeDefault, options))
 	require.False(t, exitPlanModeSelectionAllows(modePlan, options))

@@ -26,15 +26,14 @@ var deleteNativeTranscript = deleteNativeTranscriptImpl
 var materializedNativeTreeReclaimTimeout = 5 * time.Second
 
 var (
-	materializeGlob        = filepath.Glob
-	materializeMkdirAll    = os.MkdirAll
-	materializeMkdirTemp   = os.MkdirTemp
-	materializeReadFile    = os.ReadFile
-	materializeRemove      = os.Remove
-	materializeRemoveAll   = os.RemoveAll
-	materializeStat        = os.Stat
-	materializeUserHomeDir = os.UserHomeDir
-	materializeWriteFile   = os.WriteFile
+	materializeGlob      = filepath.Glob
+	materializeMkdirAll  = os.MkdirAll
+	materializeMkdirTemp = os.MkdirTemp
+	materializeReadFile  = os.ReadFile
+	materializeRemove    = os.Remove
+	materializeRemoveAll = os.RemoveAll
+	materializeStat      = os.Stat
+	materializeWriteFile = os.WriteFile
 )
 
 type materializedSession struct {
@@ -404,40 +403,16 @@ func (a *Agent) resumeCredentialOptions() claude.Options {
 	}
 }
 
-func sourceClaudeConfigDir(sourceClaudeHome string, env map[string]string) string {
-	if env != nil && strings.TrimSpace(env[claudeConfigDirEnv]) != "" {
-		return filepath.Clean(env[claudeConfigDirEnv])
-	}
-
-	if strings.TrimSpace(sourceClaudeHome) != "" {
-		return filepath.Clean(sourceClaudeHome)
-	}
-
-	if configDir := strings.TrimSpace(os.Getenv(claudeConfigDirEnv)); configDir != "" {
-		return filepath.Clean(configDir)
-	}
-
-	home, err := materializeUserHomeDir()
-	if err != nil {
-		return ""
-	}
-
-	return filepath.Join(home, ".claude")
-}
-
-func deleteNativeTranscriptImpl(ctx context.Context, claudeHome string, sessionID string) error {
+func deleteNativeTranscriptImpl(ctx context.Context, configDir string, sessionID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	if !validUUIDShape(sessionID) {
+	if !validUUIDShape(sessionID) || configDir == "" {
 		return nil
 	}
 
-	source := sourceClaudeConfigDir(claudeHome, nil)
-	if source == "" {
-		return nil
-	}
+	source := filepath.Clean(configDir)
 
 	matches, err := materializeGlob(filepath.Join(source, "projects", "*", sessionID+".jsonl"))
 	if err != nil {

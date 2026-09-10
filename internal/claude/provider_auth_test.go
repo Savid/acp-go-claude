@@ -156,7 +156,7 @@ func TestAuthCommandsOrdinaryBoundary(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	options := Options{Cwd: dir, OrdinaryEnvironment: OrdinaryEnvironment()}
+	options := Options{Cwd: dir, OrdinaryEnvironment: OrdinaryEnvironment(os.Environ())}
 	options.CLIPath = writeShellScript(t, filepath.Join(dir, "status"), "#!/bin/sh\nprintf '{\"loggedIn\":true}'\n")
 	account, code, err := AuthStatus(context.Background(), options)
 	require.NoError(t, err)
@@ -192,7 +192,7 @@ func TestAuthLoginOrdinaryBoundaryEndToEnd(t *testing.T) {
 		"read value\n"+
 		"printf '%s' \"$value\" > \"$PASTED\"\n")
 	login, authorizeURL, err := StartAuthLogin(context.Background(), Options{
-		CLIPath: cli, Cwd: dir, ScratchParent: dir, OrdinaryEnvironment: OrdinaryEnvironment(), Env: map[string]string{"PASTED": recorded},
+		CLIPath: cli, Cwd: dir, ScratchParent: dir, OrdinaryEnvironment: OrdinaryEnvironment(os.Environ()), Env: map[string]string{"PASTED": recorded},
 	})
 	require.NoError(t, err)
 	require.Equal(t, currentAuthorizeURL, authorizeURL)

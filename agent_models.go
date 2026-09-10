@@ -2,7 +2,6 @@ package claudeacp
 
 import (
 	"context"
-	"os"
 	"slices"
 	"strings"
 
@@ -107,7 +106,7 @@ func (a *Agent) setSessionConfigValue(
 		}
 
 		_, model, available := session.modeInfo()
-		if !modeAvailableForModel(mode, model, available) {
+		if !modeAvailableForModel(mode, model, available, session.bypassPermissionsOffered()) {
 			return acp.SetSessionConfigOptionResponse{}, unsupportedField(jsonFieldValue)
 		}
 
@@ -143,13 +142,13 @@ func (a *Agent) setSessionConfigValue(
 func sessionConfigOptions(session *agentSession) []acp.SessionConfigOption {
 	mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown := session.configInfo()
 
-	return configOptions(mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown)
+	return configOptions(mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown, session.bypassPermissionsOffered())
 }
 
 func sessionUnstableConfigOptions(session *agentSession) []acp.UnstableSessionConfigOption {
 	mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown := session.configInfo()
 
-	return unstableConfigOptions(mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown)
+	return unstableConfigOptions(mode, model, available, outputStyle, outputStyles, effort, fastMode, fastModeKnown, session.bypassPermissionsOffered())
 }
 
 func selectInitialModel(
@@ -208,6 +207,7 @@ func configOptions(
 	effort string,
 	fastMode bool,
 	fastModeKnown bool,
+	bypassAvailable bool,
 ) []acp.SessionConfigOption {
 	var options []acp.SessionConfigOption
 
@@ -229,7 +229,7 @@ func configOptions(
 	}
 
 	if mode != "" {
-		values := modeSelectOptions(model, available)
+		values := modeSelectOptions(model, available, bypassAvailable)
 		options = append(options, acp.SessionConfigOption{
 			Select: &acp.SessionConfigOptionSelect{
 				Id:           configMode,
@@ -286,6 +286,7 @@ func unstableConfigOptions(
 	effort string,
 	fastMode bool,
 	fastModeKnown bool,
+	bypassAvailable bool,
 ) []acp.UnstableSessionConfigOption {
 	var options []acp.UnstableSessionConfigOption
 
@@ -308,7 +309,7 @@ func unstableConfigOptions(
 	}
 
 	if mode != "" {
-		values := modeSelectOptions(model, available)
+		values := modeSelectOptions(model, available, bypassAvailable)
 		options = append(options, acp.UnstableSessionConfigOption{
 			Select: &acp.UnstableSessionConfigOptionSelect{
 				Id:           configMode,
@@ -430,6 +431,7 @@ func outputStyleSelectOptions(current string, available []string) acp.SessionCon
 func modeSelectOptions(
 	model string,
 	available []claude.AvailableModelInfo,
+	bypassAvailable bool,
 ) acp.SessionConfigSelectOptionsUngrouped {
 	choices := []struct {
 		id   acp.SessionModeId
@@ -440,7 +442,7 @@ func modeSelectOptions(
 		{id: modeAcceptEdits, name: "Accept Edits"},
 	}
 
-	if bypassPermissionsAvailable() {
+	if bypassAvailable {
 		choices = append(choices, struct {
 			id   acp.SessionModeId
 			name string
@@ -579,12 +581,13 @@ func modeAvailableForModel(
 	mode acp.SessionModeId,
 	model string,
 	available []claude.AvailableModelInfo,
+	bypassAvailable bool,
 ) bool {
 	switch mode {
 	case modeDefault, modePlan, modeAcceptEdits, modeDontAsk:
 		return true
 	case modeBypassPermissions:
-		return bypassPermissionsAvailable()
+		return bypassAvailable
 	case modeAuto:
 		return modelSupportsAutoMode(model, available)
 	default:
@@ -592,12 +595,11 @@ func modeAvailableForModel(
 	}
 }
 
-func bypassPermissionsAvailable() bool {
-	if osGeteuid() != 0 {
-		return true
-	}
-
-	return strings.TrimSpace(os.Getenv("IS_SANDBOX")) != ""
+// bypassPermissionsAvailable mirrors Claude Code's own rule: a root process
+// refuses to skip permissions unless the environment it runs in declares
+// IS_SANDBOX. effectiveEnv is the environment the native process inherits.
+func bypassPermissionsAvailable(effectiveEnv map[string]string) bool {
+	return osGeteuid() != 0 || strings.TrimSpace(effectiveEnv[claude.EnvironmentKey("IS_SANDBOX")]) != ""
 }
 
 func modelSupportsAutoMode(model string, available []claude.AvailableModelInfo) bool {

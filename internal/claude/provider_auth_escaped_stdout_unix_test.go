@@ -44,7 +44,7 @@ func TestAuthLoginFailedPresentationClosesEscapedStdout(t *testing.T) {
 		CLIPath:             writeShellScript(t, filepath.Join(dir, "failed-presentation"), script),
 		Cwd:                 dir,
 		ScratchParent:       dir,
-		OrdinaryEnvironment: OrdinaryEnvironment(),
+		OrdinaryEnvironment: OrdinaryEnvironment(os.Environ()),
 		Env: map[string]string{
 			authEscapedStdoutRoleEnv:   "holder",
 			authEscapedStdoutPIDEnv:    pidFile,

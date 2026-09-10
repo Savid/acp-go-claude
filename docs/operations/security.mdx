@@ -6,10 +6,14 @@ description: "Native-process and filesystem authority boundaries"
 ## Ordinary execution
 
 When `WithHostAuthority` is omitted, Claude runs as the adapter process's own
-identity. The adapter captures a sanitized ambient environment, applies
-`WithEnv`, and starts the configured executable directly. `WithHome` selects
-the Claude config directory. Reserved home, XDG, and adapter-private variables
-cannot be overridden through `WithEnv` or session metadata.
+identity. The adapter captures a sanitized ambient environment, from its own
+process or from the block `WithAmbientEnvironment` supplies in its place,
+applies `WithEnv`, and starts the configured executable directly. `WithHome` selects
+the Claude config directory; without it, Claude and the adapter's own settings
+discovery, transcript mirroring, and permission rules use `.claude` under the
+`HOME` of that captured environment, never the adapter account's home. Reserved
+home, XDG, and adapter-private variables cannot be overridden through `WithEnv`
+or session metadata.
 
 ## Host authority
 

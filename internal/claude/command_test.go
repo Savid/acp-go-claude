@@ -184,7 +184,7 @@ func TestValidateClaudeVersionOrdinaryBoundary(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	options := Options{Cwd: dir, OrdinaryEnvironment: OrdinaryEnvironment()}
+	options := Options{Cwd: dir, OrdinaryEnvironment: OrdinaryEnvironment(os.Environ())}
 
 	options.CLIPath = writeShellScript(t, filepath.Join(dir, "current"), "#!/bin/sh\nprintf '2.1.201 (Claude Code)\\n'\n")
 	require.NoError(t, validateClaudeVersion(context.Background(), options))

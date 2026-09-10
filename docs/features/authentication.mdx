@@ -10,7 +10,8 @@ authentication remains unadvertised.
 ## Credential input
 
 Ordinary execution forwards a deterministic sanitized capture of the adapter's
-ambient environment, so ambient
+ambient environment, or of the block `WithAmbientEnvironment` supplies in its
+place, so ambient
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN`
 values work as-is.
 

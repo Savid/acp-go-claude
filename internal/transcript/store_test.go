@@ -268,18 +268,15 @@ func TestStoreListEdgeBranches(t *testing.T) {
 func TestStoreConfigAndCanonicalFallbacks(t *testing.T) {
 	abs := storeAbs
 	open := storeOpen
-	userHomeDir := storeUserHomeDir
 	t.Cleanup(func() {
 		storeAbs = abs
 		storeOpen = open
-		storeUserHomeDir = userHomeDir
 	})
 
-	storeUserHomeDir = func() (string, error) {
-		return "", errors.New("home failed")
-	}
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	require.Equal(t, filepath.Clean(".claude"), Store{}.configHome())
+	_, err := Store{}.List(context.Background(), nil, nil)
+	require.ErrorIs(t, err, errClaudeHomeRequired)
+	_, err = Store{}.List(context.Background(), nonEmptyStringPtr("/repo"), nil)
+	require.ErrorIs(t, err, errClaudeHomeRequired)
 
 	storeAbs = func(string) (string, error) {
 		return "", errors.New("abs failed")
@@ -293,7 +290,7 @@ func TestStoreConfigAndCanonicalFallbacks(t *testing.T) {
 	storeOpen = func(string) (transcriptFile, error) {
 		return nil, errors.New("open failed")
 	}
-	_, err := readSession(path, "")
+	_, err = readSession(path, "")
 	require.Error(t, err)
 }
 
@@ -308,27 +305,6 @@ func TestStoreFindFallsBackToAllWhenCwdEmpty(t *testing.T) {
 	found, err := Store{ClaudeHome: home}.Find(context.Background(), testSessionID, "")
 	require.NoError(t, err)
 	require.Equal(t, path, found.Path)
-}
-
-func TestStoreUsesConfigDirEnvironment(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", home)
-
-	writeTestTranscript(t, home, "/repo", testSessionID, []string{
-		`{"type":"user","uuid":"22222222-2222-4222-8222-222222222222","cwd":"/repo","message":{"content":"hello"}}`,
-	})
-
-	sessions, err := Store{}.List(context.Background(), nil, nil)
-	require.NoError(t, err)
-	require.Len(t, sessions, 1)
-
-	if runtime.GOOS != "windows" {
-		homeDir := t.TempDir()
-		t.Setenv("CLAUDE_CONFIG_DIR", "")
-		t.Setenv("HOME", homeDir)
-
-		require.Equal(t, filepath.Join(homeDir, ".claude"), Store{}.configHome())
-	}
 }
 
 func TestReplaySkipsInvalidAndHiddenEntries(t *testing.T) {

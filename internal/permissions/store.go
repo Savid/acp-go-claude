@@ -41,15 +41,17 @@ var (
 	storeCreateTemp    = func(dir string, pattern string) (tempFile, error) {
 		return os.CreateTemp(dir, pattern)
 	}
-	storeSyncDir     = syncPermissionsDir
-	storeRename      = os.Rename
-	storeUserHomeDir = os.UserHomeDir
+	storeSyncDir = syncPermissionsDir
+	storeRename  = os.Rename
 )
 
-// Store persists session-scoped Claude permission rules.
+// Store persists session-scoped Claude permission rules under ClaudeHome, the
+// Claude config directory the session's native process uses.
 type Store struct {
 	ClaudeHome string
 }
+
+var errClaudeHomeRequired = errors.New("claude config dir is required")
 
 // Load returns permission rules for a session.
 func (s Store) Load(ctx context.Context, sessionID string) (map[string]string, error) {
@@ -57,7 +59,12 @@ func (s Store) Load(ctx context.Context, sessionID string) (map[string]string, e
 		return nil, err
 	}
 
-	unlock, err := lockPermissionsFile(ctx, s.path())
+	path, err := s.path()
+	if err != nil {
+		return nil, err
+	}
+
+	unlock, err := lockPermissionsFile(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +88,12 @@ func (s Store) Save(ctx context.Context, sessionID string, rules map[string]stri
 		return fmt.Errorf("session ID is required")
 	}
 
-	unlock, err := lockPermissionsFile(ctx, s.path())
+	path, err := s.path()
+	if err != nil {
+		return err
+	}
+
+	unlock, err := lockPermissionsFile(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -162,7 +174,10 @@ func permissionLockRetryDelay() time.Duration {
 }
 
 func (s Store) readAll(ctx context.Context) (map[string]map[string]string, error) {
-	path := s.path()
+	path, err := s.path()
+	if err != nil {
+		return nil, err
+	}
 
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -206,8 +221,12 @@ func backupCorruptPermissionRules(path string) (string, error) {
 }
 
 func (s Store) writeAll(all map[string]map[string]string) error {
-	path := s.path()
-	if err := storeMkdirAll(filepath.Dir(path), 0o700); err != nil {
+	path, err := s.path()
+	if err != nil {
+		return err
+	}
+
+	if err = storeMkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create permission rules dir: %w", err)
 	}
 
@@ -251,25 +270,12 @@ func (s Store) writeAll(all map[string]map[string]string) error {
 	return nil
 }
 
-func (s Store) path() string {
-	return filepath.Join(s.configHome(), appDirName, permissionsFile)
-}
-
-func (s Store) configHome() string {
-	if strings.TrimSpace(s.ClaudeHome) != "" {
-		return filepath.Clean(s.ClaudeHome)
+func (s Store) path() (string, error) {
+	if strings.TrimSpace(s.ClaudeHome) == "" {
+		return "", errClaudeHomeRequired
 	}
 
-	if configDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); configDir != "" {
-		return filepath.Clean(configDir)
-	}
-
-	home, err := storeUserHomeDir()
-	if err != nil {
-		return filepath.Clean(".claude")
-	}
-
-	return filepath.Join(home, ".claude")
+	return filepath.Join(filepath.Clean(s.ClaudeHome), appDirName, permissionsFile), nil
 }
 
 // Clone returns a defensive copy of permission rules.

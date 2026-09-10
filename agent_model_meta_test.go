@@ -76,7 +76,7 @@ func TestAgentModelMetaAndOptions(t *testing.T) {
 	require.Equal(t, available[0].Value, foundInfo.Value)
 	require.Equal(t, []string{"a", "b"}, nonEmptyModelStrings([]string{"", "a", "a", "b"}))
 
-	options := configOptions(modeAuto, "claude-sonnet-4-5", available, "default", []string{"default", "concise"}, effortHigh, true, true)
+	options := configOptions(modeAuto, "claude-sonnet-4-5", available, "default", []string{"default", "concise"}, effortHigh, true, true, true)
 	require.Len(t, options, 4)
 	require.Equal(t, configModel, options[0].Select.Id)
 	require.Equal(t, configMode, options[1].Select.Id)
@@ -86,14 +86,14 @@ func TestAgentModelMetaAndOptions(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(encodedOptions), `"capabilities"`)
 
-	unstable := unstableConfigOptions(modeAuto, "claude-sonnet-4-5", available, "default", []string{"default"}, effortHigh, true, true)
+	unstable := unstableConfigOptions(modeAuto, "claude-sonnet-4-5", available, "default", []string{"default"}, effortHigh, true, true, true)
 	require.Len(t, unstable, 4)
 	require.Equal(t, configTypeSelect, unstable[0].Select.Type)
 
 	require.Len(t, configSelectOptions("custom", available), 3)
 	require.Len(t, configSelectOptions("claude-sonnet-4-5", available), 2)
 	require.Len(t, outputStyleSelectOptions("verbose", []string{"default", "", "default"}), 2)
-	require.Contains(t, modeSelectOptions("claude-sonnet-4-5", available), acp.SessionConfigSelectOption{Name: modeNameAuto, Value: acp.SessionConfigValueId(modeAuto)})
+	require.Contains(t, modeSelectOptions("claude-sonnet-4-5", available, true), acp.SessionConfigSelectOption{Name: modeNameAuto, Value: acp.SessionConfigValueId(modeAuto)})
 	require.Nil(t, effortSelectOptions("missing", available, effortHigh))
 	require.Contains(t, effortSelectOptions("claude-sonnet-4-5", available, effortMedium), acp.SessionConfigSelectOption{Name: "Medium", Value: acp.SessionConfigValueId(effortMedium)})
 	require.Equal(t, []string{effortLow, effortHigh, effortHigh, ""}, effortLevelsForModel("claude-sonnet-4-5", available))

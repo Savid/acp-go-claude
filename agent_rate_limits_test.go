@@ -5,6 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -234,4 +243,124 @@ func TestHandleRateLimitsFencesChangedTarget(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRateLimitsProbeUsesSessionScratchDirectory(t *testing.T) {
+	for _, pathKind := range []string{"absolute", "relative"} {
+		t.Run(pathKind, func(t *testing.T) {
+			workingDirectory := t.TempDir()
+			t.Chdir(workingDirectory)
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					_, _ = io.WriteString(w, `{"data":[],"has_more":false}`)
+
+					return
+				}
+				calls.Add(1)
+				var request struct {
+					Model string `json:"model"`
+				}
+				if json.NewDecoder(r.Body).Decode(&request) == nil && request.Model == "claude-fable-5-1" {
+					w.Header().Set("anthropic-ratelimit-unified-7d_oi-utilization", "1.0")
+				}
+				w.Header().Set("anthropic-ratelimit-unified-7d-utilization", "0.57")
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+			t.Cleanup(upstream.Close)
+
+			scratch, cwd := filepath.Join(workingDirectory, "scratch"), t.TempDir()
+			scratchOption := scratch
+			if pathKind == "relative" {
+				scratchOption = "scratch"
+			}
+			launches := make(chan NativeRequest, 1)
+			requestErrors := make(chan error, 1)
+			authority := newFakeHostAuthority()
+			authority.start = func(ctx context.Context, request NativeRequest) (NativeProcess, error) {
+				if request.Executable == keychainToolExecutable {
+					return valueNativeProcess{}, nil
+				}
+				if slices.Equal(request.Arguments, []string{"--version"}) {
+					return &fakeNativeProcess{authority: authority, stdout: io.NopCloser(strings.NewReader("2.1.263\n"))}, nil
+				}
+				if slices.Contains(request.Arguments, "--safe-mode") {
+					launches <- request
+
+					return newQuotaProbeNativeProcess(ctx, authority, request, requestErrors), nil
+				}
+
+				return newConfigurationNativeProcess(), nil
+			}
+			agent := NewAgent(WithHome(t.TempDir()), WithScratchDir(scratchOption), WithExecutablePath("fixture-claude"),
+				WithHostAuthority(authority), WithLogger(slog.New(slog.DiscardHandler)), WithEnv(map[string]string{
+					"CLAUDE_CODE_OAUTH_TOKEN": "synthetic-quota-token", "ANTHROPIC_BASE_URL": upstream.URL,
+				}))
+			agent.setConnection(newRecordingAgentClient())
+			t.Cleanup(func() { require.NoError(t, agent.Close()) })
+			session, err := agent.NewSession(t.Context(), NewSessionRequest(cwd))
+			require.NoError(t, err)
+			// Removing the unused fake-native CWD makes misplaced scratch creation fail
+			// deterministically, including when tests run as root.
+			require.NoError(t, os.Remove(cwd))
+			params, err := json.Marshal(RateLimitsRequest{SessionID: session.SessionId})
+			require.NoError(t, err)
+			value, err := agent.HandleExtensionMethod(t.Context(), RateLimitsMethod, params)
+			require.NoError(t, err)
+			result, ok := value.(RateLimitsResponse)
+			require.True(t, ok)
+			require.Equal(t, "available", result.Availability)
+			var fable *RateLimitPool
+			for i := range result.Pools {
+				if result.Pools[i].ID == "model:Fable" {
+					fable = &result.Pools[i]
+				}
+			}
+			require.NotNil(t, fable, "the native 429 must retain the exhausted Fable pool")
+			require.Len(t, fable.Windows, 1)
+			require.Equal(t, 100.0, *fable.Windows[0].UsedPercent)
+			require.Equal(t, int32(1), calls.Load(), "usable Fable headers must not trigger a Haiku fallback")
+			request := <-launches
+			root := filepath.Dir(request.WorkingDirectory)
+			require.Equal(t, scratch, filepath.Dir(root))
+			require.NoDirExists(t, root)
+			require.Contains(t, authority.snapshot(), "reclaim:"+root)
+			require.NoError(t, <-requestErrors)
+		})
+	}
+}
+
+func newQuotaProbeNativeProcess(ctx context.Context, authority *fakeHostAuthority, request NativeRequest, requestErrors chan<- error) NativeProcess {
+	var baseURL, token string
+	for _, entry := range request.Environment {
+		key, value, _ := strings.Cut(entry, "=")
+		switch key {
+		case "ANTHROPIC_BASE_URL":
+			baseURL = value
+		case "CLAUDE_CODE_OAUTH_TOKEN":
+			token = value
+		}
+	}
+	done := make(chan struct{})
+	stdout, output := io.Pipe()
+	go func() {
+		defer close(done)
+		defer output.Close()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/messages?beta=true",
+			strings.NewReader(`{"model":"claude-fable-5-1","max_tokens":1,"tools":[]}`))
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+token)
+			var response *http.Response
+			response, err = http.DefaultClient.Do(req)
+			if err == nil {
+				_ = response.Body.Close()
+			}
+		}
+		if errors.Is(err, context.Canceled) {
+			err = nil
+		}
+		requestErrors <- err
+	}()
+
+	return &fakeNativeProcess{authority: authority, stdout: stdout, waitFor: done}
 }

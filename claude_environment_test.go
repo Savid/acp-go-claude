@@ -1,7 +1,6 @@
 package claudeacp
 
 import (
-	"context"
 	"testing"
 
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -24,11 +23,8 @@ func TestSessionModelsUseEffectiveNativeEnvironment(t *testing.T) {
 		{name: "empty override", base: map[string]string{envAnthropicModel: "opus", envClaudeModelConfig: "invalid authority config"}, overlay: map[string]string{envAnthropicModel: "", envClaudeModelConfig: ""}, model: "sonnet", models: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			authority := &callbackHostAuthority{
-				environment: func() map[string]string { return cloneStringMap(test.base) },
-				prepare:     func(context.Context, string) error { return nil },
-				reclaim:     func(context.Context, string) error { return nil },
-			}
+			authority := residualCallbackAuthority()
+			authority.environment = func() map[string]string { return cloneStringMap(test.base) }
 			agent, _, _ := newFakeLifecycleAgent(t, newFakeClaudeTransport(), WithHostAuthority(authority), WithEnv(test.overlay))
 			t.Cleanup(func() { require.NoError(t, agent.Close()) })
 			response, err := agent.NewSession(t.Context(), NewSessionRequest(t.TempDir()))

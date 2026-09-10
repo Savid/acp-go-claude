@@ -23,8 +23,8 @@ type Options struct {
 	// over the one the operator's PATH would otherwise resolve.
 	ExtraPathDirs []string
 	// ScratchParent is the already-resolved directory every ephemeral
-	// wrapper-owned directory is created beneath. The login leg materialises
-	// its browser shim here, so it is set only where a child can launch one.
+	// wrapper-owned directory is created beneath, including login browser shims
+	// and isolated quota probes.
 	ScratchParent string
 
 	SessionID   string

@@ -179,8 +179,10 @@ The probes use the exact session process's captured `CLAUDE_CODE_OAUTH_TOKEN` an
 `claude-haiku-4-5`. It makes no credential-store lookup, refresh, or login change.
 
 The Fable request runs through a temporary Claude process with its own empty
-home and working directory, tools disabled, and no session persistence. A private
-loopback bridge forwards only the first request matching the captured setup
+home and working directory, tools disabled, and no session persistence. Its
+temporary tree lives under `WithScratchDir` (default `os.TempDir()`), so the
+session's working directory need not be writable. A private loopback bridge
+forwards only the first request matching the captured setup
 token, Fable model, and one-token limit. Further native attempts cannot reach the
 upstream endpoint. The native process supplies its own request format; the bridge
 discards generated content. Managed launches and temporary trees use the session's

@@ -41,7 +41,8 @@ type Options struct {
 	Home string
 	// ScratchDir is the parent directory for all ephemeral on-disk
 	// materialization (per-session roots, hydration temp files, probe dirs).
-	// Empty means the system temp directory.
+	// Empty means the system temp directory. Relative paths resolve against
+	// the adapter's working directory.
 	ScratchDir string
 	// InputHandoffRoot is the absolute directory a host hands prompt-image
 	// bytes over in. It is a read root only: nothing is ever written, moved, or
@@ -265,8 +266,8 @@ func WithHome(path string) Option {
 
 // WithScratchDir sets the parent directory for all ephemeral on-disk
 // materialization (per-session roots, hydration temp files, probe dirs).
-// Empty means the system temp directory. The directory is created 0700
-// when missing.
+// Empty means the system temp directory. Relative paths resolve against the
+// adapter's working directory. The directory is created 0700 when missing.
 func WithScratchDir(dir string) Option {
 	return func(options *Options) {
 		options.ScratchDir = dir

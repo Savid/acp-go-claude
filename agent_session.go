@@ -1382,6 +1382,7 @@ func (a *Agent) startSession(ctx context.Context, id acp.SessionId, start sessio
 		CLIPath:                 a.options.ExecutablePath,
 		Cwd:                     start.Cwd,
 		ClaudeHome:              processClaudeHome,
+		ScratchParent:           scratchParent,
 		Env:                     env,
 		OrdinaryEnvironment:     a.ordinaryEnvironment(),
 		Authority:               a.claudeAuthority(),

@@ -20,7 +20,9 @@ func TestEnsureScratchParent(t *testing.T) {
 
 	parent, err := ensureScratchParent("")
 	require.NoError(t, err)
-	require.Equal(t, os.TempDir(), parent)
+	expected, err := filepath.Abs(os.TempDir())
+	require.NoError(t, err)
+	require.Equal(t, expected, parent)
 
 	missing := filepath.Join(t.TempDir(), "nested", "scratch")
 	parent, err = ensureScratchParent(missing)

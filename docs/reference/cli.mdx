@@ -21,7 +21,7 @@ notifications to standard output, and reserves standard error for diagnostics.
 | --- | --- |
 | `-path` | Claude CLI executable; empty uses `claude` from `PATH`. |
 | `-home` | Claude config directory. |
-| `-scratch-dir` | Parent for adapter-owned temporary roots; empty uses the system temporary directory. |
+| `-scratch-dir` | Parent for adapter-owned temporary roots; relative paths resolve against the adapter's working directory, and empty uses the system temporary directory. |
 | `-provider-auth-root` | Host-owned provider-auth ledger root. |
 | `-provider-auth-direct-home` | Exact Claude config directory a native-login disconnect may clear. |
 | `-model` | Default Claude model. |

@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 var imageScratchMkdirTemp = os.MkdirTemp
@@ -17,10 +18,14 @@ func scratchParent(dir string) string {
 	return os.TempDir()
 }
 
-// ensureScratchParent resolves the scratch parent and creates it 0700 when
-// missing.
+// ensureScratchParent resolves the scratch parent to an absolute path and
+// creates it 0700 when missing.
 func ensureScratchParent(dir string) (string, error) {
-	parent := scratchParent(dir)
+	parent, err := filepath.Abs(scratchParent(dir))
+	if err != nil {
+		return "", fmt.Errorf("resolve scratch parent dir: %w", err)
+	}
+
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return "", fmt.Errorf("create scratch parent dir: %w", err)
 	}

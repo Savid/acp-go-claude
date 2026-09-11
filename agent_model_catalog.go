@@ -33,6 +33,8 @@ func (a *Agent) discoverSessionModels(
 		a.log.DebugContext(ctx, "Claude model discovery unavailable", slog.String("stage", "model_discovery"))
 	}
 
+	models = appendHostListedModels(models, a.options.ConfiguredModels, client.WithholdsAnthropicNames(settings))
+
 	known := settings != nil
 	if settings == nil {
 		settings = &claude.SettingsSnapshot{}

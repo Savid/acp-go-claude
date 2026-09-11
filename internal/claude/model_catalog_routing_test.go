@@ -276,7 +276,7 @@ func TestAnthropicModelIdentity(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.model.Value+"/"+tc.model.ResolvedModel, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tc.want, anthropicModelIdentity(tc.model))
+			require.Equal(t, tc.want, AnthropicModelIdentity(tc.model))
 		})
 	}
 }

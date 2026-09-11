@@ -112,6 +112,17 @@ also requires readable native settings and a fresh native `list_models`
 response so explicit restrictions can be preserved. HTTP reads refuse redirects
 and bound pagination and response size.
 
+### Host-listed models
+
+A host that knows what its endpoint serves lists those ids with
+`WithConfiguredModels`. Each id is published after the native rows on every
+route as the id alone, with no metadata or effort levels, so a gateway session
+carries a menu even before Claude Code's own discovery lands. An id Claude Code
+already reports keeps its native row and facts, an id Claude Code refused stays
+refused, and an id naming Anthropic's own model is withheld wherever the
+conditions above withhold it. An empty, whitespace, or duplicate id fails
+construction.
+
 ## Model and mode options
 
 Session configuration uses typed option categories:

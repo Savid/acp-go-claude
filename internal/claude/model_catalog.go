@@ -111,7 +111,7 @@ func (c *Client) discoverDirectModels(
 // route: an allowlist or an explicit selection must not reintroduce a refused
 // model under another alias.
 func (c *Client) routedNativeModels(ctx context.Context, settings *SettingsSnapshot) []AvailableModelInfo {
-	if !c.gatewayRouted(settings) && !c.credentialAbsent() {
+	if !c.WithholdsAnthropicNames(settings) {
 		return c.InitializeInfo().Models
 	}
 
@@ -125,12 +125,19 @@ func (c *Client) routedNativeModels(ctx context.Context, settings *SettingsSnaps
 
 	kept := make([]AvailableModelInfo, 0, len(native))
 	for _, model := range native {
-		if model.Disabled || !anthropicModelIdentity(model) {
+		if model.Disabled || !AnthropicModelIdentity(model) {
 			kept = append(kept, model)
 		}
 	}
 
 	return kept
+}
+
+// WithholdsAnthropicNames reports whether this process publishes no Anthropic
+// model names: it is routed to another endpoint, or Claude reports that no
+// credential signs its requests.
+func (c *Client) WithholdsAnthropicNames(settings *SettingsSnapshot) bool {
+	return c.gatewayRouted(settings) || c.credentialAbsent()
 }
 
 // gatewayRouted reports whether this process talks the Anthropic API to an
@@ -197,11 +204,11 @@ func effectiveRouteEnvironment(settings *SettingsSnapshot, env map[string]string
 	return resolved
 }
 
-// anthropicModelIdentity reports whether a model row names an Anthropic model:
+// AnthropicModelIdentity reports whether a model row names an Anthropic model:
 // a `claude-` prefixed id, or one of Claude's family aliases with no concrete
 // target behind it. A row whose target is some other id was contributed by a
 // provider Claude was pointed at, and belongs to that provider.
-func anthropicModelIdentity(model AvailableModelInfo) bool {
+func AnthropicModelIdentity(model AvailableModelInfo) bool {
 	if resolved := NormalizeModelIdentity(model.ResolvedModel); resolved != "" {
 		return strings.HasPrefix(resolved, anthropicModelPrefix)
 	}

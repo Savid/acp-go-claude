@@ -2,6 +2,7 @@ package claudeacp
 
 import (
 	"log/slog"
+	"slices"
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
@@ -59,6 +60,11 @@ type Options struct {
 	ProviderAuthDirectHome string
 	// DefaultModel is passed to newly created Claude sessions when non-empty.
 	DefaultModel string
+	// ConfiguredModels are the model ids the host lists explicitly. Each is a
+	// configured catalog entry: published after the native rows on every route,
+	// standing aside for a native row of the same identity, and carrying no
+	// invented facts.
+	ConfiguredModels []string
 	// Env is merged into every launched Claude process environment. Managed
 	// config and identity root variables are rejected.
 	Env map[string]string
@@ -338,6 +344,13 @@ func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
 func WithDefaultModel(model string) Option {
 	return func(options *Options) {
 		options.DefaultModel = model
+	}
+}
+
+// WithConfiguredModels names the models the host lists explicitly.
+func WithConfiguredModels(ids []string) Option {
+	return func(options *Options) {
+		options.ConfiguredModels = slices.Clone(ids)
 	}
 }
 

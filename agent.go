@@ -150,6 +150,7 @@ func NewAgent(opts ...Option) *Agent {
 			validateProviderAuthRoot(options),
 			validateProviderAuthDirectHome(options.ProviderAuthDirectHome),
 			validateAmbientEnvironment(options.AmbientEnvironment),
+			validateConfiguredModels(options.ConfiguredModels),
 		),
 		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
 			return claude.NewClient(log, options, nil)

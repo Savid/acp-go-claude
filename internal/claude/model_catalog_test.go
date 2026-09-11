@@ -17,10 +17,17 @@ func (f modelCatalogReadFunc) List(ctx context.Context, access ModelCatalogAcces
 
 type catalogControlTransport struct {
 	*fakeTransport
-	environment  map[string]string
-	models       []any
-	settings     map[string]any
-	nativeFailed bool
+	environment map[string]string
+	models      []any
+	// listed answers list_models when set, so a test can separate Claude's
+	// startup snapshot from the list it serves once discovery has landed.
+	listed         []any
+	apiProvider    string
+	tokenSource    string
+	apiKeySource   string
+	settings       map[string]any
+	nativeFailed   bool
+	settingsFailed bool
 }
 
 func (t *catalogControlTransport) LaunchEnvironment() map[string]string {
@@ -40,14 +47,34 @@ func (t *catalogControlTransport) Send(ctx context.Context, payload any) error {
 	subtype, _ := request.Request["subtype"].(string)
 	response := map[string]any{}
 	switch subtype {
-	case "initialize", "list_models":
+	case "initialize":
 		response["models"] = t.models
+
+		account := map[string]any{}
+		for key, value := range map[string]string{
+			"apiProvider":  t.apiProvider,
+			"tokenSource":  t.tokenSource,
+			"apiKeySource": t.apiKeySource,
+		} {
+			if value != "" {
+				account[key] = value
+			}
+		}
+
+		if len(account) > 0 {
+			response["account"] = account
+		}
+	case "list_models":
+		response["models"] = t.models
+		if t.listed != nil {
+			response["models"] = t.listed
+		}
 	case "get_settings":
 		response["effective"] = t.settings
 	}
 
 	control := map[string]any{"request_id": request.RequestID, "subtype": "success", "response": response}
-	if subtype == "list_models" && t.nativeFailed {
+	if subtype == "list_models" && t.nativeFailed || subtype == "get_settings" && t.settingsFailed {
 		control = map[string]any{"request_id": request.RequestID, "subtype": "error", "error": "private native failure"}
 	}
 	t.sendMessage(map[string]any{"type": "control_response", "response": control})
@@ -59,7 +86,11 @@ func newCatalogControlTransport() *catalogControlTransport {
 	return &catalogControlTransport{
 		fakeTransport: newFakeTransport(),
 		environment:   map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "synthetic-token"},
-		settings:      map[string]any{},
+		// A signed-in first-party session, as Claude reports one: it names the
+		// provider it resolved and names no credential source, because a
+		// subscription is neither a bearer variable nor an API key.
+		apiProvider: apiProviderFirstParty,
+		settings:    map[string]any{},
 		models: []any{
 			map[string]any{"value": "sonnet", "resolvedModel": "claude-sonnet-5", "displayName": "Sonnet"},
 		},

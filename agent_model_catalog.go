@@ -81,7 +81,7 @@ func reconcileSessionModels(
 // nativeModelAllowed applies the native availableModels grammar to model IDs.
 // Specific entries narrow a family's wildcard; labels never establish identity.
 func nativeModelAllowed(model claude.AvailableModelInfo, allowlist []string, catalog []claude.AvailableModelInfo) bool {
-	value, resolved := nativeAllowlistID(model.Value), nativeAllowlistID(model.ResolvedModel)
+	value, resolved := claude.NormalizeModelIdentity(model.Value), claude.NormalizeModelIdentity(model.ResolvedModel)
 	// Concrete Anthropic IDs retain their source identity under native
 	// overrides. The override's target cannot admit an excluded source ID.
 	if strings.HasPrefix(value, "claude-") {
@@ -91,7 +91,7 @@ func nativeModelAllowed(model claude.AvailableModelInfo, allowlist []string, cat
 	entries := make([]string, len(allowlist))
 
 	for i, entry := range allowlist {
-		entries[i] = nativeAllowlistID(entry)
+		entries[i] = claude.NormalizeModelIdentity(entry)
 	}
 
 	for _, entry := range entries {
@@ -117,16 +117,12 @@ func nativeModelAllowed(model claude.AvailableModelInfo, allowlist []string, cat
 		}
 
 		if allowed := resolveModelPreference(catalog, entry); allowed != nil && allowed.ResolvedModel != "" &&
-			(value == nativeAllowlistID(allowed.ResolvedModel) || resolved == nativeAllowlistID(allowed.ResolvedModel)) {
+			(value == claude.NormalizeModelIdentity(allowed.ResolvedModel) || resolved == claude.NormalizeModelIdentity(allowed.ResolvedModel)) {
 			return true
 		}
 	}
 
 	return false
-}
-
-func nativeAllowlistID(id string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(id)), "[1m]")
 }
 
 func nativeAllowlistFamily(id string) bool {

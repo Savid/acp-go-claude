@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -476,6 +477,7 @@ type fakeClaudeTransport struct {
 	sendErr  error
 
 	initialize  map[string]any
+	environment map[string]string
 	settings    map[string]any
 	context     map[string]any
 	controlErr  map[string]error
@@ -505,6 +507,10 @@ func newFakeClaudeTransport() *fakeClaudeTransport {
 			},
 			"output_style":            "default",
 			"available_output_styles": []any{"default", "concise"},
+			// A signed-in first-party session, as Claude reports one: it names
+			// the provider it resolved and names no credential source, because
+			// a subscription is neither a bearer variable nor an API key.
+			"account": map[string]any{"apiProvider": "firstParty"},
 		},
 		settings: map[string]any{
 			"applied":   map[string]any{"model": "sonnet", "effort": "low"},
@@ -544,6 +550,16 @@ func newFakeClaudeTransport() *fakeClaudeTransport {
 		sentSignal:  make(chan struct{}, 1),
 		closeSignal: make(chan struct{}),
 	}
+}
+
+// LaunchEnvironment mirrors ProcessTransport: the environment the native
+// process was launched with is what places a first-party session on a route.
+// An empty one names no base URL, which is Anthropic's own endpoint.
+func (t *fakeClaudeTransport) LaunchEnvironment() map[string]string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return maps.Clone(t.environment)
 }
 
 func (t *fakeClaudeTransport) Start(context.Context) error {

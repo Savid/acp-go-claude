@@ -39,6 +39,47 @@ unknown until the native session reports its context window. Model listings
 publish no modality fields or per-model `capabilities` array. Catalog presence
 does not establish successful inference, quota, or billing entitlement.
 
+### Routing and credentials decide which names are published
+
+Claude Code reports the provider it resolved, and every provider it names —
+Bedrock, Vertex, Foundry, and the rest — serves Anthropic's models under its own
+account. Their menus stand exactly as Claude Code reports them. A provider
+Claude Code will not name leaves the route unestablished, and an unestablished
+route is no evidence that Anthropic's own names dispatch, so they are withheld.
+
+The process whose menu does not describe its endpoint is a first-party one
+pointed somewhere else. The test is Claude Code's own, and the hostname alone
+decides it: `ANTHROPIC_BASE_URL` naming a host other than `api.anthropic.com`
+or `api-staging.anthropic.com`, whatever scheme, port, path, or query it
+carries, and whether it comes from the launch environment or from a settings
+file's `env` block, which Claude Code applies over it. Such an endpoint speaks
+the Anthropic API without serving Anthropic's models, so every row whose
+dispatch identity is one of them is withheld: a `claude-` prefixed ID, and the
+`default`, `sonnet`, `opus`, `haiku`, and `fable` aliases when nothing else is
+resolved behind them. Rows resolving to another ID stay, and a model Claude Code
+explicitly refused stays too, so an allowlist or an explicit selection cannot
+reintroduce it. Setting `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` to `1`,
+`true`, `yes`, or `on` declares the endpoint first-party instead: Claude Code
+then serves its own menu and runs no gateway discovery, and nothing is withheld.
+
+A process holding no credential withholds the same names for the same reason:
+it can dispatch none of them. Claude Code names its own credential in the
+`account` block of `initialize` — `tokenSource` is the variable a bearer came
+from and reads `none` when there is no bearer, and `apiKeySource` names an API
+key when one is configured. Only an explicit `none` with no API key beside it
+withholds. A signed-in subscription reports neither field, as does a Bedrock,
+Vertex, or Foundry process resolving its credential through that cloud's own
+chain; that silence is not a report of absence and withholds nothing.
+
+For a withholding process the catalog comes from a fresh `list_models` rather
+than the startup snapshot, which omits refused rows and predates Claude Code's
+own gateway discovery — enabled by
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` — that lands after `initialize`
+and is served from there. The adapter makes no request of its own to a gateway.
+
+Menu absence never blocks a selection: the selected model is always offered as
+the option's current value and is sent to Claude Code unchanged.
+
 Discovery uses the credentials captured for the launched session, including
 typed provider-auth injection. Starting the agent without credentials does not
 cache missing credentials, so a later authenticated session can discover models.
@@ -61,10 +102,10 @@ are not persisted.
 
 `WithClaudeDirectAPI(false)` disables these Models API reads and the separate
 setup-token quota probe. Native discovery continues when direct reads are
-disabled, unavailable, or ineligible. Bedrock,
-Vertex, Foundry, custom endpoints, ambiguous credentials, credential helpers,
-and native-home authentication use native discovery; the catalog reader does
-not inspect native credential files or execute helpers. Bare mode ignores OAuth,
+disabled, unavailable, or ineligible. Bedrock, Vertex, Foundry, custom
+endpoints, ambiguous credentials, credential helpers, and native-home
+authentication use native discovery; the catalog reader does not inspect native
+credential files or execute helpers. Bare mode ignores OAuth,
 so a setup token does not enable direct discovery there; an explicit API key
 can still qualify. Adopting an API catalog
 also requires readable native settings and a fresh native `list_models`
@@ -325,7 +366,9 @@ are covered in [Session store](/docs/features/session-store).
 
 To point Claude Code at a custom Anthropic-compatible endpoint, set the base URL
 through the environment. Claude Code reads `ANTHROPIC_BASE_URL` (and related
-`ANTHROPIC_*` variables), so pass it with `WithEnv`:
+`ANTHROPIC_*` variables), so pass it with `WithEnv`. Such a session publishes
+what the endpoint serves rather than Anthropic's model names — see
+[Routing and credentials decide which names are published](#routing-and-credentials-decide-which-names-are-published).
 
 ```go
 err := claudeacp.Serve(ctx, input, output,

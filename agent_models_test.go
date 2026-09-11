@@ -234,3 +234,39 @@ func TestProviderAuthSettingsWithoutCredentialsAreNotConfigured(t *testing.T) {
 		providerAuthSettingsContentConfigured([]byte(`{"env":{"`+providerAuthEnvAnthropicAPIKey+`":"secret"}}`)),
 	)
 }
+
+// TestGatewayCatalogMenuKeepsTheSelectedModel pins the host-facing consequence
+// of a catalog that carries no Anthropic names: the menu is the gateway's own
+// models, and a selection outside it is still offered as the current value.
+func TestGatewayCatalogMenuKeepsTheSelectedModel(t *testing.T) {
+	available := []claude.AvailableModelInfo{
+		{Value: "vendor/qwen", DisplayName: "Qwen"},
+		{Value: "vendor/deepseek", DisplayName: "DeepSeek"},
+	}
+
+	values := configSelectOptions("vendor/qwen", available)
+	require.Equal(t, []acp.SessionConfigValueId{"vendor/qwen", "vendor/deepseek"}, configValueIDs(values))
+
+	// A model the host selected that the catalog never listed still reaches the
+	// menu, so absence never blocks the value a client sends.
+	values = configSelectOptions("vendor/unlisted", available)
+	require.Equal(t,
+		[]acp.SessionConfigValueId{"vendor/qwen", "vendor/deepseek", "vendor/unlisted"},
+		configValueIDs(values),
+	)
+
+	// With nothing reachable known and nothing selected, the model option is
+	// withheld rather than filled with names this process cannot dispatch.
+	for _, option := range configOptions(modeDefault, "", nil, "", nil, "", false, false, false) {
+		require.NotEqual(t, configModel, option.Select.Id)
+	}
+}
+
+func configValueIDs(values acp.SessionConfigSelectOptionsUngrouped) []acp.SessionConfigValueId {
+	ids := make([]acp.SessionConfigValueId, 0, len(values))
+	for _, value := range values {
+		ids = append(ids, value.Value)
+	}
+
+	return ids
+}

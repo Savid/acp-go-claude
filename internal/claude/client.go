@@ -59,6 +59,19 @@ type InitializeInfo struct {
 	Models                []AvailableModelInfo
 	OutputStyle           string
 	AvailableOutputStyles []string
+	// APIProvider is Claude's own verdict about where this process sends
+	// turns — `firstParty`, `bedrock`, `vertex`, and so on. It is the process
+	// reporting its resolved route rather than the adapter reconstructing one
+	// from environment variables, and is empty when Claude reports none.
+	APIProvider string
+	// TokenSource names the environment variable Claude took its bearer from,
+	// and is the literal `none` when Claude has no bearer at all. It is empty
+	// when Claude reports nothing, which is not the same answer: see
+	// credentialAbsent.
+	TokenSource string
+	// APIKeySource names the environment variable Claude took an API key from,
+	// and is empty when Claude reports none.
+	APIKeySource string
 }
 
 // SlashCommand describes one Claude slash command.
@@ -297,6 +310,9 @@ func (c *Client) InitializeInfo() InitializeInfo {
 		Models:                CloneAvailableModels(c.initializeInfo.Models),
 		OutputStyle:           c.initializeInfo.OutputStyle,
 		AvailableOutputStyles: append([]string(nil), c.initializeInfo.AvailableOutputStyles...),
+		APIProvider:           c.initializeInfo.APIProvider,
+		TokenSource:           c.initializeInfo.TokenSource,
+		APIKeySource:          c.initializeInfo.APIKeySource,
 	}
 }
 
@@ -333,6 +349,9 @@ func (c *Client) setInitializeInfo(info InitializeInfo) {
 		Models:                CloneAvailableModels(info.Models),
 		OutputStyle:           info.OutputStyle,
 		AvailableOutputStyles: append([]string(nil), info.AvailableOutputStyles...),
+		APIProvider:           info.APIProvider,
+		TokenSource:           info.TokenSource,
+		APIKeySource:          info.APIKeySource,
 	}
 }
 
@@ -351,11 +370,16 @@ func parseInitializeInfo(value any) InitializeInfo {
 		return InitializeInfo{}
 	}
 
+	account, _ := raw["account"].(map[string]any)
+
 	return InitializeInfo{
 		Commands:              parseSlashCommands(raw["commands"]),
 		Models:                parseAvailableModels(raw["models"]),
 		OutputStyle:           stringValue(raw["output_style"]),
 		AvailableOutputStyles: stringSlice(raw["available_output_styles"]),
+		APIProvider:           stringValue(account["apiProvider"]),
+		TokenSource:           stringValue(account["tokenSource"]),
+		APIKeySource:          stringValue(account["apiKeySource"]),
 	}
 }
 
@@ -418,7 +442,7 @@ func parseAvailableModels(value any) []AvailableModelInfo {
 			SupportedEffortLevels: effort,
 			EffortUnsupported:     raw["supportsEffort"] == false,
 			SupportsAutoMode:      boolValue(raw["supportsAutoMode"]),
-			Disabled:              boolValue(raw["disabled"]),
+			Disabled:              boolValue(raw[nativeModelDisabledKey]),
 		})
 	}
 

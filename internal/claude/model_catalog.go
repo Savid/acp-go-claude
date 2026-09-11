@@ -3,16 +3,30 @@ package claude
 import (
 	"context"
 	"errors"
-	"net/url"
+	"maps"
 	"slices"
 	"strings"
 	"time"
 )
 
 const (
-	modelCatalogEndpoint = "https://api.anthropic.com/v1/models"
-	modelCatalogEnvYes   = "yes"
+	modelCatalogEndpoint  = "https://api.anthropic.com/v1/models"
+	anthropicModelPrefix  = "claude-"
+	anthropicModelDefault = "default"
+	anthropicModelSonnet  = "sonnet"
+	modelDiscoveryTimeout = 3 * time.Second
+
+	// nativeModelDisabledKey is the native model field naming an explicit refusal.
+	nativeModelDisabledKey = "disabled"
+
+	// nativeTokenSourceNone is Claude's own word for holding no bearer.
+	nativeTokenSourceNone = "none"
 )
+
+// anthropicModelAliases are the family names Claude's own menu uses for
+// Anthropic models. `default` joins them: with nothing concrete resolved behind
+// it, it selects whichever Anthropic model the harness would choose.
+var anthropicModelAliases = []string{anthropicModelDefault, anthropicModelSonnet, "opus", "haiku", "fable"}
 
 // ModelCatalogReader supplies provider model facts for one effective credential.
 // The owning Agent shares the reader across sessions; native restrictions are
@@ -21,33 +35,47 @@ type ModelCatalogReader interface {
 	List(context.Context, ModelCatalogAccess) ([]APIModel, error)
 }
 
-// DiscoverModels reads this process's model configuration. Direct Anthropic
-// credentials use the provider catalog; native choices remain the operational
-// fallback when provider discovery is unavailable. Unauthenticated processes
-// never consult or populate the provider cache.
+// DiscoverModels reads this process's model configuration.
+//
+// Claude's own menu names Anthropic's models. Every provider Claude reports
+// serves those models under its own account, so the menu stands as given unless
+// this process cannot dispatch those names: see routedNativeModels for the
+// conditions. Direct Anthropic credentials additionally enrich the native rows
+// from the provider catalog; unauthenticated processes never consult or
+// populate the provider cache.
 func (c *Client) DiscoverModels(
 	ctx context.Context,
 	catalog ModelCatalogReader,
 	direct bool,
 ) ([]AvailableModelInfo, *SettingsSnapshot, error) {
-	native := c.InitializeInfo().Models
-
 	settings, err := c.GetSettings(ctx)
 	if err != nil {
-		return native, nil, err
+		return c.routedNativeModels(ctx, nil), nil, err
 	}
 
 	access, eligible := c.modelCatalogAccess(settings)
 	if !direct || catalog == nil || !eligible {
-		return native, settings, nil
+		return c.routedNativeModels(ctx, settings), settings, nil
 	}
 
-	discoverCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	return c.discoverDirectModels(ctx, catalog, settings, access)
+}
+
+// discoverDirectModels merges Anthropic's Models API facts into the native
+// list. Eligibility means an unambiguous credential for Anthropic's own
+// endpoint, so such a process withholds nothing and every native row stands.
+func (c *Client) discoverDirectModels(
+	ctx context.Context,
+	catalog ModelCatalogReader,
+	settings *SettingsSnapshot,
+	access ModelCatalogAccess,
+) ([]AvailableModelInfo, *SettingsSnapshot, error) {
+	discoverCtx, cancel := context.WithTimeout(ctx, modelDiscoveryTimeout)
 	defer cancel()
 
 	// initialize is a startup snapshot and excludes disabled rows. A fresh
 	// native list carries explicit refusals that provider discovery must honor.
-	native, err = c.listModels(discoverCtx)
+	native, err := c.listModels(discoverCtx)
 	if err != nil {
 		return c.InitializeInfo().Models, settings, err
 	}
@@ -66,12 +94,128 @@ func (c *Client) DiscoverModels(
 
 	current, eligible := c.modelCatalogAccess(currentSettings)
 	if !eligible || current != access {
-		return native, currentSettings, nil
+		return c.routedNativeModels(discoverCtx, currentSettings), currentSettings, nil
 	}
 
 	overrides, _ := currentSettings.Effective["modelOverrides"].(map[string]any)
 
 	return mergeModelCatalog(models, native, overrides), currentSettings, nil
+}
+
+// routedNativeModels is the native list this process may publish. Claude's own
+// menu names Anthropic's models, and two conditions make them unusable: a
+// process reaching the Anthropic API at another endpoint cannot dispatch them,
+// and a process Claude reports as holding no credential cannot dispatch
+// anything. Either withdraws those names and leaves what the endpoint
+// enumerated for itself. Rows Claude explicitly refused are kept whatever the
+// route: an allowlist or an explicit selection must not reintroduce a refused
+// model under another alias.
+func (c *Client) routedNativeModels(ctx context.Context, settings *SettingsSnapshot) []AvailableModelInfo {
+	if !c.gatewayRouted(settings) && !c.credentialAbsent() {
+		return c.InitializeInfo().Models
+	}
+
+	// The startup snapshot is neither complete nor current for a withholding
+	// process: it omits the rows Claude refused, and Claude's own gateway
+	// discovery lands after initialize has already answered.
+	native, err := c.listModels(ctx)
+	if err != nil {
+		native = c.InitializeInfo().Models
+	}
+
+	kept := make([]AvailableModelInfo, 0, len(native))
+	for _, model := range native {
+		if model.Disabled || !anthropicModelIdentity(model) {
+			kept = append(kept, model)
+		}
+	}
+
+	return kept
+}
+
+// gatewayRouted reports whether this process talks the Anthropic API to an
+// endpoint other than Anthropic's own. Claude names the provider it resolved,
+// and every provider it names but `firstParty` serves Anthropic's models
+// itself, so only a first-party process pointed at another host has a menu it
+// cannot dispatch. Claude does not report the host, so the base URL places a
+// first-party process, and the route test is Claude's own: a spelling Claude
+// treats as its endpoint keeps the menu Claude is serving. A provider Claude
+// will not name, and a launch environment this adapter cannot read, leave the
+// route unestablished rather than first-party, and an unestablished route is no
+// evidence that these names dispatch.
+func (c *Client) gatewayRouted(settings *SettingsSnapshot) bool {
+	provider := c.InitializeInfo().APIProvider
+	if provider == "" {
+		return true
+	}
+
+	if provider != apiProviderFirstParty {
+		return false
+	}
+
+	env, ok := c.launchEnvironment()
+	if !ok {
+		return true
+	}
+
+	return !firstPartyRoute(effectiveRouteEnvironment(settings, env))
+}
+
+// credentialAbsent reports whether Claude says this process holds no
+// credential. Claude names its own: `tokenSource` is the variable a bearer came
+// from and reads `none` when there is no bearer, `apiKeySource` names an API
+// key when one is configured, and a signed-in subscription reports neither
+// field. Absence of both is silence rather than a report — a Bedrock, Vertex or
+// Foundry process resolves its credential through that cloud's own chain and
+// Claude names nothing here — so only an explicit `none` standing alone
+// establishes that nothing signs this process's requests.
+func (c *Client) credentialAbsent() bool {
+	info := c.InitializeInfo()
+
+	return info.TokenSource == nativeTokenSourceNone && info.APIKeySource == ""
+}
+
+// Settings env overrides the launch environment for both route controls.
+func effectiveRouteEnvironment(settings *SettingsSnapshot, env map[string]string) map[string]string {
+	if settings == nil || settings.Effective == nil {
+		return env
+	}
+
+	values, _ := settings.Effective["env"].(map[string]any)
+
+	resolved := maps.Clone(env)
+	if resolved == nil {
+		resolved = make(map[string]string)
+	}
+
+	for _, key := range []string{directAPIBaseURLEnv, assumeFirstPartyEnv} {
+		if value, ok := values[key].(string); ok {
+			resolved[EnvironmentKey(key)] = value
+		}
+	}
+
+	return resolved
+}
+
+// anthropicModelIdentity reports whether a model row names an Anthropic model:
+// a `claude-` prefixed id, or one of Claude's family aliases with no concrete
+// target behind it. A row whose target is some other id was contributed by a
+// provider Claude was pointed at, and belongs to that provider.
+func anthropicModelIdentity(model AvailableModelInfo) bool {
+	if resolved := NormalizeModelIdentity(model.ResolvedModel); resolved != "" {
+		return strings.HasPrefix(resolved, anthropicModelPrefix)
+	}
+
+	value := NormalizeModelIdentity(model.Value)
+
+	return strings.HasPrefix(value, anthropicModelPrefix) || slices.Contains(anthropicModelAliases, value)
+}
+
+// NormalizeModelIdentity reduces a model name to the identity two spellings of
+// the same model share: case, surrounding space, and the `[1m]` context-window
+// suffix all name the same model to Claude.
+func NormalizeModelIdentity(id string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(id)), "[1m]")
 }
 
 func (c *Client) listModels(ctx context.Context) ([]AvailableModelInfo, error) {
@@ -80,7 +224,7 @@ func (c *Client) listModels(ctx context.Context) ([]AvailableModelInfo, error) {
 		return nil, ErrClientNotStarted
 	}
 
-	response, err := controller.SendRequest(ctx, "list_models", nil, 3*time.Second)
+	response, err := controller.SendRequest(ctx, "list_models", nil, modelDiscoveryTimeout)
 	if err != nil {
 		return nil, errors.New("native model discovery failed")
 	}
@@ -94,13 +238,9 @@ func (c *Client) listModels(ctx context.Context) ([]AvailableModelInfo, error) {
 }
 
 func (c *Client) modelCatalogAccess(settings *SettingsSnapshot) (ModelCatalogAccess, bool) {
-	source, ok := c.transport.(interface{ LaunchEnvironment() map[string]string })
-	if !ok || settings == nil || settings.Effective == nil || c.isClosed() {
-		return ModelCatalogAccess{}, false
-	}
-
-	env := source.LaunchEnvironment()
-	if !directAPISettingsMatch(settings.Effective, env) {
+	env, ok := c.launchEnvironment()
+	if !ok || settings == nil || settings.Effective == nil ||
+		!directAPISettingsMatch(settings.Effective, env) {
 		return ModelCatalogAccess{}, false
 	}
 
@@ -108,8 +248,7 @@ func (c *Client) modelCatalogAccess(settings *SettingsSnapshot) (ModelCatalogAcc
 	if access.OAuth {
 		// Native bare mode ignores OAuth, including an explicit environment
 		// token. Its equivalent SIMPLE switch uses Claude's truthy spellings.
-		simple := strings.ToLower(strings.TrimSpace(env[EnvironmentKey("CLAUDE_CODE_SIMPLE")]))
-		if c.options.Bare || simple == "1" || simple == "true" || simple == modelCatalogEnvYes || simple == "on" {
+		if c.options.Bare || claudeSwitchEnabled(env[EnvironmentKey("CLAUDE_CODE_SIMPLE")]) {
 			return ModelCatalogAccess{}, false
 		}
 	}
@@ -117,20 +256,22 @@ func (c *Client) modelCatalogAccess(settings *SettingsSnapshot) (ModelCatalogAcc
 	return access, eligible
 }
 
+func (c *Client) launchEnvironment() (map[string]string, bool) {
+	source, ok := c.transport.(interface{ LaunchEnvironment() map[string]string })
+	if !ok || c.isClosed() {
+		return nil, false
+	}
+
+	return source.LaunchEnvironment(), true
+}
+
 func resolveModelCatalogAccess(env map[string]string) (ModelCatalogAccess, bool) {
-	if directAPIHasRouteOverride(env) || strings.TrimSpace(env[EnvironmentKey("CLAUDE_CODE_API_BASE_URL")]) != "" {
+	if directAPIHasRouteOverride(env) || strings.TrimSpace(env[EnvironmentKey(directAPIInternalBaseURLEnv)]) != "" {
 		return ModelCatalogAccess{}, false
 	}
 
-	base := strings.TrimSpace(env[EnvironmentKey(directAPIBaseURLEnv)])
-	if base != "" {
-		endpoint, err := url.Parse(base)
-		if err != nil || endpoint.Scheme != authLoginURLScheme || !strings.EqualFold(endpoint.Hostname(), "api.anthropic.com") ||
-			(endpoint.Port() != "" && endpoint.Port() != "443") || endpoint.User != nil ||
-			(endpoint.Path != "" && endpoint.Path != "/") || endpoint.RawPath != "" ||
-			endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" {
-			return ModelCatalogAccess{}, false
-		}
+	if !anthropicBaseURL(env) {
+		return ModelCatalogAccess{}, false
 	}
 
 	token := env[EnvironmentKey(directAPIOAuthTokenEnv)]

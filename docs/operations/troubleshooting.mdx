@@ -33,6 +33,22 @@ Cancellation resolves pending permission and elicitation requests. A late
 answer is not applied to the cancelled turn. Retry through a new prompt if the
 work should continue; see [Prompt streaming](/docs/core/prompt-streaming).
 
+## The model menu lost Claude's own model names
+
+Three conditions withhold `default`, `sonnet`, `opus`, `haiku` and `claude-`
+IDs, leaving the menu the endpoint offers: a first-party session pointed at a
+custom `ANTHROPIC_BASE_URL`, which reaches an endpoint that does not serve
+Anthropic's models; a session Claude Code reports as holding no credential; and
+a session whose provider Claude Code will not name. Sign in, or supply
+`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, for the credential case. For the
+route case, enable Claude Code's own gateway discovery with
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` to populate the menu, and check
+the base URL in both the launch environment and any settings `env` block. A
+Bedrock, Vertex or Foundry session keeps its full menu, credential silence
+included. Selection is unaffected either way: a value outside the menu is still
+sent to Claude Code. See
+[Models and config](/docs/features/models-config#routing-and-credentials-decide-which-names-are-published).
+
 ## Provider authentication is unavailable
 
 The `_claude/auth/*` methods require a usable `WithProviderAuthRoot`, non-bare

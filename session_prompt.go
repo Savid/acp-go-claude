@@ -76,7 +76,7 @@ func (s *session) mapPrompt(ctx context.Context, blocks []acp.ContentBlock) (nat
 				kind = "document"
 			}
 
-			prompt.content = append(prompt.content, claude.ContentBlock{Type: kind, Source: &claude.Source{Type: "base64", MediaType: item.MIME, Data: base64.StdEncoding.EncodeToString(item.Data)}})
+			prompt.content = append(prompt.content, claude.ContentBlock{Type: kind, Source: &claude.Source{Type: nativeBase64, MediaType: item.MIME, Data: base64.StdEncoding.EncodeToString(item.Data)}})
 
 			continue
 		}

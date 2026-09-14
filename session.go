@@ -286,7 +286,7 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model strin
 	}
 
 	if s.options.Effort != "" {
-		if setErr := rt.client.ApplySettings(ctx, map[string]any{"effortLevel": s.options.Effort}); setErr != nil {
+		if setErr := rt.client.ApplySettings(ctx, map[string]any{nativeEffortLevel: s.options.Effort}); setErr != nil {
 			return s.startFailure(ctx, setErr)
 		}
 	}
@@ -297,7 +297,7 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model strin
 	}
 
 	if s.outputStyle != "" && s.outputStyle != initialized.OutputStyle {
-		if err := rt.client.ApplySettings(ctx, map[string]any{"outputStyle": s.outputStyle}); err != nil {
+		if err := rt.client.ApplySettings(ctx, map[string]any{nativeOutputStyle: s.outputStyle}); err != nil {
 			return s.startFailure(ctx, err)
 		}
 

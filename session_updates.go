@@ -10,6 +10,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-core/lifecycle"
 )
 
 const (
@@ -25,6 +26,7 @@ const (
 type messageState struct {
 	id, text, thinking string
 	finalized          map[string]struct{}
+	images             map[string]struct{}
 }
 type cycleState struct {
 	replay           bool
@@ -44,7 +46,7 @@ func (state *cycleState) message(parent string) *messageState {
 	}
 
 	if state.messages[parent] == nil {
-		state.messages[parent] = &messageState{finalized: make(map[string]struct{})}
+		state.messages[parent] = &messageState{finalized: make(map[string]struct{}), images: make(map[string]struct{})}
 	}
 
 	return state.messages[parent]
@@ -144,7 +146,7 @@ func (s *session) projectEvent(ctx context.Context, _ *runtime, c *cycle, event 
 
 		return true, nil
 	case "system":
-		return event.Subtype == "task_notification" && c.origin != "submission", nil
+		return event.Subtype == "task_notification" && c.origin != lifecycle.CauseSubmission, nil
 	}
 
 	return false, nil
@@ -196,24 +198,44 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 		return err
 	}
 
-	var text, thought strings.Builder
-
 	for index := range blocks {
 		block := &blocks[index]
 		switch block.Type {
-		case contentBlockTypeText:
-			text.WriteString(block.Text)
-		case contentBlockTypeThinking:
-			thought.WriteString(block.Thinking)
+		case contentBlockTypeText, contentBlockTypeThinking:
+			text, pending := block.Text, &message.text
+			if block.Type == contentBlockTypeThinking {
+				text, pending = block.Thinking, &message.thinking
+			}
+
+			text = consumeAssistantText(pending, text)
+			if text == "" {
+				continue
+			}
+
+			update := acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock(text), MessageId: optionalString(native.ID)}}
+			if block.Type == contentBlockTypeThinking {
+				update = acp.SessionUpdate{AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{Content: acp.TextBlock(text), MessageId: optionalString(native.ID)}}
+			}
+
+			if err := s.emit(ctx, update); err != nil {
+				return err
+			}
 		case contentBlockTypeToolCall:
 			if err := s.publishToolStart(ctx, state, *block); err != nil {
 				return err
 			}
 		case contentBlockTypeImage:
 			if link := remoteImageLink(*block); link != nil {
-				if err := s.emit(ctx, acp.UpdateAgentMessage(*link)); err != nil {
+				key := native.ID + ":" + link.ResourceLink.Uri
+				if _, emitted := message.images[key]; emitted {
+					continue
+				}
+
+				if err := s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: *link, MessageId: optionalString(native.ID)}}); err != nil {
 					return err
 				}
+
+				message.images[key] = struct{}{}
 
 				continue
 			}
@@ -225,36 +247,24 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 				}
 
 				guidance, _ := failure.Guidance()
-				if err := s.emit(ctx, acp.UpdateAgentMessageText(guidance)); err != nil {
+				if err := s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock(guidance), MessageId: optionalString(native.ID)}}); err != nil {
 					return err
 				}
 
 				continue
 			}
 
-			if err := s.emit(ctx, acp.UpdateAgentMessage(acp.ImageBlock(output.data, output.mime))); err != nil {
+			key := native.ID + ":" + output.fingerprint
+			if _, emitted := message.images[key]; emitted {
+				continue
+			}
+
+			if err := s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.ImageBlock(output.data, output.mime), MessageId: optionalString(native.ID)}}); err != nil {
 				return err
 			}
 
+			message.images[key] = struct{}{}
 			state.imagesEmitted = true
-		}
-	}
-
-	for _, chunk := range []struct {
-		text    string
-		thought bool
-	}{{consumeAssistantText(&message.thinking, thought.String()), true}, {consumeAssistantText(&message.text, text.String()), false}} {
-		if chunk.text == "" {
-			continue
-		}
-
-		update := acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock(chunk.text), MessageId: optionalString(native.ID)}}
-		if chunk.thought {
-			update = acp.SessionUpdate{AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{Content: acp.TextBlock(chunk.text), MessageId: optionalString(native.ID)}}
-		}
-
-		if err := s.emit(ctx, update); err != nil {
-			return err
 		}
 	}
 
@@ -519,7 +529,7 @@ func redactImages(value any) {
 			}
 		}
 
-		if data, ok := typed["data"].(string); ok && blockType == "base64" && data != "" {
+		if data, ok := typed["data"].(string); ok && blockType == nativeBase64 && data != "" {
 			typed["data"] = ""
 			typed["sizeBytes"] = len(data) / 4 * 3
 		}
@@ -550,3 +560,11 @@ const (
 const configCommand = "config"
 
 const nativeMessageStart = "message_start"
+
+const (
+	nativeEffortLevel  = "effortLevel"
+	nativeOutputStyle  = "outputStyle"
+	nativeBase64       = "base64"
+	permissionModePlan = "plan"
+	elicitationAccept  = "accept"
+)

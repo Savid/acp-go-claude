@@ -140,3 +140,20 @@ func TestConfigurationAndEnvironment(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rows[0], &record))
 	require.Equal(t, "haiku", record.Model)
 }
+
+func TestRelativeNativeHomeUsesSessionCwd(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithHome(""), WithSessionStore(store), WithEnv(map[string]string{fakeClaudeEnv: "1", claude.EnvConfigDir: "native-home"}))
+	h.initialize()
+	session := h.newSession()
+	_, err := h.prompt(session.SessionId, "relative-home", nil)
+	require.NoError(t, err)
+	rows, err := store.Load(t.Context(), acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: "config"})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	var record sessionRecord
+	require.NoError(t, json.Unmarshal(rows[0], &record))
+	require.Equal(t, claude.SessionPath(filepath.Join(record.Cwd, "native-home"), record.Cwd, string(session.SessionId)), record.SessionFile)
+	require.FileExists(t, record.SessionFile)
+}

@@ -23,7 +23,7 @@ func (s *session) configOptions() []acp.SessionConfigOption {
 	defer s.mu.Unlock()
 
 	options := []acp.SessionConfigOption{selectConfig(configModel, "Model", s.model, modelSelectOptions(s.model, s.models, s.agent.options.ConfiguredModels))}
-	modes := []string{nativeDefault, "plan", "acceptEdits", "bypassPermissions", "dontAsk"}
+	modes := []string{nativeDefault, permissionModePlan, "acceptEdits", "bypassPermissions", "dontAsk"}
 
 	for _, model := range s.models {
 		if model.SupportsAutoMode {
@@ -143,9 +143,9 @@ func (s *session) setConfigOption(ctx context.Context, id acp.SessionConfigId, v
 	case configMode:
 		err = rt.client.SetPermissionMode(ctx, value)
 	case configEffort:
-		err = rt.client.ApplySettings(ctx, map[string]any{"effortLevel": value})
+		err = rt.client.ApplySettings(ctx, map[string]any{nativeEffortLevel: value})
 	case configOutputStyle:
-		err = rt.client.ApplySettings(ctx, map[string]any{"outputStyle": value})
+		err = rt.client.ApplySettings(ctx, map[string]any{nativeOutputStyle: value})
 	}
 
 	if err != nil {

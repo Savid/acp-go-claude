@@ -20,6 +20,7 @@ const permissionOptionDeny acp.PermissionOptionId = "deny"
 
 // handleControl publishes any tool state before its callback can run concurrently.
 func (s *session) handleControl(ctx context.Context, rt *runtime, event claude.Event) {
+	ctx = context.WithValue(ctx, parentToolKey{}, event.ParentToolUseID)
 	if event.Request == nil {
 		return
 	}
@@ -88,7 +89,7 @@ func (s *session) handleControl(ctx context.Context, rt *runtime, event claude.E
 
 			result = map[string]any{permissionBehavior: permissionOptionDeny, nativeMessage: "Permission denied"}
 			if answer == permissionOptionAllow {
-				result = map[string]any{permissionBehavior: "allow", "updatedInput": request.Input}
+				result = map[string]any{permissionBehavior: permissionOptionAllow, "updatedInput": request.Input}
 			}
 		case controlElicitation:
 			result = s.elicit(dialogCtx, c, request)
@@ -166,7 +167,7 @@ func (s *session) elicit(ctx context.Context, c *cycle, request claude.ControlRe
 	}
 
 	if response.Accept != nil {
-		return map[string]any{elicitationAction: "accept", nativeContent: response.Accept.Content}
+		return map[string]any{elicitationAction: elicitationAccept, nativeContent: response.Accept.Content}
 	}
 
 	if response.Decline != nil {
@@ -374,7 +375,7 @@ func (s *session) answerQuestions(ctx context.Context, c *cycle, request claude.
 	schema, _ := json.Marshal(map[string]any{schemaTypeKey: "object", "properties": properties, "required": required})
 
 	response := s.elicit(ctx, c, claude.ControlRequest{Mode: elicitationModeForm, Message: "Claude needs your input.", RequestedSchema: schema})
-	if response[elicitationAction] != "accept" {
+	if response[elicitationAction] != elicitationAccept {
 		return denied
 	}
 
@@ -413,7 +414,7 @@ func (s *session) answerQuestions(ctx context.Context, c *cycle, request claude.
 	input := maps.Clone(request.Input)
 	input["answers"] = answers
 
-	return map[string]any{permissionBehavior: "allow", "updatedInput": input}
+	return map[string]any{permissionBehavior: permissionOptionAllow, "updatedInput": input}
 }
 
 const (

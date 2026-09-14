@@ -50,3 +50,40 @@ func TestReplayRejectsInvalidImageBytes(t *testing.T) {
 	err := session.replay(t.Context(), rows)
 	require.Equal(t, "claude_restore_failed", requestErrorData(t, err)["error"])
 }
+
+func TestCommandCatalogFollowsRuntime(t *testing.T) {
+	t.Parallel()
+	for _, commands := range []string{"native", "empty"} {
+		t.Run(commands, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", "ACP_GO_CLAUDE_TEST_COMMANDS": commands}))
+			h.initialize()
+			session := h.newSession()
+			h.rec.waitFor(t, func(updates []acp.SessionNotification) bool { return len(commandSnapshots(updates)) > 0 })
+			initial := commandSnapshots(h.rec.snapshot())[0]
+			if commands == "empty" {
+				require.Empty(t, initial)
+			} else {
+				require.Len(t, initial, 1)
+				require.Equal(t, "compact", initial[0].Name)
+			}
+			_, err := h.prompt(session.SessionId, "CRASH", nil)
+			require.Equal(t, "claude_turn_failed", requestErrorData(t, err)["error"])
+			_, err = h.prompt(session.SessionId, "HELLO", nil)
+			require.NoError(t, err)
+			catalogs := commandSnapshots(h.rec.snapshot())
+			require.Len(t, catalogs, 2)
+			require.Equal(t, initial, catalogs[len(catalogs)-1])
+		})
+	}
+}
+func commandSnapshots(updates []acp.SessionNotification) [][]acp.AvailableCommand {
+	var snapshots [][]acp.AvailableCommand
+	for _, update := range updates {
+		if commands := update.Update.AvailableCommandsUpdate; commands != nil {
+			snapshots = append(snapshots, commands.AvailableCommands)
+		}
+	}
+
+	return snapshots
+}

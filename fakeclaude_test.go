@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,7 @@ import (
 )
 
 const fakeClaudeEnv = "ACP_GO_CLAUDE_TEST_FAKE"
+const fakeClaudeEnvVersion = "ACP_GO_CLAUDE_TEST_VERSION"
 
 type fakeClaude struct {
 	id, path string
@@ -25,7 +27,11 @@ type fakeClaude struct {
 
 func runFakeClaude(args []string) int {
 	if slices.Contains(args, "--version") {
-		fmt.Println("2.1.270 (Claude Code)")
+		version := os.Getenv(fakeClaudeEnvVersion)
+		if version == "" {
+			version = "2.1.270"
+		}
+		fmt.Println(version + " (Claude Code)")
 
 		return 0
 	}
@@ -40,6 +46,7 @@ func runFakeClaude(args []string) int {
 	if dump := os.Getenv("ACP_GO_CLAUDE_TEST_ENV_DUMP"); dump != "" {
 		_ = os.WriteFile(dump, []byte(strings.Join(os.Environ(), "\n")), 0o600)
 	}
+	settings := map[string]any{"model": "default", nativeEffortLevel: "low", nativeOutputStyle: "default"}
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 16<<20)
 	for scanner.Scan() {
@@ -62,6 +69,20 @@ func runFakeClaude(args []string) int {
 			switch frame.Request["subtype"] {
 			case "initialize":
 				result = claude.InitializeResponse{Models: []claude.Model{{Value: "default", DisplayName: "Default", SupportsEffort: true, SupportedEffortLevels: []string{"low", "high"}, SupportsAutoMode: true}, {Value: "haiku", DisplayName: "Haiku"}}, Commands: []claude.Command{{Name: "compact", Description: "Compact"}, {Name: "clear"}}, PermissionMode: "default", OutputStyle: "default", AvailableOutputStyles: []string{"default", "concise"}}
+			case "get_settings":
+				result = map[string]any{"effective": settings}
+			case "set_model":
+				settings["model"] = frame.Request["model"]
+			case "set_permission_mode":
+				if _, ok := frame.Request["mode"].(string); !ok {
+					return 2
+				}
+			case "apply_flag_settings":
+				values, ok := frame.Request["settings"].(map[string]any)
+				if !ok {
+					return 2
+				}
+				maps.Copy(settings, values)
 			case "get_context_usage":
 				result = claude.ContextUsage{TotalTokens: 20, MaxTokens: 1000, Model: "default"}
 			case "interrupt":
@@ -71,6 +92,14 @@ func runFakeClaude(args []string) int {
 					f.abort = nil
 				}
 				f.turnMu.Unlock()
+			default:
+				f.write(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "error", "request_id": frame.RequestID, "error": "unsupported fake control operation"}})
+
+				continue
+			}
+			if initialized, ok := result.(claude.InitializeResponse); ok && os.Getenv("ACP_GO_CLAUDE_TEST_COMMANDS") == "empty" {
+				initialized.Commands = []claude.Command{}
+				result = initialized
 			}
 			f.write(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": frame.RequestID, "response": result}})
 		case "user":
@@ -113,6 +142,12 @@ func (f *fakeClaude) row(role, text string) {
 	_ = json.NewEncoder(file).Encode(map[string]any{"type": role, "sessionId": f.id, "message": map[string]any{"id": role + text, "role": role, "content": []map[string]any{{"type": "text", "text": text}}}})
 }
 func (f *fakeClaude) turn(text string, abort <-chan struct{}) {
+	if text == "NOISE" {
+		fmt.Fprintln(os.Stderr, "native stderr noise")
+		fmt.Println("native stdout noise")
+
+		return
+	}
 	if text == "CRASH" {
 		os.Exit(23)
 	}
@@ -124,10 +159,14 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}) {
 
 		return
 	}
-	if text == "PERMISSION" || text == "ELICIT" || text == "QUESTION" {
+	outcome := ""
+	if text == "PERMISSION" || text == "ELICIT" || text == "ELICIT_URL" || text == "QUESTION" {
 		request := map[string]any{"subtype": "can_use_tool", "tool_name": "Write", "tool_use_id": "tool-1", "input": map[string]any{"file_path": "/tmp/example", "content": "hello"}}
 		if text == "ELICIT" {
 			request = map[string]any{"subtype": "elicitation", "mode": "form", "message": "Choose a color", "requestedSchema": map[string]any{"type": "object", "properties": map[string]any{"color": map[string]any{"type": "string"}}, "required": []string{"color"}}}
+		}
+		if text == "ELICIT_URL" {
+			request = map[string]any{"subtype": "elicitation", "mode": "url", "message": "Open the page", "url": "https://example.test/authorize", "elicitationId": "url-1"}
 		}
 		if text == "QUESTION" {
 			request = map[string]any{"subtype": "can_use_tool", "tool_name": "AskUserQuestion", "tool_use_id": "question-tool", "input": map[string]any{"questions": []any{map[string]any{"question": "Pick a color", "options": []any{map[string]any{"label": "blue"}, map[string]any{"label": "red"}}}}}}
@@ -139,6 +178,16 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}) {
 		f.write(map[string]any{"type": "control_request", "request_id": "question-1", "request": request})
 		select {
 		case value := <-reply:
+			var answer map[string]any
+			if json.Unmarshal(value, &answer) != nil {
+				return
+			}
+			if text == "PERMISSION" {
+				outcome, _ = answer["behavior"].(string)
+			}
+			if text == "ELICIT" || text == "ELICIT_URL" {
+				outcome, _ = answer["action"].(string)
+			}
 			if text == "QUESTION" {
 				var answer struct {
 					UpdatedInput struct {
@@ -161,6 +210,9 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}) {
 		return
 	}
 	answer := "reply: " + text
+	if outcome != "" {
+		answer = outcome
+	}
 	f.write(map[string]any{"type": "stream_event", "session_id": f.id, "event": map[string]any{"type": "content_block_delta", "delta": map[string]any{"type": "text_delta", "text": answer[:3]}}})
 	f.write(map[string]any{"type": "assistant", "session_id": f.id, "message": map[string]any{"id": "reply-" + text, "role": "assistant", "content": []map[string]any{{"type": "text", "text": answer}}}})
 	f.row("assistant", answer)

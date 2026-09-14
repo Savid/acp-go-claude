@@ -222,6 +222,7 @@ func (s *session) failToolImage(ctx context.Context, state *cycleState, toolCall
 // delivered item never disappears, bounded per tool call.
 func mapToolContent(previous []toolContentItem, blocks []claude.ContentBlock, limits image.Limits) ([]toolContentItem, *image.OutputError) {
 	next := make([]toolContentItem, 0, len(blocks))
+	seen := make(map[string]struct{})
 
 	for index := range blocks {
 		block := &blocks[index]
@@ -235,6 +236,12 @@ func mapToolContent(previous []toolContentItem, blocks []claude.ContentBlock, li
 			next = append(next, toolContentItem{content: acp.ToolContent(acp.TextBlock(block.Text)), key: "text:" + block.Text})
 		case contentBlockTypeImage:
 			if link := remoteImageLink(*block); link != nil {
+				key := "uri:" + link.ResourceLink.Uri
+				if _, exists := seen[key]; exists {
+					continue
+				}
+
+				seen[key] = struct{}{}
 				next = append(next, toolContentItem{content: acp.ToolContent(*link), key: "uri:" + link.ResourceLink.Uri})
 
 				continue
@@ -245,9 +252,15 @@ func mapToolContent(previous []toolContentItem, blocks []claude.ContentBlock, li
 				return nil, failure
 			}
 
+			key := "image:" + output.mime + ":" + output.fingerprint
+			if _, exists := seen[key]; exists {
+				continue
+			}
+
+			seen[key] = struct{}{}
 			next = append(next, toolContentItem{
 				content:    acp.ToolContent(acp.ImageBlock(output.data, output.mime)),
-				key:        "image:" + output.mime + ":" + output.fingerprint,
+				key:        key,
 				imageBytes: output.sizeBytes,
 			})
 		}

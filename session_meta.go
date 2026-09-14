@@ -322,7 +322,7 @@ func validateClaudeOptions(options ClaudeOptions) *acp.RequestError {
 		}
 	}
 
-	if options.PermissionMode != "" && !slices.Contains([]string{nativeDefault, "manual", "plan", "acceptEdits", "bypassPermissions", "auto", "dontAsk"}, options.PermissionMode) {
+	if options.PermissionMode != "" && !slices.Contains([]string{nativeDefault, "manual", permissionModePlan, "acceptEdits", "bypassPermissions", "auto", "dontAsk"}, options.PermissionMode) {
 		return wire.Unsupported(metaOptionPath(metaPermissionModeKey))
 	}
 

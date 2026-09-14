@@ -3,773 +3,350 @@ package claudeacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
-	"maps"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
-// absTestPath builds a host-absolute path from POSIX-looking segments, so a
-// test states "an absolute working directory" rather than a spelling only one
-// platform accepts.
-func absTestPath(segments ...string) string {
-	root := "/"
-	if runtime.GOOS == "windows" {
-		root = `C:\`
+func TestMain(m *testing.M) {
+	if os.Getenv(fakeClaudeEnv) == "1" {
+		os.Exit(runFakeClaude(os.Args[1:]))
 	}
 
-	return filepath.Join(append([]string{root}, segments...)...)
+	os.Exit(m.Run())
 }
 
-// fileTestURI spells a host path as the file URI a host on this platform sends:
-// a POSIX path is already the URI path, while a Windows path needs its
-// separators turned around and an empty authority in front of the drive.
-func fileTestURI(path string) string {
-	slashed := filepath.ToSlash(path)
-	if !strings.HasPrefix(slashed, "/") {
-		slashed = "/" + slashed
-	}
+const testTimeout = 60 * time.Second
 
-	return "file://" + slashed
-}
-
-// requirePrivateMode asserts the POSIX permission bits a private file or
-// directory carries. Windows keeps no POSIX bits: os.FileMode.Perm reports
-// 0o777 for every directory and 0o666 for every writable file there, and
-// privacy rests on the ACL the parent hands down, so the assertion states the
-// mode that platform actually records rather than one it can never report.
-func requirePrivateMode(t *testing.T, want os.FileMode, info os.FileInfo) {
+// testOptions configures an agent that launches the test binary as claude, with
+// an isolated claude home and scratch directory.
+func testOptions(t *testing.T, extra ...Option) []Option {
 	t.Helper()
 
-	if runtime.GOOS == "windows" {
-		want = os.FileMode(0o666)
-		if info.IsDir() {
-			want = os.FileMode(0o777)
-		}
+	options := make([]Option, 0, 5+len(extra))
+	options = append(options,
+		WithExecutablePath(os.Args[0]),
+		WithEnv(map[string]string{fakeClaudeEnv: "1"}),
+		WithHome(filepath.Join(t.TempDir(), "home")),
+		WithScratchDir(filepath.Join(t.TempDir(), "scratch")),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	)
+
+	return append(options, extra...)
+}
+
+// recorder is the ACP client the tests observe the agent through.
+type recorder struct {
+	mu          sync.Mutex
+	updates     []acp.SessionNotification
+	raw         []json.RawMessage
+	permissions []acp.RequestPermissionRequest
+	answer      func(acp.RequestPermissionRequest) acp.RequestPermissionResponse
+	elicit      func(acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
+	changed     chan struct{}
+}
+
+var (
+	_ acp.Client                 = (*recorder)(nil)
+	_ acp.ExtensionMethodHandler = (*recorder)(nil)
+)
+
+func newRecorder() *recorder {
+	return &recorder{
+		changed: make(chan struct{}, 1),
+		answer: func(acp.RequestPermissionRequest) acp.RequestPermissionResponse {
+			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(permissionOptionAllow)}
+		},
 	}
-
-	require.Equal(t, want, info.Mode().Perm())
 }
 
-// permissionOutcome carries a permission handler's whole result across a
-// goroutine boundary, so the assertion runs on the test goroutine where
-// require's FailNow is legal.
-type permissionOutcome struct {
-	decision claude.PermissionDecision
-	err      error
-}
-
-type extensionNotification struct {
-	method string
-	params json.RawMessage
-}
-
-func interruptCalls(transport *fakeClaudeTransport) int {
-	calls := 0
-	for _, sent := range transport.Sent() {
-		request, ok := sent.(claude.ControlRequest)
-		if ok && request.Request["subtype"] == "interrupt" {
-			calls++
-		}
+func (r *recorder) signal() {
+	select {
+	case r.changed <- struct{}{}:
+	default:
 	}
-
-	return calls
 }
 
-type closeHookTransport struct {
-	claude.Transport
-	onClose func()
-}
-
-func (t *closeHookTransport) Close() error {
-	if t.onClose != nil {
-		t.onClose()
-	}
-
-	return t.Transport.Close()
-}
-
-type recordingClient struct {
-	mu           sync.Mutex
-	updates      []acp.SessionNotification
-	elicitations []acp.UnstableCreateElicitationRequest
-	extensions   []extensionNotification
-}
-
-func (c *recordingClient) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.updates = append(c.updates, notification)
+func (r *recorder) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
+	r.mu.Lock()
+	r.updates = append(r.updates, params)
+	r.mu.Unlock()
+	r.signal()
 
 	return nil
 }
 
-func (c *recordingClient) Updates() []acp.SessionNotification {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (r *recorder) RequestPermission(_ context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	r.mu.Lock()
+	r.permissions = append(r.permissions, params)
+	answer := r.answer
+	r.mu.Unlock()
+	r.signal()
 
-	return append([]acp.SessionNotification(nil), c.updates...)
+	return answer(params), nil
 }
 
-func (c *recordingClient) UnstableCreateElicitation(
-	_ context.Context,
-	request acp.UnstableCreateElicitationRequest,
-) (acp.UnstableCreateElicitationResponse, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (r *recorder) UnstableCreateElicitation(_ context.Context, params acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+	r.mu.Lock()
+	elicit := r.elicit
+	r.mu.Unlock()
 
-	c.elicitations = append(c.elicitations, request)
-	resp := acp.NewUnstableCreateElicitationResponseAccept()
-	resp.Accept.Content = map[string]any{"ok": true}
-
-	return resp, nil
-}
-
-func (c *recordingClient) Elicitations() []acp.UnstableCreateElicitationRequest {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return append([]acp.UnstableCreateElicitationRequest(nil), c.elicitations...)
-}
-
-func (c *recordingClient) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.extensions = append(c.extensions, extensionNotification{method: method, params: append(json.RawMessage(nil), params...)})
-
-	return map[string]any{"ok": true}, nil
-}
-
-func (c *recordingClient) Extensions() []extensionNotification {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return append([]extensionNotification(nil), c.extensions...)
-}
-
-func (*recordingClient) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
-}
-
-func (*recordingClient) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	return acp.ReadTextFileResponse{}, acp.NewMethodNotFound(acp.ClientMethodFsReadTextFile)
-}
-
-func (*recordingClient) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
-	return acp.WriteTextFileResponse{}, acp.NewMethodNotFound(acp.ClientMethodFsWriteTextFile)
-}
-
-func (*recordingClient) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
-	return acp.CreateTerminalResponse{}, acp.NewMethodNotFound(acp.ClientMethodTerminalCreate)
-}
-
-func (*recordingClient) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
-	return acp.KillTerminalResponse{}, acp.NewMethodNotFound(acp.ClientMethodTerminalKill)
-}
-
-func (*recordingClient) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
-	return acp.TerminalOutputResponse{}, acp.NewMethodNotFound(acp.ClientMethodTerminalOutput)
-}
-
-func (*recordingClient) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
-	return acp.ReleaseTerminalResponse{}, acp.NewMethodNotFound(acp.ClientMethodTerminalRelease)
-}
-
-func (*recordingClient) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
-	return acp.WaitForTerminalExitResponse{}, acp.NewMethodNotFound(acp.ClientMethodTerminalWaitForExit)
-}
-
-type recordingAgentClient struct {
-	recordingClient
-	done             chan struct{}
-	permission       acp.PermissionOptionId
-	permissionErr    error
-	nilPermission    bool
-	completions      []acp.UnstableCompleteElicitationNotification
-	elicitResponse   *acp.UnstableCreateElicitationResponse
-	elicitErr        error
-	extensionErr     error
-	sessionUpdateErr error
-	updateCalls      int
-	failUpdateAfter  int
-	updateSignal     chan struct{}
-}
-
-// gatedSessionUpdateClient stops exactly one selected session update at a test
-// barrier. Later updates pass through normally, so a close can prove it retained
-// the carrier until a post-response producer finished and still complete its
-// own terminal publications afterward.
-type gatedSessionUpdateClient struct {
-	*recordingAgentClient
-	gateMu  sync.Mutex
-	calls   int
-	blockAt int
-	entered chan struct{}
-	release chan struct{}
-}
-
-func newGatedSessionUpdateClient(blockAt int) *gatedSessionUpdateClient {
-	return &gatedSessionUpdateClient{
-		recordingAgentClient: newRecordingAgentClient(),
-		blockAt:              blockAt,
-		entered:              make(chan struct{}),
-		release:              make(chan struct{}),
+	if elicit == nil {
+		return acp.UnstableCreateElicitationResponse{}, errors.New("no elicitation handler")
 	}
+
+	return elicit(params)
 }
 
-func (c *gatedSessionUpdateClient) SessionUpdate(
-	ctx context.Context,
-	notification acp.SessionNotification,
-) error {
-	c.gateMu.Lock()
-	c.calls++
-	blocked := c.calls == c.blockAt
-	if blocked {
-		close(c.entered)
+func (r *recorder) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+	if method == RawEventMethod {
+		r.mu.Lock()
+		r.raw = append(r.raw, append(json.RawMessage(nil), params...))
+		r.mu.Unlock()
+		r.signal()
 	}
-	c.gateMu.Unlock()
 
-	if blocked {
+	return map[string]any{}, nil
+}
+
+func (*recorder) NotifyExtension(context.Context, string, any) error { return nil }
+
+func (*recorder) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	return acp.ReadTextFileResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	return acp.WriteTextFileResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+	return acp.CreateTerminalResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+	return acp.KillTerminalResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+	return acp.TerminalOutputResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	return acp.ReleaseTerminalResponse{}, errors.New("unsupported")
+}
+
+func (*recorder) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+	return acp.WaitForTerminalExitResponse{}, errors.New("unsupported")
+}
+
+// snapshot returns the notifications recorded so far.
+func (r *recorder) snapshot() []acp.SessionNotification {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]acp.SessionNotification(nil), r.updates...)
+}
+
+// waitFor blocks until condition holds over the recorded notifications.
+func (r *recorder) waitFor(t *testing.T, condition func([]acp.SessionNotification) bool) {
+	t.Helper()
+
+	deadline := time.After(testTimeout)
+
+	for {
+		if condition(r.snapshot()) {
+			return
+		}
+
 		select {
-		case <-c.release:
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-r.changed:
+		case <-deadline:
+			t.Fatalf("condition not met; %d notifications recorded", len(r.snapshot()))
 		}
 	}
-
-	return c.recordingAgentClient.SessionUpdate(ctx, notification)
 }
 
-func newRecordingAgentClient() *recordingAgentClient {
-	return &recordingAgentClient{done: make(chan struct{}), updateSignal: make(chan struct{}, 1)}
+// harness serves an agent over pipes to a recording client.
+type harness struct {
+	t      *testing.T
+	conn   *acp.ClientSideConnection
+	rec    *recorder
+	cancel context.CancelFunc
+	served chan error
 }
 
-// admitControlCallbackForTest enters callback code through the same exact
-// reservation production installs in the Claude client. Call finish when the
-// handler returns so prompt final admission observes the real callback lifetime.
-func admitControlCallbackForTest(
-	t *testing.T,
-	session *agentSession,
-	ctx context.Context,
-	route string,
-) (context.Context, func()) {
+func newHarness(t *testing.T, extra ...Option) *harness {
 	t.Helper()
 
-	admittedCtx, finish, admitted := session.admitControlCallback(ctx, route)
-	require.True(t, admitted, "test callback route must have an exact live owner")
-
-	return admittedCtx, finish
-}
-
-func handlePermissionThroughAdmissionForTest(
-	t *testing.T,
-	session *agentSession,
-	ctx context.Context,
-	route string,
-	request claude.PermissionRequest,
-) (claude.PermissionDecision, error) {
-	t.Helper()
-
-	admittedCtx, finish := admitControlCallbackForTest(t, session, ctx, route)
-	defer finish()
-
-	return session.handlePermission(admittedCtx, request)
-}
-
-func handleElicitationThroughAdmissionForTest(
-	t *testing.T,
-	session *agentSession,
-	ctx context.Context,
-	route string,
-	request claude.ElicitationRequest,
-) (claude.ElicitationResponse, error) {
-	t.Helper()
-
-	admittedCtx, finish := admitControlCallbackForTest(t, session, ctx, route)
-	defer finish()
-
-	return session.handleElicitation(admittedCtx, request)
-}
-
-func (c *recordingAgentClient) Done() <-chan struct{} {
-	if c.done == nil {
-		c.done = make(chan struct{})
-	}
-
-	return c.done
-}
-
-func (c *recordingAgentClient) CreateElicitation(
-	ctx context.Context,
-	request acp.UnstableCreateElicitationRequest,
-	_ elicitationScope,
-	action actionWireAdmission,
-) (acp.UnstableCreateElicitationResponse, error) {
-	if err := action.publishPending(); err != nil {
-		return acp.UnstableCreateElicitationResponse{}, err
-	}
-
-	c.mu.Lock()
-	c.elicitations = append(c.elicitations, request)
-	c.mu.Unlock()
-
-	if err := action.observeWrite(ctx, actionWireIdentity{
-		method:    acp.ClientMethodElicitationCreate,
-		requestID: "test-elicitation-" + action.actionID,
-	}); err != nil {
-		return acp.UnstableCreateElicitationResponse{}, err
-	}
-	if c.elicitErr != nil {
-		return acp.UnstableCreateElicitationResponse{}, c.elicitErr
-	}
-	if c.elicitResponse != nil {
-		return *c.elicitResponse, nil
-	}
-
-	resp := acp.NewUnstableCreateElicitationResponseAccept()
-	resp.Accept.Content = map[string]any{"ok": true}
-
-	return resp, nil
-}
-
-func (c *recordingAgentClient) UnstableCompleteElicitation(
-	_ context.Context,
-	notification acp.UnstableCompleteElicitationNotification,
-) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.completions = append(c.completions, notification)
-
-	return nil
-}
-
-func (c *recordingAgentClient) Completions() []acp.UnstableCompleteElicitationNotification {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return append([]acp.UnstableCompleteElicitationNotification(nil), c.completions...)
-}
-
-func (c *recordingAgentClient) RequestPermission(
-	ctx context.Context,
-	request acp.RequestPermissionRequest,
-	action actionWireAdmission,
-) (acp.RequestPermissionResponse, error) {
-	if err := action.publishPending(); err != nil {
-		return acp.RequestPermissionResponse{}, err
-	}
-
-	if err := action.observeWrite(ctx, actionWireIdentity{
-		method:    acp.ClientMethodSessionRequestPermission,
-		requestID: "test-permission-" + action.actionID,
-	}); err != nil {
-		return acp.RequestPermissionResponse{}, err
-	}
-	if c.permissionErr != nil {
-		return acp.RequestPermissionResponse{}, c.permissionErr
-	}
-	if c.nilPermission {
-		return acp.RequestPermissionResponse{}, nil
-	}
-	if c.permission == "" {
-		return c.recordingClient.RequestPermission(context.Background(), request)
-	}
-
-	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(c.permission)}, nil
-}
-
-func (c *recordingAgentClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
-	// The pinned SDK refuses to send a notification whose context is already done,
-	// so this double refuses too: a test that delivered an update under a cancelled
-	// context would prove nothing about the real transport.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	c.mu.Lock()
-	c.updateCalls++
-	failAfter := c.failUpdateAfter
-	calls := c.updateCalls
-	c.mu.Unlock()
-
-	if failAfter > 0 {
-		if calls >= failAfter {
-			return c.sessionUpdateErr
-		}
-
-		return c.recordUpdate(ctx, notification)
-	}
-	if c.sessionUpdateErr != nil {
-		return c.sessionUpdateErr
-	}
-
-	return c.recordUpdate(ctx, notification)
-}
-
-func (c *recordingAgentClient) recordUpdate(
-	ctx context.Context,
-	notification acp.SessionNotification,
-) error {
-	if err := c.recordingClient.SessionUpdate(ctx, notification); err != nil {
-		return err
-	}
-
-	c.mu.Lock()
-	if c.updateSignal == nil {
-		c.updateSignal = make(chan struct{}, 1)
-	}
-	signal := c.updateSignal
-	c.mu.Unlock()
-	select {
-	case signal <- struct{}{}:
-	default:
-	}
-
-	return nil
-}
-
-func (c *recordingAgentClient) UpdatesChanged() <-chan struct{} {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.updateSignal == nil {
-		c.updateSignal = make(chan struct{}, 1)
-	}
-
-	return c.updateSignal
-}
-
-func (c *recordingAgentClient) NotifyExtension(_ context.Context, method string, params any) error {
-	if c.extensionErr != nil {
-		return c.extensionErr
-	}
-
-	data, err := json.Marshal(params)
-	if err != nil {
-		return err
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.extensions = append(c.extensions, extensionNotification{method: method, params: data})
-
-	return nil
-}
-
-type fakeClaudeTransport struct {
-	mu sync.Mutex
-
-	startErr error
-	closeErr error
-	sendErr  error
-
-	initialize  map[string]any
-	environment map[string]string
-	settings    map[string]any
-	context     map[string]any
-	controlErr  map[string]error
-	queryMsgs   []map[string]any
-	queryCount  int
-	onQuery     func()
-	onSend      func(any)
-	sent        []any
-	closeCalls  int
-	sentSignal  chan struct{}
-	closeSignal chan struct{}
-	closeOnce   sync.Once
-
-	messages chan map[string]any
-	errs     chan error
-}
-
-func newFakeClaudeTransport() *fakeClaudeTransport {
-	return &fakeClaudeTransport{
-		initialize: map[string]any{
-			"commands": []any{
-				map[string]any{"name": "help", "description": "Help", "argumentHint": "[topic]"},
-			},
-			"models": []any{
-				map[string]any{"value": "sonnet", "displayName": "Sonnet", "description": "balanced", "supportedEffortLevels": []any{"low", "high"}, "supportsAutoMode": true},
-				map[string]any{"value": "opus", "displayName": "Opus", "supportedEffortLevels": []any{"high"}},
-			},
-			"output_style":            "default",
-			"available_output_styles": []any{"default", "concise"},
-			// A signed-in first-party session, as Claude reports one: it names
-			// the provider it resolved and names no credential source, because
-			// a subscription is neither a bearer variable nor an API key.
-			"account": map[string]any{"apiProvider": "firstParty"},
-		},
-		settings: map[string]any{
-			"applied":   map[string]any{"model": "sonnet", "effort": "low"},
-			"effective": map[string]any{"fastMode": true},
-		},
-		context: map[string]any{"totalTokens": 8, "maxTokens": 200000},
-		queryMsgs: []map[string]any{
-			{
-				"type": "stream_event",
-				"event": map[string]any{
-					"type": "message_start",
-					"message": map[string]any{
-						"model": "sonnet",
-						"usage": map[string]any{"input_tokens": 1, "output_tokens": 2},
-					},
-				},
-			},
-			{
-				"type": "assistant",
-				"uuid": "33333333-3333-4333-8333-333333333333",
-				"message": map[string]any{
-					"model":       "sonnet",
-					"stop_reason": "end_turn",
-					"content":     []any{map[string]any{"type": "text", "text": "hello"}},
-				},
-			},
-			{
-				"type":        "result",
-				"subtype":     "success",
-				"is_error":    false,
-				"stop_reason": "end_turn",
-				"usage":       map[string]any{"input_tokens": 1, "output_tokens": 2},
-			},
-		},
-		messages:    make(chan map[string]any, 64),
-		errs:        make(chan error, 4),
-		sentSignal:  make(chan struct{}, 1),
-		closeSignal: make(chan struct{}),
-	}
-}
-
-// LaunchEnvironment mirrors ProcessTransport: the environment the native
-// process was launched with is what places a first-party session on a route.
-// An empty one names no base URL, which is Anthropic's own endpoint.
-func (t *fakeClaudeTransport) LaunchEnvironment() map[string]string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	return maps.Clone(t.environment)
-}
-
-func (t *fakeClaudeTransport) Start(context.Context) error {
-	return t.startErr
-}
-
-func (t *fakeClaudeTransport) Send(_ context.Context, payload any) error {
-	if t.sendErr != nil {
-		return t.sendErr
-	}
-
-	t.mu.Lock()
-	t.sent = append(t.sent, payload)
-	if t.sentSignal == nil {
-		t.sentSignal = make(chan struct{}, 1)
-	}
-	sentSignal := t.sentSignal
-	t.mu.Unlock()
-	select {
-	case sentSignal <- struct{}{}:
-	default:
-	}
-	if t.onSend != nil {
-		t.onSend(payload)
-	}
-
-	switch msg := payload.(type) {
-	case claude.ControlRequest:
-		t.respond(msg)
-	case map[string]any:
-		if msg["type"] == claude.MessageTypeUser {
-			t.mu.Lock()
-			t.queryCount++
-			queryCount := t.queryCount
-			queryMsgs := append([]map[string]any(nil), t.queryMsgs...)
-			t.mu.Unlock()
-			for _, queryMsg := range queryMsgs {
-				if queryCount > 1 && queryMsg["uuid"] == "33333333-3333-4333-8333-333333333333" {
-					cloned := cloneAnyMap(queryMsg)
-					cloned["uuid"] = fmt.Sprintf("33333333-3333-4333-8333-%012d", queryCount)
-					queryMsg = cloned
-				}
-				t.messages <- queryMsg
-			}
-			if t.onQuery != nil {
-				t.onQuery()
-			}
-		}
-	}
-
-	return nil
-}
-
-func (t *fakeClaudeTransport) SentChanged() <-chan struct{} {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.sentSignal == nil {
-		t.sentSignal = make(chan struct{}, 1)
-	}
-
-	return t.sentSignal
-}
-
-func (t *fakeClaudeTransport) respond(req claude.ControlRequest) {
-	subtype, _ := req.Request["subtype"].(string)
-	if err := t.controlErr[subtype]; err != nil {
-		t.messages <- map[string]any{
-			"type": "control_response",
-			"response": map[string]any{
-				"request_id": req.RequestID,
-				"subtype":    "error",
-				"error":      err.Error(),
-			},
-		}
-
-		return
-	}
-
-	response := map[string]any{}
-	switch subtype {
-	case "initialize":
-		response = t.initialize
-	case "list_models":
-		response = map[string]any{"models": t.initialize["models"]}
-	case "get_settings":
-		response = t.settings
-	case "get_context_usage":
-		response = t.context
-	}
-
-	t.messages <- map[string]any{
-		"type": "control_response",
-		"response": map[string]any{
-			"request_id": req.RequestID,
-			"subtype":    "success",
-			"response":   response,
-		},
-	}
-}
-
-func (t *fakeClaudeTransport) Events(ctx context.Context) <-chan claude.TransportEvent {
-	events := make(chan claude.TransportEvent)
-	go func() {
-		defer close(events)
-		messages, errs := t.messages, t.errs
-		for messages != nil || errs != nil {
-			select {
-			case msg, ok := <-messages:
-				if !ok {
-					messages = nil
-
-					continue
-				}
-				events <- claude.TransportEvent{Message: msg}
-			case err, ok := <-errs:
-				if !ok {
-					errs = nil
-
-					continue
-				}
-				events <- claude.TransportEvent{Err: err}
-
-				return
-			case <-ctx.Done():
-				events <- claude.TransportEvent{Err: ctx.Err()}
-
-				return
-			case <-t.closeSignal:
-				return
-			}
-		}
-	}()
-
-	return events
-}
-
-func (t *fakeClaudeTransport) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.closeCalls++
-	t.closeOnce.Do(func() { close(t.closeSignal) })
-
-	return t.closeErr
-}
-
-func (t *fakeClaudeTransport) CloseCalls() int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	return t.closeCalls
-}
-
-func (t *fakeClaudeTransport) Sent() []any {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	return append([]any(nil), t.sent...)
-}
-
-func installFakeClaudeClient(agent *Agent, transport *fakeClaudeTransport) {
-	agent.newClaudeClient = func(log *slog.Logger, options claude.Options) *claude.Client {
-		return claude.NewClient(log, options, transport)
-	}
-}
-
-func residualCallbackAuthority() *callbackHostAuthority {
-	return &callbackHostAuthority{
-		environment: func() map[string]string { return map[string]string{"PATH": "/bin"} },
-		prepare:     func(context.Context, string) error { return nil },
-		read:        func(context.Context, string, uint64) ([][]byte, error) { return nil, nil },
-		reclaim:     func(context.Context, string) error { return nil },
-		start:       func(context.Context, NativeRequest) (NativeProcess, error) { return valueNativeProcess{}, nil },
-	}
-}
-
-func residualProviderAuth(authority HostAuthority) *providerAuth {
-	agent := NewAgent(WithHostAuthority(authority))
-
-	return &providerAuth{agent: agent, home: providerAuthHome{path: "/provider-home"}}
-}
-
-func residualCanceledContext() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	clientReader, agentWriter := io.Pipe()
+	agentReader, clientWriter := io.Pipe()
+	rec := newRecorder()
+	served := make(chan error, 1)
+
+	go func() { served <- Serve(ctx, agentReader, agentWriter, testOptions(t, extra...)...) }()
+
+	conn := acp.NewClientSideConnection(rec, clientWriter, clientReader)
+	conn.SetLogger(slog.New(slog.DiscardHandler))
+
+	h := &harness{t: t, conn: conn, rec: rec, cancel: cancel, served: served}
+
+	t.Cleanup(func() {
+		cancel()
+		_ = clientWriter.Close()
+
+		select {
+		case <-served:
+		case <-time.After(testTimeout):
+			t.Error("Serve did not return")
+		}
+	})
+
+	return h
+}
+
+func (h *harness) ctx() context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	h.t.Cleanup(cancel)
 
 	return ctx
 }
 
-// TestMain gives the suite one temp root. Image scratch, resume materialization and MCP
-// config land under os.TempDir until the session releases them, and many
-// tests never close the sessions they open, so the root removes on the way
-// out whatever a test left behind.
-// TMP and TEMP cover the Windows lookup.
-func TestMain(m *testing.M) {
-	suiteTemp, err := os.MkdirTemp("", "acp-go-claude-suite-")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "create suite temp root:", err)
-		os.Exit(1)
+func (h *harness) initialize(opts ...func(*acp.InitializeRequest)) acp.InitializeResponse {
+	h.t.Helper()
+
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	for _, opt := range opts {
+		opt(&request)
 	}
 
-	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
-		if err = os.Setenv(name, suiteTemp); err != nil {
-			fmt.Fprintln(os.Stderr, "set suite "+name+":", err)
-			os.Exit(1)
+	resp, err := h.conn.Initialize(h.ctx(), request)
+	require.NoError(h.t, err)
+
+	return resp
+}
+
+func withLifecycle() func(*acp.InitializeRequest) {
+	return func(request *acp.InitializeRequest) {
+		request.Meta = map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}
+	}
+}
+
+func withFormElicitation() func(*acp.InitializeRequest) {
+	return func(request *acp.InitializeRequest) {
+		request.ClientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+	}
+}
+
+func (h *harness) newSession(opts ...SessionRequestOption) acp.NewSessionResponse {
+	h.t.Helper()
+
+	resp, err := h.conn.NewSession(h.ctx(), NewSessionRequest(h.t.TempDir(), opts...))
+	require.NoError(h.t, err)
+
+	return resp
+}
+
+func (h *harness) prompt(sessionID acp.SessionId, text string, meta map[string]any) (acp.PromptResponse, error) {
+	h.t.Helper()
+
+	request := TextPromptRequest(sessionID, text)
+	request.Meta = meta
+
+	return h.conn.Prompt(h.ctx(), request)
+}
+
+// promptMeta stamps the lifecycle prompt correlation.
+func promptMeta(n int) map[string]any {
+	return map[string]any{wire.LifecycleKey: map[string]any{
+		"version": 1, "submission": map[string]any{"submissionId": fmt.Sprintf("sub-%d", n), "clientNonce": fmt.Sprintf("non-%d", n)},
+	}}
+}
+
+// requestErrorData decodes the data member of a JSON-RPC error.
+func requestErrorData(t *testing.T, err error) map[string]any {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+
+	data, ok := reqErr.Data.(map[string]any)
+	if !ok {
+		encoded, marshalErr := json.Marshal(reqErr.Data)
+		require.NoError(t, marshalErr)
+		require.NoError(t, json.Unmarshal(encoded, &data))
+	}
+
+	return data
+}
+
+func requestErrorCode(t *testing.T, err error) int {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+
+	return reqErr.Code
+}
+
+// agentText concatenates streamed agent message text.
+func agentText(updates []acp.SessionNotification) string {
+	var text strings.Builder
+
+	for _, update := range updates {
+		if chunk := update.Update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
+			text.WriteString(chunk.Content.Text.Text)
 		}
 	}
 
-	code := m.Run()
-	_ = os.RemoveAll(suiteTemp)
-	os.Exit(code)
+	return text.String()
+}
+
+// lifecycleEvents extracts the lifecycle envelopes in delivery order.
+func lifecycleEvents(updates []acp.SessionNotification) []map[string]any {
+	events := make([]map[string]any, 0)
+
+	for _, update := range updates {
+		envelope, ok := update.Meta[wire.LifecycleKey].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		event, _ := envelope["event"].(map[string]any)
+		events = append(events, event)
+	}
+
+	return events
+}
+
+func eventTypes(events []map[string]any) []string {
+	types := make([]string, 0, len(events))
+	for _, event := range events {
+		kind, _ := event["type"].(string)
+		state, _ := event["state"].(string)
+
+		if action, ok := event["action"].(map[string]any); ok {
+			state, _ = action["state"].(string)
+		}
+
+		if state != "" {
+			kind += ":" + state
+		}
+
+		types = append(types, kind)
+	}
+
+	return types
 }

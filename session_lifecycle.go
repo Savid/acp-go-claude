@@ -2,925 +2,237 @@ package claudeacp
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
-	"slices"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/savid/acp-go-claude/internal/claude"
+
+	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/wire"
 )
 
-// sessionInterruptTimeout bounds the native interrupt. The interrupt runs under
-// a background-derived context so a cancelled caller context cannot abort it.
-var sessionInterruptTimeout = 5 * time.Second
-var sessionRemoveAll = os.RemoveAll
-
-// errSessionCloseUnsettled marks a close its settlement barrier never admitted.
-// Such a close tore nothing down and settled nothing, so the id keeps its live
-// session and a later caller takes the barrier again.
-var errSessionCloseUnsettled = errors.New("await the in-flight Claude turn")
-
-// sessionCloseUnsettledError is the wire answer for that close. Nothing failed
-// internally: the boundary was never reached, and the truthful report is that
-// this close settled nothing and may be taken again.
-//
-// Which answer that is depends on why the barrier wait ended. A wait the caller
-// cancelled is the caller's own $/cancel_request coming back, so the raw error
-// travels undressed and the dispatcher answers the one code a withdrawn request
-// has: -32800. Any other expiry is a retryable refusal of a well-formed request,
-// which is the family's invalid-request idiom, and its message carries the
-// barrier-wait error rather than anything the native process said.
-func sessionCloseUnsettledError(err error) error {
-	if errors.Is(err, context.Canceled) {
-		return err
-	}
-
-	return acp.NewInvalidRequest(map[string]any{
-		jsonFieldError:   "claude_session_close_unsettled",
-		jsonFieldMessage: "session close did not reach its settlement barrier",
-	})
+// lifecycleState is the session's side of the ordered lifecycle stream: one
+// incarnation per claude process generation, the foreground it currently holds,
+// and the blocking actions outstanding on it.
+type lifecycleState struct {
+	stream   *lifecycle.Stream
+	seq      uint64
+	cycleID  string
+	blockers map[string]struct{}
 }
 
-// sessionDeleteUnsettledError is the wire answer for a delete whose teardown
-// never took the session's settlement barrier. That is the same unreached
-// boundary session/close reports, so it is answered the same way and for the
-// same reason: nothing failed internally, the teardown simply never ran, and the
-// next delete takes the barrier again. A caller that withdrew its own request
-// gets the raw error and the -32800 that goes with it; any other expiry is the
-// family's invalid-request idiom, naming itself.
-//
-// It names itself apart from close because the two refusals do not report the
-// same state. A refused close settled nothing at all and its id still names a
-// live session; a refused delete already wrote its durable tombstone and already
-// hid the id, so the deletion the host asked for has happened and only the
-// teardown behind it is still owed.
-//
-// Anything else the teardown reports travels unchanged. A containment or cleanup
-// failure is a real internal failure and keeps the answer it earned.
-func sessionDeleteUnsettledError(err error) error {
-	if !errors.Is(err, errSessionCloseUnsettled) {
-		return err
-	}
-
-	if errors.Is(err, context.Canceled) {
-		return err
-	}
-
-	return acp.NewInvalidRequest(map[string]any{
-		jsonFieldError:   "claude_session_delete_unsettled",
-		jsonFieldMessage: "session delete teardown did not reach its settlement barrier",
-	})
+func (s *session) lifecycleNegotiated() lifecycle.Negotiated {
+	return s.agent.lifecycleNegotiated()
 }
 
-// sessionDeleteTombstoneError is the wire answer for a delete whose durable
-// tombstone never landed. It names itself apart from the unsettled-teardown
-// refusal because the two report opposite states: that one has already deleted
-// the session and owes only the teardown, while this one deleted nothing at all —
-// the id still names whatever it named, it is still listable, loadable and
-// resumable, and the host's next delete starts from the beginning.
-//
-// A caller that withdrew its own request still gets -32800, because a request
-// nobody is waiting for has no other honest answer; what the name buys is that
-// the -32800 a host does see carries which of the two happened, rather than
-// leaving it to assume the deletion went through.
-func sessionDeleteTombstoneError(err error) error {
-	if errors.Is(err, context.Canceled) {
-		return fmt.Errorf("claude_session_delete_untombstoned: %w", err)
-	}
+func (s *session) nextLifecycleID(kind string) string {
+	s.lc.seq++
 
-	return internalFailure(failureClassDeleteUntombstoned, "session delete tombstone failed", err)
+	return fmt.Sprintf("%s-%d", kind, s.lc.seq)
 }
 
-// finalizeSessionRuntimeResources removes adapter-owned roots only after the
-// selected native boundary completes. An incomplete boundary retains every
-// scratch root because escaped work may still be using it.
-func finalizeSessionRuntimeResources(
-	runtimeErr error,
-	mcpConfigDir string,
-	imageScratchDir string,
-	materialized *materializedSession,
-) error {
-	if errors.Is(runtimeErr, ErrContainmentIncomplete) ||
-		errors.Is(runtimeErr, ErrHostAuthorityUnavailable) ||
-		errors.Is(runtimeErr, ErrNativeTreeBusy) {
-		return runtimeErr
-	}
-
-	var materializedRemoveErr error
-	if materialized != nil {
-		materializedRemoveErr = materialized.Close()
-	}
-
-	boundaryErr := errors.Join(runtimeErr, materializedRemoveErr)
-	if errors.Is(boundaryErr, ErrContainmentIncomplete) || errors.Is(boundaryErr, ErrHostAuthorityUnavailable) || errors.Is(boundaryErr, ErrNativeTreeBusy) {
-		return boundaryErr
-	}
-
-	var imageRemoveErr error
-	if imageScratchDir != "" {
-		imageRemoveErr = sessionRemoveAll(imageScratchDir)
-	}
-
-	var mcpRemoveErr error
-	if mcpConfigDir != "" && (materialized == nil || !materialized.owns(mcpConfigDir)) {
-		mcpRemoveErr = sessionRemoveAll(mcpConfigDir)
-	}
-
-	return errors.Join(boundaryErr, mcpRemoveErr, imageRemoveErr)
-}
-
-// acquireClosingTurn admits close into the session's turn queue. It is the one
-// admission with no fail-fast arm: a prompt that finds the queue full can be
-// answered with backpressure and retried, while close is about to tear the
-// native process out from under whatever holds the slot and therefore has to
-// wait for it. The caller's context bounds the wait.
-//
-// A free slot is taken before the caller's context is consulted at all, so an
-// expired caller loses the barrier only to a turn that really holds it. Offering
-// both to one select would let an already-cancelled close of a quiescent session
-// report an in-flight turn that does not exist.
-func (s *agentSession) acquireClosingTurn(ctx context.Context) (func(), error) {
-	turn := s.turnQueue()
-
-	select {
-	case turn <- struct{}{}:
-		return func() { <-turn }, nil
-	default:
-	}
-
-	select {
-	case turn <- struct{}{}:
-		return func() { <-turn }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-func releaseTurnPrefix(turn chan struct{}, count int) {
-	for range count {
-		<-turn
-	}
-}
-
-func (s *agentSession) turnQueue() chan struct{} {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.turn == nil {
-		s.turn = make(chan struct{}, sessionTurnCapacity)
-	}
-
-	return s.turn
-}
-
-// ensureClientAlive relaunches the native Claude process when it died on a
-// previous turn. The session is never removed on a native failure, so a
-// follow-up prompt lands here and brings the process back up (resuming the
-// native session id) rather than returning the unknown-session error. It is a
-// no-op for sessions that cannot relaunch (e.g. injected test clients) and for
-// clients that are still alive.
-func (s *agentSession) ensureClientAlive(ctx context.Context) error {
-	s.mu.Lock()
-	canRelaunch := s.canRelaunch
-	client := s.client
-	s.mu.Unlock()
-
-	if !canRelaunch {
+// openStream opens the incarnation for the live process generation with an
+// idle snapshot. Its identity is minted by the agent so no earlier
+// incarnation of the session, including one before a close, shares it. It is a no-op while the host negotiated no lifecycle.
+func (s *session) openStream(ctx context.Context) error {
+	negotiated := s.lifecycleNegotiated()
+	if !negotiated.Present() {
 		return nil
 	}
 
-	if client != nil && client.Alive() {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
+
+	if s.lc.stream != nil && !s.lc.stream.Fenced() {
 		return nil
 	}
 
-	opts := s.clientOptions
-	opts.ResumeID = string(s.id)
-	opts.ForkSession = false
+	s.lc.stream = lifecycle.NewStream(fmt.Sprintf("%s:%d", s.id, s.agent.nextIncarnation()), negotiated)
+	s.lc.cycleID = s.nextLifecycleID("cycle")
+	s.lc.blockers = make(map[string]struct{})
 
-	return s.relaunchClient(ctx, client, opts)
+	return s.emitLifecycleLocked(ctx, lifecycle.SnapshotEvent(s.lc.cycleID))
 }
 
-// refreshMCPRegistry rebuilds Claude's fixed MCP tool registry exactly once,
-// after the host has armed the first user turn and before the model sees that
-// turn. Session establishment may intentionally observe only a provisional
-// runtime_ready surface; the session's private MCP descriptor itself remains
-// unchanged and is reused by the replacement process.
-func (s *agentSession) refreshMCPRegistry(ctx context.Context) error {
-	s.mu.Lock()
-	pending := s.mcpRefreshPending
-	canRelaunch := s.canRelaunch
-	closing := s.closing
-	client := s.client
-	opts := s.clientOptions
-	s.mu.Unlock()
-
-	if !pending {
-		return nil
-	}
-
-	if closing {
-		return closedSessionError()
-	}
-
-	if !canRelaunch {
-		// Injected unit-test sessions have no process launch contract. Their
-		// transport already represents the effective tool registry.
-		return nil
-	}
-
-	if err := s.relaunchClient(ctx, client, opts); err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	s.mcpRefreshPending = false
-	s.mu.Unlock()
-
-	return nil
-}
-
-type relaunchConfig struct {
-	model          string
-	modelOverrides map[string]string
-	modelAllowlist []string
-	outputStyle    string
-	effort         string
-	mode           acp.SessionModeId
-}
-
-func (s *agentSession) currentRelaunchConfig() relaunchConfig {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return relaunchConfig{
-		model:          s.model,
-		modelOverrides: cloneStringMap(s.modelOverrides),
-		modelAllowlist: slices.Clone(s.modelAllowlist),
-		outputStyle:    s.outputStyle,
-		effort:         s.effort,
-		mode:           s.mode,
-	}
-}
-
-// relaunchClient replaces one completed native process boundary. A failed or
-// cancelled launch is fully closed before it returns, and an incomplete
-// boundary poisons relaunch permanently.
-func (s *agentSession) relaunchClient(
-	ctx context.Context,
-	client *claude.Client,
-	opts claude.Options,
-) (returnErr error) {
-	if s.isClosing() {
-		return closedSessionError()
-	}
-
-	if err := s.agent.beginSessionConstruction(); err != nil {
-		return err
-	}
-	defer func() {
-		s.recordContainmentError(returnErr)
-		s.agent.endSessionConstruction()
-	}()
-
-	config := s.currentRelaunchConfig()
-	if config.model != "" {
-		opts.Model = claudeModelID(config.model, config.modelOverrides)
-	}
-
-	if permissionMode, ok := permissionModeForACP(config.mode); ok {
-		opts.PermissionMode = permissionMode
-	}
-
-	var previousCloseErr error
-
-	if client != nil {
-		var retirementErr error
-
-		if incarnation := s.currentNativeIncarnation(); incarnation != nil && incarnation.client == client {
-			s.pumpServeMu.Lock()
-			_, retirementErr = s.endExactNativeIncarnationLocked(ctx, incarnation)
-			s.pumpServeMu.Unlock()
-		}
-
-		previousCloseErr = client.Close()
-		if errors.Is(previousCloseErr, ErrContainmentIncomplete) {
-			s.mu.Lock()
-			s.canRelaunch = false
-			s.mu.Unlock()
-			s.recordContainmentError(previousCloseErr)
-
-			return fmt.Errorf("complete previous Claude containment boundary: %w", previousCloseErr)
-		}
-
-		if retirementErr != nil {
-			return errors.Join(retirementErr, previousCloseErr)
-		}
-	}
-
-	relaunched := s.agent.newClaudeClient(s.agent.log, opts)
-	relaunched.SetControlHandlerAdmission(s.admitControlCallback)
-
-	if err := relaunched.Start(ctx); err != nil {
-		return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
-	}
-
-	models, settings, settingsKnown := s.agent.discoverSessionModels(ctx, relaunched)
-	if err := ctx.Err(); err != nil {
-		return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
-	}
-
-	models = reconcileSessionModels(models, config.modelAllowlist, settings, config.modelOverrides)
-	if claude.ModelDisabled(config.model, models) || claude.ModelDisabled(opts.Model, models) {
-		return s.cleanupFailedRelaunch(unsupportedField("model"), relaunched, previousCloseErr)
-	}
-
-	config.effort, _ = reconcileEffortForModel(config.model, models, config.effort)
-	bypassAvailable := bypassPermissionsAvailable(s.agent.effectiveNativeEnvironment(opts.Env))
-
-	if !modeAvailableForModel(config.mode, config.model, models, bypassAvailable) {
-		config.mode = modeDefault
-		if err := relaunched.SetPermissionMode(ctx, string(modeDefault)); err != nil {
-			return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
-		}
-	}
-
-	if config.outputStyle != "" {
-		if err := relaunched.SetOutputStyle(ctx, config.outputStyle); err != nil {
-			return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
-		}
-	}
-
-	if config.effort != "" {
-		if err := relaunched.SetEffort(ctx, config.effort); err != nil {
-			return s.cleanupFailedRelaunch(err, relaunched, previousCloseErr)
-		}
-	}
-
-	s.mu.Lock()
-	if s.closing {
-		s.mu.Unlock()
-
-		// A relaunch that lost the race to close must not leave a native process
-		// behind it: the replacement is torn down and its admission returned
-		// before the refusal is answered.
-		return s.cleanupFailedRelaunch(closedSessionError(), relaunched, previousCloseErr)
-	}
-
-	s.client = relaunched
-	s.availableModels = models
-	s.effort = config.effort
-	s.mode = config.mode
-	s.bypassPermissionsAvailable = bypassAvailable
-
-	s.fastModeKnown = settingsKnown
-	if settings.FastMode != nil {
-		s.fastMode = *settings.FastMode
-	}
-	// The replacement process ran command discovery of its own, so the catalog
-	// this session advertises is the one that process actually serves. Keeping the
-	// catalog the retired process reported would advertise commands nothing is
-	// left to route.
-	s.availableCommands = relaunched.InitializeInfo().Commands
-	s.mu.Unlock()
-
-	// The snapshot is restated rather than diffed. A full replacement is what the
-	// host is owed after a discovery run, an explicit empty one included: silence
-	// after a relaunch and "this process has no commands" are different facts, and
-	// a host cannot tell a catalog that survived the relaunch from one that never
-	// arrived. The process is live either way — only the notification failed — so
-	// the failure travels to the caller and the next successful emission restates
-	// the catalog.
-	if emitErr := s.emitAvailableCommandsUpdate(ctx, true); emitErr != nil {
-		return errors.Join(previousCloseErr, emitErr)
-	}
-
-	if emitErr := s.emitUpdates(ctx, []acp.SessionUpdate{{
-		ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: sessionConfigOptions(s)},
-	}}); emitErr != nil {
-		return errors.Join(previousCloseErr, emitErr)
-	}
-
-	return previousCloseErr
-}
-
-func (s *agentSession) cleanupFailedRelaunch(
-	cause error,
-	relaunched *claude.Client,
-	previousCloseErr error,
-) error {
-	cleanupErr := errors.Join(cause, relaunched.Close())
-
-	if errors.Is(cleanupErr, ErrContainmentIncomplete) {
-		// No later path may launch another root under an admission whose
-		// selected containment boundary did not complete.
-		s.mu.Lock()
-		s.canRelaunch = false
-		s.mu.Unlock()
-		s.recordContainmentError(cleanupErr)
-	}
-
-	return errors.Join(previousCloseErr, cleanupErr)
-}
-
-// Cancel cancels the active Claude turn. Settlement is fenced by cancelMu: the
-// local turn wakes immediately, but neither Cancel nor Prompt may return until
-// the selected native containment boundary has completed. A later prompt
-// lazily relaunches Claude and resumes the same native session id.
-func (s *agentSession) Cancel(ctx context.Context) (err error) {
-	s.cancelMu.Lock()
-	defer s.cancelMu.Unlock()
-
-	return s.cancelNative(ctx)
-}
-
-// cancelRouted validates the active turn and keeps its native interrupt fenced
-// from turn completion and admission of the next turn. The lifecycle key never
-// rides session/cancel: it fails the cancel closed before any native interrupt,
-// and the cancel is never applied. Being a notification, the refusal is
-// wire-silent.
-//
-// The route is validated first. This surface carries both reserved objects, and
-// the route is the authenticator: it decides whether the caller is addressing
-// the turn that is actually running, which precedes the placement rule about
-// where a family literal may ride. A cancel carrying both an invalid route and
-// the lifecycle key therefore reports the route, and never one of two verdicts
-// chosen by whichever check an implementation happened to run first.
-//
-// Authentication is unconditional. There is no turn state under which a cancel
-// skips the route: an idle session has no active nonce for a caller to name, so
-// nothing authorizes native interrupt and the request fails closed with no
-// native side effect at all — no interrupt, no pending-interaction resolution,
-// and no native client close.
-//
-// A repeat is idempotent, and only after it has been judged like any other
-// frame. The route still authenticates it and the reserved key still refuses it,
-// because both verdicts are about the frame rather than about how much of the
-// turn is left to cancel; what a second authenticated cancel of the same turn
-// does not do is act. The first one already resolved the pending interactions
-// and completed the containment boundary, so acting again would interrupt a
-// process this session has already closed and answer a request that succeeded
-// with the failure that re-issue produced.
-func (s *agentSession) cancelRouted(ctx context.Context, meta map[string]any) error {
-	s.cancelMu.Lock()
-	defer s.cancelMu.Unlock()
-
-	route, err := parseInboundTurnRoute(meta)
-	if err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	activeNonce := s.turnNonce
-	active := s.cancel != nil && activeNonce != ""
-	applied := s.cancelledNonce != "" && s.cancelledNonce == route.turnNonce
-	s.mu.Unlock()
-
-	if !active || route.turnNonce != activeNonce {
-		return unsupportedField(routeMemberPath(routeFieldTurn))
-	}
-
-	if err := rejectLifecycleMeta(meta); err != nil {
-		return err
-	}
-
-	if applied {
-		return nil
-	}
-
-	s.mu.Lock()
-	s.cancelledNonce = route.turnNonce
-	s.mu.Unlock()
-
-	return s.cancelNative(ctx)
-}
-
-func (s *agentSession) cancelNative(ctx context.Context) (err error) {
-	s.mu.Lock()
-	turnCancel := s.cancel
-	client := s.client
-	active := turnCancel != nil || len(s.permissionCancel) > 0 || len(s.elicitationCancel) > 0
-	s.mu.Unlock()
-
-	s.cancelPendingInteractions(true)
-
-	if turnCancel != nil {
-		turnCancel()
-	}
-
-	if s.agent != nil {
-		var finish func(error)
-
-		ctx, finish = s.agent.observe.StartClaudeProcess(ctx, "interrupt")
-		defer func() { finish(err) }()
-	}
-
-	interruptCtx, cancelInterrupt := context.WithTimeout(context.WithoutCancel(ctx), sessionInterruptTimeout)
-	defer cancelInterrupt()
-
-	var interruptErr error
-	if client == nil {
-		interruptErr = claude.ErrClientNotStarted
-	} else {
-		interruptErr = client.Interrupt(interruptCtx)
-	}
-
-	var closeErr error
-
-	if active {
-		incarnation := s.currentNativeIncarnation()
-
-		if incarnation != nil {
-			incarnation.expectedStop.Store(true)
-		}
-
-		if incarnation != nil {
-			if incarnation.failed.Load() {
-				<-incarnation.mirrorReady
-			} else {
-				s.pumpServeMu.Lock()
-				s.nativePumpHandle().stopReceivingExact(incarnation)
-				s.pumpServeMu.Unlock()
-			}
-		}
-
-		closeErr = s.closeNativeClient(client)
-	}
-
-	s.mu.Lock()
-	if errors.Is(closeErr, ErrContainmentIncomplete) {
-		s.turnContainmentErr = closeErr
-	} else {
-		s.turnContainmentErr = nil
-	}
-	s.mu.Unlock()
-
-	return errors.Join(interruptErr, closeErr)
-}
-
-// closeNativeClient terminates the selected native containment boundary and
-// returns its admission only after that boundary completes. An incomplete
-// boundary permanently disables relaunch and retains its admission.
-func (s *agentSession) closeNativeClient(client *claude.Client) error {
-	if client == nil {
-		return nil
-	}
-
-	closeErr := client.Close()
-	if errors.Is(closeErr, ErrContainmentIncomplete) {
-		s.mu.Lock()
-		s.canRelaunch = false
-		s.mu.Unlock()
-		s.recordContainmentError(closeErr)
-
-		return closeErr
-	}
-
-	return closeErr
-}
-
-// cancelPendingInteractions marks the turn cancelled and resolves any pending
-// permission and elicitation requests as cancelled. Callers invoke this before
-// native abort so outstanding client requests are answered cancelled first.
-func (s *agentSession) cancelPendingInteractions(markTurnCancelled bool) {
-	s.mu.Lock()
-	if markTurnCancelled && (s.cancel != nil || len(s.permissionCancel) > 0 || len(s.elicitationCancel) > 0) {
-		s.turnCancelled = true
-	}
-
-	permissionCancels := s.cancelPermissionRequestsLocked()
-	elicitationCancels := s.cancelElicitationRequestsLocked()
-	s.mu.Unlock()
-
-	for _, cancel := range permissionCancels {
-		cancel()
-	}
-
-	for _, cancel := range elicitationCancels {
-		cancel()
-	}
-}
-
-// cancelPendingInteractionsExact resolves only host requests causally owned by
-// expected. The callback ownership primitive makes registration atomic with
-// this selection: once expected is marked failed, a later registration cancels
-// itself instead of entering either map after this snapshot.
-func (s *agentSession) cancelPendingInteractionsExact(expected *nativeIncarnation) {
-	if expected == nil {
+// acceptTurn publishes the prompt's acceptance exactly once: the pump does it
+// on the first record claude produced for the turn, the prompt does it when the
+// native response arrives first.
+func (s *session) acceptTurn(ctx context.Context, t *turn) {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
+
+	if t.accepted {
 		return
 	}
 
-	s.callbackOwnershipMu.Lock()
-	s.mu.Lock()
-	permissionCancels := s.cancelPermissionRequestsExactLocked(expected)
-	elicitationCancels := s.cancelElicitationRequestsExactLocked(expected)
-	s.mu.Unlock()
-	s.callbackOwnershipMu.Unlock()
+	t.accepted = true
 
-	for _, cancel := range permissionCancels {
-		cancel()
+	if s.lc.stream == nil || s.lc.stream.Fenced() {
+		return
 	}
 
-	for _, cancel := range elicitationCancels {
-		cancel()
+	t.turnID = s.nextLifecycleID("turn")
+	t.cycleID = s.nextLifecycleID("cycle")
+	t.origin = lifecycle.CauseSubmission
+	s.lc.cycleID = t.cycleID
+
+	if err := s.emitLifecycleLocked(ctx, lifecycle.AcceptedEvent(t.submission, t.turnID)); err != nil {
+		t.failure = err
+
+		return
+	}
+
+	if err := s.emitLifecycleLocked(ctx, lifecycle.TransitionEvent(lifecycle.ForegroundRunning, t.cycleID, t.turnID)); err != nil {
+		t.failure = err
 	}
 }
 
-func (s *agentSession) cancelPermissionRequestsLocked() []context.CancelFunc {
-	permissionCancels := make([]context.CancelFunc, 0, len(s.permissionCancel))
-	for id, entry := range s.permissionCancel {
-		permissionCancels = append(permissionCancels, entry.cancel)
+// lcOpenAgentCycle opens an agent-origin turn on the stream.
+func (s *session) lcOpenAgentCycle(ctx context.Context, c *cycle) error {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
 
-		delete(s.permissionCancel, id)
-	}
-
-	return permissionCancels
-}
-
-func (s *agentSession) cancelElicitationRequestsLocked() []context.CancelFunc {
-	elicitationCancels := make([]context.CancelFunc, 0, len(s.elicitationCancel))
-	for id, entry := range s.elicitationCancel {
-		elicitationCancels = append(elicitationCancels, entry.cancel)
-
-		delete(s.elicitationCancel, id)
-	}
-
-	return elicitationCancels
-}
-
-func (s *agentSession) cancelPermissionRequestsExactLocked(expected *nativeIncarnation) []context.CancelFunc {
-	permissionCancels := make([]context.CancelFunc, 0, len(s.permissionCancel))
-	for id, entry := range s.permissionCancel {
-		if entry.owner.incarnation != expected || entry.owner.route == "" {
-			continue
-		}
-
-		cancel := entry.fail
-		if cancel == nil {
-			cancel = entry.cancel
-		}
-
-		permissionCancels = append(permissionCancels, cancel)
-
-		delete(s.permissionCancel, id)
-	}
-
-	return permissionCancels
-}
-
-func (s *agentSession) cancelElicitationRequestsExactLocked(expected *nativeIncarnation) []context.CancelFunc {
-	elicitationCancels := make([]context.CancelFunc, 0, len(s.elicitationCancel))
-	for id, entry := range s.elicitationCancel {
-		if entry.owner.incarnation != expected || entry.owner.route == "" {
-			continue
-		}
-
-		cancel := entry.fail
-		if cancel == nil {
-			cancel = entry.cancel
-		}
-
-		elicitationCancels = append(elicitationCancels, cancel)
-
-		delete(s.elicitationCancel, id)
-	}
-
-	return elicitationCancels
-}
-
-// Close closes the underlying Claude process and memoizes a boundary that
-// completed. A second caller blocks until the first finishes and observes that
-// same result.
-//
-// Only a completed boundary is memoized. A close its settlement barrier never
-// admitted tore nothing down, and a close that reached the boundary and failed a
-// rung of it still owes that rung: neither has a terminal result to hand a later
-// caller, so both leave the session closable and the next caller takes the
-// boundary again under a context of its own. Each rung stands on its own once —
-// the native signalling, the durable commit, the stream fence, and each returned
-// admission are all guarded where they run, so a retry re-attempts what is still
-// owed and repeats nothing that already happened.
-func (s *agentSession) Close(ctx context.Context) error {
-	s.closeMu.Lock()
-	defer s.closeMu.Unlock()
-
-	if s.closeSettled {
+	if s.lc.stream == nil || s.lc.stream.Fenced() {
 		return nil
 	}
 
-	if err := s.close(ctx); err != nil {
+	c.turnID = s.nextLifecycleID("turn")
+	c.cycleID = s.nextLifecycleID("cycle")
+	s.lc.cycleID = c.cycleID
+
+	return s.emitLifecycleLocked(ctx, lifecycle.TransitionEventWithCause(
+		lifecycle.ForegroundRunning, c.cycleID, c.turnID, lifecycle.CauseActivity,
+	))
+}
+
+// lcActionPendingWithID announces one blocking action on the cycle and moves
+// the foreground to requires_action for its first blocker.
+func (s *session) lcActionPendingWithID(ctx context.Context, c *cycle, actionID string, kind lifecycle.ActionKind) error {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
+
+	if s.lc.stream == nil || s.lc.stream.Fenced() || c.turnID == "" {
+		return nil
+	}
+
+	owner := lifecycle.Owner{Type: lifecycle.OwnerTurn, ID: c.turnID}
+
+	if err := s.emitLifecycleLocked(ctx, lifecycle.ActionEvent(lifecycle.PendingAction(actionID, kind, owner, true))); err != nil {
 		return err
 	}
 
-	s.closeSettled = true
+	if len(s.lc.blockers) == 0 {
+		if err := s.emitLifecycleLocked(ctx, lifecycle.TransitionEventWithCause(
+			lifecycle.ForegroundRequiresAction, c.cycleID, c.turnID, c.origin,
+		)); err != nil {
+			return err
+		}
+	}
+
+	s.lc.blockers[actionID] = struct{}{}
 
 	return nil
 }
 
-// beginClose latches the terminal close state before any teardown runs, so a
-// prompt, relaunch, registry refresh or reuse that is deciding whether to start
-// native work sees the close that is about to remove the process it would use.
-func (s *agentSession) beginClose() []<-chan struct{} {
-	s.producers.seal()
-	s.callbackOwnershipMu.Lock()
-	defer s.callbackOwnershipMu.Unlock()
+// lcActionResolved terminalizes one action and returns the foreground to
+// running once no blocker remains.
+func (s *session) lcActionResolved(ctx context.Context, c *cycle, actionID string, state lifecycle.ActionState) error {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
 
-	s.mu.Lock()
-	s.closing = true
-	s.mu.Unlock()
-
-	waits := make([]<-chan struct{}, 0, len(s.callbackAdmissions))
-	for admission := range s.callbackAdmissions {
-		waits = append(waits, admission.done)
-	}
-
-	return waits
-}
-
-func awaitControlCallbacks(ctx context.Context, waits []<-chan struct{}) error {
-	for _, done := range waits {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return fmt.Errorf("%w: %w", errSessionCloseUnsettled, ctx.Err())
-		}
-	}
-
-	return nil
-}
-
-// isClosing reports the terminal close state.
-func (s *agentSession) isClosing() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.closing
-}
-
-// fenceAuthorityFailure closes every door that can admit more work before the
-// detached agent-wide teardown begins. It deliberately does not wait for any
-// session resource: recordContainmentError may have been called by this exact
-// session while it owns one of those resources.
-func (s *agentSession) fenceAuthorityFailure() {
-	s.producers.seal()
-
-	s.mu.Lock()
-	s.closing = true
-	cancel := s.cancel
-	s.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
-}
-
-// closedSessionError is the answer every door gives once close has begun. The
-// id is on its way out of the active map, so a caller that raced the close is
-// told what it would be told a moment later.
-func closedSessionError() error {
-	return unknownSessionError()
-}
-
-// awaitSettledTurn is the close barrier, and it is the full-settlement latch. A
-// turn releases the session's turn slot only after its own settlement has
-// finished — its containment boundary, its durable commit, and its terminal
-// lifecycle event — so acquiring that slot is what proves there is nothing left
-// to settle. The caller's context is the only bound: a deadline here would tear
-// the process out from under a commit that is still landing, which is the exact
-// thing waiting for the turn prevents.
-func (s *agentSession) awaitSettledTurn(ctx context.Context) (func(), error) {
-	releaseTurn, err := s.acquireClosingTurn(ctx)
-	if err != nil {
-		return func() {}, fmt.Errorf("%w: %w", errSessionCloseUnsettled, err)
-	}
-
-	return releaseTurn, nil
-}
-
-func (s *agentSession) close(ctx context.Context) (err error) {
-	if s.agent != nil {
-		var finish func(error)
-
-		ctx, finish = s.agent.observe.StartClaudeProcess(ctx, "close")
-		defer func() { finish(err) }()
-	}
-
-	callbackWaits := s.beginClose()
-	s.settleEstablishment(closedSessionError())
-
-	if s.agent != nil {
-		err = errors.Join(err, s.agent.interruptActiveHostWrite())
-	}
-
-	s.cancelPendingInteractions(true)
-
-	if callbackErr := awaitControlCallbacks(ctx, callbackWaits); callbackErr != nil {
-		return callbackErr
-	}
-
-	if producerErr := s.producers.closeAndWait(ctx); producerErr != nil {
-		return fmt.Errorf("%w: %w", errSessionCloseUnsettled, producerErr)
-	}
-
-	// Pending provider-auth flows are cancelled after pending input is resolved
-	// and before the native interrupt, so a flow is never abandoned to a
-	// process that is already being torn down.
-	if s.agent != nil {
-		s.agent.providerAuth.closeSession(s.id)
-	}
-
-	s.mu.Lock()
-	cancel := s.cancel
-	s.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
-
-	// The barrier runs before the native teardown rather than after it: closing
-	// the process under a turn that is still settling is the very thing waiting
-	// for that turn prevents. The wait is real, so a busy session is waited for
-	// instead of being answered with backpressure.
-	//
-	// An abandoned wait ends the close right here. A turn is still holding the
-	// slot, so nothing below may run: the teardown would tear the process out from
-	// under a commit that is still landing, and the settlement below states
-	// quiescence, which is the one fact a session with a live turn cannot state.
-	releaseTurn, err := s.awaitSettledTurn(ctx)
-	if err != nil {
-		return err
-	}
-
-	defer releaseTurn()
-
-	s.pumpServeMu.Lock()
-	s.nativePumpHandle().expectStopCurrent()
-	closeErr := s.client.Close()
-	err = errors.Join(err, closeErr, s.settleSessionClose(ctx, closeErr))
-	s.pumpServeMu.Unlock()
-
-	s.stopNativePump()
-
-	err = finalizeSessionRuntimeResources(
-		err,
-		s.mcpConfigDir,
-		s.imageScratchDir,
-		s.materialized,
-	)
-
-	if s.agent != nil {
-		s.agent.observe.RecordClaudeProcessExit(ctx, "closed", err)
-		s.agent.recordContainmentError(err)
-	}
-
-	return err
-}
-
-// settleSessionClose runs the close-fenced settlement in the order the contract
-// fixes. The containment boundary has just completed, so: stop the reader that
-// served the contained process, terminalize what the session still owns —
-// including the terminal idle a still-open turn receives — commit the resumable
-// snapshot behind those transitions, state the quiescence fact that completed
-// proof produced, and fence the session.
-//
-// The terminal transitions precede the commit because they report how work the
-// proof already contained ended, which is true whatever the store then does with
-// it; a host told nothing would be left projecting live actions behind a session
-// that is over. The commit failing is still a failed close, and it leaves the
-// quiescence fact unstated: that fact certifies the boundary, and a boundary whose
-// snapshot the store does not hold is exactly the one nothing may certify.
-//
-// A boundary that did not complete terminalizes nothing, commits nothing new, and
-// states no fact — a set of activities the adapter has just proved it cannot
-// contain must not be declared terminal — and the stream is fenced regardless.
-func (s *agentSession) settleSessionClose(ctx context.Context, closeErr error) error {
-	var dataFailure *claude.ControllerDataError
-	if errors.Is(closeErr, ErrContainmentIncomplete) ||
-		(errors.As(closeErr, &dataFailure) && dataFailure.Kind == claude.ControllerDataTeardownAbort) {
-		s.nativePumpHandle().stopReceiving()
-		s.lifecycleStream().abandonIncarnation()
-		s.lifecycleStream().fenceClose()
-
+	if _, pending := s.lc.blockers[actionID]; !pending || s.lc.stream == nil || s.lc.stream.Fenced() {
 		return nil
 	}
 
-	return s.settleDrainedSession(ctx, s.nativePumpHandle().drainReceiving(ctx))
-}
+	delete(s.lc.blockers, actionID)
 
-func (s *agentSession) settleDrainedSession(ctx context.Context, drainErr error) error {
-	if drainErr != nil {
-		s.lifecycleStream().abandonIncarnation()
-		s.lifecycleStream().fenceClose()
-
-		return drainErr
+	if err := s.emitLifecycleLocked(ctx, lifecycle.ActionEvent(lifecycle.ResolvedAction(actionID, state))); err != nil {
+		return err
 	}
 
-	return s.lifecycleStream().settleClose(ctx, s.commitSessionMirror)
+	if len(s.lc.blockers) > 0 {
+		return nil
+	}
+
+	return s.emitLifecycleLocked(ctx, lifecycle.TransitionEventWithCause(
+		lifecycle.ForegroundRunning, c.cycleID, c.turnID, c.origin,
+	))
 }
 
-func (s *agentSession) recordContainmentError(err error) {
-	if s.agent != nil {
-		s.agent.recordContainmentError(err)
+// lcIdle ends the cycle. Blockers still pending are terminalized as cancelled
+// first, and a failed outcome carries no stop reason.
+func (s *session) lcIdle(ctx context.Context, c *cycle, verdict cycleVerdict) error {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
+
+	if s.lc.stream == nil || s.lc.stream.Fenced() || c.turnID == "" {
+		return nil
 	}
+
+	for actionID := range s.lc.blockers {
+		if err := s.emitLifecycleLocked(ctx, lifecycle.ActionEvent(lifecycle.ResolvedAction(actionID, lifecycle.ActionCancelled))); err != nil {
+			return err
+		}
+
+		delete(s.lc.blockers, actionID)
+	}
+
+	stopReason := verdict.stopReason
+	if verdict.outcome == lifecycle.OutcomeFailed {
+		stopReason = ""
+	}
+
+	return s.emitLifecycleLocked(ctx, lifecycle.IdleEventWithCause(c.cycleID, c.turnID, c.origin, stopReason, verdict.outcome))
+}
+
+// lcFence ends the incarnation. Later native process generations open a new
+// stream with a fresh snapshot.
+func (s *session) lcFence() {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
+
+	if s.lc.stream != nil {
+		s.lc.stream.Fence()
+	}
+}
+
+// actionCorrelation is the value stamped on a permission or elicitation
+// request while the lifecycle is negotiated.
+func (s *session) actionCorrelation(c *cycle, actionID string) map[string]any {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
+
+	if actionID == "" || s.lc.stream == nil {
+		return nil
+	}
+
+	return map[string]any{wire.LifecycleKey: lifecycle.ActionCorrelation{
+		StreamID: s.lc.stream.ID(),
+		ActionID: actionID,
+		Owner:    lifecycle.Owner{Type: lifecycle.OwnerTurn, ID: c.turnID},
+	}.Value()}
+}
+
+// emitLifecycleLocked claims the next sequence on the stream and delivers the
+// envelope on its own identity-only session_info_update. A refused event
+// fences the incarnation: the stream cannot be continued truthfully. Delivery
+// never rides a request's cancellation: a sequence the stream claimed must
+// reach the host even when the request that caused it is gone.
+func (s *session) emitLifecycleLocked(ctx context.Context, event lifecycle.Event) error {
+	envelope, err := s.lc.stream.Emit(event)
+	if err != nil {
+		s.lc.stream.Fence()
+
+		return fmt.Errorf("lifecycle stream refused an event: %w", err)
+	}
+
+	conn := s.agent.connection()
+	if conn == nil {
+		return nil
+	}
+
+	return conn.SessionUpdate(context.WithoutCancel(ctx), acp.SessionNotification{
+		Meta:      map[string]any{wire.LifecycleKey: envelope},
+		SessionId: s.id,
+		Update:    acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{}},
+	})
 }

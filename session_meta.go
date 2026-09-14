@@ -1,389 +1,362 @@
 package claudeacp
 
 import (
-	"encoding/json"
-	"maps"
-	"os"
-	"path/filepath"
+	"errors"
+	"fmt"
 	"slices"
-	"strconv"
-	"strings"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/wire"
 )
 
 const (
-	metaAdditionalDirectoriesKey = "additionalDirectories"
-	metaBareKey                  = "bare"
-	metaExtraPathDirsKey         = "extraPathDirs"
-	metaModelKey                 = "model"
-	metaOptionsKey               = "options"
-	metaOutputSchemaKey          = "outputSchema"
-	metaPermissionModeKey        = "permissionMode"
-	metaRawEventKey              = "rawEvent"
-	metaRawEventEnabledKey       = "enabled"
-	metaSystemPromptKey          = "systemPrompt"
+	metaOptionsKey        = "options"
+	metaRawEventKey       = "rawEvent"
+	metaModelKey          = "model"
+	metaEnvKey            = "env"
+	metaExtraPathDirsKey  = "extraPathDirs"
+	metaOutputSchemaKey   = "outputSchema"
+	metaEffortKey         = "effort"
+	metaPermissionModeKey = "permissionMode"
+	metaBareKey           = "bare"
+	metaSystemPromptKey   = "systemPrompt"
+	metaEnabledKey        = "enabled"
 )
 
-// ClaudeOptions is the stable, supported Claude-specific subset accepted at
-// _meta.claude.options. The JSON field names below are part of this
-// package's wire contract; unsupported option keys are rejected.
+// ClaudeOptions is the per-session options struct carried at _meta.claude.options.
 type ClaudeOptions struct {
-	// Model selects the initial Claude model for this session.
+	// Model selects the claude model for this session by native identifier.
 	Model string `json:"model,omitempty"`
-	// Bare launches Claude with --bare for this session.
-	Bare bool `json:"bare,omitempty"`
-	// Env adds environment variables for this Claude session.
+	// Env overlays the session's claude process environment.
 	Env map[string]string `json:"env,omitempty"`
-	// ExtraPathDirs are absolute directories prepended, in order, to the PATH of
-	// this session's Claude process. They precede every inherited entry, so an
-	// executable placed here shadows the one PATH would otherwise resolve. Raw
-	// PATH stays rejected in Env: this is the only supported way to extend it.
+	// ExtraPathDirs are absolute directories prepended, in order, to the PATH
+	// of this session's claude process.
 	ExtraPathDirs []string `json:"extraPathDirs,omitempty"`
-	// OutputSchema configures Claude Code JSON Schema structured output.
+	// OutputSchema is the native structured-output JSON schema.
 	OutputSchema map[string]any `json:"outputSchema,omitempty"`
-	// SystemPrompt overrides the default system prompt for this Claude session.
-	SystemPrompt string `json:"systemPrompt,omitempty"`
-	// PermissionMode selects the initial Claude permission mode for this session.
+	// Effort is a reasoning-level value passed unchanged to claude.
+	Effort string `json:"effort,omitempty"`
+	// PermissionMode selects Claude's native permission policy.
 	PermissionMode string `json:"permissionMode,omitempty"`
-	// ProviderAuth carries host-owned credentials into one session launch.
-	ProviderAuth map[string]ProviderAuthBinding `json:"providerAuth,omitempty"`
+	Bare           bool   `json:"bare,omitempty"`
+	bareSet        bool
+	SystemPrompt   string `json:"systemPrompt,omitempty"`
 }
 
-// Meta returns an ACP _meta object for the supported Claude-specific options.
+// ClaudeOption configures ClaudeOptions values.
+type ClaudeOption func(*ClaudeOptions)
+
+// NewClaudeOptions constructs ClaudeOptions from functional options.
+func NewClaudeOptions(opts ...ClaudeOption) ClaudeOptions {
+	options := ClaudeOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	return options.clone()
+}
+
+// WithClaudeModel configures the session model by native identifier.
+func WithClaudeModel(model string) ClaudeOption {
+	return func(options *ClaudeOptions) { options.Model = model }
+}
+
+// WithClaudeEnv configures the session environment overlay.
+func WithClaudeEnv(env map[string]string) ClaudeOption {
+	cloned := cloneStringMap(env)
+
+	return func(options *ClaudeOptions) { options.Env = cloneStringMap(cloned) }
+}
+
+// WithClaudeExtraPathDirs configures the directories prepended to the session PATH.
+func WithClaudeExtraPathDirs(dirs ...string) ClaudeOption {
+	cloned := slices.Clone(dirs)
+
+	return func(options *ClaudeOptions) { options.ExtraPathDirs = slices.Clone(cloned) }
+}
+
+// WithClaudeOutputSchema configures native structured output.
+func WithClaudeOutputSchema(schema map[string]any) ClaudeOption {
+	cloned := cloneAnyMap(schema)
+
+	return func(options *ClaudeOptions) { options.OutputSchema = cloneAnyMap(cloned) }
+}
+
+// WithClaudeEffort configures the reasoning level passed to claude.
+func WithClaudeEffort(level string) ClaudeOption {
+	return func(options *ClaudeOptions) { options.Effort = level }
+}
+
+// WithClaudePermissionMode selects the native permission policy.
+func WithClaudePermissionMode(mode string) ClaudeOption {
+	return func(options *ClaudeOptions) { options.PermissionMode = mode }
+}
+
+// WithClaudeBare requests Claude's native bare mode.
+func WithClaudeBare(enabled bool) ClaudeOption {
+	return func(options *ClaudeOptions) { options.Bare = enabled; options.bareSet = true }
+}
+
+// WithClaudeSystemPrompt sets the native system prompt.
+func WithClaudeSystemPrompt(text string) ClaudeOption {
+	return func(options *ClaudeOptions) { options.SystemPrompt = text }
+}
+
+// Meta returns exactly {"claude": {"options": {...}}} with the non-zero fields.
 func (options ClaudeOptions) Meta() map[string]any {
 	values := map[string]any{}
-	if options.Bare {
-		values[metaBareKey] = true
-	}
-
-	if len(options.Env) > 0 {
-		values[settingsFieldEnv] = cloneStringMap(options.Env)
-	}
-
-	if len(options.ExtraPathDirs) > 0 {
-		values[metaExtraPathDirsKey] = slices.Clone(options.ExtraPathDirs)
-	}
-
-	if len(options.OutputSchema) > 0 {
-		values[metaOutputSchemaKey] = cloneAnyMap(options.OutputSchema)
-	}
-
-	if options.SystemPrompt != "" {
-		values[metaSystemPromptKey] = options.SystemPrompt
-	}
 
 	if options.Model != "" {
 		values[metaModelKey] = options.Model
+	}
+
+	if options.Env != nil {
+		values[metaEnvKey] = cloneStringMap(options.Env)
+	}
+
+	if options.ExtraPathDirs != nil {
+		values[metaExtraPathDirsKey] = slices.Clone(options.ExtraPathDirs)
+	}
+
+	if options.OutputSchema != nil {
+		values[metaOutputSchemaKey] = cloneAnyMap(options.OutputSchema)
+	}
+
+	if options.Effort != "" {
+		values[metaEffortKey] = options.Effort
 	}
 
 	if options.PermissionMode != "" {
 		values[metaPermissionModeKey] = options.PermissionMode
 	}
 
-	if len(options.ProviderAuth) > 0 {
-		values["providerAuth"] = cloneProviderAuthBindings(options.ProviderAuth)
+	if options.Bare || options.bareSet {
+		values[metaBareKey] = options.Bare
 	}
 
-	return map[string]any{
-		claudeMetaKey: map[string]any{
-			metaOptionsKey: values,
-		},
+	if options.SystemPrompt != "" {
+		values[metaSystemPromptKey] = options.SystemPrompt
 	}
+
+	return map[string]any{vendor: map[string]any{metaOptionsKey: values}}
 }
 
-func claudeOptionsFromMeta(meta map[string]any) (ClaudeOptions, error) {
-	return claudeOptionsFromMetaWithProviderAuth(meta, false)
+func (options ClaudeOptions) clone() ClaudeOptions {
+	cloned := options
+	cloned.Env = cloneStringMap(options.Env)
+	cloned.ExtraPathDirs = slices.Clone(options.ExtraPathDirs)
+	cloned.OutputSchema = cloneAnyMap(options.OutputSchema)
+
+	return cloned
 }
 
-func claudeOptionsFromMetaWithProviderAuth(meta map[string]any, providerAuthEnabled bool) (ClaudeOptions, error) {
-	options := ClaudeOptions{}
+// ValidateClaudeSessionMeta runs the owned-namespace parsing of a session
+// lifecycle request's _meta without an Agent and returns the same refusal.
+func ValidateClaudeSessionMeta(meta map[string]any) error {
+	_, err := parseSessionMeta(meta)
+	if err != nil {
+		return err
+	}
 
-	namespace, ok := meta[claudeMetaKey].(map[string]any)
+	return nil
+}
+
+// sessionMeta is what one session lifecycle request's _meta.claude carried.
+type sessionMeta struct {
+	options   ClaudeOptions
+	rawEvents bool
+	// present records which carrier fields the request named, so a load or
+	// resume inherits the stored value only for fields it left out.
+	presentEnv           bool
+	presentExtraPathDirs bool
+}
+
+// parseSessionMeta validates the owned _meta.claude namespace of one session
+// lifecycle request. Unknown own-namespace keys fail closed; foreign
+// namespaces are ignored; the lifecycle literal is refused by name.
+func parseSessionMeta(meta map[string]any) (sessionMeta, *acp.RequestError) {
+	if refusal := lifecycle.RejectKey(meta); refusal != nil {
+		return sessionMeta{}, invalidParam(refusal)
+	}
+
+	raw, exists := meta[vendor]
+	if !exists {
+		return sessionMeta{}, nil
+	}
+
+	vendorMeta, ok := raw.(map[string]any)
 	if !ok {
-		if _, exists := meta[claudeMetaKey]; exists {
-			return ClaudeOptions{}, unsupportedField("_meta." + claudeMetaKey)
-		}
+		return sessionMeta{}, wire.Unsupported("_meta." + vendor)
 	}
 
-	if err := validateClaudeLifecycleMeta(namespace); err != nil {
-		return ClaudeOptions{}, err
-	}
+	parsed := sessionMeta{}
 
-	if rawOptions, ok := namespace[metaOptionsKey]; ok {
-		parsed, err := parseClaudeOptions(rawOptions, providerAuthEnabled)
-		if err != nil {
-			return ClaudeOptions{}, err
-		}
-
-		options = parsed
-	}
-
-	return options, nil
-}
-
-func validateClaudeLifecycleMeta(namespace map[string]any) error {
-	if namespace == nil {
-		return nil
-	}
-
-	for key := range namespace {
+	for key := range vendorMeta {
 		switch key {
 		case metaOptionsKey, metaRawEventKey:
 		default:
-			return unsupportedField("_meta." + claudeMetaKey + "." + key)
+			return sessionMeta{}, wire.Unsupported("_meta." + vendor + "." + key)
 		}
 	}
 
-	if rawEvent, ok := namespace[metaRawEventKey]; ok {
-		if err := validateRawEventMeta(rawEvent); err != nil {
-			return err
+	if rawEvent, ok := vendorMeta[metaRawEventKey]; ok {
+		values, ok := rawEvent.(map[string]any)
+		if !ok {
+			return sessionMeta{}, wire.Unsupported("_meta." + vendor + "." + metaRawEventKey)
 		}
-	}
 
-	return nil
-}
-
-func validateRawEventMeta(value any) error {
-	raw, ok := value.(map[string]any)
-	if !ok {
-		return unsupportedField("_meta." + claudeMetaKey + "." + metaRawEventKey)
-	}
-
-	for key, item := range raw {
-		switch key {
-		case metaRawEventEnabledKey:
-			if _, ok := item.(bool); !ok {
-				return unsupportedField("_meta." + claudeMetaKey + "." + metaRawEventKey + "." + key)
+		for key, item := range values {
+			enabled, ok := item.(bool)
+			if key != metaEnabledKey || !ok {
+				return sessionMeta{}, wire.Unsupported("_meta." + vendor + "." + metaRawEventKey + "." + key)
 			}
-		default:
-			return unsupportedField("_meta." + claudeMetaKey + "." + metaRawEventKey + "." + key)
+
+			parsed.rawEvents = enabled
 		}
 	}
 
-	return nil
-}
-
-func sessionAdditionalDirectories(primary []string) []string {
-	return append([]string(nil), primary...)
-}
-
-func outputSchemaJSONSchema(schema map[string]any) map[string]any {
-	if len(schema) == 0 {
-		return nil
+	rawOptions, hasOptions := vendorMeta[metaOptionsKey]
+	if !hasOptions {
+		return parsed, nil
 	}
 
-	return cloneAnyMap(schema)
-}
-
-func parseClaudeOptions(value any, providerAuthEnabled bool) (ClaudeOptions, error) {
-	switch typed := value.(type) {
-	case map[string]any:
-		return parseClaudeOptionsMap(typed, providerAuthEnabled)
-	default:
-		return ClaudeOptions{}, unsupportedField("_meta." + claudeMetaKey + "." + metaOptionsKey)
+	values, isObject := rawOptions.(map[string]any)
+	if !isObject {
+		return sessionMeta{}, wire.Unsupported(metaOptionPath(""))
 	}
+
+	options, err := parseClaudeOptions(values)
+	if err != nil {
+		return sessionMeta{}, err
+	}
+
+	parsed.options = options
+	_, parsed.presentEnv = values[metaEnvKey]
+	_, parsed.presentExtraPathDirs = values[metaExtraPathDirsKey]
+
+	return parsed, nil
 }
 
-func parseClaudeOptionsMap(raw map[string]any, providerAuthEnabled bool) (ClaudeOptions, error) {
+func parseClaudeOptions(values map[string]any) (ClaudeOptions, *acp.RequestError) {
 	options := ClaudeOptions{}
 
-	for key, value := range raw {
+	for key, item := range values {
 		switch key {
-		case metaBareKey:
-			bare, ok := value.(bool)
+		case metaModelKey:
+			model, ok := item.(string)
 			if !ok {
-				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
+				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
 			}
 
-			options.Bare = bare
-		case settingsFieldEnv:
-			env, err := stringMapOption(value, metaOptionPath(key))
+			options.Model = model
+		case metaEnvKey:
+			env, err := stringMapOption(item, metaOptionPath(key))
 			if err != nil {
 				return ClaudeOptions{}, err
 			}
 
 			options.Env = env
 		case metaExtraPathDirsKey:
-			dirs, err := stringSliceOption(value, metaOptionPath(key))
+			dirs, err := stringSliceOption(item, metaOptionPath(key))
 			if err != nil {
 				return ClaudeOptions{}, err
 			}
 
 			options.ExtraPathDirs = dirs
-		case metaSystemPromptKey:
-			systemPrompt, ok := value.(string)
-			if !ok {
-				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
-			}
-
-			options.SystemPrompt = systemPrompt
-		case metaModelKey:
-			model, ok := value.(string)
-			if !ok {
-				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
-			}
-
-			options.Model = model
-		case metaPermissionModeKey:
-			permissionMode, ok := value.(string)
-			if !ok {
-				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
-			}
-
-			options.PermissionMode = permissionMode
 		case metaOutputSchemaKey:
-			// An empty object is refused here rather than treated as "no
-			// schema": a host that asked for structured output and got an
-			// ordinary turn back has no way to tell the two apart.
-			schema, ok := value.(map[string]any)
-			if !ok || len(schema) == 0 {
-				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
+			schema, ok := item.(map[string]any)
+			if !ok {
+				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
 			}
 
 			options.OutputSchema = cloneAnyMap(schema)
-		case "providerAuth":
-			if !providerAuthEnabled {
-				return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
+		case metaEffortKey:
+			level, ok := item.(string)
+			if !ok || level == "" {
+				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
 			}
 
-			bindings, err := providerAuthBindingsOption(value)
-			if err != nil {
-				return ClaudeOptions{}, err
+			options.Effort = level
+		case metaPermissionModeKey:
+			permission, ok := item.(string)
+			if !ok {
+				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
 			}
 
-			options.ProviderAuth = bindings
+			options.PermissionMode = permission
+		case metaSystemPromptKey:
+			text, ok := item.(string)
+			if !ok {
+				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
+			}
+
+			options.SystemPrompt = text
+		case metaBareKey:
+			enabled, ok := item.(bool)
+			if !ok {
+				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
+			}
+
+			options.Bare = enabled
+			options.bareSet = true
 		default:
-			return ClaudeOptions{}, unsupportedField(metaOptionPath(key))
+			return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
 		}
 	}
 
-	return validateClaudeOptions(options)
+	return options, validateClaudeOptions(options)
 }
 
-func providerAuthBindingsOption(value any) (map[string]ProviderAuthBinding, error) {
-	if typed, ok := value.(map[string]ProviderAuthBinding); ok {
-		if len(typed) != 1 || !validProviderCredential(typed[authProviderID].Credential) {
-			return nil, unsupportedField(providerAuthOptionPath)
-		}
-
-		binding := typed[authProviderID]
-		if !authValidConnectionID(binding.ConnectionID) || binding.Revision <= 0 || binding.BindingGeneration <= 0 {
-			return nil, unsupportedField(providerAuthOptionPath + "." + authProviderID)
-		}
-
-		return cloneProviderAuthBindings(typed), nil
+func validateClaudeOptions(options ClaudeOptions) *acp.RequestError {
+	if options.OutputSchema != nil && len(options.OutputSchema) == 0 {
+		return wire.Unsupported(metaOptionPath(metaOutputSchemaKey))
 	}
 
-	raw, ok := value.(map[string]any)
-	if !ok || len(raw) != 1 {
-		return nil, unsupportedField(providerAuthOptionPath)
-	}
-
-	wire, ok := raw[authProviderID]
-	if !ok {
-		return nil, unsupportedField(providerAuthOptionPath)
-	}
-
-	encoded, err := json.Marshal(wire)
-	if err != nil {
-		return nil, unsupportedField(providerAuthOptionPath + "." + authProviderID)
-	}
-
-	var binding ProviderAuthBinding
-
-	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
-	decoder.DisallowUnknownFields()
-
-	if decoder.Decode(&binding) != nil || !authValidConnectionID(binding.ConnectionID) ||
-		binding.Revision <= 0 || binding.BindingGeneration <= 0 ||
-		!validProviderCredential(binding.Credential) {
-		return nil, unsupportedField(providerAuthOptionPath + "." + authProviderID)
-	}
-
-	return map[string]ProviderAuthBinding{authProviderID: binding}, nil
-}
-
-func cloneProviderAuthBindings(source map[string]ProviderAuthBinding) map[string]ProviderAuthBinding {
-	if len(source) == 0 {
-		return nil
-	}
-
-	cloned := make(map[string]ProviderAuthBinding, len(source))
-	for providerID, binding := range source {
-		if binding.Credential.API != nil {
-			api := *binding.Credential.API
-			api.Metadata = maps.Clone(api.Metadata)
-			binding.Credential.API = &api
-		}
-
-		cloned[providerID] = binding
-	}
-
-	return cloned
-}
-
-func unsupportedField(path string) error {
-	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: valUnsupported,
-		jsonFieldField: path,
-	})
-}
-
-// missingField refuses a reserved key the contract requires on this surface and
-// the caller omitted. It is a different verdict from unsupportedField and the
-// two are never merged: a host reading `missing` adds the key it forgot, and a
-// host reading `unsupported` on the same bare path stops sending the key there.
-func missingField(path string) error {
-	return acp.NewInvalidParams(map[string]any{
-		jsonFieldError: valMissing,
-		jsonFieldField: path,
-	})
-}
-
-func validateClaudeOptions(options ClaudeOptions) (ClaudeOptions, error) {
-	if strings.TrimSpace(options.PermissionMode) != "" && !validClaudePermissionMode(options.PermissionMode) {
-		return ClaudeOptions{}, unsupportedField(metaOptionPath(metaPermissionModeKey))
-	}
-
-	if err := validateSessionEnv(options.Env, metaOptionPath(settingsFieldEnv)); err != nil {
-		return ClaudeOptions{}, err
-	}
-
-	for index, dir := range options.ExtraPathDirs {
-		if !filepath.IsAbs(dir) || strings.ContainsRune(dir, os.PathListSeparator) {
-			return ClaudeOptions{}, unsupportedField(
-				metaOptionPath(metaExtraPathDirsKey) + "[" + strconv.Itoa(index) + "]",
-			)
+	if options.Model != "" {
+		if err := claude.ValidModel(options.Model); err != nil {
+			return wire.Unsupported(metaOptionPath(metaModelKey))
 		}
 	}
 
-	if len(options.OutputSchema) > 0 {
-		outputSchema, err := validateOutputSchema(options.OutputSchema)
-		if err != nil {
-			return ClaudeOptions{}, err
+	if options.PermissionMode != "" && !slices.Contains([]string{nativeDefault, "manual", "plan", "acceptEdits", "bypassPermissions", "auto", "dontAsk"}, options.PermissionMode) {
+		return wire.Unsupported(metaOptionPath(metaPermissionModeKey))
+	}
+
+	if err := process.ValidateNames(options.Env); err != nil {
+		var nameErr *process.NameError
+		if errors.As(err, &nameErr) {
+			return wire.Unsupported(metaOptionPath(metaEnvKey) + "." + nameErr.Key)
 		}
 
-		options.OutputSchema = outputSchema
+		return wire.Unsupported(metaOptionPath(metaEnvKey))
 	}
 
-	return options, nil
-}
+	if err := process.ValidateExtraPathDirs(options.ExtraPathDirs); err != nil {
+		var dirErr *process.PathDirError
+		if errors.As(err, &dirErr) {
+			return wire.Unsupported(fmt.Sprintf("%s[%d]", metaOptionPath(metaExtraPathDirsKey), dirErr.Index))
+		}
 
-func validClaudePermissionMode(mode string) bool {
-	switch mode {
-	case string(modeDefault), permissionModeAcceptEdits, permissionModeBypassPermissions, string(modePlan), permissionModeDontAsk, string(modeAuto):
-		return true
-	default:
-		return false
+		return wire.Unsupported(metaOptionPath(metaExtraPathDirsKey))
 	}
+
+	return nil
 }
 
 func metaOptionPath(key string) string {
-	return "_meta." + claudeMetaKey + "." + metaOptionsKey + "." + key
+	path := "_meta." + vendor + "." + metaOptionsKey
+	if key == "" {
+		return path
+	}
+
+	return path + "." + key
 }
 
-func stringMapOption(value any, path string) (map[string]string, error) {
+func stringMapOption(value any, path string) (map[string]string, *acp.RequestError) {
 	switch typed := value.(type) {
 	case map[string]string:
 		return cloneStringMap(typed), nil
@@ -392,7 +365,7 @@ func stringMapOption(value any, path string) (map[string]string, error) {
 		for key, item := range typed {
 			text, ok := item.(string)
 			if !ok {
-				return nil, unsupportedField(path + "." + key)
+				return nil, wire.Unsupported(path + "." + key)
 			}
 
 			result[key] = text
@@ -400,11 +373,11 @@ func stringMapOption(value any, path string) (map[string]string, error) {
 
 		return result, nil
 	default:
-		return nil, unsupportedField(path)
+		return nil, wire.Unsupported(path)
 	}
 }
 
-func stringSliceOption(value any, path string) ([]string, error) {
+func stringSliceOption(value any, path string) ([]string, *acp.RequestError) {
 	switch typed := value.(type) {
 	case []string:
 		return slices.Clone(typed), nil
@@ -413,7 +386,7 @@ func stringSliceOption(value any, path string) ([]string, error) {
 		for index, item := range typed {
 			text, ok := item.(string)
 			if !ok {
-				return nil, unsupportedField(path + "[" + strconv.Itoa(index) + "]")
+				return nil, wire.Unsupported(fmt.Sprintf("%s[%d]", path, index))
 			}
 
 			result = append(result, text)
@@ -421,19 +394,58 @@ func stringSliceOption(value any, path string) ([]string, error) {
 
 		return result, nil
 	default:
-		return nil, unsupportedField(path)
+		return nil, wire.Unsupported(path)
 	}
 }
 
-func cloneStringMap(values map[string]string) map[string]string {
-	return maps.Clone(values)
-}
-
-func validateOutputSchema(schema map[string]any) (map[string]any, error) {
-	cloned := cloneAnyMap(schema)
-	if _, err := json.Marshal(cloned); err != nil {
-		return nil, unsupportedField(metaOptionPath(metaOutputSchemaKey))
+func cloneAnyMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
 	}
 
-	return cloned, nil
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = cloneAny(value)
+	}
+
+	return cloned
+}
+
+func cloneAny(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneAnyMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneAny(item)
+		}
+
+		return cloned
+	case []string:
+		return slices.Clone(typed)
+	default:
+		return typed
+	}
+}
+
+func mergeAnyMap(base map[string]any, overlay map[string]any) map[string]any {
+	result := cloneAnyMap(base)
+	if result == nil {
+		result = map[string]any{}
+	}
+
+	for key, value := range overlay {
+		if valueMap, ok := value.(map[string]any); ok {
+			if existing, ok := result[key].(map[string]any); ok {
+				result[key] = mergeAnyMap(existing, valueMap)
+
+				continue
+			}
+		}
+
+		result[key] = cloneAny(value)
+	}
+
+	return result
 }

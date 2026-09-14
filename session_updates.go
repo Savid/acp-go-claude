@@ -2,419 +2,424 @@ package claudeacp
 
 import (
 	"context"
-	"errors"
-	"log/slog"
+	"encoding/json"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
-	"github.com/savid/acp-go-claude/internal/mapper"
-	"github.com/savid/acp-go-claude/internal/transcript"
 )
 
-var (
-	errAgentClosed              = errors.New("ACP agent is closed")
-	errACPConnectionNotAttached = errors.New("ACP connection is not attached")
+const (
+	messageRoleUser          = "user"
+	messageRoleAssistant     = "assistant"
+	contentBlockTypeText     = "text"
+	contentBlockTypeThinking = "thinking"
+	contentBlockTypeToolCall = "tool_use"
+	contentBlockTypeImage    = "image"
+	sessionTitleMaxRunes     = 256
 )
 
-const liveSessionTitleMaxRunes = 256
-
-func (s *agentSession) emitUpdates(ctx context.Context, updates []acp.SessionUpdate) error {
-	return s.emitUpdatesWithAssistantIdentity(ctx, updates, "", false)
+type messageState struct {
+	id, text, thinking string
+	finalized          map[string]struct{}
+}
+type cycleState struct {
+	replay           bool
+	usage            *acp.Usage
+	cost             float64
+	structuredOutput any
+	stopReason       string
+	errorMessage     string
+	imagesEmitted    bool
+	messages         map[string]*messageState
+	tools            map[string]*toolState
 }
 
-func (s *agentSession) emitUpdatesWithAssistantIdentity(
-	ctx context.Context,
-	updates []acp.SessionUpdate,
-	messageID string,
-	replay bool,
-) error {
-	if len(updates) == 0 {
+func (state *cycleState) message(parent string) *messageState {
+	if state.messages == nil {
+		state.messages = make(map[string]*messageState)
+	}
+
+	if state.messages[parent] == nil {
+		state.messages[parent] = &messageState{finalized: make(map[string]struct{})}
+	}
+
+	return state.messages[parent]
+}
+
+type parentToolKey struct{}
+
+// emit preserves delegated provenance on every derived update.
+func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error {
+	conn := s.agent.connection()
+	if conn == nil {
 		return nil
 	}
 
-	s.agent.observe.ObserveFirstPromptUpdate(ctx)
-
-	s.agent.mu.Lock()
-	if s.agent.closed {
-		s.agent.mu.Unlock()
-
-		return errAgentClosed
-	}
-
-	conn := s.agent.conn
-	s.agent.mu.Unlock()
-
-	if conn == nil {
-		return errACPConnectionNotAttached
-	}
-
+	parent, _ := ctx.Value(parentToolKey{}).(string)
 	for _, update := range updates {
-		s.toolCallUpdateMu.Lock()
+		if parent != "" {
+			meta := map[string]any{vendor: map[string]any{"parentToolUseId": parent}}
 
-		routedUpdate, started := s.reconcileToolCallStartLocked(update)
-
-		routedUpdate, shouldEmit, failedToolCallID, err := s.prepareImageUpdateLocked(ctx, routedUpdate, replay)
-		if err != nil {
-			// A recoverable verdict is reported and the turn runs on, so the
-			// thread keeps its context and can write the image somewhere the
-			// adapter may read. Only the artifact store breaking is fatal, and
-			// even then the tool call still reports failed for attribution.
-			guidance, recoverable := imageOutputGuidance(err)
-
-			if recoverable || failedToolCallID != "" {
-				refusal := imageRefusalUpdate(failedToolCallID, guidance)
-				if !recoverable {
-					refusal.ToolCallUpdate.Content = nil
-				}
-
-				if emitErr := conn.SessionUpdate(ctx, acp.SessionNotification{
-					Meta:      assistantIdentityNotificationMeta(ctx, messageID),
-					SessionId: s.id,
-					Update:    refusal,
-				}); emitErr != nil {
-					s.toolCallUpdateMu.Unlock()
-
-					return emitErr
-				}
+			switch {
+			case update.AgentMessageChunk != nil:
+				update.AgentMessageChunk.Meta = meta
+			case update.AgentThoughtChunk != nil:
+				update.AgentThoughtChunk.Meta = meta
+			case update.UserMessageChunk != nil:
+				update.UserMessageChunk.Meta = meta
+			case update.ToolCall != nil:
+				update.ToolCall.Meta = meta
+			case update.ToolCallUpdate != nil:
+				update.ToolCallUpdate.Meta = meta
+			case update.UsageUpdate != nil:
+				update.UsageUpdate.Meta = meta
 			}
+		}
 
-			s.toolCallUpdateMu.Unlock()
+		if err := conn.SessionUpdate(context.WithoutCancel(ctx), acp.SessionNotification{SessionId: s.id, Update: update}); err != nil {
+			return err
+		}
+	}
 
-			if recoverable {
+	return nil
+}
+
+// projectEvent maps native stream records, with result as the turn boundary.
+func (s *session) projectEvent(ctx context.Context, _ *runtime, c *cycle, event claude.Event) (bool, error) {
+	ctx = context.WithValue(ctx, parentToolKey{}, event.ParentToolUseID)
+	state := &c.state
+
+	switch event.Type {
+	case nativeStreamEvent:
+		return false, s.projectStream(ctx, state, event)
+	case messageRoleAssistant:
+		if event.Message == nil {
+			return false, nil
+		}
+
+		return false, s.projectAssistant(ctx, state, event.ParentToolUseID, event.UUID, *event.Message)
+	case messageRoleUser:
+		if event.Message == nil {
+			return false, nil
+		}
+
+		blocks, err := event.Message.ContentBlocks()
+		if err != nil {
+			return false, err
+		}
+
+		return false, s.projectToolResults(ctx, state, blocks)
+	case nativeResult:
+		if event.ParentToolUseID != "" {
+			return false, nil
+		}
+
+		state.stopReason = event.StopReason
+		state.cost = event.TotalCostUSD
+		state.structuredOutput = event.StructuredOutput
+
+		state.usage = mapUsage(event.Usage)
+		if event.IsError {
+			state.stopReason = stopReasonError
+
+			state.errorMessage = strings.Join(append(event.Errors, event.Error, event.Result), "\n")
+			if strings.TrimSpace(state.errorMessage) == "" {
+				state.errorMessage = event.Subtype
+			}
+		}
+
+		for _, usage := range event.ModelUsage {
+			if usage.ContextWindow > 0 {
+				s.mu.Lock()
+				s.contextWindow = usage.ContextWindow
+				s.mu.Unlock()
+
+				break
+			}
+		}
+
+		return true, nil
+	case "system":
+		return event.Subtype == "task_notification" && c.origin != "submission", nil
+	}
+
+	return false, nil
+}
+
+func (s *session) projectStream(ctx context.Context, state *cycleState, event claude.Event) error {
+	if event.Event == nil {
+		return nil
+	}
+
+	native := event.Event
+	message := state.message(event.ParentToolUseID)
+
+	switch native.Type {
+	case nativeMessageStart:
+		message.text = ""
+
+		message.thinking = ""
+		if native.Message != nil {
+			message.id = native.Message.ID
+		}
+	case "content_block_delta":
+		switch native.Delta.Type {
+		case "text_delta":
+			message.text += native.Delta.Text
+
+			return s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock(native.Delta.Text), MessageId: optionalString(message.id)}})
+		case "thinking_delta":
+			message.thinking += native.Delta.Thinking
+
+			return s.emit(ctx, acp.SessionUpdate{AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{Content: acp.TextBlock(native.Delta.Thinking), MessageId: optionalString(message.id)}})
+		}
+	}
+
+	return nil
+}
+func (s *session) projectAssistant(ctx context.Context, state *cycleState, parent string, rowID string, native claude.Message) error {
+	message := state.message(parent)
+	if _, seen := message.finalized[rowID]; rowID != "" && seen {
+		return nil
+	}
+
+	if rowID != "" {
+		message.finalized[rowID] = struct{}{}
+	}
+
+	blocks, err := native.ContentBlocks()
+	if err != nil {
+		return err
+	}
+
+	var text, thought strings.Builder
+
+	for index := range blocks {
+		block := &blocks[index]
+		switch block.Type {
+		case contentBlockTypeText:
+			text.WriteString(block.Text)
+		case contentBlockTypeThinking:
+			thought.WriteString(block.Thinking)
+		case contentBlockTypeToolCall:
+			if err := s.publishToolStart(ctx, state, *block); err != nil {
+				return err
+			}
+		case contentBlockTypeImage:
+			if link := remoteImageLink(*block); link != nil {
+				if err := s.emit(ctx, acp.UpdateAgentMessage(*link)); err != nil {
+					return err
+				}
+
 				continue
 			}
 
-			return err
+			output, failure := decodeOutputImage(*block, s.agent.options.ImageLimits.core().EffectiveOutputPerImage())
+			if failure != nil {
+				if state.replay {
+					return failure
+				}
+
+				guidance, _ := failure.Guidance()
+				if err := s.emit(ctx, acp.UpdateAgentMessageText(guidance)); err != nil {
+					return err
+				}
+
+				continue
+			}
+
+			if err := s.emit(ctx, acp.UpdateAgentMessage(acp.ImageBlock(output.data, output.mime))); err != nil {
+				return err
+			}
+
+			state.imagesEmitted = true
 		}
+	}
 
-		if !shouldEmit {
-			s.toolCallUpdateMu.Unlock()
-
+	for _, chunk := range []struct {
+		text    string
+		thought bool
+	}{{consumeAssistantText(&message.thinking, thought.String()), true}, {consumeAssistantText(&message.text, text.String()), false}} {
+		if chunk.text == "" {
 			continue
 		}
 
-		if err := conn.SessionUpdate(ctx, acp.SessionNotification{
-			Meta:      assistantIdentityNotificationMeta(ctx, messageID),
-			SessionId: s.id,
-			Update:    routedUpdate,
-		}); err != nil {
-			s.toolCallUpdateMu.Unlock()
+		update := acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock(chunk.text), MessageId: optionalString(native.ID)}}
+		if chunk.thought {
+			update = acp.SessionUpdate{AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{Content: acp.TextBlock(chunk.text), MessageId: optionalString(native.ID)}}
+		}
 
+		if err := s.emit(ctx, update); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+func (s *session) projectToolResults(ctx context.Context, state *cycleState, blocks []claude.ContentBlock) error {
+	for index := range blocks {
+		block := &blocks[index]
+		if block.Type != "tool_result" {
+			continue
+		}
+
+		content, err := claude.DecodeContent(block.Content)
+		if err != nil {
 			return err
 		}
 
-		if started != "" {
-			if s.publishedToolCalls == nil {
-				s.publishedToolCalls = make(map[acp.ToolCallId]struct{})
-			}
-
-			s.publishedToolCalls[started] = struct{}{}
-		}
-		s.toolCallUpdateMu.Unlock()
-	}
-
-	return nil
-}
-
-// resetPublishedToolCalls starts a fresh exact-ID admission set for one prompt
-// turn. Control callbacks and streamed tool-use blocks share this set so a
-// callback may publish a pending start before Claude streams the corresponding
-// block without producing a second tool_call start later.
-func (s *agentSession) resetPublishedToolCalls() {
-	s.toolCallUpdateMu.Lock()
-	s.publishedToolCalls = make(map[acp.ToolCallId]struct{})
-	s.toolContent = make(map[acp.ToolCallId][]acp.ToolCallContent)
-	s.emittedAgentImages = make(map[string]struct{})
-	s.toolCallUpdateMu.Unlock()
-}
-
-func (s *agentSession) reconcileToolCallStartLocked(update acp.SessionUpdate) (acp.SessionUpdate, acp.ToolCallId) {
-	start := update.ToolCall
-	if start == nil || start.ToolCallId == "" {
-		return update, ""
-	}
-
-	if _, published := s.publishedToolCalls[start.ToolCallId]; !published {
-		return update, start.ToolCallId
-	}
-
-	title := start.Title
-	kind := start.Kind
-	status := start.Status
-	update.ToolCall = nil
-	update.ToolCallUpdate = &acp.SessionToolCallUpdate{
-		Meta:          start.Meta,
-		Content:       start.Content,
-		Kind:          &kind,
-		Locations:     start.Locations,
-		RawInput:      start.RawInput,
-		RawOutput:     start.RawOutput,
-		SessionUpdate: "tool_call_update",
-		Status:        &status,
-		Title:         &title,
-		ToolCallId:    start.ToolCallId,
-	}
-
-	return update, ""
-}
-
-func assistantIdentityNotificationMeta(ctx context.Context, messageID string) map[string]any {
-	meta := turnRouteMetaFromContext(ctx)
-	if messageID == "" {
-		return meta
-	}
-
-	meta = cloneAnyMap(meta)
-	if meta == nil {
-		meta = make(map[string]any, 1)
-	}
-
-	meta[claudeMetaKey] = map[string]any{jsonFieldMessageID: messageID}
-
-	return meta
-}
-
-// emitNativeMessageIdentity publishes the finalized main-assistant transcript
-// UUID without fabricating visible assistant content. The empty session-info
-// update is only a carrier; the durable correlation belongs to the routed
-// notification envelope.
-func (s *agentSession) emitNativeMessageIdentity(ctx context.Context, messageID string) error {
-	if messageID == "" {
-		return nil
-	}
-
-	return s.emitUpdatesWithAssistantIdentity(ctx, []acp.SessionUpdate{{
-		SessionInfoUpdate: &acp.SessionSessionInfoUpdate{},
-	}}, messageID, false)
-}
-
-// emitAvailableCommandsUpdate advertises the harness's command catalog. A forced
-// update always states one, an empty catalog included: silence and "no commands"
-// are different facts, and a host that never receives the empty snapshot cannot
-// tell a harness with no commands from one whose catalog has not arrived yet.
-func (s *agentSession) emitAvailableCommandsUpdate(ctx context.Context, force bool) error {
-	s.callbackOwnershipMu.Lock()
-	defer s.callbackOwnershipMu.Unlock()
-
-	s.mu.Lock()
-	closing := s.closing
-	s.mu.Unlock()
-
-	if closing {
-		return closedSessionError()
-	}
-
-	updates := mapper.AvailableCommandsUpdate(s.commands())
-	current := availableCommandsFromUpdates(updates)
-
-	s.mu.Lock()
-	previous := cloneAvailableCommands(s.advertisedCommands)
-	s.mu.Unlock()
-
-	var emit []acp.SessionUpdate
-
-	switch {
-	case len(current) > 0:
-		if !force && availableCommandsEqual(previous, current) {
-			return nil
+		status := acp.ToolCallStatusCompleted
+		if block.IsError {
+			status = acp.ToolCallStatusFailed
 		}
 
-		emit = updates
-	case len(previous) > 0 || force:
-		emit = emptyAvailableCommandsUpdate()
-	default:
-		return nil
-	}
-
-	if err := s.emitUpdates(ctx, emit); err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	s.advertisedCommands = cloneAvailableCommands(current)
-	s.mu.Unlock()
-
-	return nil
-}
-
-func (s *agentSession) emitClearAvailableCommandsUpdate(ctx context.Context) error {
-	s.mu.Lock()
-	previous := len(s.advertisedCommands)
-	s.mu.Unlock()
-
-	if previous == 0 {
-		return nil
-	}
-
-	if err := s.emitUpdates(ctx, emptyAvailableCommandsUpdate()); err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	s.advertisedCommands = nil
-	s.mu.Unlock()
-
-	return nil
-}
-
-func emptyAvailableCommandsUpdate() []acp.SessionUpdate {
-	return []acp.SessionUpdate{{
-		AvailableCommandsUpdate: &acp.SessionAvailableCommandsUpdate{AvailableCommands: []acp.AvailableCommand{}},
-	}}
-}
-
-func availableCommandsFromUpdates(updates []acp.SessionUpdate) []acp.AvailableCommand {
-	for _, update := range updates {
-		if update.AvailableCommandsUpdate != nil {
-			return cloneAvailableCommands(update.AvailableCommandsUpdate.AvailableCommands)
+		if err := s.publishToolTerminal(ctx, state, block.ToolUseID, status, content); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
-func cloneAvailableCommands(commands []acp.AvailableCommand) []acp.AvailableCommand {
-	if len(commands) == 0 {
-		return nil
-	}
-
-	cloned := make([]acp.AvailableCommand, len(commands))
-	for index, command := range commands {
-		cloned[index] = command
-		if command.Input != nil {
-			input := *command.Input
-			if input.Unstructured != nil {
-				unstructured := *input.Unstructured
-				input.Unstructured = &unstructured
-			}
-
-			cloned[index].Input = &input
-		}
-	}
-
-	return cloned
-}
-
-func availableCommandsEqual(left []acp.AvailableCommand, right []acp.AvailableCommand) bool {
-	if len(left) != len(right) {
-		return false
-	}
-
-	for index := range left {
-		if left[index].Name != right[index].Name || left[index].Description != right[index].Description {
-			return false
-		}
-
-		if availableCommandHint(left[index]) != availableCommandHint(right[index]) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func availableCommandHint(command acp.AvailableCommand) string {
-	if command.Input == nil || command.Input.Unstructured == nil {
+// consumeAssistantText matches one completed content fragment to pending deltas.
+func consumeAssistantText(pending *string, full string) string {
+	if full == "" {
 		return ""
 	}
 
-	return command.Input.Unstructured.Hint
+	if after, ok := strings.CutPrefix(*pending, full); ok {
+		*pending = after
+
+		return ""
+	}
+
+	if !strings.HasPrefix(full, *pending) {
+		return ""
+	}
+
+	suffix := strings.TrimPrefix(full, *pending)
+	*pending = ""
+
+	return suffix
 }
-
-func (s *agentSession) poisonedError() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.poisonCause == "" {
+func optionalString(value string) *string {
+	if value == "" {
 		return nil
 	}
 
-	return poisonedSessionError(s.poisonCause)
+	return &value
 }
+func mapUsage(usage claude.Usage) *acp.Usage {
+	read, write := int(usage.CacheReadInputTokens), int(usage.CacheCreationInputTokens)
 
-func (s *agentSession) poison(ctx context.Context, cause string) error {
+	return &acp.Usage{InputTokens: int(usage.InputTokens), OutputTokens: int(usage.OutputTokens), CachedReadTokens: &read, CachedWriteTokens: &write, TotalTokens: int(usage.InputTokens+usage.OutputTokens) + read + write}
+}
+func (s *session) emitUsage(ctx context.Context, state *cycleState, stats *claude.ContextUsage) {
 	s.mu.Lock()
-	if s.poisonCause != "" {
-		cause = s.poisonCause
-		s.mu.Unlock()
-
-		return poisonedSessionError(cause)
-	}
-
-	s.poisonCause = cause
-	cancel := s.cancel
+	size := s.contextWindow
 	s.mu.Unlock()
 
-	if s.agent == nil {
-		if cancel != nil {
-			cancel()
-		}
-
-		return poisonedSessionError(cause)
+	used := 0
+	if state.usage != nil {
+		used = state.usage.TotalTokens
 	}
 
-	s.agent.log.ErrorContext(ctx, "poison Claude session after native invariant violation",
-		slog.String(acpFieldSessionID, string(s.id)),
-	)
-
-	emitCtx, cancelEmit := settlementContext(ctx)
-	if err := s.emitClearAvailableCommandsUpdate(emitCtx); err != nil {
-		s.agent.log.ErrorContext(emitCtx, "clear available Claude commands after poison failed",
-			slog.String(acpFieldSessionID, string(s.id)),
-		)
+	if stats != nil {
+		used = int(stats.TotalTokens)
+		size = stats.MaxTokens
 	}
 
-	cancelEmit()
-
-	if cancel != nil {
-		cancel()
+	update := &acp.SessionUsageUpdate{Size: int(size), Used: used}
+	if state.cost > 0 {
+		update.Cost = &acp.Cost{Amount: state.cost, Currency: "USD"}
 	}
 
-	return poisonedSessionError(cause)
+	if state.structuredOutput != nil {
+		update.Meta = map[string]any{vendor: map[string]any{"structuredOutput": state.structuredOutput}}
+	}
+
+	_ = s.emit(ctx, acp.SessionUpdate{UsageUpdate: update})
+}
+func (s *session) emitRestoredUsage(ctx context.Context, rt *runtime) {
+	stats, err := rt.client.ContextUsage(ctx)
+	if err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	s.contextWindow = stats.MaxTokens
+	s.mu.Unlock()
+	s.emitUsage(ctx, &cycleState{}, &stats)
+}
+func suppressedCommand(name string) bool {
+	switch name {
+	case "clear", "reset", "new", configCommand, "settings", "logout", "login", "mcp", "resume", "fork":
+		return true
+	}
+
+	return false
 }
 
-// poisonedSessionError is the uniform refusal a poisoned session answers with.
-// The cause is one of the closed tokens this adapter documents, so a host can
-// tell the two native invariant violations apart without reading prose.
-func poisonedSessionError(cause string) error {
-	return acp.NewInternalError(map[string]any{
-		jsonFieldError:    sessionPoisonedError,
-		failureFieldCause: cause,
-	})
-}
-
-func (s *agentSession) emitLiveSessionInfoUpdate(ctx context.Context, prompt []acp.ContentBlock) error {
+// emitSessionInfo records the turn's time and, on the first prompt, a title.
+func (s *session) emitSessionInfo(ctx context.Context, prompt []acp.ContentBlock) {
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
 	update := acp.SessionSessionInfoUpdate{UpdatedAt: &updatedAt}
-	title := liveSessionTitleFromPrompt(prompt)
 
 	s.mu.Lock()
-
 	s.updatedAt = updatedAt
-	if s.title == "" && title != "" {
-		s.title = title
-		update.Title = &title
+
+	if s.title == "" {
+		if title := promptTitle(prompt); title != "" {
+			s.title = title
+			update.Title = &title
+		}
 	}
 	s.mu.Unlock()
 
-	return s.emitUpdates(ctx, []acp.SessionUpdate{{SessionInfoUpdate: &update}})
+	_ = s.emit(ctx, acp.SessionUpdate{SessionInfoUpdate: &update})
 }
 
-func (s *agentSession) sessionInfo(id acp.SessionId) acp.SessionInfo {
+func promptTitle(prompt []acp.ContentBlock) string {
+	for _, block := range prompt {
+		if block.Text == nil {
+			continue
+		}
+
+		if title := normalizeTitle(block.Text.Text); title != "" {
+			return title
+		}
+	}
+
+	return ""
+}
+
+func normalizeTitle(text string) string {
+	title := strings.Join(strings.Fields(text), " ")
+	if utf8.RuneCountInString(title) <= sessionTitleMaxRunes {
+		return title
+	}
+
+	runes := []rune(title)
+
+	return strings.TrimSpace(string(runes[:sessionTitleMaxRunes-3])) + "..."
+}
+
+func (s *session) sessionInfo() acp.SessionInfo {
 	s.mu.Lock()
 	title := s.title
 	updatedAt := s.updatedAt
 	s.mu.Unlock()
 
 	if title == "" {
-		title = string(id)
+		title = string(s.id)
 	}
 
 	info := acp.SessionInfo{
-		SessionId:             id,
+		SessionId:             s.id,
 		Title:                 &title,
 		Cwd:                   s.cwd,
 		AdditionalDirectories: append([]string(nil), s.additionalDirectories...),
@@ -426,265 +431,122 @@ func (s *agentSession) sessionInfo(id acp.SessionId) acp.SessionInfo {
 	return info
 }
 
-func liveSessionTitleFromPrompt(prompt []acp.ContentBlock) string {
-	for _, block := range prompt {
-		if block.Text == nil {
+// publishCommands emits the session's command catalog as a full replacement,
+// including the explicit empty one.
+func (s *session) publishCommands(ctx context.Context) error {
+	s.mu.Lock()
+	commands := append([]acp.AvailableCommand{}, s.commands...)
+	s.mu.Unlock()
+
+	return s.emit(ctx, acp.SessionUpdate{AvailableCommandsUpdate: &acp.SessionAvailableCommandsUpdate{AvailableCommands: commands}})
+}
+
+func (s *session) clearCommands(ctx context.Context) {
+	s.mu.Lock()
+	s.commands = nil
+	s.mu.Unlock()
+
+	_ = s.publishCommands(ctx)
+}
+
+// availableCommands converts claude's command catalog, dropping names the shared
+// sanitizer rejects.
+func availableCommands(commands []claude.Command) []acp.AvailableCommand {
+	available := make([]acp.AvailableCommand, 0, len(commands))
+
+	for _, command := range commands {
+		if !validCommandName(command.Name) || suppressedCommand(command.Name) {
 			continue
 		}
 
-		if title := normalizeLiveSessionTitle(block.Text.Text); title != "" {
-			return title
+		available = append(available, acp.AvailableCommand{Name: command.Name, Description: command.Description})
+	}
+
+	return available
+}
+
+// validCommandName rejects empty names, names containing '/', invalid UTF-8,
+// and any Unicode whitespace, control, or format rune.
+func validCommandName(name string) bool {
+	if name == "" || strings.Contains(name, "/") || !utf8.ValidString(name) {
+		return false
+	}
+
+	for _, r := range name {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return false
 		}
 	}
 
-	return ""
+	return true
 }
 
-func normalizeLiveSessionTitle(text string) string {
-	title := strings.Join(strings.Fields(text), " ")
-	if title == "" {
-		return ""
-	}
-
-	if utf8.RuneCountInString(title) <= liveSessionTitleMaxRunes {
-		return title
-	}
-
-	runes := []rune(title)
-
-	return strings.TrimSpace(string(runes[:liveSessionTitleMaxRunes-3])) + "..."
-}
-
-// emitRawClaudeMessage emits one live raw-event notification when raw events are
-// enabled. The caller has already resolved the frame's exact route, so raw and
-// typed projections share one owner and one failure boundary.
-func (s *agentSession) emitRawClaudeMessage(ctx context.Context, msg claude.Message) error {
-	raw := rawClaudeMessage(msg)
-	if !s.rawMessages.ShouldEmit(raw) {
-		return nil
-	}
-
-	s.agent.mu.Lock()
-	if s.agent.closed || s.agent.conn == nil {
-		s.agent.mu.Unlock()
-
-		return errACPConnectionNotAttached
-	}
-
-	conn := s.agent.conn
-	s.agent.mu.Unlock()
-
-	s.rawEventMu.Lock()
-	defer s.rawEventMu.Unlock()
-
-	sequence := s.rawEventSequence + 1
-
-	payload := map[string]any{
-		acpFieldSessionID:     s.id,
-		rawEventFieldSequence: sequence,
-		rawEventFieldSource:   claudeMetaKey,
-		rawEventFieldEvent:    raw,
-	}
-	if meta := turnRouteMetaFromContext(ctx); meta != nil {
-		payload["_meta"] = meta
-	}
-
-	// Oversized or unserializable provider events are replaced with the fixed
-	// marker after route metadata is attached, and the final payload is checked
-	// before delivery.
-	capped, err := capRawEventPayload(payload)
-	if err != nil {
-		s.agent.observe.RecordRawMessageEmitFailure(ctx, err)
-
-		return nil
-	}
-
-	if err := conn.NotifyExtension(ctx, RawEventMethod, capped); err != nil {
-		s.agent.observe.RecordRawMessageEmitFailure(ctx, err)
-
-		return nil
-	}
-
-	s.rawEventSequence = sequence
-
-	return nil
-}
-
-func resultOriginKind(result *claude.ResultMessage) string {
-	if result == nil {
-		return ""
-	}
-
-	kind, _ := result.Origin["kind"].(string)
-
-	return kind
-}
-
-func mergeUsage(total *acp.Usage, next *acp.Usage) *acp.Usage {
-	if next == nil {
-		return cloneUsage(total)
-	}
-
-	if total == nil {
-		return cloneUsage(next)
-	}
-
-	merged := &acp.Usage{
-		InputTokens:  total.InputTokens + next.InputTokens,
-		OutputTokens: total.OutputTokens + next.OutputTokens,
-		TotalTokens:  total.TotalTokens + next.TotalTokens,
-	}
-
-	if value := optionalIntSum(total.CachedReadTokens, next.CachedReadTokens); value != nil {
-		merged.CachedReadTokens = value
-	}
-
-	if value := optionalIntSum(total.CachedWriteTokens, next.CachedWriteTokens); value != nil {
-		merged.CachedWriteTokens = value
-	}
-
-	if value := optionalIntSum(total.ThoughtTokens, next.ThoughtTokens); value != nil {
-		merged.ThoughtTokens = value
-	}
-
-	return merged
-}
-
-func cloneUsage(usage *acp.Usage) *acp.Usage {
-	if usage == nil {
-		return nil
-	}
-
-	cloned := *usage
-	if usage.CachedReadTokens != nil {
-		cloned.CachedReadTokens = new(*usage.CachedReadTokens)
-	}
-
-	if usage.CachedWriteTokens != nil {
-		cloned.CachedWriteTokens = new(*usage.CachedWriteTokens)
-	}
-
-	if usage.ThoughtTokens != nil {
-		cloned.ThoughtTokens = new(*usage.ThoughtTokens)
-	}
-
-	return &cloned
-}
-
-func optionalIntSum(left *int, right *int) *int {
-	if left == nil && right == nil {
-		return nil
-	}
-
-	value := 0
-	if left != nil {
-		value += *left
-	}
-
-	if right != nil {
-		value += *right
-	}
-
-	return &value
-}
-
-// replayTranscriptEntries replays the session store's own rows. The store is
-// the only transcript this adapter replays: Claude's local cache is discovery
-// metadata, never a source of updates a resumed session emits.
-func (s *agentSession) replayTranscriptEntries(ctx context.Context, entries []SessionStoreEntry) error {
-	rehydrated, err := rehydrateTranscriptImageEntries(entries, s.snapshotImageArtifacts())
-	if err != nil {
-		return err
-	}
-
-	updates, truncated := transcript.ReplayEntries(rehydrated)
-
-	if truncated {
-		updates = append([]acp.SessionUpdate{
-			acp.UpdateAgentMessageText("Claude transcript replay was truncated; only the first 10000 ACP updates were replayed."),
-		}, updates...)
-	}
-
-	return s.emitUpdatesWithAssistantIdentity(ctx, updates, "", true)
-}
-
-func (s *agentSession) emitMessageSideEffects(ctx context.Context, msg claude.Message) error {
-	system, ok := msg.(*claude.SystemMessage)
-	if !ok {
-		return nil
-	}
-
-	switch system.Subtype {
-	case systemStatus:
-		if systemString(system, systemStatus) == systemStatusCompacting {
-			return s.emitUpdates(ctx, []acp.SessionUpdate{acp.UpdateAgentMessageText(compactingMessageText)})
-		}
-
-		return nil
-	case systemSubtypeCompactBoundary:
-		return s.emitUpdates(ctx, []acp.SessionUpdate{
-			{
-				UsageUpdate: &acp.SessionUsageUpdate{
-					Size: s.currentContextWindow(),
-					Used: 0,
-				},
-			},
-			acp.UpdateAgentMessageText(compactingCompleteMessageText),
-		})
-	case systemSubtypeLocalCommandOutput:
-		if content := systemString(system, systemContent); content != "" {
-			return s.emitUpdates(ctx, []acp.SessionUpdate{acp.UpdateAgentMessageText(content)})
-		}
-
-		return nil
-	case elicitationComplete:
-		return s.emitElicitationComplete(ctx, system)
-	default:
-		return nil
-	}
-}
-
-func (s *agentSession) emitElicitationComplete(ctx context.Context, system *claude.SystemMessage) error {
-	caps := s.agent.clientElicitationCapabilities()
-	if caps == nil || caps.Url == nil {
-		return nil
-	}
-
-	elicitationID := elicitationIDFromSystem(system)
-	if elicitationID == "" {
-		return nil
+// emitRawEvent forwards one native record on the raw-event channel when the
+// session opted in. Inline payloads and source URLs are redacted.
+func (s *session) emitRawEvent(ctx context.Context, event claude.Event) {
+	if !s.rawEvents.Enabled() {
+		return
 	}
 
 	conn := s.agent.connection()
 	if conn == nil {
-		return nil
+		return
 	}
 
-	return conn.UnstableCompleteElicitation(ctx, acp.UnstableCompleteElicitationNotification{
-		ElicitationId: acp.UnstableElicitationId(elicitationID),
-	})
+	var payload map[string]any
+	if err := json.Unmarshal(event.Raw, &payload); err != nil {
+		return
+	}
+
+	redactImages(payload)
+
+	notify := func(ctx context.Context, method string, params map[string]any) error {
+		return conn.NotifyExtension(ctx, method, params)
+	}
+
+	if err := s.rawEvents.Emit(ctx, notify, payload); err != nil {
+		s.agent.observe.RecordRawMessageEmitFailure(ctx, err)
+	}
 }
 
-func (s *agentSession) emitHookResponseUpdates(ctx context.Context, msg claude.Message, options mapper.ToolUpdateOptions) error {
-	system, ok := msg.(*claude.SystemMessage)
-	if !ok || system.Subtype != systemSubtypeHookResponse {
-		return nil
+func redactImages(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		blockType, _ := typed["type"].(string)
+		if blockType == elicitationModeURL {
+			if _, exists := typed["url"]; exists {
+				typed["url"] = "[redacted]"
+			}
+		}
+
+		if data, ok := typed["data"].(string); ok && blockType == "base64" && data != "" {
+			typed["data"] = ""
+			typed["sizeBytes"] = len(data) / 4 * 3
+		}
+
+		for _, item := range typed {
+			redactImages(item)
+		}
+	case []any:
+		for _, item := range typed {
+			redactImages(item)
+		}
 	}
-
-	if systemString(system, systemHookEventName) != systemHookPostToolUse {
-		return nil
-	}
-
-	toolUseID := systemString(system, systemToolUseID)
-	if toolUseID == "" {
-		return nil
-	}
-
-	if s.hookHandled(toolUseID) {
-		return nil
-	}
-
-	toolUse := options.ToolUses[toolUseID]
-
-	return s.handlePostToolUseFrame(ctx, toolUseID, toolUse.Name, systemMap(system, systemToolResponse))
 }
+
+const (
+	controlElicitation   = "elicitation"
+	mimePDF              = "application/pdf"
+	nativeDefault        = "default"
+	nativeControlRequest = "control_request"
+	permissionBehavior   = "behavior"
+	controlCanUseTool    = "can_use_tool"
+	elicitationAction    = "action"
+	nativeContent        = "content"
+	nativeStreamEvent    = "stream_event"
+	nativeResult         = "result"
+)
+
+const configCommand = "config"
+
+const nativeMessageStart = "message_start"

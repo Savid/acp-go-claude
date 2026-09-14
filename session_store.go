@@ -1,353 +1,234 @@
 package claudeacp
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+
+	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/coder/acp-go-sdk"
+
+	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/sessionlog"
+	"github.com/savid/acp-go-core/wire"
 )
 
-const (
-	SessionStoreFormat      = "claude-transcript-jsonl-v1"
-	SessionStoreMainSubpath = ""
-)
-
-type SessionStoreEntry = json.RawMessage
-
-type SessionKey struct {
-	SessionID string
-	Subpath   string
+// sessionRecord is the adapter-owned state a session needs to resume: where
+// claude keeps the native file and the configuration the session was established
+// with.
+type sessionRecord struct {
+	SessionID             string            `json:"sessionId"`
+	Cwd                   string            `json:"cwd"`
+	AdditionalDirectories []string          `json:"additionalDirectories,omitempty"`
+	SessionFile           string            `json:"sessionFile"`
+	Env                   map[string]string `json:"env,omitempty"`
+	ExtraPathDirs         []string          `json:"extraPathDirs,omitempty"`
+	Model                 string            `json:"model,omitempty"`
+	Effort                string            `json:"effort,omitempty"`
+	PermissionMode        string            `json:"permissionMode,omitempty"`
+	Bare                  bool              `json:"bare,omitempty"`
+	SystemPrompt          string            `json:"systemPrompt,omitempty"`
+	OutputSchema          map[string]any    `json:"outputSchema,omitempty"`
+	OutputStyle           string            `json:"outputStyle,omitempty"`
+	UpdatedAtUnixMilli    int64             `json:"updatedAtUnixMilli"`
 }
 
-type SessionSummary struct {
-	SessionID          string
-	UpdatedAtUnixMilli int64
-	Cwd                string
-	Title              string
-	Meta               map[string]any
-}
-
-type SessionStoreReplacement struct {
-	Key     SessionKey
-	Entries []SessionStoreEntry
-}
-
-// SessionStore is the adapter's durable authority for session rows. An
-// implementation supplied through WithSessionStore must hold the same contract
-// InMemorySessionStore does.
-//
-// Replace is the one method with a refusal contract of its own: **every Replace
-// is one session's**. It atomically rewrites the generation `main` names and
-// nothing else, so before writing any key it must refuse a replacement key whose
-// SessionID differs from main.SessionID, and a set naming one
-// {SessionID, Subpath} twice — each with an error naming the offending key. A
-// refused generation writes nothing at all.
-type SessionStore interface {
-	Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
-	Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
-	Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error
-	Delete(ctx context.Context, key SessionKey) error
-	ListSessions(ctx context.Context) ([]SessionSummary, error)
-	ListSubkeys(ctx context.Context, key SessionKey) ([]string, error)
-}
-
-type InMemorySessionStore struct {
-	mu        sync.Mutex
-	entries   map[SessionKey][]SessionStoreEntry
-	updatedAt map[SessionKey]int64
-	tombstone map[SessionKey]struct{}
-}
-
-var _ SessionStore = (*InMemorySessionStore)(nil)
-
-func NewInMemorySessionStore() *InMemorySessionStore {
-	return &InMemorySessionStore{
-		entries:   make(map[SessionKey][]SessionStoreEntry),
-		updatedAt: make(map[SessionKey]int64),
-		tombstone: make(map[SessionKey]struct{}),
-	}
-}
-
-func (s *InMemorySessionStore) Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	if s == nil {
-		return fmt.Errorf("nil InMemorySessionStore")
-	}
-
-	if len(entries) == 0 {
-		return nil
-	}
-
-	if key.SessionID == "" {
-		return fmt.Errorf("session id is required")
-	}
-
+func (s *session) record() sessionRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.ensure()
+	return sessionRecord{
+		SessionID:             string(s.id),
+		Cwd:                   s.cwd,
+		AdditionalDirectories: slices.Clone(s.additionalDirectories),
+		SessionFile:           s.sessionFile,
+		Env:                   cloneStringMap(s.options.Env),
+		ExtraPathDirs:         slices.Clone(s.options.ExtraPathDirs),
+		Model:                 s.model,
+		Effort:                s.effort,
+		PermissionMode:        s.options.PermissionMode,
+		Bare:                  s.options.Bare, SystemPrompt: s.options.SystemPrompt, OutputSchema: cloneAnyMap(s.options.OutputSchema), OutputStyle: s.outputStyle,
+		UpdatedAtUnixMilli: time.Now().UnixMilli(),
+	}
+}
 
-	if s.isTombstonedLocked(key) {
+// commitMirror publishes the native rows and current session configuration
+// as one durable generation.
+func (s *session) commitMirror(ctx context.Context) error {
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+
+	s.mu.Lock()
+	path := s.sessionFile
+	mirrored := s.mirrored
+	s.mu.Unlock()
+
+	if path == "" {
 		return nil
 	}
 
-	for _, entry := range entries {
-		s.entries[key] = append(s.entries[key], cloneStoreEntry(entry))
+	rows, err := claude.ReadRows(path)
+	if err != nil {
+		return fmt.Errorf("read native session: %w", err)
 	}
 
-	s.updatedAt[key] = time.Now().UnixMilli()
+	if len(rows) < mirrored {
+		return fmt.Errorf("native log shrank from %d to %d rows", mirrored, len(rows))
+	}
+
+	if len(rows) == 0 {
+		return nil
+	}
+
+	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, "replace")
+	err = sessionlog.Commit(commitCtx, s.agent.store, string(s.id), rows, s.record())
+	finish(err)
+
+	if err != nil {
+		return fmt.Errorf("commit session mirror: %w", err)
+	}
+
+	s.mu.Lock()
+	s.mirrored = len(rows)
+	s.mu.Unlock()
 
 	return nil
 }
 
-func (s *InMemorySessionStore) Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	if s == nil {
-		return nil, fmt.Errorf("nil InMemorySessionStore")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.isTombstonedLocked(key) {
-		return nil, nil
-	}
-
-	return cloneStoreEntries(s.entries[key]), nil
+// storedSession is what the store holds for one session id.
+type storedSession struct {
+	rows   [][]byte
+	record sessionRecord
+	found  bool
 }
 
-func (s *InMemorySessionStore) Replace(ctx context.Context, main SessionKey, replacements []SessionStoreReplacement) error {
-	if err := ctx.Err(); err != nil {
+// loadStored reads the native rows and required current configuration.
+func (a *Agent) loadStored(ctx context.Context, sessionID acp.SessionId) (storedSession, error) {
+	loadCtx, cancel := context.WithTimeout(ctx, a.options.SessionStoreLoadTimeout)
+	defer cancel()
+
+	loadCtx, finish := a.observe.StartSessionStore(loadCtx, "load")
+
+	var record sessionRecord
+
+	rows, err := sessionlog.Load(loadCtx, a.store, string(sessionID), &record)
+	if err == nil && len(rows) > 0 {
+		err = record.validate(string(sessionID))
+	}
+
+	finish(err)
+
+	if err != nil {
+		return storedSession{}, a.restoreRefused(ctx, sessionID, err)
+	}
+
+	return storedSession{rows: rows, record: record, found: len(rows) > 0}, nil
+}
+
+func (r sessionRecord) validate(sessionID string) error {
+	if r.SessionID != sessionID || !filepath.IsAbs(r.Cwd) || !filepath.IsAbs(r.SessionFile) || r.UpdatedAtUnixMilli <= 0 {
+		return fmt.Errorf("invalid session record identity or location")
+	}
+
+	if err := process.ValidateNames(r.Env); err != nil {
 		return err
 	}
 
-	if s == nil {
-		return fmt.Errorf("nil InMemorySessionStore")
-	}
-
-	if main.SessionID == "" {
-		return fmt.Errorf("session id is required")
-	}
-
-	if main.Subpath != SessionStoreMainSubpath {
-		return fmt.Errorf("main key must use a session id and the main subpath")
-	}
-
-	now := time.Now().UnixMilli()
-	next := make(map[SessionKey][]SessionStoreEntry, len(replacements))
-	mainCount := 0
-
-	for _, replacement := range replacements {
-		// Every Replace is one session's. A key naming another session would have
-		// this generation rewrite rows the caller never addressed, and the
-		// whole-session tombstone sweep below would fence a session this call has
-		// no authority over. It is refused by name before anything is written.
-		if replacement.Key.SessionID != main.SessionID {
-			return fmt.Errorf("replacement key %+v does not belong to main session %q", replacement.Key, main.SessionID)
-		}
-
-		// Two replacements naming one key are refused before anything is written.
-		// A generation states what each key holds, so a set that states two things
-		// about the same key states neither, and resolving it by keeping whichever
-		// arrived last would durably commit an order the caller never expressed.
-		if _, duplicate := next[replacement.Key]; duplicate {
-			return fmt.Errorf("duplicate replacement key %+v", replacement.Key)
-		}
-
-		if replacement.Key == main {
-			mainCount++
-		}
-
-		next[replacement.Key] = cloneStoreEntries(replacement.Entries)
-	}
-
-	if mainCount != 1 {
-		return fmt.Errorf("replacements must include the main key exactly once")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.ensure()
-
-	// A tombstone is final. Replace rewrites the whole session, so it would
-	// otherwise clear a tombstone it never wrote and resurrect a row the host was
-	// already told is gone — including from the final mirror commit a delete's own
-	// teardown runs behind it.
-	if s.isTombstonedLocked(main) {
-		return nil
-	}
-
-	for key := range s.entries {
-		if key.SessionID == main.SessionID {
-			delete(s.entries, key)
-			delete(s.updatedAt, key)
-			s.tombstone[key] = struct{}{}
-		}
-	}
-
-	for key, entries := range next {
-		s.entries[key] = entries
-		s.updatedAt[key] = now
-		delete(s.tombstone, key)
+	if err := process.ValidateExtraPathDirs(r.ExtraPathDirs); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func (s *InMemorySessionStore) Delete(ctx context.Context, key SessionKey) error {
-	if err := ctx.Err(); err != nil {
-		return err
+// hydrate reconciles the store with claude's own file before a load or resume. An
+// existing native file at least as long as the store wins and its newer rows
+// are adopted; a missing or shorter one is materialized from the store. A
+// disagreement at a shared position fails the restore. It returns the native
+// path and the rows the session now holds.
+func (a *Agent) hydrate(ctx context.Context, sessionID acp.SessionId, stored storedSession, cwd string, agentDir string) (string, [][]byte, error) {
+	if err := claude.ValidateRows(stored.rows, string(sessionID)); err != nil {
+		return "", nil, a.restoreRefused(ctx, sessionID, err)
 	}
 
-	if s == nil {
-		return fmt.Errorf("nil InMemorySessionStore")
+	path := claude.SessionPath(agentDir, cwd, string(sessionID))
+
+	native, err := claude.ReadRows(path)
+	if err != nil {
+		return "", nil, a.restoreRefused(ctx, sessionID, err)
 	}
 
-	if key.SessionID == "" {
-		return nil
+	if _, err := sessionlog.Reconcile(native, stored.rows); err != nil {
+		return "", nil, a.restoreRefused(ctx, sessionID, err)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if len(native) >= len(stored.rows) {
+		if len(native) > len(stored.rows) {
+			if err := sessionlog.Commit(ctx, a.store, string(sessionID), native, stored.record); err != nil {
+				return "", nil, a.restoreRefused(ctx, sessionID, err)
+			}
+		}
 
-	s.ensure()
+		return path, native, nil
+	}
 
-	for candidate := range s.entries {
-		if candidate.SessionID != key.SessionID {
+	if err := claude.WriteRows(path, stored.rows); err != nil {
+		return "", nil, a.restoreRefused(ctx, sessionID, err)
+	}
+
+	return path, stored.rows, nil
+}
+
+func (a *Agent) restoreRefused(ctx context.Context, sessionID acp.SessionId, err error) error {
+	a.log.ErrorContext(ctx, "claude session restore failed",
+		slog.String("session_id", string(sessionID)), slog.String("reason", err.Error()))
+
+	return wire.RestoreFailed(vendor)
+}
+
+// storedTitle derives a listing title: the first user message text, else the
+// session id.
+func storedTitle(sessionID string, rows [][]byte) string {
+	for _, row := range rows {
+		var entry struct {
+			Type    string          `json:"type"`
+			Message json.RawMessage `json:"message"`
+		}
+
+		if json.Unmarshal(row, &entry) != nil || entry.Type != messageRoleUser {
 			continue
 		}
 
-		if key.Subpath != SessionStoreMainSubpath && candidate.Subpath != key.Subpath {
+		var message claude.Message
+		if json.Unmarshal(entry.Message, &message) != nil || message.Role != messageRoleUser {
 			continue
 		}
 
-		delete(s.entries, candidate)
-		delete(s.updatedAt, candidate)
-		s.tombstone[candidate] = struct{}{}
-	}
-
-	s.tombstone[key] = struct{}{}
-
-	return nil
-}
-
-func (s *InMemorySessionStore) ListSessions(ctx context.Context) ([]SessionSummary, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	if s == nil {
-		return nil, fmt.Errorf("nil InMemorySessionStore")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	summaries := make([]SessionSummary, 0)
-
-	for key := range s.entries {
-		if key.Subpath != SessionStoreMainSubpath || s.isTombstonedLocked(key) {
+		blocks, err := message.ContentBlocks()
+		if err != nil {
 			continue
 		}
 
-		summaries = append(summaries, SessionSummary{
-			SessionID:          key.SessionID,
-			UpdatedAtUnixMilli: s.updatedAt[key],
-		})
-	}
+		for index := range blocks {
+			if blocks[index].Type != contentBlockTypeText {
+				continue
+			}
 
-	slices.SortFunc(summaries, func(left, right SessionSummary) int {
-		if byTime := cmp.Compare(right.UpdatedAtUnixMilli, left.UpdatedAtUnixMilli); byTime != 0 {
-			return byTime
+			if title := normalizeTitle(blocks[index].Text); title != "" {
+				return title
+			}
 		}
+	}
 
-		return strings.Compare(left.SessionID, right.SessionID)
-	})
-
-	return summaries, nil
+	return sessionID
 }
 
-func (s *InMemorySessionStore) ListSubkeys(ctx context.Context, key SessionKey) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	if s == nil {
-		return nil, fmt.Errorf("nil InMemorySessionStore")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	subkeys := make([]string, 0)
-
-	for candidate := range s.entries {
-		if candidate.SessionID != key.SessionID ||
-			candidate.Subpath == SessionStoreMainSubpath ||
-			s.isTombstonedLocked(candidate) {
-			continue
-		}
-
-		subkeys = append(subkeys, candidate.Subpath)
-	}
-
-	slices.Sort(subkeys)
-
-	return subkeys, nil
-}
-
-func (s *InMemorySessionStore) ensure() {
-	if s.entries == nil {
-		s.entries = make(map[SessionKey][]SessionStoreEntry)
-	}
-
-	if s.updatedAt == nil {
-		s.updatedAt = make(map[SessionKey]int64)
-	}
-
-	if s.tombstone == nil {
-		s.tombstone = make(map[SessionKey]struct{})
-	}
-}
-
-func (s *InMemorySessionStore) isTombstonedLocked(key SessionKey) bool {
-	if _, ok := s.tombstone[key]; ok {
-		return true
-	}
-
-	_, mainDeleted := s.tombstone[SessionKey{SessionID: key.SessionID, Subpath: SessionStoreMainSubpath}]
-
-	return mainDeleted && key.Subpath != SessionStoreMainSubpath
-}
-
-func cloneStoreEntries(entries []SessionStoreEntry) []SessionStoreEntry {
-	if entries == nil {
-		return nil
-	}
-
-	cloned := make([]SessionStoreEntry, len(entries))
-	for index, entry := range entries {
-		cloned[index] = cloneStoreEntry(entry)
-	}
-
-	return cloned
-}
-
-func cloneStoreEntry(entry SessionStoreEntry) SessionStoreEntry {
-	if entry == nil {
-		return nil
-	}
-
-	return append(SessionStoreEntry(nil), entry...)
+func trimSpace(value string) string {
+	return strings.TrimSpace(value)
 }

@@ -3,1169 +3,337 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
 	claudeacp "github.com/savid/acp-go-claude"
+
+	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
-const livePromptRefusalRetries = 1
-const envRunIntegration = "ACP_GO_CLAUDE_RUN_INTEGRATION"
-const envRunLiveTokens = "ACP_GO_CLAUDE_RUN_LIVE_TOKENS" //nolint:gosec // Environment variable name, not a credential value.
-const envClaudeHome = "ACP_GO_CLAUDE_HOME"
-const envAnthropicAuthToken = "ANTHROPIC_AUTH_TOKEN"      //nolint:gosec // Environment variable name, not a credential value.
-const envAnthropicAPIKey = "ANTHROPIC_API_KEY"            //nolint:gosec // Environment variable name, not a credential value.
-const envClaudeCodeOAuthToken = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // Environment variable name, not a credential value.
+const testTimeout = 120 * time.Second
+const permissionOptionAllow acp.PermissionOptionId = "allow"
 
-var integrationLogger = slog.New(slog.DiscardHandler)
-
-func TestMain(m *testing.M) {
-	previousLogger := slog.Default()
-	slog.SetDefault(integrationLogger)
-
-	code := m.Run()
-	cleanupIntegrationBinary()
-
-	slog.SetDefault(previousLogger)
-	os.Exit(code)
+// recorder is the ACP client the tests observe the agent through.
+type recorder struct {
+	mu          sync.Mutex
+	updates     []acp.SessionNotification
+	raw         []json.RawMessage
+	permissions []acp.RequestPermissionRequest
+	answer      func(acp.RequestPermissionRequest) acp.RequestPermissionResponse
+	elicit      func(acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
+	changed     chan struct{}
 }
 
-type recordingClient struct {
-	mu sync.Mutex
+var (
+	_ acp.Client                 = (*recorder)(nil)
+	_ acp.ExtensionMethodHandler = (*recorder)(nil)
+)
 
-	textChunks             []string
-	commands               []acp.AvailableCommand
-	usageUpdates           []acp.SessionUsageUpdate
-	updates                []acp.SessionUpdate
-	notifications          []acp.SessionNotification
-	permissions            []acp.RequestPermissionRequest
-	permission             acp.PermissionOptionId
-	elicitations           []acp.UnstableCreateElicitationRequest
-	elicitationCompletions []acp.UnstableCompleteElicitationNotification
-	elicitationResponse    acp.UnstableCreateElicitationResponse
-	extensions             []recordedExtension
-}
-
-var _ acp.Client = (*recordingClient)(nil)
-
-var _ interface {
-	UnstableCompleteElicitation(context.Context, acp.UnstableCompleteElicitationNotification) error
-	UnstableCreateElicitation(context.Context, acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
-	acp.ExtensionMethodHandler
-} = (*recordingClient)(nil)
-
-type recordedExtension struct {
-	Method string
-	Params map[string]any
-}
-
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	return b.buf.String()
-}
-
-func (c *recordingClient) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	return acp.ReadTextFileResponse{Content: ""}, nil
-}
-
-func (c *recordingClient) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
-	return acp.WriteTextFileResponse{}, nil
-}
-
-func (c *recordingClient) RequestPermission(
-	_ context.Context,
-	params acp.RequestPermissionRequest,
-) (acp.RequestPermissionResponse, error) {
-	c.mu.Lock()
-	c.permissions = append(c.permissions, params)
-	selected := c.permission
-	c.mu.Unlock()
-
-	if selected != "" {
-		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(selected)}, nil
+func newRecorder() *recorder {
+	return &recorder{
+		changed: make(chan struct{}, 1),
+		answer: func(acp.RequestPermissionRequest) acp.RequestPermissionResponse {
+			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(permissionOptionAllow)}
+		},
 	}
-
-	for _, option := range params.Options {
-		if option.Kind == acp.PermissionOptionKindAllowOnce || option.Kind == acp.PermissionOptionKindAllowAlways {
-			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(option.OptionId)}, nil
-		}
-	}
-
-	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 }
 
-func (c *recordingClient) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
-	var text string
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.updates = append(c.updates, params.Update)
-	c.notifications = append(c.notifications, params)
-
-	switch {
-	case params.Update.AvailableCommandsUpdate != nil:
-		c.commands = append(c.commands, params.Update.AvailableCommandsUpdate.AvailableCommands...)
-
-		return nil
-	case params.Update.UsageUpdate != nil:
-		c.usageUpdates = append(c.usageUpdates, *params.Update.UsageUpdate)
-
-		return nil
-	case params.Update.AgentMessageChunk != nil && params.Update.AgentMessageChunk.Content.Text != nil:
-		text = params.Update.AgentMessageChunk.Content.Text.Text
-	case params.Update.UserMessageChunk != nil && params.Update.UserMessageChunk.Content.Text != nil:
-		text = params.Update.UserMessageChunk.Content.Text.Text
+func (r *recorder) signal() {
+	select {
+	case r.changed <- struct{}{}:
 	default:
-		return nil
 	}
+}
 
-	c.textChunks = append(c.textChunks, text)
+func (r *recorder) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
+	r.mu.Lock()
+	r.updates = append(r.updates, params)
+	r.mu.Unlock()
+	r.signal()
 
 	return nil
 }
 
-func (c *recordingClient) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
-	return acp.CreateTerminalResponse{TerminalId: "terminal-1"}, nil
+func (r *recorder) RequestPermission(_ context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	r.mu.Lock()
+	r.permissions = append(r.permissions, params)
+	answer := r.answer
+	r.mu.Unlock()
+	r.signal()
+
+	return answer(params), nil
 }
 
-func (c *recordingClient) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
-	return acp.KillTerminalResponse{}, nil
-}
+func (r *recorder) UnstableCreateElicitation(_ context.Context, params acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+	r.mu.Lock()
+	elicit := r.elicit
+	r.mu.Unlock()
 
-func (c *recordingClient) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
-	return acp.TerminalOutputResponse{Output: "", Truncated: false}, nil
-}
-
-func (c *recordingClient) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
-	return acp.ReleaseTerminalResponse{}, nil
-}
-
-func (c *recordingClient) WaitForTerminalExit(
-	context.Context,
-	acp.WaitForTerminalExitRequest,
-) (acp.WaitForTerminalExitResponse, error) {
-	return acp.WaitForTerminalExitResponse{}, nil
-}
-
-func (c *recordingClient) UnstableCreateElicitation(
-	_ context.Context,
-	params acp.UnstableCreateElicitationRequest,
-) (acp.UnstableCreateElicitationResponse, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.elicitations = append(c.elicitations, params)
-	if c.elicitationResponse.Accept != nil ||
-		c.elicitationResponse.Decline != nil ||
-		c.elicitationResponse.Cancel != nil {
-		return c.elicitationResponse, nil
+	if elicit == nil {
+		return acp.UnstableCreateElicitationResponse{}, errors.New("no elicitation handler")
 	}
 
-	content := map[string]any{}
-	if params.Form != nil {
-		for _, required := range params.Form.RequestedSchema.Required {
-			content[required] = "Go"
-		}
-	}
-	if len(content) == 0 {
-		content["question_1"] = "Go"
-	}
-
-	return acp.UnstableCreateElicitationResponse{
-		Accept: &acp.UnstableCreateElicitationAccept{Action: "accept", Content: content},
-	}, nil
+	return elicit(params)
 }
 
-func (c *recordingClient) UnstableCompleteElicitation(
-	_ context.Context,
-	params acp.UnstableCompleteElicitationNotification,
-) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.elicitationCompletions = append(c.elicitationCompletions, params)
-
-	return nil
-}
-
-func (c *recordingClient) HandleExtensionMethod(
-	_ context.Context,
-	method string,
-	params json.RawMessage,
-) (any, error) {
-	var decoded map[string]any
-	if len(params) > 0 {
-		if err := json.Unmarshal(params, &decoded); err != nil {
-			return nil, err
-		}
+func (r *recorder) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+	if method == claudeacp.RawEventMethod {
+		r.mu.Lock()
+		r.raw = append(r.raw, append(json.RawMessage(nil), params...))
+		r.mu.Unlock()
+		r.signal()
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.extensions = append(c.extensions, recordedExtension{Method: method, Params: decoded})
 
 	return map[string]any{}, nil
 }
 
-func (c *recordingClient) text() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (*recorder) NotifyExtension(context.Context, string, any) error { return nil }
 
-	return strings.Join(c.textChunks, "")
+func (*recorder) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	return acp.ReadTextFileResponse{}, errors.New("unsupported")
 }
 
-func (c *recordingClient) commandCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return len(c.commands)
+func (*recorder) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	return acp.WriteTextFileResponse{}, errors.New("unsupported")
 }
 
-func (c *recordingClient) latestUsage() *acp.SessionUsageUpdate {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if len(c.usageUpdates) == 0 {
-		return nil
-	}
-
-	usage := c.usageUpdates[len(c.usageUpdates)-1]
-
-	return &usage
+func (*recorder) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+	return acp.CreateTerminalResponse{}, errors.New("unsupported")
 }
 
-func (c *recordingClient) clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.textChunks = nil
+func (*recorder) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+	return acp.KillTerminalResponse{}, errors.New("unsupported")
 }
 
-func (c *recordingClient) permissionCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return len(c.permissions)
+func (*recorder) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+	return acp.TerminalOutputResponse{}, errors.New("unsupported")
 }
 
-func (c *recordingClient) permissionSnapshot() []acp.RequestPermissionRequest {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return append([]acp.RequestPermissionRequest(nil), c.permissions...)
+func (*recorder) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	return acp.ReleaseTerminalResponse{}, errors.New("unsupported")
 }
 
-func (c *recordingClient) elicitationCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return len(c.elicitations)
+func (*recorder) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+	return acp.WaitForTerminalExitResponse{}, errors.New("unsupported")
 }
 
-func (c *recordingClient) elicitationSnapshot() []acp.UnstableCreateElicitationRequest {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// snapshot returns the notifications recorded so far.
+func (r *recorder) snapshot() []acp.SessionNotification {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	return append([]acp.UnstableCreateElicitationRequest(nil), c.elicitations...)
+	return append([]acp.SessionNotification(nil), r.updates...)
 }
 
-func (c *recordingClient) updateSnapshot() []acp.SessionUpdate {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return append([]acp.SessionUpdate(nil), c.updates...)
-}
-
-func (c *recordingClient) notificationSnapshot() []acp.SessionNotification {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return append([]acp.SessionNotification(nil), c.notifications...)
-}
-
-func (c *recordingClient) extensionSnapshot() []recordedExtension {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return append([]recordedExtension(nil), c.extensions...)
-}
-
-type blockingPermissionClient struct {
-	recordingClient
-
-	permissionRequested chan struct{}
-	permissionReturned  chan acp.RequestPermissionResponse
-	requestOnce         sync.Once
-}
-
-func newBlockingPermissionClient() *blockingPermissionClient {
-	return &blockingPermissionClient{
-		permissionRequested: make(chan struct{}),
-		permissionReturned:  make(chan acp.RequestPermissionResponse, 1),
-	}
-}
-
-func (c *blockingPermissionClient) RequestPermission(
-	ctx context.Context,
-	params acp.RequestPermissionRequest,
-) (acp.RequestPermissionResponse, error) {
-	c.mu.Lock()
-	c.permissions = append(c.permissions, params)
-	c.mu.Unlock()
-
-	c.requestOnce.Do(func() { close(c.permissionRequested) })
-
-	<-ctx.Done()
-
-	resp := acp.RequestPermissionResponse{
-		Outcome: acp.NewRequestPermissionOutcomeCancelled(),
-	}
-	c.permissionReturned <- resp
-
-	return resp, nil
-}
-
-func (c *recordingClient) resetRecordedOutput() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.textChunks = nil
-	c.updates = nil
-	c.usageUpdates = nil
-}
-
-func integrationClaudePath(t *testing.T) string {
-	t.Helper()
-	if os.Getenv(envRunIntegration) != "1" {
-		t.Skipf("set %s=1 to run claude integration tests", envRunIntegration)
-	}
-	path := "claude"
-	resolved, err := exec.LookPath(path)
-	if err != nil {
-		if os.Getenv(envRunLiveTokens) == "1" || os.Getenv("ACP_GO_CLAUDE_RUN_ATTENDED") == "1" || os.Getenv("ACP_GO_CLAUDE_RUN_KEYSTORE") == "1" {
-			t.Fatalf("requested claude integration tier requires the CLI: %v", err)
-		}
-		t.Skipf("claude CLI absent from PATH for smoke (%s=1): %v", envRunIntegration, err)
-	}
-	return resolved
-}
-
-// requireLiveTokens skips a test that spends model tokens unless the caller
-// opted in explicitly. Smoke runs never spend tokens; only
-// `make test-integration-live` sets this variable.
-func requireLiveTokens(t *testing.T) {
+// waitFor blocks until condition holds over the recorded notifications.
+func (r *recorder) waitFor(t *testing.T, condition func([]acp.SessionNotification) bool) {
 	t.Helper()
 
-	if os.Getenv(envRunLiveTokens) != "1" {
-		t.Skipf("set %s=1 to run live tests that spend model tokens", envRunLiveTokens)
-	}
-}
+	deadline := time.After(testTimeout)
 
-func integrationClaudeHome(t *testing.T) string {
-	t.Helper()
-
-	return os.Getenv(envClaudeHome)
-}
-
-func integrationClaudeSourceHome(t *testing.T) (string, bool) {
-	t.Helper()
-
-	source := integrationClaudeHome(t)
-	if source != "" {
-		return source, true
-	}
-
-	home, err := os.UserHomeDir()
-	require.NoError(t, err)
-
-	return filepath.Join(home, ".claude"), false
-}
-
-func isolatedClaudeHome(t *testing.T) string {
-	t.Helper()
-
-	runtime := isolatedClaudeRuntime(t)
-
-	return runtime.home
-}
-
-type isolatedClaudeRuntimeConfig struct {
-	home string
-	env  map[string]string
-}
-
-func isolatedClaudeRuntime(t *testing.T) isolatedClaudeRuntimeConfig {
-	t.Helper()
-
-	source, explicitSource := integrationClaudeSourceHome(t)
-	processAuth := processClaudeAuthAvailable()
-	env := copiedClaudeAuthEnv(t, source)
-	if len(env) == 0 && !portableClaudeAuthAvailable(t, source) {
-		t.Fatalf(
-			"live Claude integration requires portable file/env auth; refusing to launch against the real Claude home. "+
-				"Set %s, %s, %s, or provide .credentials.json/settings.json auth in %s",
-			envAnthropicAuthToken,
-			envAnthropicAPIKey,
-			envClaudeCodeOAuthToken,
-			envClaudeHome,
-		)
-	}
-
-	base, err := filepath.Abs(filepath.Join("..", ".tmp", "integration-claude-home"))
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(base, 0o700))
-
-	target, err := os.MkdirTemp(base, "home-*")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(target) })
-
-	if explicitSource || !processAuth {
-		for _, name := range []string{".credentials.json", "settings.json"} {
-			require.NoError(t, copyClaudeHomeFile(source, target, name))
-		}
-		require.NoError(t, copyClaudeStateFile(source, target))
-		require.NoError(t, copyClaudeHomeDir(source, target, "sessions"))
-	}
-
-	return isolatedClaudeRuntimeConfig{
-		home: target,
-		env:  env,
-	}
-}
-
-// emptyClaudeRuntime is a Claude config directory nothing was copied into and
-// no auth environment reaches. Every other runtime here is seeded with portable
-// auth so live turns can run, which makes a login driven against one
-// indistinguishable from the credential that was already there.
-func emptyClaudeRuntime(t *testing.T) isolatedClaudeRuntimeConfig {
-	t.Helper()
-
-	base, err := filepath.Abs(filepath.Join("..", ".tmp", "integration-claude-home"))
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(base, 0o700))
-
-	target, err := os.MkdirTemp(base, "empty-home-*")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(target) })
-
-	return isolatedClaudeRuntimeConfig{home: target, env: emptyClaudeCredentialEnv()}
-}
-
-func emptyClaudeCredentialEnv() map[string]string {
-	return map[string]string{
-		envAnthropicAuthToken:   "",
-		envAnthropicAPIKey:      "",
-		envClaudeCodeOAuthToken: "",
-	}
-}
-
-// requireClaudeHomeHoldsNoCredential fails unless the config dir answers logged
-// out with every credential environment variable explicitly cleared.
-func requireClaudeHomeHoldsNoCredential(t *testing.T, home string) {
-	t.Helper()
-
-	require.False(t, claudeHomeLoggedInWithoutCredentialEnv(t, home),
-		"config dir %s already holds a credential", home)
-}
-
-func claudeHomeLoggedInWithoutCredentialEnv(t *testing.T, home string) bool {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
-	command := exec.CommandContext(ctx, integrationClaudePath(t), "auth", "status", "--json") // #nosec G204 -- path is the discovered Claude CLI.
-	command.Env = claudeEnvWithoutCredentials(home)
-
-	output, err := command.Output()
-	if err != nil {
-		return false
-	}
-
-	var payload struct {
-		LoggedIn bool `json:"loggedIn"`
-	}
-
-	require.NoError(t, json.Unmarshal(bytes.TrimSpace(output), &payload))
-
-	return payload.LoggedIn
-}
-
-func claudeEnvWithoutCredentials(home string) []string {
-	blocked := map[string]struct{}{
-		envAnthropicAuthToken:   {},
-		envAnthropicAPIKey:      {},
-		envClaudeCodeOAuthToken: {},
-		"CLAUDE_CONFIG_DIR":     {},
-	}
-
-	env := make([]string, 0, len(os.Environ())+4)
-	for _, entry := range os.Environ() {
-		name, _, ok := strings.Cut(entry, "=")
-		if !ok {
-			continue
-		}
-
-		remove := false
-		for blockedName := range blocked {
-			if strings.EqualFold(name, blockedName) {
-				remove = true
-
-				break
-			}
-		}
-		if !remove {
-			env = append(env, entry)
-		}
-	}
-
-	return append(env,
-		envAnthropicAuthToken+"=",
-		envAnthropicAPIKey+"=",
-		envClaudeCodeOAuthToken+"=",
-		"CLAUDE_CONFIG_DIR="+home,
-	)
-}
-
-func copyClaudeHomeFile(sourceDir string, targetDir string, name string) error {
-	source := filepath.Join(sourceDir, name)
-	data, err := os.ReadFile(source)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	data, err = nullClaudeRefreshTokens(data)
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(filepath.Join(targetDir, name), data, 0o600)
-}
-
-func copyClaudeStateFile(sourceDir string, targetDir string) error {
-	source := filepath.Join(sourceDir, ".claude.json")
-	if _, err := os.Stat(source); errors.Is(err, os.ErrNotExist) && filepath.Base(sourceDir) == ".claude" {
-		source = filepath.Join(filepath.Dir(sourceDir), ".claude.json")
-	}
-
-	data, err := os.ReadFile(source)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	data, err = nullClaudeRefreshTokens(data)
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(filepath.Join(targetDir, ".claude.json"), data, 0o600)
-}
-
-func copyClaudeHomeDir(sourceDir string, targetDir string, name string) error {
-	sourceRoot := filepath.Join(sourceDir, name)
-	info, err := os.Stat(sourceRoot)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return nil
-	}
-
-	targetRoot := filepath.Join(targetDir, name)
-	return filepath.WalkDir(sourceRoot, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-
-		rel, err := filepath.Rel(sourceRoot, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(targetRoot, rel)
-
-		if entry.IsDir() {
-			return os.MkdirAll(target, 0o700)
-		}
-		if entry.Type()&os.ModeType != 0 {
-			return nil
-		}
-
-		data, err := os.ReadFile(path) // #nosec G304 -- integration helper copies selected local Claude home files.
-		if err != nil {
-			return err
-		}
-		if strings.HasSuffix(entry.Name(), ".json") {
-			data, err = nullClaudeRefreshTokens(data)
-			if err != nil {
-				return err
-			}
-		}
-
-		return os.WriteFile(target, data, 0o600) // #nosec G306 -- private integration temp home.
-	})
-}
-
-func nullClaudeRefreshTokens(data []byte) ([]byte, error) {
-	var value any
-	if err := json.Unmarshal(data, &value); err != nil {
-		return nil, err
-	}
-
-	nullRefreshTokens(value)
-
-	out, err := json.Marshal(value)
-	if err != nil {
-		return nil, err
-	}
-
-	return append(out, '\n'), nil
-}
-
-func nullRefreshTokens(value any) {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, child := range typed {
-			if key == "refreshToken" {
-				typed[key] = nil
-				continue
-			}
-			nullRefreshTokens(child)
-		}
-	case []any:
-		for _, child := range typed {
-			nullRefreshTokens(child)
-		}
-	}
-}
-
-func copiedClaudeAuthEnv(t *testing.T, sourceDir string) map[string]string {
-	t.Helper()
-
-	if processClaudeAuthAvailable() {
-		return nil
-	}
-
-	data, err := os.ReadFile(filepath.Join(sourceDir, ".credentials.json"))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	require.NoError(t, err)
-
-	var value any
-	require.NoError(t, json.Unmarshal(data, &value))
-
-	token := strings.TrimSpace(claudeAccessToken(value))
-	if token == "" {
-		return nil
-	}
-
-	return map[string]string{envAnthropicAuthToken: token}
-}
-
-func portableClaudeAuthAvailable(t *testing.T, sourceDir string) bool {
-	t.Helper()
-
-	if processClaudeAuthAvailable() {
-		return true
-	}
-
-	if token := strings.TrimSpace(claudeAccessTokenFromFile(t, filepath.Join(sourceDir, ".credentials.json"))); token != "" {
-		return true
-	}
-
-	return claudeSettingsAuthAvailable(t, filepath.Join(sourceDir, "settings.json"))
-}
-
-func processClaudeAuthAvailable() bool {
-	return strings.TrimSpace(os.Getenv(envAnthropicAuthToken)) != "" ||
-		strings.TrimSpace(os.Getenv(envAnthropicAPIKey)) != "" ||
-		strings.TrimSpace(os.Getenv(envClaudeCodeOAuthToken)) != ""
-}
-
-func claudeAccessTokenFromFile(t *testing.T, path string) string {
-	t.Helper()
-
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return ""
-	}
-	require.NoError(t, err)
-
-	var value any
-	require.NoError(t, json.Unmarshal(data, &value))
-
-	return claudeAccessToken(value)
-}
-
-func claudeSettingsAuthAvailable(t *testing.T, path string) bool {
-	t.Helper()
-
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false
-	}
-	require.NoError(t, err)
-
-	var raw map[string]any
-	require.NoError(t, json.Unmarshal(data, &raw))
-
-	env, _ := raw["env"].(map[string]any)
-	return strings.TrimSpace(stringValue(env[envAnthropicAuthToken])) != "" ||
-		strings.TrimSpace(stringValue(env[envAnthropicAPIKey])) != "" ||
-		strings.TrimSpace(stringValue(env[envClaudeCodeOAuthToken])) != ""
-}
-
-func stringValue(value any) string {
-	text, _ := value.(string)
-
-	return text
-}
-
-func claudeAccessToken(value any) string {
-	switch typed := value.(type) {
-	case map[string]any:
-		if oauth, ok := typed["claudeAiOauth"].(map[string]any); ok {
-			if token, ok := oauth["accessToken"].(string); ok {
-				return token
-			}
-		}
-		for _, child := range typed {
-			if token := claudeAccessToken(child); token != "" {
-				return token
-			}
-		}
-	case []any:
-		for _, child := range typed {
-			if token := claudeAccessToken(child); token != "" {
-				return token
-			}
-		}
-	}
-
-	return ""
-}
-
-func mergeClaudeEnv(env map[string]string) claudeacp.Option {
-	return func(options *claudeacp.Options) {
-		if len(env) == 0 {
+	for {
+		if condition(r.snapshot()) {
 			return
 		}
-		if options.Env == nil {
-			options.Env = map[string]string{}
-		}
-		for key, value := range env {
-			if strings.TrimSpace(options.Env[key]) == "" {
-				options.Env[key] = value
-			}
-		}
-	}
-}
-
-func mergedProcessEnv(env map[string]string) []string {
-	if len(env) == 0 {
-		return nil
-	}
-
-	processEnv := os.Environ()
-	seen := make(map[string]struct{}, len(processEnv))
-	for _, item := range processEnv {
-		key, _, ok := strings.Cut(item, "=")
-		if ok {
-			seen[key] = struct{}{}
-		}
-	}
-
-	for key, value := range env {
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		processEnv = append(processEnv, key+"="+value)
-	}
-
-	return processEnv
-}
-
-func permissionGateOptions() []claudeacp.Option {
-	return []claudeacp.Option{
-		claudeacp.WithClaudeDefaultPermissionMode("default"),
-		claudeacp.WithClaudeSettingSources(),
-	}
-}
-
-func requirePortableClaudeAuth(t *testing.T) {
-	t.Helper()
-
-	source, _ := integrationClaudeSourceHome(t)
-	if !portableClaudeAuthAvailable(t, source) {
-		t.Skip("store-backed materialized resume requires portable Claude file/env auth")
-	}
-}
-
-func parallelWhenPortableClaudeAuth(t *testing.T) {
-	t.Helper()
-
-	source, _ := integrationClaudeSourceHome(t)
-	if portableClaudeAuthAvailable(t, source) {
-		t.Parallel()
-	}
-}
-
-func connectLiveAgent(
-	t *testing.T,
-	ctx context.Context,
-	client acp.Client,
-	initReq acp.InitializeRequest,
-	opts ...claudeacp.Option,
-) *acp.ClientSideConnection {
-	t.Helper()
-
-	clientConn := serveLiveAgentForTest(t, ctx, client, opts...)
-
-	if initReq.ProtocolVersion == 0 {
-		initReq.ProtocolVersion = acp.ProtocolVersionNumber
-	}
-	_, err := clientConn.Initialize(ctx, initReq)
-	require.NoError(t, err)
-
-	return clientConn
-}
-
-func serveLiveAgentForTest(
-	t *testing.T,
-	ctx context.Context,
-	client acp.Client,
-	opts ...claudeacp.Option,
-) *acp.ClientSideConnection {
-	t.Helper()
-
-	pipes := serveLiveAgentRawForTest(t, ctx, opts...)
-
-	return acp.NewClientSideConnection(client, pipes.clientInput, pipes.agentOutput)
-}
-
-type liveAgentPipes struct {
-	clientInput io.Writer
-	agentOutput io.Reader
-}
-
-func serveLiveAgentRawForTest(
-	t *testing.T,
-	ctx context.Context,
-	opts ...claudeacp.Option,
-) liveAgentPipes {
-	t.Helper()
-
-	return serveLiveAgentInRuntimeForTest(t, ctx, isolatedClaudeRuntime(t), opts...)
-}
-
-func serveLiveAgentInRuntimeForTest(
-	t *testing.T,
-	ctx context.Context,
-	runtime isolatedClaudeRuntimeConfig,
-	opts ...claudeacp.Option,
-) liveAgentPipes {
-	t.Helper()
-
-	claudePath := integrationClaudePath(t)
-	base := []claudeacp.Option{
-		claudeacp.WithExecutablePath(claudePath),
-		claudeacp.WithHome(runtime.home),
-		claudeacp.WithDefaultModel(os.Getenv("ACP_GO_CLAUDE_MODEL")),
-		claudeacp.WithClaudeInitializeTimeout(30 * time.Second),
-		claudeacp.WithLogger(integrationLogger),
-	}
-
-	c2aR, c2aW := io.Pipe()
-	a2cR, a2cW := io.Pipe()
-	serveCtx, stopServe := context.WithCancel(ctx)
-
-	serveErr := make(chan error, 1)
-	go func() {
-		options := append(base, opts...)
-		options = append(options, mergeClaudeEnv(runtime.env))
-		serveErr <- claudeacp.Serve(serveCtx, c2aR, a2cW, options...)
-	}()
-
-	t.Cleanup(func() {
-		stopServe()
-		_ = c2aR.Close()
-		_ = c2aW.Close()
-		_ = a2cR.Close()
-		_ = a2cW.Close()
 
 		select {
-		case err := <-serveErr:
-			if err != nil && !errors.Is(err, context.Canceled) {
-				t.Logf("live agent serve returned: %v", err)
+		case <-r.changed:
+		case <-deadline:
+			t.Fatalf("condition not met; %d notifications recorded", len(r.snapshot()))
+		}
+	}
+}
+
+func (r *recorder) waitForCount(t *testing.T, count int) {
+	t.Helper()
+	r.waitFor(t, func(updates []acp.SessionNotification) bool { return len(updates) >= count })
+}
+
+// harness serves an agent over pipes to a recording client.
+type harness struct {
+	t        *testing.T
+	conn     *acp.ClientSideConnection
+	rec      *recorder
+	cancel   context.CancelFunc
+	served   chan error
+	stopOnce sync.Once
+	stop     func()
+}
+
+func newHarness(t *testing.T, extra ...claudeacp.Option) *harness {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	clientReader, agentWriter := io.Pipe()
+	agentReader, clientWriter := io.Pipe()
+	rec := newRecorder()
+	served := make(chan error, 1)
+
+	go func() { served <- claudeacp.Serve(ctx, agentReader, agentWriter, extra...) }()
+
+	conn := acp.NewClientSideConnection(rec, clientWriter, clientReader)
+	conn.SetLogger(slog.New(slog.DiscardHandler))
+
+	h := &harness{t: t, conn: conn, rec: rec, cancel: cancel, served: served}
+
+	h.stop = func() {
+		h.stopOnce.Do(func() {
+			cancel()
+			_ = clientWriter.Close()
+			select {
+			case <-served:
+			case <-time.After(testTimeout):
+				t.Error("claudeacp.Serve did not return")
 			}
-		case <-time.After(time.Second):
-			t.Log("live agent serve did not stop within cleanup timeout")
-		}
-	})
+		})
+	}
+	t.Cleanup(h.stop)
 
-	return liveAgentPipes{clientInput: c2aW, agentOutput: a2cR}
+	return h
 }
 
-func serveLiveAgentConnectionForTest(
-	t *testing.T,
-	ctx context.Context,
-	handler acp.MethodHandler,
-	opts ...claudeacp.Option,
-) *acp.Connection {
-	t.Helper()
+func (h *harness) ctx() context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	h.t.Cleanup(cancel)
 
-	pipes := serveLiveAgentRawForTest(t, ctx, opts...)
-
-	return acp.NewConnection(handler, pipes.clientInput, pipes.agentOutput)
+	return ctx
 }
 
-func initializeLiveAgentForTest(
-	t *testing.T,
-	ctx context.Context,
-	client acp.Client,
-	initReq acp.InitializeRequest,
-	opts ...claudeacp.Option,
-) (*acp.ClientSideConnection, acp.InitializeResponse) {
-	t.Helper()
+func (h *harness) initialize(opts ...func(*acp.InitializeRequest)) acp.InitializeResponse {
+	h.t.Helper()
 
-	clientConn := serveLiveAgentForTest(t, ctx, client, opts...)
-	if initReq.ProtocolVersion == 0 {
-		initReq.ProtocolVersion = acp.ProtocolVersionNumber
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	for _, opt := range opts {
+		opt(&request)
 	}
 
-	resp, err := clientConn.Initialize(ctx, initReq)
-	require.NoError(t, err)
-
-	return clientConn, resp
-}
-
-func connectLiveAgentBinary(
-	t *testing.T,
-	ctx context.Context,
-	client acp.Client,
-	initReq acp.InitializeRequest,
-) *acp.ClientSideConnection {
-	t.Helper()
-
-	agentPath := integrationBinaryPath(t)
-
-	claudePath := integrationClaudePath(t)
-	runtime := isolatedClaudeRuntime(t)
-	args := []string{"-path", claudePath, "-home", runtime.home}
-	if model := os.Getenv("ACP_GO_CLAUDE_MODEL"); model != "" {
-		args = append(args, "-model", model)
-	}
-
-	cmd := exec.CommandContext(ctx, agentPath, args...) // #nosec G204,G702 -- test-built adapter.
-
-	cmd.Env = mergedProcessEnv(runtime.env)
-	process := startIntegrationProcess(t, cmd)
-	stdin, stdout := process.stdin, process.stdout
-	stderr := &process.stderr
-
-	clientConn := acp.NewClientSideConnection(client, stdin, stdout)
-	if initReq.ProtocolVersion == 0 {
-		initReq.ProtocolVersion = acp.ProtocolVersionNumber
-	}
-	_, err := clientConn.Initialize(ctx, initReq)
-	require.NoError(t, err, "stderr: %s", stderr.String())
-
-	return clientConn
-}
-
-func promptWithRefusalRetry(
-	t *testing.T,
-	prompt func() (acp.PromptResponse, error),
-) acp.PromptResponse {
-	t.Helper()
-
-	var resp acp.PromptResponse
-	var err error
-	for attempt := 0; attempt <= livePromptRefusalRetries; attempt++ {
-		resp, err = prompt()
-		require.NoError(t, err)
-		if resp.StopReason != acp.StopReasonRefusal || attempt == livePromptRefusalRetries {
-			return resp
-		}
-
-		t.Logf(
-			"live Claude refused prompt on attempt %d/%d; retrying once per integration flake budget",
-			attempt+1,
-			livePromptRefusalRetries+1,
-		)
-	}
+	resp, err := h.conn.Initialize(h.ctx(), request)
+	require.NoError(h.t, err)
 
 	return resp
 }
 
-func findSelectConfig(t *testing.T, options []acp.SessionConfigOption, id acp.SessionConfigId) *acp.SessionConfigOptionSelect {
+func withLifecycle() func(*acp.InitializeRequest) {
+	return func(request *acp.InitializeRequest) {
+		request.Meta = map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}
+	}
+}
+
+func withFormElicitation() func(*acp.InitializeRequest) {
+	return func(request *acp.InitializeRequest) {
+		request.ClientCapabilities.Elicitation = &acp.ElicitationCapabilities{Form: &acp.ElicitationFormCapabilities{}}
+	}
+}
+
+func (h *harness) newSession(opts ...claudeacp.SessionRequestOption) acp.NewSessionResponse {
+	h.t.Helper()
+
+	resp, err := h.conn.NewSession(h.ctx(), claudeacp.NewSessionRequest(h.t.TempDir(), opts...))
+	require.NoError(h.t, err)
+
+	return resp
+}
+
+func (h *harness) prompt(sessionID acp.SessionId, text string, meta map[string]any) (acp.PromptResponse, error) {
+	h.t.Helper()
+
+	request := claudeacp.TextPromptRequest(sessionID, text)
+	request.Meta = meta
+
+	return h.conn.Prompt(h.ctx(), request)
+}
+
+// promptMeta stamps the lifecycle prompt correlation.
+func promptMeta(n int) map[string]any {
+	return map[string]any{wire.LifecycleKey: map[string]any{
+		"version": 1, "submission": map[string]any{"submissionId": fmt.Sprintf("sub-%d", n), "clientNonce": fmt.Sprintf("non-%d", n)},
+	}}
+}
+
+// requestErrorData decodes the data member of a JSON-RPC error.
+func requestErrorData(t *testing.T, err error) map[string]any {
 	t.Helper()
 
-	if option := selectConfig(options, id); option != nil {
-		return option
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+
+	data, ok := reqErr.Data.(map[string]any)
+	if !ok {
+		encoded, marshalErr := json.Marshal(reqErr.Data)
+		require.NoError(t, marshalErr)
+		require.NoError(t, json.Unmarshal(encoded, &data))
 	}
 
-	t.Fatalf("missing config option %q", id)
-
-	return nil
+	return data
 }
 
-func selectConfig(options []acp.SessionConfigOption, id acp.SessionConfigId) *acp.SessionConfigOptionSelect {
-	for _, option := range options {
-		if option.Select != nil && option.Select.Id == id {
-			return option.Select
+func requestErrorCode(t *testing.T, err error) int {
+	t.Helper()
+
+	var reqErr *acp.RequestError
+	require.ErrorAs(t, err, &reqErr)
+
+	return reqErr.Code
+}
+
+// agentText concatenates streamed agent message text.
+func agentText(updates []acp.SessionNotification) string {
+	var text strings.Builder
+
+	for _, update := range updates {
+		if chunk := update.Update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
+			text.WriteString(chunk.Content.Text.Text)
 		}
 	}
 
-	return nil
+	return text.String()
 }
 
-func booleanConfig(options []acp.SessionConfigOption, id acp.SessionConfigId) *acp.SessionConfigOptionBoolean {
-	for _, option := range options {
-		if option.Boolean != nil && option.Boolean.Id == id {
-			return option.Boolean
+// lifecycleEvents extracts the lifecycle envelopes in delivery order.
+func lifecycleEvents(updates []acp.SessionNotification) []map[string]any {
+	events := make([]map[string]any, 0)
+
+	for _, update := range updates {
+		envelope, ok := update.Meta[wire.LifecycleKey].(map[string]any)
+		if !ok {
+			continue
 		}
+
+		event, _ := envelope["event"].(map[string]any)
+		events = append(events, event)
 	}
 
-	return nil
+	return events
 }
 
-func selectConfigValues(option *acp.SessionConfigOptionSelect) []acp.SessionConfigValueId {
-	if option == nil {
-		return nil
-	}
+func eventTypes(events []map[string]any) []string {
+	types := make([]string, 0, len(events))
+	for _, event := range events {
+		kind, _ := event["type"].(string)
+		state, _ := event["state"].(string)
 
-	values := make([]acp.SessionConfigValueId, 0)
-	if option.Options.Ungrouped != nil {
-		for _, candidate := range *option.Options.Ungrouped {
-			values = append(values, candidate.Value)
+		if action, ok := event["action"].(map[string]any); ok {
+			state, _ = action["state"].(string)
 		}
-	}
-	if option.Options.Grouped != nil {
-		for _, group := range *option.Options.Grouped {
-			for _, candidate := range group.Options {
-				values = append(values, candidate.Value)
-			}
+
+		if state != "" {
+			kind += ":" + state
 		}
+
+		types = append(types, kind)
 	}
 
-	return values
-}
-
-func selectConfigValueAvailable(option *acp.SessionConfigOptionSelect, value acp.SessionConfigValueId) bool {
-	return slices.Contains(selectConfigValues(option), value)
-}
-
-func configUpdateSelect(update acp.SessionUpdate, id acp.SessionConfigId) *acp.SessionConfigOptionSelect {
-	if update.ConfigOptionUpdate == nil {
-		return nil
-	}
-
-	return selectConfig(update.ConfigOptionUpdate.ConfigOptions, id)
-}
-
-func TestIntegrationHarnessPrerequisites(t *testing.T) {
-	if os.Args[len(os.Args)-1] == "harness-prerequisite-child" {
-		path := integrationClaudePath(t)
-		t.Log("resolved harness " + path)
-		return
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name, integration, tier, value, outcome string
-		available                               bool
-	}{
-		{name: "ungated", outcome: "SKIP"},
-		{name: "disabled", integration: "0", outcome: "SKIP"},
-		{name: "invalid_gate", integration: "true", outcome: "SKIP"},
-		{name: "missing_smoke", integration: "1", outcome: "SKIP"},
-		{name: "disabled_live", integration: "1", tier: "RUN_LIVE_TOKENS", value: "0", outcome: "SKIP"},
-		{name: "missing_live", integration: "1", tier: "RUN_LIVE_TOKENS", value: "1", outcome: "FAIL"},
-		{name: "missing_attended", integration: "1", tier: "RUN_ATTENDED", value: "1", outcome: "FAIL"},
-		{name: "missing_keystore", integration: "1", tier: "RUN_KEYSTORE", value: "1", outcome: "FAIL"},
-		{name: "fake_path", integration: "1", outcome: "PASS", available: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, suffix := range []string{"RUN_INTEGRATION", "RUN_LIVE_TOKENS", "RUN_ATTENDED", "RUN_KEYSTORE"} {
-				t.Setenv("ACP_GO_CLAUDE_"+suffix, "0")
-			}
-			t.Setenv("ACP_GO_CLAUDE_RUN_INTEGRATION", tc.integration)
-			if tc.tier != "" {
-				t.Setenv("ACP_GO_CLAUDE_"+tc.tier, tc.value)
-			}
-			dir := t.TempDir()
-			harness := filepath.Join(dir, "claude")
-			if runtime.GOOS == "windows" {
-				harness += ".exe"
-			}
-			if tc.available {
-				// Resolution only: this file is never executed.
-				if err := os.WriteFile(harness, []byte("fake harness path"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			t.Setenv("PATH", dir)
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, executable, "-test.run=^TestIntegrationHarnessPrerequisites$", "-test.v", "--", "harness-prerequisite-child")
-			cmd.WaitDelay = time.Second
-			output, runErr := cmd.CombinedOutput()
-			if ctx.Err() != nil {
-				t.Fatal(ctx.Err())
-			}
-			if (runErr != nil) != (tc.outcome == "FAIL") {
-				t.Fatalf("unexpected child result: %v\n%s", runErr, output)
-			}
-			if !strings.Contains(string(output), "--- "+tc.outcome+": TestIntegrationHarnessPrerequisites") {
-				t.Fatalf("want child %s:\n%s", tc.outcome, output)
-			}
-			if tc.available && !strings.Contains(string(output), "resolved harness "+harness) {
-				t.Fatalf("fake harness selection was lost:\n%s", output)
-			}
-		})
-	}
+	return types
 }

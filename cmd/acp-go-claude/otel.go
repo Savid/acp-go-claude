@@ -18,7 +18,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 
 	claudeacp "github.com/savid/acp-go-claude"
-	"github.com/savid/acp-go-claude/internal/observer"
+	"github.com/savid/acp-go-core/observer"
 )
 
 const defaultServiceName = "acp-go-claude"
@@ -87,7 +87,7 @@ func configureTelemetry(ctx context.Context, baseLogger *slog.Logger, version st
 				sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)),
 			)
 			handler := otelslog.NewHandler(
-				observer.InstrumentationName,
+				observer.InstrumentationName("claude"),
 				otelslog.WithLoggerProvider(provider),
 				otelslog.WithVersion(version),
 			)

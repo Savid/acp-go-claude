@@ -2,701 +2,423 @@ package claudeacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"maps"
+	"strconv"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
-	"github.com/savid/acp-go-claude/internal/lifecycle"
-	"github.com/savid/acp-go-claude/internal/mapper"
-	"github.com/savid/acp-go-claude/internal/observer"
+	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/observer"
 )
 
-func (s *agentSession) permissionRule(toolName string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+const permissionOptionAllow acp.PermissionOptionId = "allow"
+const permissionOptionDeny acp.PermissionOptionId = "deny"
 
-	behavior, ok := s.permissionRules[toolName]
-
-	return behavior, ok
-}
-
-func (s *agentSession) setPermissionRule(ctx context.Context, toolName string, behavior string) {
-	if toolName == "" {
+// handleControl publishes any tool state before its callback can run concurrently.
+func (s *session) handleControl(ctx context.Context, rt *runtime, event claude.Event) {
+	if event.Request == nil {
 		return
 	}
 
-	s.permissionSaveMu.Lock()
-	defer s.permissionSaveMu.Unlock()
-
-	s.mu.Lock()
-	if s.permissionRules == nil {
-		s.permissionRules = make(map[string]string)
-	}
-
-	s.permissionRules[toolName] = behavior
-	rules := s.clonePermissionRulesLocked()
-	s.mu.Unlock()
-
-	err := savePermissionRules(ctx, s.agent.claudeConfigDir(s.agent.options.Home), s.id, rules)
-	if err == nil {
-		s.agent.cachePermissionRules(s.id, rules)
-	}
-
-	if err != nil {
-		s.agent.log.WarnContext(ctx, "save permission rules failed",
-			slog.String("stage", "permission_rules_write"))
+	request := *event.Request
+	if request.Subtype == "hook_callback" {
+		_ = rt.client.Reply(ctx, event.RequestID, map[string]any{}, nil)
 
 		return
 	}
-}
-
-func (s *agentSession) clonePermissionRules() map[string]string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.clonePermissionRulesLocked()
-}
-
-func (s *agentSession) clonePermissionRulesLocked() map[string]string {
-	rules := make(map[string]string, len(s.permissionRules))
-	maps.Copy(rules, s.permissionRules)
-
-	return rules
-}
-
-func (s *agentSession) persistPermissionRules(ctx context.Context) {
-	s.permissionSaveMu.Lock()
-	defer s.permissionSaveMu.Unlock()
 
 	s.mu.Lock()
-	rules := s.clonePermissionRulesLocked()
-	s.mu.Unlock()
-
-	err := savePermissionRules(ctx, s.agent.claudeConfigDir(s.agent.options.Home), s.id, rules)
-	if err == nil {
-		s.agent.cachePermissionRules(s.id, rules)
-	}
-
-	if err != nil {
-		s.agent.log.WarnContext(ctx, "save permission rules failed",
-			slog.String("stage", "permission_rules_write"))
-
-		return
-	}
-}
-
-func (s *agentSession) handlePermission(ctx context.Context, request claude.PermissionRequest) (decision claude.PermissionDecision, err error) {
-	if request.ToolName == askUserQuestionTool {
-		return s.handleAskUserQuestion(ctx, request)
-	}
-
-	mode, _, _ := s.modeInfo()
-
-	ctx, finish := s.agent.observe.StartPermission(ctx, request.ToolName, string(mode))
-	defer func() {
-		finish(observer.PermissionResult{
-			Behavior: decision.Behavior,
-			Err:      err,
-			Mode:     string(mode),
-			ToolName: request.ToolName,
-		})
-	}()
-
-	if request.ToolName == exitPlanModeTool {
-		return s.handleExitPlanMode(ctx, request)
-	}
-
-	if behavior, ok := s.permissionRule(request.ToolName); ok {
-		if behavior == claude.BehaviorAllow {
-			return claude.PermissionDecision{Behavior: claude.BehaviorAllow, UpdatedInput: request.Input}, nil
-		}
-
-		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: "Denied by saved ACP permission rule"}, nil
-	}
-
-	conn := s.agent.connection()
-	if conn == nil {
-		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: "ACP client is unavailable"}, nil
-	}
-
-	toolCallID := request.ToolUseID
-	if toolCallID == "" {
-		return claude.PermissionDecision{
-			Behavior: claude.BehaviorDeny,
-			Message:  "Claude permission callback is missing its native tool-use ID",
-		}, nil
-	}
-
-	title := request.Title
-	if title == "" {
-		title = mapper.ToolTitle(request.ToolName, request.Input)
-	}
-
-	info := mapper.ToolCallInfo(request.ToolName, toolCallID, request.Input, mapper.ToolUpdateOptions{
-		Cwd:                    s.cwd,
-		SupportsTerminalOutput: s.agent.clientSupportsTerminalOutput(),
-	})
-	status := acp.ToolCallStatusPending
-	kind := info.Kind
-
-	action, err := s.beginLifecycleAction(ctx, lifecycle.ActionPermission)
-	if err != nil {
-		return claude.PermissionDecision{}, err
-	}
-
-	permissionCtx, finishPermissionRequest := s.permissionRequestContext(ctx, toolCallID, action.interactionOwner())
-	defer finishPermissionRequest()
-
-	actionState := lifecycle.ActionFailed
-
-	defer func() {
-		// The state is read when the deferred resolution runs, not when it is
-		// registered: an action resolves once, with the answer it actually got.
-		if resolveErr := action.resolve(ctx, actionState); resolveErr != nil && err == nil {
-			decision, err = claude.PermissionDecision{}, resolveErr
-		}
-	}()
-
-	emitPending := func() error {
-		return s.emitPendingToolCall(ctx, request.ToolName, toolCallID, title, request.Input, request.Raw)
-	}
-
-	wireAdmission, err := action.prepareWireAdmission(ctx, emitPending)
-	if err != nil {
-		return claude.PermissionDecision{}, err
-	}
-
-	resp, err := conn.RequestPermission(permissionCtx, acp.RequestPermissionRequest{
-		Meta:      action.meta(),
-		SessionId: s.id,
-		ToolCall: acp.ToolCallUpdate{
-			ToolCallId: acp.ToolCallId(toolCallID),
-			Title:      &title,
-			Kind:       &kind,
-			Status:     &status,
-			Content:    info.Content,
-			Locations:  info.Locations,
-			RawInput:   request.Input,
-			Meta:       map[string]any{claudeMetaKey: map[string]any{acpFieldRaw: request.Raw}},
-		},
-		Options: []acp.PermissionOption{
-			{OptionId: permissionAllowOnce, Name: "Allow once", Kind: acp.PermissionOptionKindAllowOnce},
-			{OptionId: permissionAllowAlways, Name: describeAlwaysAllow(request.Suggestions, request.ToolName), Kind: acp.PermissionOptionKindAllowAlways},
-			{OptionId: permissionRejectOnce, Name: "Reject once", Kind: acp.PermissionOptionKindRejectOnce},
-			{OptionId: permissionRejectAlways, Name: "Reject always", Kind: acp.PermissionOptionKindRejectAlways},
-		},
-	}, wireAdmission)
-	if err != nil {
-		actionState = interactionActionState(permissionCtx, permissionActionState(resp, err, permissionAllowsTool))
-
-		if permissionRequestCancelled(err) && s.wasTurnCancelled() {
-			return claude.PermissionDecision{
-				Behavior:  claude.BehaviorDeny,
-				Message:   permissionCancelledMessage,
-				Interrupt: true,
-			}, nil
-		}
-
-		return claude.PermissionDecision{}, err
-	}
-
-	if !action.responseOwnerCurrent() {
-		return claude.PermissionDecision{
-			Behavior: claude.BehaviorDeny,
-			Message:  "Permission response belongs to a retired native incarnation",
-		}, nil
-	}
-
-	actionState = interactionActionState(permissionCtx, permissionActionState(resp, nil, permissionAllowsTool))
-
-	if resp.Outcome.Selected == nil {
-		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: permissionCancelledMessage}, nil
-	}
-
-	switch resp.Outcome.Selected.OptionId {
-	case permissionAllowOnce:
-		return claude.PermissionDecision{Behavior: claude.BehaviorAllow, UpdatedInput: request.Input}, nil
-	case permissionAllowAlways:
-		if len(request.Suggestions) == 0 {
-			s.setPermissionRule(ctx, request.ToolName, claude.BehaviorAllow)
-		}
-
-		return claude.PermissionDecision{
-			Behavior:           claude.BehaviorAllow,
-			UpdatedInput:       request.Input,
-			UpdatedPermissions: permissionSuggestionsForAllowAlways(request.ToolName, request.Suggestions, permissionUpdate(request.ToolName, claude.BehaviorAllow)),
-		}, nil
-	case permissionRejectOnce:
-		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: permissionRejectedMessage}, nil
-	case permissionRejectAlways:
-		s.setPermissionRule(ctx, request.ToolName, claude.BehaviorDeny)
-
-		return claude.PermissionDecision{
-			Behavior:           claude.BehaviorDeny,
-			Message:            permissionRejectedMessage,
-			UpdatedPermissions: []map[string]any{permissionUpdate(request.ToolName, claude.BehaviorDeny)},
-		}, nil
-	default:
-		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: "Unknown permission option selected"}, nil
-	}
-}
-
-func (s *agentSession) permissionRequestContext(
-	ctx context.Context,
-	id string,
-	owner lifecycleInteractionOwner,
-) (context.Context, context.CancelFunc) {
-	if id == "" {
-		return ctx, func() {}
-	}
-
-	permissionCtx, cancelCause := context.WithCancelCause(ctx)
-	cancel := func() { cancelCause(context.Canceled) }
-	fail := func() { cancelCause(errExactInteractionContainment) }
-	entry := &permissionRequestCancel{cancel: cancel, fail: fail, owner: owner}
-
-	s.callbackOwnershipMu.Lock()
-	ownerCurrent := owner.incarnation == nil || s.currentNativeIncarnation() == owner.incarnation
-	s.mu.Lock()
-	if s.permissionCancel == nil {
-		s.permissionCancel = make(map[string]*permissionRequestCancel)
-	}
-
-	ownerFailed := owner.incarnation != nil && owner.incarnation.failed.Load()
+	t := s.turn
+	c := s.cycle
 	closing := s.closing
-
-	if !ownerFailed && ownerCurrent && !closing {
-		s.permissionCancel[id] = entry
-	}
-
-	turnCancelled := s.turnCancelled
 	s.mu.Unlock()
-	s.callbackOwnershipMu.Unlock()
 
-	if ownerFailed || !ownerCurrent {
-		fail()
-	} else if turnCancelled || closing {
-		cancel()
+	if t != nil {
+		s.acceptTurn(ctx, t)
+		c = &t.cycle
 	}
 
-	return permissionCtx, func() {
+	if c == nil && !closing {
+		s.openAgentCycle(ctx)
 		s.mu.Lock()
-		if s.permissionCancel[id] == entry {
-			delete(s.permissionCancel, id)
-		}
+		c = s.cycle
 		s.mu.Unlock()
-
-		cancel()
-	}
-}
-
-func permissionRequestCancelled(err error) bool {
-	if errors.Is(err, context.Canceled) {
-		return true
 	}
 
-	var requestErr *acp.RequestError
-	if !errors.As(err, &requestErr) {
-		return false
+	if c == nil || closing {
+		_ = rt.client.Reply(ctx, event.RequestID, map[string]any{permissionBehavior: permissionOptionDeny, nativeMessage: "Session closed"}, nil)
+
+		return
 	}
 
-	return requestErr.Code == acp.NewRequestCancelled(nil).Code
+	if request.Subtype == controlCanUseTool {
+		if err := s.publishPendingTool(ctx, &c.state, request); err != nil {
+			c.failure = err
+		}
+	}
+
+	dialogCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+
+	unregister := s.registerDialog(event.RequestID, cancel)
+
+	rt.callbacks.Go(func() {
+		defer cancel(nil)
+		defer unregister()
+
+		var (
+			result any
+			err    error
+		)
+
+		switch request.Subtype {
+		case controlCanUseTool:
+			if request.ToolName == "AskUserQuestion" {
+				result = s.answerQuestions(dialogCtx, c, request)
+
+				break
+			}
+
+			permissionCtx, finish := s.agent.observe.StartPermission(dialogCtx, request.ToolName, s.permissionMode())
+			answer := s.requestPermission(permissionCtx, c, request)
+			finish(observer.PermissionResult{Behavior: string(answer), Mode: s.permissionMode(), ToolName: request.ToolName})
+
+			result = map[string]any{permissionBehavior: permissionOptionDeny, nativeMessage: "Permission denied"}
+			if answer == permissionOptionAllow {
+				result = map[string]any{permissionBehavior: "allow", "updatedInput": request.Input}
+			}
+		case controlElicitation:
+			result = s.elicit(dialogCtx, c, request)
+		default:
+			err = errors.New("unsupported native control request")
+		}
+
+		replyCtx, replyCancel := context.WithTimeout(context.WithoutCancel(dialogCtx), sessionAbortTimeout)
+		defer replyCancel()
+
+		if replyErr := rt.client.Reply(replyCtx, event.RequestID, result, err); replyErr != nil {
+			s.agent.log.DebugContext(replyCtx, "native control reply failed", slog.String("session_id", string(s.id)))
+		}
+	})
 }
 
-type permissionRequestCancel struct {
-	cancel context.CancelFunc
-	fail   context.CancelFunc
-	owner  lifecycleInteractionOwner
+func (s *session) elicit(ctx context.Context, c *cycle, request claude.ControlRequest) map[string]any {
+	conn := s.agent.connection()
+
+	cancelled := map[string]any{elicitationAction: "cancel"}
+	if conn == nil {
+		return cancelled
+	}
+
+	var params acp.UnstableCreateElicitationRequest
+
+	if request.Mode == elicitationModeURL {
+		s.agent.mu.Lock()
+		supported := s.agent.clientCapabilities.Elicitation != nil && s.agent.clientCapabilities.Elicitation.Url != nil
+		s.agent.mu.Unlock()
+
+		if !supported {
+			return cancelled
+		}
+
+		params.Url = &acp.UnstableCreateElicitationUrl{Mode: elicitationModeURL, Message: request.Message, Url: request.URL, ElicitationId: acp.UnstableElicitationId(request.ElicitationID)}
+	} else {
+		if !s.agent.clientSupportsFormElicitation() {
+			return cancelled
+		}
+
+		var schema acp.UnstableElicitationSchema
+		if err := json.Unmarshal(request.RequestedSchema, &schema); err != nil {
+			return cancelled
+		}
+
+		params.Form = &acp.UnstableCreateElicitationForm{Mode: elicitationModeForm, Message: request.Message, RequestedSchema: schema}
+	}
+
+	ctx, finish := s.agent.observe.StartElicitation(ctx)
+	response, err := announcedRequest(ctx, s, c, lifecycle.ActionElicitation, func(requestCtx context.Context, meta map[string]any) (acp.UnstableCreateElicitationResponse, error) {
+		if params.Form != nil {
+			params.Form.Meta = meta
+		} else {
+			params.Url.Meta = meta
+		}
+
+		return conn.UnstableCreateElicitation(requestCtx, params)
+	}, func(response acp.UnstableCreateElicitationResponse, err error) lifecycle.ActionState {
+		switch {
+		case err != nil:
+			return lifecycle.ActionFailed
+		case response.Accept != nil:
+			return lifecycle.ActionAccepted
+		case response.Decline != nil:
+			return lifecycle.ActionDeclined
+		default:
+			return lifecycle.ActionCancelled
+		}
+	})
+	finish(observer.ElicitationResult{Accepted: err == nil && response.Accept != nil, Err: err})
+
+	if err != nil {
+		return cancelled
+	}
+
+	if response.Accept != nil {
+		return map[string]any{elicitationAction: "accept", nativeContent: response.Accept.Content}
+	}
+
+	if response.Decline != nil {
+		return map[string]any{elicitationAction: "decline"}
+	}
+
+	return cancelled
 }
 
-func (s *agentSession) handleExitPlanMode(
-	ctx context.Context,
-	request claude.PermissionRequest,
-) (decision claude.PermissionDecision, planErr error) {
+func (s *session) requestPermission(ctx context.Context, c *cycle, prompt claude.ControlRequest) acp.PermissionOptionId {
 	conn := s.agent.connection()
 	if conn == nil {
-		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: "ACP client is unavailable"}, nil
+		return permissionOptionDeny
 	}
 
-	turnCtx, active := s.activeControlCallbackContext(ctx)
-	if !active {
-		return claude.PermissionDecision{
-			Behavior: claude.BehaviorDeny,
-			Message:  exitPlanModeOutsideMessage,
-		}, nil
-	}
-
-	ctx = turnCtx
-
-	toolCallID := request.ToolUseID
-	if toolCallID == "" {
-		return claude.PermissionDecision{
-			Behavior: claude.BehaviorDeny,
-			Message:  "ExitPlanMode callback is missing its native tool-use ID",
-		}, nil
-	}
-
-	_, model, availableModels := s.modeInfo()
-	options := exitPlanModeOptions(model, availableModels, s.bypassPermissionsOffered())
-	info := mapper.ToolCallInfo(request.ToolName, toolCallID, request.Input, mapper.ToolUpdateOptions{
-		Cwd:                    s.cwd,
-		SupportsTerminalOutput: s.agent.clientSupportsTerminalOutput(),
-	})
+	kind := toolKindForName(prompt.ToolName)
 	status := acp.ToolCallStatusPending
-	title := info.Title
+	title := prompt.ToolName
 
-	if request.Title != "" {
-		title = request.Title
+	toolCall := acp.ToolCallUpdate{
+		ToolCallId: acp.ToolCallId(prompt.ToolUseID),
+		Title:      &title,
+		Kind:       &kind,
+		Status:     &status,
+	}
+	if len(prompt.Input) > 0 {
+		toolCall.RawInput = prompt.Input
 	}
 
-	action, err := s.beginLifecycleAction(ctx, lifecycle.ActionPermission)
+	resp, err := announcedRequest(ctx, s, c, lifecycle.ActionPermission,
+		func(requestCtx context.Context, meta map[string]any) (acp.RequestPermissionResponse, error) {
+			return conn.RequestPermission(requestCtx, acp.RequestPermissionRequest{
+				Meta:      meta,
+				SessionId: s.id,
+				ToolCall:  toolCall,
+				Options: []acp.PermissionOption{
+					{OptionId: permissionOptionAllow, Name: "Allow", Kind: acp.PermissionOptionKindAllowOnce},
+					{OptionId: permissionOptionDeny, Name: "Deny", Kind: acp.PermissionOptionKindRejectOnce},
+				},
+			})
+		},
+		func(resp acp.RequestPermissionResponse, err error) lifecycle.ActionState {
+			switch {
+			case err != nil:
+				return lifecycle.ActionFailed
+			case resp.Outcome.Selected == nil:
+				return lifecycle.ActionCancelled
+			case resp.Outcome.Selected.OptionId == permissionOptionAllow:
+				return lifecycle.ActionAccepted
+			default:
+				return lifecycle.ActionDeclined
+			}
+		})
+	if err != nil || resp.Outcome.Selected == nil || resp.Outcome.Selected.OptionId != permissionOptionAllow {
+		return permissionOptionDeny
+	}
+
+	return permissionOptionAllow
+}
+
+// announcedRequest sends one client request that holds native work, announces
+// the action it answers once the request is on the wire, and resolves that
+// action exactly once.
+func announcedRequest[T any](
+	ctx context.Context,
+	s *session,
+	c *cycle,
+	kind lifecycle.ActionKind,
+	send func(context.Context, map[string]any) (T, error),
+	resolved func(T, error) lifecycle.ActionState,
+) (T, error) {
+	var zero T
+
+	releaseCall, err := s.agent.acquireClientCall()
 	if err != nil {
-		return claude.PermissionDecision{}, err
+		return zero, err
+	}
+	defer releaseCall()
+
+	actionID, err := s.reserveAction(c)
+	if err != nil {
+		return zero, err
 	}
 
-	permissionCtx, finishPermissionRequest := s.permissionRequestContext(ctx, toolCallID, action.interactionOwner())
-	defer finishPermissionRequest()
+	if actionID == "" {
+		return send(ctx, nil)
+	}
 
-	actionState := lifecycle.ActionFailed
+	type answer struct {
+		value T
+		err   error
+	}
 
-	defer func() {
-		if resolveErr := action.resolve(ctx, actionState); resolveErr != nil && planErr == nil {
-			decision, planErr = claude.PermissionDecision{}, resolveErr
-		}
+	answers := make(chan answer, 1)
+
+	var written <-chan struct{}
+	if t := s.agent.transportRef(); t != nil {
+		written = t.AwaitRequestWrite(actionID)
+	}
+
+	go func() {
+		value, err := send(ctx, s.actionCorrelation(c, actionID))
+		answers <- answer{value: value, err: err}
 	}()
 
-	emitPending := func() error {
-		return s.emitPendingToolCall(ctx, request.ToolName, toolCallID, title, request.Input, request.Raw)
+	if written != nil {
+		select {
+		case <-written:
+		case result := <-answers:
+			answers <- result
+		}
 	}
 
-	wireAdmission, err := action.prepareWireAdmission(ctx, emitPending)
+	if err := s.lcActionPendingWithID(ctx, c, actionID, kind); err != nil {
+		s.agent.log.ErrorContext(ctx, "announce lifecycle action failed",
+			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
+	}
+
+	result := <-answers
+	state := resolved(result.value, result.err)
+
+	if result.err != nil && errors.Is(context.Cause(ctx), errDialogCancelled) {
+		state = lifecycle.ActionCancelled
+	}
+
+	if err := s.lcActionResolved(context.WithoutCancel(ctx), c, actionID, state); err != nil {
+		s.agent.log.ErrorContext(ctx, "resolve lifecycle action failed",
+			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
+	}
+
+	return result.value, result.err
+}
+
+func (s *session) reserveAction(c *cycle) (string, error) {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
+
+	if s.lc.stream == nil || s.lc.stream.Fenced() || c.turnID == "" {
+		return "", nil
+	}
+
+	return s.nextLifecycleID(elicitationAction), nil
+}
+
+func toolKindForName(name string) acp.ToolKind {
+	switch name {
+	case "Read":
+		return acp.ToolKindRead
+	case "Edit", "Write", "NotebookEdit":
+		return acp.ToolKindEdit
+	case "Bash":
+		return acp.ToolKindExecute
+	case "Grep", "Glob":
+		return acp.ToolKindSearch
+	case "WebFetch":
+		return acp.ToolKindFetch
+	default:
+		return acp.ToolKindOther
+	}
+}
+
+const nativeMessage = "message"
+
+// answerQuestions returns answers in the native tool's updated input.
+func (s *session) answerQuestions(ctx context.Context, c *cycle, request claude.ControlRequest) map[string]any {
+	denied := map[string]any{permissionBehavior: permissionOptionDeny, nativeMessage: "Question cancelled"}
+
+	encoded, err := json.Marshal(request.Input["questions"])
 	if err != nil {
-		return claude.PermissionDecision{}, err
+		return denied
 	}
 
-	selectionAllows := func(option acp.PermissionOptionId) bool {
-		return exitPlanModeSelectionAllows(acp.SessionModeId(option), options)
+	var questions []struct {
+		Question    string `json:"question"`
+		MultiSelect bool   `json:"multiSelect"`
+		Options     []struct {
+			Label       string `json:"label"`
+			Description string `json:"description"`
+		} `json:"options"`
+	}
+	if json.Unmarshal(encoded, &questions) != nil || len(questions) == 0 {
+		return denied
 	}
 
-	resp, err := conn.RequestPermission(permissionCtx, acp.RequestPermissionRequest{
-		Meta:      action.meta(),
-		SessionId: s.id,
-		ToolCall: acp.ToolCallUpdate{
-			ToolCallId: acp.ToolCallId(toolCallID),
-			Title:      &title,
-			Kind:       &info.Kind,
-			Status:     &status,
-			Content:    info.Content,
-			Locations:  info.Locations,
-			RawInput:   request.Input,
-			Meta:       map[string]any{claudeMetaKey: map[string]any{acpFieldRaw: request.Raw}},
-		},
-		Options: options,
-	}, wireAdmission)
-	if err != nil {
-		actionState = interactionActionState(permissionCtx, permissionActionState(resp, err, selectionAllows))
+	properties := make(map[string]any)
 
-		return claude.PermissionDecision{}, err
-	}
+	required := make([]string, 0, len(questions))
+	for index, question := range questions {
+		key := "q" + strconv.Itoa(index)
+		required = append(required, key)
 
-	if !action.responseOwnerCurrent() {
-		return claude.PermissionDecision{
-			Behavior: claude.BehaviorDeny,
-			Message:  exitPlanModeOutsideMessage,
-		}, nil
-	}
-
-	actionState = interactionActionState(permissionCtx, permissionActionState(resp, nil, selectionAllows))
-
-	if resp.Outcome.Selected == nil {
-		return claude.PermissionDecision{Behavior: claude.BehaviorDeny, Message: permissionCancelledMessage}, nil
-	}
-
-	selectedMode := acp.SessionModeId(resp.Outcome.Selected.OptionId)
-	if !exitPlanModeSelectionAllows(selectedMode, options) {
-		return claude.PermissionDecision{
-			Behavior: claude.BehaviorDeny,
-			Message:  "User rejected request to exit plan mode.",
-		}, nil
-	}
-
-	turnCtx, active = s.activeControlCallbackContext(ctx)
-	if !active {
-		return claude.PermissionDecision{
-			Behavior: claude.BehaviorDeny,
-			Message:  exitPlanModeOutsideMessage,
-		}, nil
-	}
-
-	ctx = turnCtx
-
-	s.setMode(selectedMode)
-
-	if err := s.emitUpdates(ctx, []acp.SessionUpdate{
-		{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{ConfigOptions: sessionConfigOptions(s)}},
-	}); err != nil {
-		return claude.PermissionDecision{}, err
-	}
-
-	return claude.PermissionDecision{
-		Behavior:           claude.BehaviorAllow,
-		UpdatedInput:       request.Input,
-		UpdatedPermissions: permissionSuggestionsOrFallback(request.Suggestions, permissionModeUpdate(selectedMode)),
-	}, nil
-}
-
-func (s *agentSession) emitPendingToolCall(
-	ctx context.Context,
-	toolName string,
-	toolCallID string,
-	title string,
-	input map[string]any,
-	raw map[string]any,
-) error {
-	info := mapper.ToolCallInfo(toolName, toolCallID, input, mapper.ToolUpdateOptions{
-		Cwd:                    s.cwd,
-		SupportsTerminalOutput: s.agent.clientSupportsTerminalOutput(),
-	})
-	if title == "" {
-		title = info.Title
-	}
-
-	update := acp.StartToolCall(
-		acp.ToolCallId(toolCallID),
-		title,
-		acp.WithStartKind(info.Kind),
-		acp.WithStartStatus(acp.ToolCallStatusPending),
-		acp.WithStartContent(info.Content),
-		acp.WithStartLocations(info.Locations),
-		acp.WithStartRawInput(input),
-	)
-	update.ToolCall.Meta = map[string]any{claudeMetaKey: map[string]any{
-		"toolName":  toolName,
-		acpFieldRaw: raw,
-	}}
-
-	return s.emitUpdates(ctx, []acp.SessionUpdate{update})
-}
-
-func exitPlanModeOptions(model string, availableModels []claude.AvailableModelInfo, bypassAvailable bool) []acp.PermissionOption {
-	candidates := []acp.PermissionOption{
-		{
-			OptionId: acp.PermissionOptionId(modeBypassPermissions),
-			Name:     "Yes, and bypass permissions",
-			Kind:     acp.PermissionOptionKindAllowAlways,
-		},
-		{
-			OptionId: acp.PermissionOptionId(modeAuto),
-			Name:     `Yes, and use "auto" mode`,
-			Kind:     acp.PermissionOptionKindAllowAlways,
-		},
-		{
-			OptionId: acp.PermissionOptionId(modeAcceptEdits),
-			Name:     "Yes, and auto-accept edits",
-			Kind:     acp.PermissionOptionKindAllowAlways,
-		},
-		{
-			OptionId: acp.PermissionOptionId(modeDefault),
-			Name:     "Yes, and manually approve edits",
-			Kind:     acp.PermissionOptionKindAllowOnce,
-		},
-		{
-			OptionId: acp.PermissionOptionId(modePlan),
-			Name:     "No, keep planning",
-			Kind:     acp.PermissionOptionKindRejectOnce,
-		},
-	}
-
-	options := make([]acp.PermissionOption, 0, len(candidates))
-	for _, option := range candidates {
-		if modeAvailableForModel(acp.SessionModeId(option.OptionId), model, availableModels, bypassAvailable) {
-			options = append(options, option)
-		}
-	}
-
-	return options
-}
-
-func exitPlanModeSelectionAllows(selected acp.SessionModeId, options []acp.PermissionOption) bool {
-	switch selected {
-	case modeDefault, modeAcceptEdits, modeAuto, modeBypassPermissions:
-	default:
-		return false
-	}
-
-	for _, option := range options {
-		if option.OptionId == acp.PermissionOptionId(selected) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func permissionUpdate(toolName string, behavior string) map[string]any {
-	return map[string]any{
-		jsonFieldType:               permissionUpdateAddRules,
-		permissionUpdateBehavior:    behavior,
-		permissionUpdateDestination: permissionUpdateSession,
-		permissionUpdateRules: []map[string]any{
-			{permissionUpdateToolName: toolName},
-		},
-	}
-}
-
-func permissionSuggestionsOrFallback(suggestions []map[string]any, fallback map[string]any) []map[string]any {
-	if len(suggestions) > 0 {
-		return suggestions
-	}
-
-	return []map[string]any{fallback}
-}
-
-func permissionSuggestionsForAllowAlways(toolName string, suggestions []map[string]any, fallback map[string]any) []map[string]any {
-	if !strings.EqualFold(toolName, workflowTool) || len(suggestions) == 0 {
-		return permissionSuggestionsOrFallback(suggestions, fallback)
-	}
-
-	normalized := make([]map[string]any, 0, len(suggestions))
-	for _, suggestion := range suggestions {
-		normalized = append(normalized, normalizeWorkflowPermissionSuggestion(suggestion))
-	}
-
-	return normalized
-}
-
-func normalizeWorkflowPermissionSuggestion(suggestion map[string]any) map[string]any {
-	cloned, _ := clonePermissionSuggestionValue(suggestion).(map[string]any)
-
-	if stringValue(cloned[jsonFieldType]) != permissionUpdateAddRules ||
-		stringValue(cloned[permissionUpdateBehavior]) != claude.BehaviorAllow ||
-		stringValue(cloned[permissionUpdateDestination]) != permissionUpdateLocalSettings {
-		return cloned
-	}
-
-	for _, rule := range permissionRuleMaps(cloned[permissionUpdateRules]) {
-		if workflowPermissionRuleName(stringValue(rule[permissionUpdateToolName])) {
-			cloned[permissionUpdateDestination] = permissionUpdateSession
-
-			break
-		}
-	}
-
-	return cloned
-}
-
-func workflowPermissionRuleName(toolName string) bool {
-	return strings.HasPrefix(toolName, workflowTool+"(")
-}
-
-func permissionRuleMaps(value any) []map[string]any {
-	switch typed := value.(type) {
-	case []map[string]any:
-		return append([]map[string]any(nil), typed...)
-	default:
-		return mapSliceAny(value)
-	}
-}
-
-func clonePermissionSuggestionValue(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		cloned := make(map[string]any, len(typed))
-		for key, value := range typed {
-			cloned[key] = clonePermissionSuggestionValue(value)
+		choices := make([]string, 0, len(question.Options))
+		for _, option := range question.Options {
+			choices = append(choices, option.Label)
 		}
 
-		return cloned
-	case []any:
-		cloned := make([]any, len(typed))
-		for i, value := range typed {
-			cloned[i] = clonePermissionSuggestionValue(value)
+		property := map[string]any{schemaTypeKey: schemaTypeString, "title": question.Question, "enum": choices}
+		if question.MultiSelect {
+			property = map[string]any{schemaTypeKey: "array", "title": question.Question, "items": map[string]any{schemaTypeKey: schemaTypeString, "enum": choices}}
 		}
 
-		return cloned
-	case []map[string]any:
-		cloned := make([]map[string]any, len(typed))
-		for i, value := range typed {
-			cloned[i], _ = clonePermissionSuggestionValue(value).(map[string]any)
+		properties[key] = property
+	}
+
+	schema, _ := json.Marshal(map[string]any{schemaTypeKey: "object", "properties": properties, "required": required})
+
+	response := s.elicit(ctx, c, claude.ControlRequest{Mode: elicitationModeForm, Message: "Claude needs your input.", RequestedSchema: schema})
+	if response[elicitationAction] != "accept" {
+		return denied
+	}
+
+	content, ok := response[nativeContent].(map[string]any)
+	if !ok {
+		return denied
+	}
+
+	answers := make(map[string]string, len(questions))
+	for index, question := range questions {
+		value := content["q"+strconv.Itoa(index)]
+		if text, ok := value.(string); ok {
+			answers[question.Question] = text
+
+			continue
 		}
 
-		return cloned
-	case []string:
-		return append([]string(nil), typed...)
-	default:
-		return typed
-	}
-}
+		values, ok := value.([]any)
+		if !ok {
+			return denied
+		}
 
-func describeAlwaysAllow(suggestions []map[string]any, toolName string) string {
-	if len(suggestions) == 0 {
-		return "Always Allow all " + toolName
-	}
-
-	ruleLabels := make([]string, 0, len(suggestions))
-	directories := make([]string, 0, len(suggestions))
-
-	for _, suggestion := range suggestions {
-		switch stringValue(suggestion[jsonFieldType]) {
-		case permissionUpdateAddRules:
-			if stringValue(suggestion[permissionUpdateBehavior]) != claude.BehaviorAllow {
-				continue
+		labels := make([]string, 0, len(values))
+		for _, value := range values {
+			label, ok := value.(string)
+			if !ok {
+				return denied
 			}
 
-			for _, rule := range mapSliceAny(suggestion[permissionUpdateRules]) {
-				ruleTool := stringValue(rule[permissionUpdateToolName])
-				if ruleTool == "" {
-					continue
-				}
-
-				if content := stringValue(rule[permissionUpdateRuleContent]); content != "" {
-					ruleLabels = append(ruleLabels, ruleTool+"("+content+")")
-				} else {
-					ruleLabels = append(ruleLabels, "all "+ruleTool)
-				}
-			}
-		case permissionUpdateAddDirs:
-			directories = append(directories, stringSliceValue(suggestion[permissionUpdateDirectories])...)
+			labels = append(labels, label)
 		}
+
+		answers[question.Question] = strings.Join(labels, ", ")
 	}
 
-	parts := make([]string, 0, 2)
-	if len(ruleLabels) > 0 {
-		parts = append(parts, strings.Join(ruleLabels, ", "))
-	}
+	input := maps.Clone(request.Input)
+	input["answers"] = answers
 
-	if len(directories) > 0 {
-		parts = append(parts, "access to "+strings.Join(directories, ", "))
-	}
-
-	if len(parts) == 0 {
-		return "Always Allow all " + toolName
-	}
-
-	return "Always Allow " + strings.Join(parts, " and ")
+	return map[string]any{permissionBehavior: "allow", "updatedInput": input}
 }
 
-func mapSliceAny(value any) []map[string]any {
-	values, _ := value.([]any)
-
-	result := make([]map[string]any, 0, len(values))
-	for _, value := range values {
-		raw, _ := value.(map[string]any)
-		if raw != nil {
-			result = append(result, raw)
-		}
-	}
-
-	return result
-}
-
-func permissionModeUpdate(mode acp.SessionModeId) map[string]any {
-	return map[string]any{
-		jsonFieldType:               permissionUpdateSetMode,
-		jsonFieldMode:               string(mode),
-		permissionUpdateDestination: permissionUpdateSession,
-	}
-}
+const (
+	elicitationModeURL  = "url"
+	elicitationModeForm = "form"
+	schemaTypeString    = "string"
+	schemaTypeKey       = "type"
+)

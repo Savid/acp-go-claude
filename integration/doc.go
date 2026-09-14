@@ -1,8 +1,6 @@
-//go:build integration
-
-// Package integration contains live Claude CLI integration coverage.
-//
-// Run with both the integration build tag and ACP_GO_CLAUDE_RUN_INTEGRATION=1.
-// These tests launch the real local claude binary and require an authenticated
-// Claude Code installation.
+// Package integration exercises the installed Claude Code through ACP.
+// Smoke runs require ACP_GO_CLAUDE_RUN_INTEGRATION=1; token-spending runs also
+// require ACP_GO_CLAUDE_RUN_LIVE_TOKENS=1. ACP_GO_CLAUDE_HOME supplies portable
+// credentials copied into a temporary home. Native auth environment variables
+// are inherited. ACP_GO_CLAUDE_MODEL selects the model for live tests.
 package integration

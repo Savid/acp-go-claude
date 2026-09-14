@@ -66,7 +66,7 @@ func (s *session) handleControl(ctx context.Context, rt *runtime, event claude.E
 
 	unregister := s.registerDialog(event.RequestID, cancel)
 
-	rt.callbacks.Go(func() {
+	go func() {
 		defer cancel(nil)
 		defer unregister()
 
@@ -103,7 +103,7 @@ func (s *session) handleControl(ctx context.Context, rt *runtime, event claude.E
 		if replyErr := rt.client.Reply(replyCtx, event.RequestID, result, err); replyErr != nil {
 			s.agent.log.DebugContext(replyCtx, "native control reply failed", slog.String("session_id", string(s.id)))
 		}
-	})
+	}()
 }
 
 func (s *session) elicit(ctx context.Context, c *cycle, request claude.ControlRequest) map[string]any {

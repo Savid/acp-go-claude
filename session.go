@@ -39,6 +39,7 @@ const (
 // session is one ACP session: one claude conversation, driven by one live claude
 // process at a time.
 type session struct {
+	callbacks             sync.WaitGroup
 	agent                 *Agent
 	id                    acp.SessionId
 	cwd                   string
@@ -80,11 +81,10 @@ type session struct {
 
 // runtime is one claude process generation.
 type runtime struct {
-	proc      *process.Process
-	client    *claude.Client
-	stderr    *stderrTail
-	cancel    context.CancelFunc
-	callbacks sync.WaitGroup
+	proc   *process.Process
+	client *claude.Client
+	stderr *stderrTail
+	cancel context.CancelFunc
 	// done is closed when the pump has stopped routing this generation.
 	done chan struct{}
 }
@@ -506,8 +506,6 @@ func (s *session) settleAgentCycle(ctx context.Context, c *cycle) {
 // failed; the incarnation's lifecycle stream is fenced once its last terminal
 // event is out.
 func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
-	s.cancelDialogs()
-	rt.callbacks.Wait()
 	s.mu.Lock()
 	if s.runtime == rt {
 		s.runtime = nil
@@ -518,6 +516,8 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 	s.cycle = nil
 	closing := s.closing
 	s.mu.Unlock()
+	s.cancelDialogs()
+	s.callbacks.Wait()
 
 	if c != nil && !closing {
 		_ = s.lcIdle(ctx, c, cycleVerdict{outcome: lifecycle.OutcomeFailed})
@@ -620,21 +620,32 @@ func (s *session) timeout(ctx context.Context, t *turn) {
 
 func (s *session) registerDialog(id string, cancel context.CancelCauseFunc) func() {
 	s.mu.Lock()
+	if s.closing || s.runtime == nil || (s.turn != nil && (s.turn.cancelled || s.turn.timedOut)) {
+		s.mu.Unlock()
+		cancel(errDialogCancelled)
+
+		return func() {}
+	}
+
 	if s.dialogs == nil {
 		s.dialogs = make(map[string]*dialog)
 	}
+
+	s.callbacks.Add(1)
 
 	entry := &dialog{cancel: cancel}
 	s.dialogs[id] = entry
 	s.mu.Unlock()
 
-	return func() {
+	return sync.OnceFunc(func() {
+		defer s.callbacks.Done()
+
 		s.mu.Lock()
 		if s.dialogs[id] == entry {
 			delete(s.dialogs, id)
 		}
 		s.mu.Unlock()
-	}
+	})
 }
 
 func (s *session) cancelDialogs() {
@@ -689,6 +700,13 @@ func (s *session) poisonSession(ctx context.Context, cause string) {
 // acquireGate admits one foreground operation. limit names the backpressure
 // token a refusal carries.
 func (s *session) acquireGate(limit string) (func(), error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closing {
+		return nil, wire.UnknownSession()
+	}
+
 	select {
 	case s.gate <- struct{}{}:
 		return func() { <-s.gate }, nil
@@ -721,6 +739,7 @@ func (s *session) close(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.cancelDialogs()
+	s.callbacks.Wait()
 
 	if t != nil {
 		if rt != nil {

@@ -209,3 +209,89 @@ func TestCloseCommitsAfterMirrorFailureWithoutReopeningStream(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
 }
+
+func TestConcurrentColdRestoreIsRefusedBeforeBinding(t *testing.T) {
+	t.Parallel()
+	store := &blockedLoadStore{SessionStore: acpcore.NewInMemorySessionStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	store.block.Store(true)
+	done := make(chan error, 1)
+	ctx := h.ctx()
+	go func() {
+		_, loadErr := h.conn.LoadSession(ctx, LoadSessionRequest(session.SessionId, cwd))
+		done <- loadErr
+	}()
+	select {
+	case <-store.entered:
+	case <-ctx.Done():
+		t.Fatal("load did not reach configuration")
+	}
+	_, err = h.conn.ResumeSession(h.ctx(), ResumeSessionRequest(session.SessionId, cwd))
+	close(store.release)
+	require.Equal(t, "session_restore", requestErrorData(t, err)["limit"])
+	require.NoError(t, <-done)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+}
+
+func TestLiveResumeAppliesOptionsAndRetainsDirectories(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd, directory := t.TempDir(), t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), NewSessionRequest(cwd, WithSessionAdditionalDirectories(directory)))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.ResumeSession(h.ctx(), ResumeSessionRequest(session.SessionId, cwd,
+		WithSessionClaudeOptions(NewClaudeOptions(WithClaudeModel("sonnet")))))
+	require.NoError(t, err)
+	rows, err := store.Load(h.ctx(), acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: "config"})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	var record sessionRecord
+	require.NoError(t, json.Unmarshal(rows[0], &record))
+	require.Equal(t, "sonnet", record.Model)
+	require.Equal(t, []string{directory}, record.AdditionalDirectories)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+}
+
+func TestRestoreIntoDifferentNativeHome(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	home := t.TempDir()
+	restored := newHarness(t, WithSessionStore(store), WithHome(home))
+	restored.initialize()
+	_, err = restored.conn.LoadSession(restored.ctx(), LoadSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+	_, err = restored.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	rows, err := store.Load(restored.ctx(), acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: "config"})
+	require.NoError(t, err)
+	var record sessionRecord
+	require.Len(t, rows, 1)
+	require.NoError(t, json.Unmarshal(rows[0], &record))
+	relative, err := filepath.Rel(home, record.SessionFile)
+	require.NoError(t, err)
+	require.True(t, filepath.IsLocal(relative))
+	require.FileExists(t, record.SessionFile)
+}

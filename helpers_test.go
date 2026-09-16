@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	acpcore "github.com/savid/acp-go-core"
+
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
 
@@ -31,16 +33,15 @@ func TestMain(m *testing.M) {
 const testTimeout = 60 * time.Second
 
 // testOptions configures an agent that launches the test binary as claude, with
-// an isolated claude home and scratch directory.
+// an isolated claude home.
 func testOptions(t *testing.T, extra ...Option) []Option {
 	t.Helper()
 
-	options := make([]Option, 0, 5+len(extra))
+	options := make([]Option, 0, 4+len(extra))
 	options = append(options,
 		WithExecutablePath(os.Args[0]),
 		WithEnv(map[string]string{fakeClaudeEnv: "1"}),
 		WithHome(filepath.Join(t.TempDir(), "home")),
-		WithScratchDir(filepath.Join(t.TempDir(), "scratch")),
 		WithLogger(slog.New(slog.DiscardHandler)),
 	)
 
@@ -180,11 +181,10 @@ func (r *recorder) waitFor(t *testing.T, condition func([]acp.SessionNotificatio
 
 // harness serves an agent over pipes to a recording client.
 type harness struct {
-	t      *testing.T
-	conn   *acp.ClientSideConnection
-	rec    *recorder
-	cancel context.CancelFunc
-	served chan error
+	input *requestWriter
+	t     *testing.T
+	conn  *acp.ClientSideConnection
+	rec   *recorder
 }
 
 func newHarness(t *testing.T, extra ...Option) *harness {
@@ -198,10 +198,11 @@ func newHarness(t *testing.T, extra ...Option) *harness {
 
 	go func() { served <- Serve(ctx, agentReader, agentWriter, testOptions(t, extra...)...) }()
 
-	conn := acp.NewClientSideConnection(rec, clientWriter, clientReader)
+	input := &requestWriter{Writer: clientWriter}
+	conn := acp.NewClientSideConnection(rec, input, clientReader)
 	conn.SetLogger(slog.New(slog.DiscardHandler))
 
-	h := &harness{t: t, conn: conn, rec: rec, cancel: cancel, served: served}
+	h := &harness{t: t, conn: conn, rec: rec, input: input}
 
 	t.Cleanup(func() {
 		cancel()
@@ -250,10 +251,10 @@ func withFormElicitation() func(*acp.InitializeRequest) {
 	}
 }
 
-func (h *harness) newSession(opts ...SessionRequestOption) acp.NewSessionResponse {
+func (h *harness) newSession(opts ...wire.SessionRequestOption) acp.NewSessionResponse {
 	h.t.Helper()
 
-	resp, err := h.conn.NewSession(h.ctx(), NewSessionRequest(h.t.TempDir(), opts...))
+	resp, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(h.t.TempDir(), opts...))
 	require.NoError(h.t, err)
 
 	return resp
@@ -262,10 +263,23 @@ func (h *harness) newSession(opts ...SessionRequestOption) acp.NewSessionRespons
 func (h *harness) prompt(sessionID acp.SessionId, text string, meta map[string]any) (acp.PromptResponse, error) {
 	h.t.Helper()
 
-	request := TextPromptRequest(sessionID, text)
+	request := wire.TextPromptRequest(sessionID, text)
 	request.Meta = meta
 
 	return h.conn.Prompt(h.ctx(), request)
+}
+
+// lifecycleIncarnations counts the opening snapshots in the recorded stream.
+func lifecycleIncarnations(updates []acp.SessionNotification) int {
+	count := 0
+
+	for _, kind := range eventTypes(lifecycleEvents(updates)) {
+		if kind == "lifecycle_snapshot" {
+			count++
+		}
+	}
+
+	return count
 }
 
 // promptMeta stamps the lifecycle prompt correlation.
@@ -349,4 +363,44 @@ func eventTypes(events []map[string]any) []string {
 	}
 
 	return types
+}
+
+func loadEntries(ctx context.Context, store acpcore.SessionStore, key acpcore.SessionKey) ([]acpcore.SessionStoreEntry, error) {
+	generation, err := store.Load(ctx, key.SessionID)
+
+	return generation[key.Subpath], err
+}
+
+// requestWriter retains the wire JSON-RPC id of the latest prompt so a test
+// can cancel that request without also sending session/cancel.
+type requestWriter struct {
+	io.Writer
+	mu       sync.Mutex
+	promptID json.RawMessage
+}
+
+func (w *requestWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var frame struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+	}
+	if json.Unmarshal(data, &frame) == nil && frame.Method == acp.AgentMethodSessionPrompt {
+		w.promptID = frame.ID
+	}
+
+	return w.Writer.Write(data)
+}
+
+func (w *requestWriter) cancelPrompt() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "$/cancel_request", "params": map[string]any{"requestId": w.promptID}})
+	if err != nil {
+		return err
+	}
+	_, err = w.Writer.Write(append(data, '\n'))
+
+	return err
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/observer"
+	"github.com/savid/acp-go-core/wire"
 )
 
 const permissionOptionAllow acp.PermissionOptionId = "allow"
@@ -57,9 +58,7 @@ func (s *session) handleControl(ctx context.Context, rt *runtime, event claude.E
 	}
 
 	if request.Subtype == controlCanUseTool {
-		if err := s.publishPendingTool(ctx, &c.state, request); err != nil {
-			c.failure = err
-		}
+		s.recordFailure(c, s.publishPendingTool(ctx, &c.state, request))
 	}
 
 	dialogCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
@@ -247,69 +246,40 @@ func announcedRequest[T any](
 	}
 	defer releaseCall()
 
-	actionID, err := s.reserveAction(c)
-	if err != nil {
-		return zero, err
-	}
-
+	actionID := s.reserveAction(c)
 	if actionID == "" {
 		return send(ctx, nil)
 	}
 
-	type answer struct {
-		value T
-		err   error
-	}
-
-	answers := make(chan answer, 1)
-
-	var written <-chan struct{}
-	if t := s.agent.transportRef(); t != nil {
-		written = t.AwaitRequestWrite(actionID)
-	}
-
-	go func() {
-		value, err := send(ctx, s.actionCorrelation(c, actionID))
-		answers <- answer{value: value, err: err}
-	}()
-
-	if written != nil {
-		select {
-		case <-written:
-		case result := <-answers:
-			answers <- result
+	value, callErr := wire.CallAndAnnounce(ctx, s.agent.transportRef(), s.lc.Correlation(c.Cycle, actionID), send, func() {
+		if err := s.lc.ActionPending(ctx, c.Cycle, actionID, kind); err != nil {
+			s.agent.log.ErrorContext(ctx, "announce lifecycle action failed",
+				slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 		}
-	}
+	})
 
-	if err := s.lcActionPendingWithID(ctx, c, actionID, kind); err != nil {
-		s.agent.log.ErrorContext(ctx, "announce lifecycle action failed",
-			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
-	}
+	state := resolved(value, callErr)
 
-	result := <-answers
-	state := resolved(result.value, result.err)
-
-	if result.err != nil && errors.Is(context.Cause(ctx), errDialogCancelled) {
+	if callErr != nil && errors.Is(context.Cause(ctx), errDialogCancelled) {
 		state = lifecycle.ActionCancelled
 	}
 
-	if err := s.lcActionResolved(context.WithoutCancel(ctx), c, actionID, state); err != nil {
+	if err := s.lc.ActionResolved(context.WithoutCancel(ctx), c.Cycle, actionID, state); err != nil {
 		s.agent.log.ErrorContext(ctx, "resolve lifecycle action failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 	}
 
-	return result.value, result.err
+	return value, callErr
 }
 
-func (s *session) reserveAction(c *cycle) (string, error) {
-	s.lcMu.Lock()
-	defer s.lcMu.Unlock()
-
-	if s.lc.stream == nil || s.lc.stream.Fenced() || c.turnID == "" {
-		return "", nil
+// reserveAction mints the identity one blocking action is announced under, or
+// an empty string when no incarnation owns the cycle.
+func (s *session) reserveAction(c *cycle) string {
+	if !s.lc.Active() || c.TurnID == "" {
+		return ""
 	}
 
-	return s.nextLifecycleID(elicitationAction), nil
+	return s.lc.NextID(elicitationAction)
 }
 
 func toolKindForName(name string) acp.ToolKind {
@@ -328,8 +298,6 @@ func toolKindForName(name string) acp.ToolKind {
 		return acp.ToolKindOther
 	}
 }
-
-const nativeMessage = "message"
 
 // answerQuestions returns answers in the native tool's updated input.
 func (s *session) answerQuestions(ctx context.Context, c *cycle, request claude.ControlRequest) map[string]any {
@@ -372,7 +340,7 @@ func (s *session) answerQuestions(ctx context.Context, c *cycle, request claude.
 		properties[key] = property
 	}
 
-	schema, _ := json.Marshal(map[string]any{schemaTypeKey: "object", "properties": properties, "required": required})
+	schema, _ := json.Marshal(map[string]any{schemaTypeKey: schemaTypeObject, "properties": properties, "required": required})
 
 	response := s.elicit(ctx, c, claude.ControlRequest{Mode: elicitationModeForm, Message: "Claude needs your input.", RequestedSchema: schema})
 	if response[elicitationAction] != elicitationAccept {
@@ -417,9 +385,18 @@ func (s *session) answerQuestions(ctx context.Context, c *cycle, request claude.
 	return map[string]any{permissionBehavior: permissionOptionAllow, "updatedInput": input}
 }
 
+// Native control-request and elicitation literals.
 const (
-	elicitationModeURL  = "url"
+	controlCanUseTool   = "can_use_tool"
+	controlElicitation  = "elicitation"
+	elicitationAccept   = "accept"
+	elicitationAction   = "action"
 	elicitationModeForm = "form"
-	schemaTypeString    = "string"
+	elicitationModeURL  = "url"
+	nativeContent       = "content"
+	nativeMessage       = "message"
+	permissionBehavior  = "behavior"
 	schemaTypeKey       = "type"
+	schemaTypeObject    = "object"
+	schemaTypeString    = "string"
 )

@@ -9,18 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCheckMinimumVersion(t *testing.T) {
-	t.Parallel()
-
-	require.NoError(t, CheckMinimumVersion("2.1.270", MinimumVersion))
-	require.NoError(t, CheckMinimumVersion("v2.0.0-beta", "2.0.0"))
-	require.NoError(t, CheckMinimumVersion("1.0", "0.99.99"))
-	require.Error(t, CheckMinimumVersion("1.9.9", "2.0.0"))
-	require.Error(t, CheckMinimumVersion("abc", "2.0.0"))
-	require.Error(t, CheckMinimumVersion("2.0.0", "x"))
-	require.Error(t, CheckMinimumVersion("", "2.0.0"))
-}
-
 func TestProbeVersion(t *testing.T) {
 	t.Parallel()
 

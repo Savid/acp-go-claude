@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/wire"
 )
 
 const (
@@ -20,7 +19,6 @@ const (
 	contentBlockTypeThinking = "thinking"
 	contentBlockTypeToolCall = "tool_use"
 	contentBlockTypeImage    = "image"
-	sessionTitleMaxRunes     = 256
 )
 
 type messageState struct {
@@ -145,8 +143,8 @@ func (s *session) projectEvent(ctx context.Context, _ *runtime, c *cycle, event 
 		}
 
 		return true, nil
-	case "system":
-		return event.Subtype == "task_notification" && c.origin != lifecycle.CauseSubmission, nil
+	case nativeSystem:
+		return event.Subtype == "task_notification" && c.Origin != lifecycle.CauseSubmission, nil
 	}
 
 	return false, nil
@@ -254,12 +252,12 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 				continue
 			}
 
-			key := native.ID + ":" + output.fingerprint
+			key := native.ID + ":" + output.Fingerprint
 			if _, emitted := message.images[key]; emitted {
 				continue
 			}
 
-			if err := s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.ImageBlock(output.data, output.mime), MessageId: optionalString(native.ID)}}); err != nil {
+			if err := s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.ImageBlock(output.Data, output.MIME), MessageId: optionalString(native.ID)}}); err != nil {
 				return err
 			}
 
@@ -340,7 +338,12 @@ func (s *session) emitUsage(ctx context.Context, state *cycleState, stats *claud
 
 	if stats != nil {
 		used = int(stats.TotalTokens)
-		size = stats.MaxTokens
+
+		// A native reading that cannot state the window keeps the one the
+		// turn's model usage already proved.
+		if stats.MaxTokens > 0 {
+			size = stats.MaxTokens
+		}
 	}
 
 	update := &acp.SessionUsageUpdate{Size: int(size), Used: used}
@@ -349,7 +352,7 @@ func (s *session) emitUsage(ctx context.Context, state *cycleState, stats *claud
 	}
 
 	if state.structuredOutput != nil {
-		update.Meta = map[string]any{vendor: map[string]any{"structuredOutput": state.structuredOutput}}
+		update.Meta = map[string]any{vendor: map[string]any{metaStructuredOutputKey: state.structuredOutput}}
 	}
 
 	_ = s.emit(ctx, acp.SessionUpdate{UsageUpdate: update})
@@ -360,9 +363,12 @@ func (s *session) emitRestoredUsage(ctx context.Context, rt *runtime) {
 		return
 	}
 
-	s.mu.Lock()
-	s.contextWindow = stats.MaxTokens
-	s.mu.Unlock()
+	if stats.MaxTokens > 0 {
+		s.mu.Lock()
+		s.contextWindow = stats.MaxTokens
+		s.mu.Unlock()
+	}
+
 	s.emitUsage(ctx, &cycleState{}, &stats)
 }
 func suppressedCommand(name string) bool {
@@ -383,7 +389,7 @@ func (s *session) emitSessionInfo(ctx context.Context, prompt []acp.ContentBlock
 	s.updatedAt = updatedAt
 
 	if s.title == "" {
-		if title := promptTitle(prompt); title != "" {
+		if title := wire.PromptTitle(prompt); title != "" {
 			s.title = title
 			update.Title = &title
 		}
@@ -391,31 +397,6 @@ func (s *session) emitSessionInfo(ctx context.Context, prompt []acp.ContentBlock
 	s.mu.Unlock()
 
 	_ = s.emit(ctx, acp.SessionUpdate{SessionInfoUpdate: &update})
-}
-
-func promptTitle(prompt []acp.ContentBlock) string {
-	for _, block := range prompt {
-		if block.Text == nil {
-			continue
-		}
-
-		if title := normalizeTitle(block.Text.Text); title != "" {
-			return title
-		}
-	}
-
-	return ""
-}
-
-func normalizeTitle(text string) string {
-	title := strings.Join(strings.Fields(text), " ")
-	if utf8.RuneCountInString(title) <= sessionTitleMaxRunes {
-		return title
-	}
-
-	runes := []rune(title)
-
-	return strings.TrimSpace(string(runes[:sessionTitleMaxRunes-3])) + "..."
 }
 
 func (s *session) sessionInfo() acp.SessionInfo {
@@ -429,6 +410,7 @@ func (s *session) sessionInfo() acp.SessionInfo {
 	}
 
 	info := acp.SessionInfo{
+		Meta:                  wire.NativeSessionMeta(vendor, s.nativeID),
 		SessionId:             s.id,
 		Title:                 &title,
 		Cwd:                   s.cwd,
@@ -465,7 +447,7 @@ func availableCommands(commands []claude.Command) []acp.AvailableCommand {
 	available := make([]acp.AvailableCommand, 0, len(commands))
 
 	for _, command := range commands {
-		if !validCommandName(command.Name) || suppressedCommand(command.Name) {
+		if !wire.ValidCommandName(command.Name) || suppressedCommand(command.Name) {
 			continue
 		}
 
@@ -473,22 +455,6 @@ func availableCommands(commands []claude.Command) []acp.AvailableCommand {
 	}
 
 	return available
-}
-
-// validCommandName rejects empty names, names containing '/', invalid UTF-8,
-// and any Unicode whitespace, control, or format rune.
-func validCommandName(name string) bool {
-	if name == "" || strings.Contains(name, "/") || !utf8.ValidString(name) {
-		return false
-	}
-
-	for _, r := range name {
-		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return false
-		}
-	}
-
-	return true
 }
 
 // emitRawEvent forwards one native record on the raw-event channel when the
@@ -523,7 +489,7 @@ func redactImages(value any) {
 	switch typed := value.(type) {
 	case map[string]any:
 		blockType, _ := typed["type"].(string)
-		if blockType == elicitationModeURL {
+		if blockType == nativeSourceURL {
 			if _, exists := typed["url"]; exists {
 				typed["url"] = "[redacted]"
 			}
@@ -544,27 +510,21 @@ func redactImages(value any) {
 	}
 }
 
+// Native record, stream, and settings literals.
 const (
-	controlElicitation   = "elicitation"
+	configCommand        = "config"
 	mimePDF              = "application/pdf"
-	nativeDefault        = "default"
+	nativeBase64         = "base64"
 	nativeControlRequest = "control_request"
-	permissionBehavior   = "behavior"
-	controlCanUseTool    = "can_use_tool"
-	elicitationAction    = "action"
-	nativeContent        = "content"
-	nativeStreamEvent    = "stream_event"
+	nativeDefault        = "default"
+	nativeEffortLevel    = "effortLevel"
+	nativeMessageStart   = "message_start"
+	nativeOutputStyle    = "outputStyle"
 	nativeResult         = "result"
-)
-
-const configCommand = "config"
-
-const nativeMessageStart = "message_start"
-
-const (
-	nativeEffortLevel  = "effortLevel"
-	nativeOutputStyle  = "outputStyle"
-	nativeBase64       = "base64"
+	nativeStreamEvent    = "stream_event"
+	nativeSystem         = "system"
+	// nativeSourceURL is the source type of a native image the harness serves
+	// by link rather than inline.
+	nativeSourceURL    = "url"
 	permissionModePlan = "plan"
-	elicitationAccept  = "accept"
 )

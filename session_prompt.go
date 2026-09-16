@@ -21,14 +21,11 @@ import (
 const (
 	limitSessionPrompt = "session_prompt"
 
-	stopReasonStop      = "stop"
 	stopReasonLength    = "length"
 	stopReasonMaxTokens = "max_tokens"
 	stopReasonAborted   = "aborted"
 	stopReasonError     = "error"
 
-	// nativeCauseMaxBytes bounds the native cause text a failure carries.
-	nativeCauseMaxBytes = 2048
 	// processExitGrace is how long failure classification waits for a dead
 	// child to be reaped after its stdout closed.
 	processExitGrace = 2 * time.Second
@@ -57,20 +54,15 @@ func (s *session) mapPrompt(ctx context.Context, blocks []acp.ContentBlock) (nat
 		return nativePrompt{}, refusal.InvalidParams()
 	}
 
-	media := make(map[int]image.Decoded)
+	media := make(map[int]image.Decoded, len(decoded))
 	for _, item := range decoded {
-		media[item.Index] = item
+		media[item.Block] = item
 	}
 
 	var prompt nativePrompt
 
-	mediaIndex := 0
-
-	for _, block := range blocks {
-		if block.Image != nil || (block.Resource != nil && block.Resource.Resource.BlobResourceContents != nil) {
-			item := media[mediaIndex]
-			mediaIndex++
-
+	for position, block := range blocks {
+		if item, isMedia := media[position]; isMedia {
 			kind := contentBlockTypeImage
 			if item.MIME == mimePDF {
 				kind = "document"
@@ -83,14 +75,14 @@ func (s *session) mapPrompt(ctx context.Context, blocks []acp.ContentBlock) (nat
 
 		switch {
 		case block.Text != nil:
-			if !audienceIsUserOnly(block.Text.Annotations) {
+			if !wire.AudienceIsUserOnly(block.Text.Annotations) && strings.TrimSpace(block.Text.Text) != "" {
 				prompt.content = append(prompt.content, claude.ContentBlock{Type: contentBlockTypeText, Text: block.Text.Text})
 			}
 		case block.ResourceLink != nil:
 			prompt.content = append(prompt.content, claude.ContentBlock{Type: contentBlockTypeText, Text: block.ResourceLink.Uri})
 		case block.Resource != nil:
 			if text := block.Resource.Resource.TextResourceContents; text != nil {
-				prompt.content = append(prompt.content, claude.ContentBlock{Type: contentBlockTypeText, Text: contextResourceText(text.Uri, text.Text)})
+				prompt.content = append(prompt.content, claude.ContentBlock{Type: contentBlockTypeText, Text: wire.ContextResourceText(text.Uri, text.Text)})
 			}
 		default:
 			return nativePrompt{}, wire.Unsupported("prompt")
@@ -104,23 +96,13 @@ func (s *session) mapPrompt(ctx context.Context, blocks []acp.ContentBlock) (nat
 	return prompt, nil
 }
 
-func audienceIsUserOnly(annotations *acp.Annotations) bool {
-	return annotations != nil && len(annotations.Audience) == 1 && annotations.Audience[0] == acp.RoleUser
-}
-
-func contextResourceText(uri string, text string) string {
-	escape := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
-
-	return "\n<context ref=\"" + escape.Replace(uri) + "\">\n" + escape.Replace(text) + "\n</context>"
-}
-
 // prompt sends one turn to claude and streams updates until the run settles.
 func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json.RawMessage) (acp.PromptResponse, error) {
 	meta := lifecycle.RetainRequestMetadata(params.Meta, raw)
 
 	submission, paramErr := lifecycle.DecodePromptCorrelation(meta, s.lifecycleNegotiated())
 	if paramErr != nil {
-		return acp.PromptResponse{}, invalidParam(paramErr)
+		return acp.PromptResponse{}, wire.ParamRefusal(paramErr)
 	}
 
 	if err := s.admissionError(); err != nil {
@@ -133,46 +115,34 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 	}
 	defer release()
 
-	s.mu.Lock()
-	busy := s.cycle != nil
-	s.mu.Unlock()
-
-	if busy {
-		return acp.PromptResponse{}, wire.Backpressure(limitSessionPrompt)
-	}
-
-	mapped, err := s.mapPrompt(ctx, params.Prompt)
-	if err != nil {
-		if ctx.Err() != nil {
-			return cancelledResponse(params), nil
-		}
-
-		return acp.PromptResponse{}, err
-	}
-
-	// session/cancel cancels this request's context through the SDK. A cancel
-	// that lands before native dispatch creates neither submission nor turn and
-	// answers cancelled.
-	if ctx.Err() != nil {
-		return cancelledResponse(params), nil
-	}
-
-	rt, err := s.ensureRuntime(ctx)
-	if err != nil {
-		return acp.PromptResponse{}, err
-	}
+	// The turn runs under a context the session owns, so a peer request the SDK
+	// refuses for this session never cancels the turn already in flight. Only
+	// session/cancel, the turn timeout, close, and a lost generation end it.
+	turnCtx, cancelTurn := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelTurn()
 
 	t := &turn{
-		cycle:      cycle{origin: lifecycle.CauseSubmission, state: cycleState{tools: make(map[string]*toolState)}},
+		cycle:      cycle{Cycle: lifecycle.Cycle{Origin: lifecycle.CauseSubmission}, state: cycleState{tools: make(map[string]*toolState)}},
 		submission: submission,
 		settled:    make(chan struct{}),
 		finished:   make(chan struct{}),
+		cancelCtx:  cancelTurn,
 	}
-	defer close(t.finished)
 
+	// The turn is installed before the request-scoped work a cancel has to be
+	// able to interrupt, and the busy check shares its critical section so a
+	// cycle the pump opens can neither be missed nor wedge the session.
 	s.mu.Lock()
+	if s.cycle != nil {
+		s.mu.Unlock()
+
+		return acp.PromptResponse{}, wire.Backpressure(limitSessionPrompt)
+	}
+
 	s.turn = t
 	s.mu.Unlock()
+
+	defer close(t.finished)
 
 	defer func() {
 		s.mu.Lock()
@@ -187,14 +157,38 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		defer timer.Stop()
 	}
 
-	if err := rt.client.Prompt(ctx, string(s.id), mapped.content); err != nil {
+	mapped, err := s.mapPrompt(turnCtx, params.Prompt)
+	if err != nil {
+		if turnCtx.Err() != nil {
+			return wire.CancelledResponse(params), nil
+		}
+
+		return acp.PromptResponse{}, err
+	}
+
+	// A cancel that lands before native dispatch creates neither submission nor
+	// turn and answers cancelled.
+	if turnCtx.Err() != nil {
+		return wire.CancelledResponse(params), nil
+	}
+
+	rt, err := s.ensureRuntime(turnCtx)
+	if err != nil {
+		if turnCtx.Err() != nil {
+			return wire.CancelledResponse(params), nil
+		}
+
+		return acp.PromptResponse{}, err
+	}
+
+	if err := rt.client.Prompt(turnCtx, s.nativeID, mapped.content); err != nil {
 		s.lcMu.Lock()
 		accepted := t.accepted
 		s.lcMu.Unlock()
 
 		if !accepted {
-			if ctx.Err() != nil {
-				return cancelledResponse(params), nil
+			if turnCtx.Err() != nil {
+				return wire.CancelledResponse(params), nil
 			}
 
 			return acp.PromptResponse{}, s.dispatchFailure(ctx, rt, err)
@@ -205,21 +199,20 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 
 	select {
 	case <-t.settled:
-	case <-ctx.Done():
-		s.cancel(ctx)
-
+	case <-turnCtx.Done():
 		select {
 		case <-t.settled:
 		case <-time.After(sessionAbortTimeout):
+			// The native abort did not settle the run, so the generation ends
+			// rather than leaving a live child bound to a fenced stream. The
+			// pump joins this turn's terminal event, so only the child is
+			// signalled here; settlement drops the binding.
+			s.signalRuntime(context.WithoutCancel(ctx), rt)
 			t.settle(turnTransportEnded)
 		}
 	}
 
 	return s.settleTurn(ctx, rt, t, params)
-}
-
-func cancelledResponse(params acp.PromptRequest) acp.PromptResponse {
-	return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}
 }
 
 // dispatchFailure classifies a prompt command claude never accepted: a native
@@ -228,7 +221,7 @@ func cancelledResponse(params acp.PromptRequest) acp.PromptResponse {
 func (s *session) dispatchFailure(ctx context.Context, rt *runtime, err error) error {
 	var commandErr *claude.CommandError
 	if errors.As(err, &commandErr) {
-		return turnFailure(wire.CauseProvider, commandErr.Message)
+		return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProvider, Message: commandErr.Message})
 	}
 
 	return s.transportFailure(ctx, rt, err)
@@ -247,11 +240,11 @@ func (s *session) transportFailure(ctx context.Context, rt *runtime, err error) 
 			message = fmt.Sprintf("claude process was killed by signal %d", result.Signal)
 		}
 
-		if line := rt.stderr.lastLine(); line != "" {
+		if line := rt.proc.StderrLastLine(); line != "" {
 			message += ": " + line
 		}
 
-		return turnFailure(wire.CauseProcessExit, message)
+		return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProcessExit, Message: message})
 	}
 
 	if err == nil {
@@ -262,21 +255,7 @@ func (s *session) transportFailure(ctx context.Context, rt *runtime, err error) 
 		err = errors.New("claude event stream closed mid-turn")
 	}
 
-	return turnFailure(wire.CauseTransport, err.Error())
-}
-
-func turnFailure(cause string, message string) *acp.RequestError {
-	return wire.TurnFailed(vendor, wire.TurnFailure{Cause: cause, Message: boundNativeCause(message)})
-}
-
-// boundNativeCause is the single gate every native cause text passes through
-// before it reaches a client.
-func boundNativeCause(message string) string {
-	if len(message) > nativeCauseMaxBytes {
-		message = message[:nativeCauseMaxBytes]
-	}
-
-	return strings.TrimSpace(strings.ToValidUTF8(message, ""))
+	return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTransport, Message: err.Error()})
 }
 
 // cycleVerdict is how one cycle ended, in the terms the lifecycle stream and
@@ -289,19 +268,21 @@ type cycleVerdict struct {
 
 // judgeCycle records how a natively settled cycle finished. The cancel guard
 // runs before every failure mapping.
-func judgeCycle(c *cycle, cancelled bool) cycleVerdict {
+func (s *session) judgeCycle(c *cycle, cancelled bool) cycleVerdict {
+	failure := s.cycleFailure(c)
+
 	switch {
 	case cancelled:
 		return cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}
-	case c.failure != nil:
-		return cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: c.failure}
+	case failure != nil:
+		return cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: failure}
 	case c.state.stopReason == stopReasonError:
 		message := strings.TrimSpace(c.state.errorMessage)
 		if message == "" {
 			message = "claude reported a turn error"
 		}
 
-		return cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: turnFailure(wire.CauseProvider, message)}
+		return cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProvider, Message: message})}
 	}
 
 	stop := acp.StopReasonEndTurn
@@ -336,11 +317,11 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 	case cancelled:
 		verdict = cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}
 	case timedOut:
-		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: turnFailure(wire.CauseTimeout, fmt.Sprintf("claude turn exceeded %s", s.agent.options.TurnTimeout))}
+		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTimeout, Message: fmt.Sprintf("claude turn exceeded %s", s.agent.options.TurnTimeout)})}
 	case t.ended == turnTransportEnded:
 		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: s.transportFailure(settleCtx, rt, nil)}
 	default:
-		verdict = judgeCycle(&t.cycle, false)
+		verdict = s.judgeCycle(&t.cycle, false)
 	}
 
 	if t.ended == turnSettled {
@@ -351,19 +332,27 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 		}
 
 		if err := s.commitMirror(settleCtx); err != nil {
-			s.stopRuntime(settleCtx, rt)
-			s.lcFence()
+			// The turn is not durable, so the incarnation is fenced and the
+			// generation ends before this response is answered.
+			s.lc.Fence()
+			s.signalRuntime(settleCtx, rt)
+			s.dropRuntime(rt)
 			verdict.failure = s.mirrorFailure(&t.state, err)
 			verdict.outcome = lifecycle.OutcomeFailed
 		}
 	}
 
-	if err := s.lcIdle(settleCtx, &t.cycle, verdict); err != nil && verdict.failure == nil {
-		verdict.failure = err
+	// A turn whose transport ended holds no durable commit, so the incarnation
+	// is fenced before the idle rather than asserting a terminal state the store
+	// does not back, and its generation is unbound before this response is
+	// answered.
+	if t.ended == turnTransportEnded {
+		s.lc.Fence()
+		s.dropRuntime(rt)
 	}
 
-	if t.ended == turnTransportEnded {
-		s.lcFence()
+	if err := s.lc.Idle(settleCtx, t.Cycle, verdict.stopReason, verdict.outcome); err != nil && verdict.failure == nil {
+		verdict.failure = err
 	}
 
 	if verdict.failure != nil {

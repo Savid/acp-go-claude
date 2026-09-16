@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 
 	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/savid/acp-go-core/sessionlog"
@@ -23,6 +24,7 @@ import (
 // with.
 type sessionRecord struct {
 	SessionID             string            `json:"sessionId"`
+	NativeSessionID       string            `json:"nativeSessionId"`
 	Cwd                   string            `json:"cwd"`
 	AdditionalDirectories []string          `json:"additionalDirectories,omitempty"`
 	SessionFile           string            `json:"sessionFile"`
@@ -44,15 +46,16 @@ func (s *session) record() sessionRecord {
 
 	return sessionRecord{
 		SessionID:             string(s.id),
+		NativeSessionID:       s.nativeID,
 		Cwd:                   s.cwd,
 		AdditionalDirectories: slices.Clone(s.additionalDirectories),
 		SessionFile:           s.sessionFile,
-		Env:                   cloneStringMap(s.options.Env),
+		Env:                   maps.Clone(s.options.Env),
 		ExtraPathDirs:         slices.Clone(s.options.ExtraPathDirs),
 		Model:                 s.model,
 		Effort:                s.effort,
 		PermissionMode:        s.options.PermissionMode,
-		Bare:                  s.options.Bare, SystemPrompt: s.options.SystemPrompt, OutputSchema: cloneAnyMap(s.options.OutputSchema), OutputStyle: s.outputStyle,
+		Bare:                  s.options.Bare, SystemPrompt: s.options.SystemPrompt, OutputSchema: wire.CloneMap(s.options.OutputSchema), OutputStyle: s.outputStyle,
 		UpdatedAtUnixMilli: time.Now().UnixMilli(),
 	}
 }
@@ -79,10 +82,6 @@ func (s *session) commitMirror(ctx context.Context) error {
 
 	if len(rows) < mirrored {
 		return fmt.Errorf("native log shrank from %d to %d rows", mirrored, len(rows))
-	}
-
-	if len(rows) == 0 {
-		return nil
 	}
 
 	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, "replace")
@@ -116,8 +115,8 @@ func (a *Agent) loadStored(ctx context.Context, sessionID acp.SessionId) (stored
 
 	var record sessionRecord
 
-	rows, err := sessionlog.Load(loadCtx, a.store, string(sessionID), &record)
-	if err == nil && len(rows) > 0 {
+	rows, found, err := sessionlog.Load(loadCtx, a.store, string(sessionID), &record)
+	if err == nil && found {
 		err = record.validate(string(sessionID))
 	}
 
@@ -127,11 +126,11 @@ func (a *Agent) loadStored(ctx context.Context, sessionID acp.SessionId) (stored
 		return storedSession{}, a.restoreRefused(ctx, sessionID, err)
 	}
 
-	return storedSession{rows: rows, record: record, found: len(rows) > 0}, nil
+	return storedSession{rows: rows, record: record, found: found}, nil
 }
 
 func (r sessionRecord) validate(sessionID string) error {
-	if r.SessionID != sessionID || !filepath.IsAbs(r.Cwd) || !filepath.IsAbs(r.SessionFile) || r.UpdatedAtUnixMilli <= 0 {
+	if uuid.Validate(r.NativeSessionID) != nil || r.SessionID != sessionID || !filepath.IsAbs(r.Cwd) || !filepath.IsAbs(r.SessionFile) || r.UpdatedAtUnixMilli <= 0 {
 		return fmt.Errorf("invalid session record identity or location")
 	}
 
@@ -154,36 +153,44 @@ func (r sessionRecord) validate(sessionID string) error {
 // disagreement at a shared position fails the restore. It returns the native
 // path and the rows the session now holds.
 func (a *Agent) hydrate(ctx context.Context, sessionID acp.SessionId, stored storedSession, cwd string, agentDir string) (string, [][]byte, error) {
-	if err := claude.ValidateRows(stored.rows, string(sessionID)); err != nil {
-		return "", nil, a.restoreRefused(ctx, sessionID, err)
-	}
-
-	path := claude.SessionPath(agentDir, cwd, string(sessionID))
+	path := claude.SessionPath(agentDir, cwd, stored.record.NativeSessionID)
 
 	native, err := claude.ReadRows(path)
 	if err != nil {
 		return "", nil, a.restoreRefused(ctx, sessionID, err)
 	}
 
-	if _, err := sessionlog.Reconcile(native, stored.rows); err != nil {
+	rows, nativeWins, err := sessionlog.Reconcile(native, stored.rows)
+	if err != nil {
 		return "", nil, a.restoreRefused(ctx, sessionID, err)
 	}
 
-	if len(native) >= len(stored.rows) {
-		if len(native) > len(stored.rows) {
-			if err := sessionlog.Commit(ctx, a.store, string(sessionID), native, stored.record); err != nil {
+	// An empty conversation is a legal stored generation; a non-empty one must
+	// be this session's own transcript.
+	if len(rows) != 0 {
+		if err := claude.ValidateRows(rows, stored.record.NativeSessionID); err != nil {
+			return "", nil, a.restoreRefused(ctx, sessionID, err)
+		}
+	}
+
+	if nativeWins {
+		if len(rows) > len(stored.rows) {
+			commitCtx, cancel := context.WithTimeout(ctx, a.options.SessionStoreLoadTimeout)
+			defer cancel()
+
+			if err := sessionlog.Commit(commitCtx, a.store, string(sessionID), rows, stored.record); err != nil {
 				return "", nil, a.restoreRefused(ctx, sessionID, err)
 			}
 		}
 
-		return path, native, nil
+		return path, rows, nil
 	}
 
-	if err := claude.WriteRows(path, stored.rows); err != nil {
+	if err := claude.WriteRows(path, rows); err != nil {
 		return "", nil, a.restoreRefused(ctx, sessionID, err)
 	}
 
-	return path, stored.rows, nil
+	return path, rows, nil
 }
 
 func (a *Agent) restoreRefused(ctx context.Context, sessionID acp.SessionId, err error) error {
@@ -221,15 +228,11 @@ func storedTitle(sessionID string, rows [][]byte) string {
 				continue
 			}
 
-			if title := normalizeTitle(blocks[index].Text); title != "" {
+			if title := wire.NormalizeTitle(blocks[index].Text); title != "" {
 				return title
 			}
 		}
 	}
 
 	return sessionID
-}
-
-func trimSpace(value string) string {
-	return strings.TrimSpace(value)
 }

@@ -3,6 +3,9 @@ package claudeacp
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -148,7 +151,7 @@ func TestSessionMetaStrictness(t *testing.T) {
 			h := newHarness(t)
 			h.initialize()
 
-			request := NewSessionRequest(t.TempDir())
+			request := wire.NewSessionRequest(t.TempDir())
 			request.Meta = tc.meta
 
 			_, err := h.conn.NewSession(h.ctx(), request)
@@ -167,7 +170,7 @@ func TestForeignMetaIgnored(t *testing.T) {
 	h := newHarness(t)
 	h.initialize()
 
-	session := h.newSession(WithSessionMeta(map[string]any{"other": map[string]any{"x": 1}, "traceparent": "00-1-2-01"}))
+	session := h.newSession(wire.WithSessionMeta(map[string]any{"other": map[string]any{"x": 1}, "traceparent": "00-1-2-01"}))
 	require.NotEmpty(t, session.SessionId)
 }
 
@@ -188,17 +191,17 @@ func TestUniformRejections(t *testing.T) {
 
 	session := h.newSession()
 
-	_, err = h.conn.Prompt(h.ctx(), PromptRequest(session.SessionId))
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId))
 	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
 
-	_, err = h.conn.Prompt(h.ctx(), PromptRequest(session.SessionId, acp.ContentBlock{Audio: &acp.ContentBlockAudio{Data: "x", MimeType: "audio/wav"}}))
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId, acp.ContentBlock{Audio: &acp.ContentBlockAudio{Data: "x", MimeType: "audio/wav"}}))
 	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
 
-	_, err = h.conn.Prompt(h.ctx(), TextPromptRequest("00000000-0000-4000-8000-000000000000", "hi"))
+	_, err = h.conn.Prompt(h.ctx(), wire.TextPromptRequest("00000000-0000-4000-8000-000000000000", "hi"))
 	require.Equal(t, -32602, requestErrorCode(t, err))
 	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
 
-	require.NoError(t, h.conn.Cancel(h.ctx(), CancelRequest("00000000-0000-4000-8000-000000000000")))
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest("00000000-0000-4000-8000-000000000000")))
 }
 
 func TestPromptCorrelationGate(t *testing.T) {
@@ -273,7 +276,7 @@ func TestInvalidOptionsVerdict(t *testing.T) {
 			require.Equal(t, "claude_invalid_options", data["error"])
 			require.Equal(t, field, data["field"])
 
-			_, err = agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+			_, err = agent.NewSession(context.Background(), wire.NewSessionRequest(t.TempDir()))
 			require.Equal(t, "claude_invalid_options", requestErrorData(t, err)["error"])
 		})
 	}
@@ -300,7 +303,7 @@ func TestPromptBackpressure(t *testing.T) {
 	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
 	require.Equal(t, "session_prompt", requestErrorData(t, err)["limit"])
 
-	require.NoError(t, h.conn.Cancel(h.ctx(), CancelRequest(session.SessionId)))
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest(session.SessionId)))
 	require.NoError(t, <-done)
 }
 
@@ -311,7 +314,7 @@ func TestActiveSessionLimit(t *testing.T) {
 	h.initialize()
 	h.newSession()
 
-	_, err := h.conn.NewSession(h.ctx(), NewSessionRequest(t.TempDir()))
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
 	require.Equal(t, "active_sessions", requestErrorData(t, err)["limit"])
 }
@@ -322,7 +325,7 @@ func TestVersionFloor(t *testing.T) {
 	h := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvVersion: "0.1.0"}))
 	h.initialize()
 
-	_, err := h.conn.NewSession(h.ctx(), NewSessionRequest(t.TempDir()))
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, -32603, requestErrorCode(t, err))
 	require.Equal(t, "claude_internal_failure", requestErrorData(t, err)["error"])
 	require.Equal(t, "native_start", requestErrorData(t, err)["class"])
@@ -335,7 +338,7 @@ func TestClosedAgentRefusesRequests(t *testing.T) {
 	require.NoError(t, agent.Close())
 	require.NoError(t, agent.Close())
 
-	_, err := agent.NewSession(context.Background(), NewSessionRequest(t.TempDir()))
+	_, err := agent.NewSession(context.Background(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, -32600, requestErrorCode(t, err))
 }
 
@@ -345,4 +348,50 @@ func TestNegativeClientCallLimitReturnsOptionsError(t *testing.T) {
 	defer agent.Close()
 	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
 	require.Equal(t, "claude_invalid_options", requestErrorData(t, err)["error"])
+}
+
+func TestStructuredOutputIsAdvertisedAndDelivered(t *testing.T) {
+	t.Parallel()
+
+	argv := filepath.Join(t.TempDir(), "argv")
+	h := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvArgvDump: argv}))
+	resp := h.initialize()
+
+	vendorMeta, ok := resp.AgentCapabilities.Meta["claude"].(map[string]any)
+	require.True(t, ok)
+
+	discovery, ok := vendorMeta["structuredOutput"].(map[string]any)
+	require.True(t, ok, "outputSchema is accepted, so the surface must be discoverable")
+	require.Equal(t, "_meta.claude.options.outputSchema", discovery["config"])
+	require.Equal(t, "_meta.claude.structuredOutput", discovery["result"])
+	require.Equal(t, "json_schema", discovery["schema"])
+
+	schema := map[string]any{"type": "object"}
+	session := h.newSession(WithSessionOutputSchema(schema))
+
+	args, err := os.ReadFile(argv)
+	require.NoError(t, err)
+	require.Contains(t, strings.Split(string(args), "\n"), "--json-schema", "the schema never reached the child")
+	require.Contains(t, strings.Split(string(args), "\n"), `{"type":"object"}`)
+
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+
+	for _, update := range h.rec.snapshot() {
+		usage := update.Update.UsageUpdate
+		if usage == nil || usage.Meta == nil {
+			continue
+		}
+
+		meta, ok := usage.Meta["claude"].(map[string]any)
+		require.True(t, ok)
+
+		result, ok := meta["structuredOutput"].(map[string]any)
+		require.True(t, ok, "the native structured result did not land where the capability names it")
+		require.Equal(t, schema, result["schema"])
+
+		return
+	}
+
+	t.Fatal("no usage update carried the structured output")
 }

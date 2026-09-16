@@ -9,6 +9,9 @@ import (
 const EnvConfigDir = "CLAUDE_CONFIG_DIR"
 const InternalEnvPrefix = "ACP_GO_CLAUDE_INTERNAL_"
 
+// streamJSON is the native framing the adapter reads and writes.
+const streamJSON = "stream-json"
+
 type Launch struct {
 	SessionID             string
 	Resume                bool
@@ -23,7 +26,7 @@ type Launch struct {
 }
 
 func (l Launch) Args() []string {
-	args := []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--include-hook-events", "--permission-prompt-tool", "stdio"}
+	args := []string{"--print", "--input-format", streamJSON, "--output-format", streamJSON, "--verbose", "--include-partial-messages", "--include-hook-events", "--permission-prompt-tool", "stdio"}
 	if l.Resume {
 		args = append(args, "--resume", l.SessionID)
 	} else {

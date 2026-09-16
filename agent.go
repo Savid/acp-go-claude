@@ -9,8 +9,8 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
@@ -34,8 +34,6 @@ const (
 	SessionStoreFormat = "claude-transcript-jsonl-v1"
 
 	vendor = "claude"
-
-	capabilityMethodKey = "method"
 )
 
 // client is the host side of the connection, as the sessions use it.
@@ -61,7 +59,6 @@ type Agent struct {
 	transport          *wire.Transport
 	closed             bool
 	clientCapabilities acp.ClientCapabilities
-	positionEncoding   acp.PositionEncodingKind
 	// lifecycle is the answer this connection gave at initialize. An absent
 	// answer leaves the extension dormant for every session on it.
 	lifecycle    lifecycle.Negotiated
@@ -71,9 +68,7 @@ type Agent struct {
 	clientCalls  chan struct{}
 	incarnations uint64
 
-	versionOnce sync.Once
-	versionErr  error
-	executable  string
+	executable process.Executable
 }
 
 var (
@@ -108,12 +103,11 @@ func NewAgent(opts ...Option) *Agent {
 			TracerProvider: options.TracerProvider,
 			Version:        options.AgentVersion,
 		}),
-		processEnv:       os.Environ(),
-		store:            store,
-		sessions:         make(map[acp.SessionId]*session),
-		deleted:          make(map[acp.SessionId]struct{}),
-		clientCalls:      make(chan struct{}, max(0, options.ConcurrencyLimits.MaxConcurrentClientCalls)),
-		positionEncoding: acp.PositionEncodingKindUtf16,
+		processEnv:  os.Environ(),
+		store:       store,
+		sessions:    make(map[acp.SessionId]*session),
+		deleted:     make(map[acp.SessionId]struct{}),
+		clientCalls: make(chan struct{}, max(0, options.ConcurrencyLimits.MaxConcurrentClientCalls)),
 	}
 	agent.optionErr = agent.validateOptions()
 
@@ -129,9 +123,8 @@ func (a *Agent) validateOptions() *acp.RequestError {
 		field string
 		err   error
 	}{
-		{"home", validateOptionalAbsolute(options.Home)},
-		{"inputHandoffRoot", validateHandoffRoot(options.InputHandoffRoot)},
-		{"defaultModel", validateOptionalModel(options.DefaultModel)},
+		{"home", process.ValidateOptionalAbsolutePath(options.Home)},
+		{"inputHandoffRoot", image.ValidateHandoffRoot(options.InputHandoffRoot)},
 		{"configuredModels", validateConfiguredModels(options.ConfiguredModels)},
 		{metaEnvKey, process.ValidateNames(options.Env)},
 		{"concurrencyLimits", validateConcurrencyLimits(options.ConcurrencyLimits)},
@@ -151,37 +144,11 @@ func (a *Agent) validateOptions() *acp.RequestError {
 	return nil
 }
 
-func validateOptionalAbsolute(path string) error {
-	if path == "" || filepath.IsAbs(path) {
-		return nil
-	}
-
-	return errors.New("path must be absolute")
-}
-
-func validateHandoffRoot(root string) error {
-	if root == "" {
-		return nil
-	}
-
-	return image.ValidateHandoffRoot(root)
-}
-
-func validateOptionalModel(model string) error {
-	if model == "" {
-		return nil
-	}
-
-	err := claude.ValidModel(model)
-
-	return err
-}
-
 func validateConfiguredModels(ids []string) error {
 	seen := make(map[string]struct{}, len(ids))
 
 	for index, id := range ids {
-		if err := claude.ValidModel(id); err != nil || id != trimSpace(id) {
+		if id == "" || id != strings.TrimSpace(id) {
 			return fmt.Errorf("configured model %d %q is not a model id", index, id)
 		}
 
@@ -266,11 +233,12 @@ func (a *Agent) Close() error {
 			}
 		}
 	})
-	a.conn = nil
 	a.mu.Unlock()
 
 	var errs []error
 
+	// The ladder's terminal events still need the connection, so it is cleared
+	// only once every session has run its own shutdown.
 	for _, s := range sessions {
 		if err := s.close(context.Background()); err != nil {
 			errs = append(errs, err)
@@ -279,6 +247,7 @@ func (a *Agent) Close() error {
 
 	a.mu.Lock()
 	clear(a.sessions)
+	a.conn = nil
 	a.mu.Unlock()
 
 	return errors.Join(errs...)
@@ -289,15 +258,10 @@ func (a *Agent) ensureOpen() error {
 	defer a.mu.Unlock()
 
 	if a.closed {
-		return errAgentClosed()
+		return wire.AgentClosed()
 	}
 
 	return nil
-}
-
-// errAgentClosed answers every request after Close.
-func errAgentClosed() *acp.RequestError {
-	return acp.NewInvalidRequest(map[string]any{wire.FieldError: "agent closed"})
 }
 
 // Initialize implements ACP initialize.
@@ -314,21 +278,20 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 		meta = lifecycle.RetainRequestMetadata(meta, t.TakeRaw(acp.AgentMethodInitialize))
 	}
 
-	offer, present, paramErr := lifecycle.DecodeOffer(meta)
+	present, paramErr := lifecycle.DecodeOffer(meta)
 	if paramErr != nil {
-		return acp.InitializeResponse{}, invalidParam(paramErr)
+		return acp.InitializeResponse{}, wire.ParamRefusal(paramErr)
 	}
 
 	var negotiated lifecycle.Negotiated
 	if present {
-		negotiated = offer.Answer(lifecycle.Negotiated{UpdatesOutsidePrompt: true, ActivityKinds: []lifecycle.ActivityKind{}})
+		negotiated = lifecycle.Answer(lifecycle.Negotiated{UpdatesOutsidePrompt: true, ActivityKinds: []lifecycle.ActivityKind{}})
 	}
 
-	encoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
+	encoding := wire.SelectPositionEncoding(params.ClientCapabilities.PositionEncodings)
 
 	a.mu.Lock()
 	a.clientCapabilities = params.ClientCapabilities
-	a.positionEncoding = encoding
 	a.lifecycle = negotiated
 	a.mu.Unlock()
 
@@ -338,8 +301,16 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 		vendor: map[string]any{
 			controlElicitation: map[string]any{"unstable": true, "scope": "session", "tracks": "ACP v1 elicitation"},
 			metaRawEventKey: map[string]any{
-				capabilityMethodKey: RawEventMethod, "enabledBy": "_meta.claude.rawEvent.enabled",
+				"method": RawEventMethod, "enabledBy": "_meta.claude.rawEvent.enabled",
 				"maxBytes": wire.RawEventMaxBytes, "defaultEnabled": false,
+			},
+			metaStructuredOutputKey: map[string]any{
+				// These are advertisement key names, unrelated to the native
+				// config slash command and the native result event type that
+				// carry the same spelling.
+				"config": wire.MetaOptionPath(vendor, metaOutputSchemaKey),  //nolint:goconst // Advertisement key name.
+				"result": "_meta." + vendor + "." + metaStructuredOutputKey, //nolint:goconst // Advertisement key name.
+				"schema": "json_schema",
 			},
 			"sessionStore": map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
 		},
@@ -382,19 +353,11 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 	}, nil
 }
 
-func selectPositionEncoding(encodings []acp.PositionEncodingKind) acp.PositionEncodingKind {
-	if slices.Contains(encodings, acp.PositionEncodingKindUtf8) {
-		return acp.PositionEncodingKindUtf8
-	}
-
-	return acp.PositionEncodingKindUtf16
-}
-
 // Authenticate exists because the SDK interface requires it. The harness
 // authenticates itself in its own home, outside ACP.
 func (a *Agent) Authenticate(_ context.Context, params acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
 	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
-		return acp.AuthenticateResponse{}, invalidParam(refusal)
+		return acp.AuthenticateResponse{}, wire.ParamRefusal(refusal)
 	}
 
 	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
@@ -403,7 +366,7 @@ func (a *Agent) Authenticate(_ context.Context, params acp.AuthenticateRequest) 
 // Logout exists because the SDK interface requires it.
 func (a *Agent) Logout(_ context.Context, params acp.LogoutRequest) (acp.LogoutResponse, error) {
 	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
-		return acp.LogoutResponse{}, invalidParam(refusal)
+		return acp.LogoutResponse{}, wire.ParamRefusal(refusal)
 	}
 
 	return acp.LogoutResponse{}, acp.NewMethodNotFound(acp.AgentMethodLogout)
@@ -413,7 +376,7 @@ func (a *Agent) Logout(_ context.Context, params acp.LogoutRequest) (acp.LogoutR
 // are config options, never ACP session modes.
 func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
 	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
-		return acp.SetSessionModeResponse{}, invalidParam(refusal)
+		return acp.SetSessionModeResponse{}, wire.ParamRefusal(refusal)
 	}
 
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
@@ -428,7 +391,7 @@ func (a *Agent) HandleExtensionMethod(_ context.Context, method string, params j
 
 	if err := json.Unmarshal(params, &envelope); err == nil {
 		if refusal := lifecycle.RejectKey(envelope.Meta); refusal != nil {
-			return nil, invalidParam(refusal)
+			return nil, wire.ParamRefusal(refusal)
 		}
 	}
 
@@ -478,62 +441,17 @@ func (a *Agent) acquireClientCall() (func(), error) {
 	}
 }
 
-// invalidParam renders a lifecycle negotiation refusal as the uniform
-// invalid-params verdict.
-func invalidParam(err *lifecycle.ParamError) *acp.RequestError {
-	if err.Verdict == lifecycle.VerdictMissing {
-		return wire.Missing(err.Field)
-	}
-
-	return wire.Unsupported(err.Field)
-}
-
 // ensureExecutable resolves the claude executable against the base environment
-// and probes its version once per agent.
+// and caches its completed version verdict through core.
 func (a *Agent) ensureExecutable(ctx context.Context) (string, error) {
-	a.versionOnce.Do(func() {
-		base, err := a.environment(nil, nil).Base()
-		if err != nil {
-			a.versionErr = err
-
-			return
-		}
-
-		selector := a.options.ExecutablePath
-		if selector == "" {
-			selector = vendor
-		}
-
-		executable, err := process.ResolveExecutable(selector, base)
-		if err != nil {
-			a.versionErr = err
-
-			return
-		}
-
-		version, err := claude.ProbeVersion(ctx, executable, base)
-		if err != nil {
-			a.versionErr = err
-
-			return
-		}
-
-		if err := claude.CheckMinimumVersion(version, claude.MinimumVersion); err != nil {
-			a.versionErr = err
-
-			return
-		}
-
-		a.executable = executable
-	})
-
-	if a.versionErr != nil {
-		a.log.ErrorContext(ctx, "claude version probe failed", slog.String("reason", a.versionErr.Error()))
+	executable, err := a.executable.Resolve(ctx, a.environment(nil, nil), a.options.ExecutablePath, vendor, claude.MinimumVersion, claude.ProbeVersion)
+	if err != nil {
+		a.log.ErrorContext(ctx, "claude version probe failed", slog.String("reason", err.Error()))
 
 		return "", wire.InternalFailure(vendor, internalClassNativeStart)
 	}
 
-	return a.executable, nil
+	return executable, nil
 }
 
 // environment builds the merge for one launch: the inherited process

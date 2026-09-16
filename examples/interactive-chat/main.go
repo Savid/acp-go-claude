@@ -17,6 +17,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 
 	claudeacp "github.com/savid/acp-go-claude"
+	"github.com/savid/acp-go-core/wire"
 )
 
 // terminal prints streamed text and asks the user about each permission.
@@ -162,12 +163,12 @@ func chat(ctx context.Context, conn agentConnection, input *bufio.Reader, cwd st
 		return err
 	}
 
-	var opts []claudeacp.SessionRequestOption
+	var opts []wire.SessionRequestOption
 	if model != "" {
 		opts = append(opts, claudeacp.WithSessionClaudeOptions(claudeacp.NewClaudeOptions(claudeacp.WithClaudeModel(model))))
 	}
 
-	session, err := conn.NewSession(ctx, claudeacp.NewSessionRequest(cwd, opts...))
+	session, err := conn.NewSession(ctx, wire.NewSessionRequest(cwd, opts...))
 	if err != nil {
 		return err
 	}
@@ -186,7 +187,7 @@ func chat(ctx context.Context, conn agentConnection, input *bufio.Reader, cwd st
 			return nil
 		}
 
-		if _, err := conn.Prompt(ctx, claudeacp.TextPromptRequest(session.SessionId, text)); err != nil {
+		if _, err := conn.Prompt(ctx, wire.TextPromptRequest(session.SessionId, text)); err != nil {
 			return err
 		}
 

@@ -6,13 +6,13 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/stretchr/testify/require"
 )
 
-// reduceAll runs every recorded notification through the core reducer, so
-// the stream the adapter emitted is proven against the same validator the
-// fixture battery drives.
+// reduceAll feeds every notification recorded for one session to the core
+// lifecycle reducer and returns the state it reaches.
 func reduceAll(t *testing.T, sessionID acp.SessionId, updates []acp.SessionNotification) lifecycle.State {
 	t.Helper()
 
@@ -59,4 +59,43 @@ func TestAgentOriginCycleFollowsPrompt(t *testing.T) {
 		}
 	}
 	require.Equal(t, 2, starts)
+}
+
+func TestCloseBackgroundCycleRequiresCommit(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "committed", true: "failed"}[fail], func(t *testing.T) {
+			store := &recoveryFaultStore{SessionStore: acpcore.NewInMemorySessionStore()}
+			h := newHarness(t, WithSessionStore(store))
+			h.initialize(withLifecycle())
+			created := h.newSession()
+			_, err := h.prompt(created.SessionId, "AGENTHANG", promptMeta(1))
+			require.NoError(t, err)
+			h.rec.waitFor(t, func(updates []acp.SessionNotification) bool {
+				events := lifecycleEvents(updates)
+
+				return len(events) >= 5 && events[4]["state"] == "running"
+			})
+			before := len(lifecycleEvents(h.rec.snapshot()))
+			store.fail.Store(fail)
+			_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+			store.fail.Store(false)
+			if fail {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			terminal := 0
+			for _, event := range lifecycleEvents(h.rec.snapshot())[before:] {
+				if event["state"] == "idle" {
+					terminal++
+					require.Equal(t, "cancelled", event["outcome"])
+				}
+			}
+			if fail {
+				require.Zero(t, terminal)
+			} else {
+				require.Equal(t, 1, terminal)
+			}
+		})
+	}
 }

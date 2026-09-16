@@ -1,15 +1,12 @@
 package claudeacp
 
 import (
-	"errors"
-	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/coder/acp-go-sdk"
 
-	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/savid/acp-go-core/lifecycle"
-	"github.com/savid/acp-go-core/process"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -25,6 +22,10 @@ const (
 	metaBareKey           = "bare"
 	metaSystemPromptKey   = "systemPrompt"
 	metaEnabledKey        = "enabled"
+
+	// metaStructuredOutputKey names both the discovery object and the result
+	// member native structured output lands on.
+	metaStructuredOutputKey = "structuredOutput"
 )
 
 // ClaudeOptions is the per-session options struct carried at _meta.claude.options.
@@ -67,9 +68,9 @@ func WithClaudeModel(model string) ClaudeOption {
 
 // WithClaudeEnv configures the session environment overlay.
 func WithClaudeEnv(env map[string]string) ClaudeOption {
-	cloned := cloneStringMap(env)
+	cloned := maps.Clone(env)
 
-	return func(options *ClaudeOptions) { options.Env = cloneStringMap(cloned) }
+	return func(options *ClaudeOptions) { options.Env = maps.Clone(cloned) }
 }
 
 // WithClaudeExtraPathDirs configures the directories prepended to the session PATH.
@@ -77,13 +78,6 @@ func WithClaudeExtraPathDirs(dirs ...string) ClaudeOption {
 	cloned := slices.Clone(dirs)
 
 	return func(options *ClaudeOptions) { options.ExtraPathDirs = slices.Clone(cloned) }
-}
-
-// WithClaudeOutputSchema configures native structured output.
-func WithClaudeOutputSchema(schema map[string]any) ClaudeOption {
-	cloned := cloneAnyMap(schema)
-
-	return func(options *ClaudeOptions) { options.OutputSchema = cloneAnyMap(cloned) }
 }
 
 // WithClaudeEffort configures the reasoning level passed to claude.
@@ -101,11 +95,6 @@ func WithClaudeBare(enabled bool) ClaudeOption {
 	return func(options *ClaudeOptions) { options.Bare = enabled; options.bareSet = true }
 }
 
-// WithClaudeSystemPrompt sets the native system prompt.
-func WithClaudeSystemPrompt(text string) ClaudeOption {
-	return func(options *ClaudeOptions) { options.SystemPrompt = text }
-}
-
 // Meta returns exactly {"claude": {"options": {...}}} with the non-zero fields.
 func (options ClaudeOptions) Meta() map[string]any {
 	values := map[string]any{}
@@ -115,7 +104,7 @@ func (options ClaudeOptions) Meta() map[string]any {
 	}
 
 	if options.Env != nil {
-		values[metaEnvKey] = cloneStringMap(options.Env)
+		values[metaEnvKey] = maps.Clone(options.Env)
 	}
 
 	if options.ExtraPathDirs != nil {
@@ -123,7 +112,7 @@ func (options ClaudeOptions) Meta() map[string]any {
 	}
 
 	if options.OutputSchema != nil {
-		values[metaOutputSchemaKey] = cloneAnyMap(options.OutputSchema)
+		values[metaOutputSchemaKey] = wire.CloneMap(options.OutputSchema)
 	}
 
 	if options.Effort != "" {
@@ -147,9 +136,9 @@ func (options ClaudeOptions) Meta() map[string]any {
 
 func (options ClaudeOptions) clone() ClaudeOptions {
 	cloned := options
-	cloned.Env = cloneStringMap(options.Env)
+	cloned.Env = maps.Clone(options.Env)
 	cloned.ExtraPathDirs = slices.Clone(options.ExtraPathDirs)
-	cloned.OutputSchema = cloneAnyMap(options.OutputSchema)
+	cloned.OutputSchema = wire.CloneMap(options.OutputSchema)
 
 	return cloned
 }
@@ -180,7 +169,7 @@ type sessionMeta struct {
 // namespaces are ignored; the lifecycle literal is refused by name.
 func parseSessionMeta(meta map[string]any) (sessionMeta, *acp.RequestError) {
 	if refusal := lifecycle.RejectKey(meta); refusal != nil {
-		return sessionMeta{}, invalidParam(refusal)
+		return sessionMeta{}, wire.ParamRefusal(refusal)
 	}
 
 	raw, exists := meta[vendor]
@@ -226,7 +215,7 @@ func parseSessionMeta(meta map[string]any) (sessionMeta, *acp.RequestError) {
 
 	values, isObject := rawOptions.(map[string]any)
 	if !isObject {
-		return sessionMeta{}, wire.Unsupported(metaOptionPath(""))
+		return sessionMeta{}, wire.Unsupported(wire.MetaOptionPath(vendor, ""))
 	}
 
 	options, err := parseClaudeOptions(values)
@@ -249,19 +238,19 @@ func parseClaudeOptions(values map[string]any) (ClaudeOptions, *acp.RequestError
 		case metaModelKey:
 			model, ok := item.(string)
 			if !ok {
-				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
+				return ClaudeOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
 			options.Model = model
 		case metaEnvKey:
-			env, err := stringMapOption(item, metaOptionPath(key))
+			env, err := wire.StringMapOption(item, wire.MetaOptionPath(vendor, key))
 			if err != nil {
 				return ClaudeOptions{}, err
 			}
 
 			options.Env = env
 		case metaExtraPathDirsKey:
-			dirs, err := stringSliceOption(item, metaOptionPath(key))
+			dirs, err := wire.StringSliceOption(item, wire.MetaOptionPath(vendor, key))
 			if err != nil {
 				return ClaudeOptions{}, err
 			}
@@ -270,41 +259,41 @@ func parseClaudeOptions(values map[string]any) (ClaudeOptions, *acp.RequestError
 		case metaOutputSchemaKey:
 			schema, ok := item.(map[string]any)
 			if !ok {
-				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
+				return ClaudeOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
-			options.OutputSchema = cloneAnyMap(schema)
+			options.OutputSchema = wire.CloneMap(schema)
 		case metaEffortKey:
 			level, ok := item.(string)
 			if !ok || level == "" {
-				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
+				return ClaudeOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
 			options.Effort = level
 		case metaPermissionModeKey:
 			permission, ok := item.(string)
 			if !ok {
-				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
+				return ClaudeOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
 			options.PermissionMode = permission
 		case metaSystemPromptKey:
 			text, ok := item.(string)
 			if !ok {
-				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
+				return ClaudeOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
 			options.SystemPrompt = text
 		case metaBareKey:
 			enabled, ok := item.(bool)
 			if !ok {
-				return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
+				return ClaudeOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 
 			options.Bare = enabled
 			options.bareSet = true
 		default:
-			return ClaudeOptions{}, wire.Unsupported(metaOptionPath(key))
+			return ClaudeOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 		}
 	}
 
@@ -313,139 +302,12 @@ func parseClaudeOptions(values map[string]any) (ClaudeOptions, *acp.RequestError
 
 func validateClaudeOptions(options ClaudeOptions) *acp.RequestError {
 	if options.OutputSchema != nil && len(options.OutputSchema) == 0 {
-		return wire.Unsupported(metaOptionPath(metaOutputSchemaKey))
-	}
-
-	if options.Model != "" {
-		if err := claude.ValidModel(options.Model); err != nil {
-			return wire.Unsupported(metaOptionPath(metaModelKey))
-		}
+		return wire.Unsupported(wire.MetaOptionPath(vendor, metaOutputSchemaKey))
 	}
 
 	if options.PermissionMode != "" && !slices.Contains([]string{nativeDefault, "manual", permissionModePlan, "acceptEdits", "bypassPermissions", "auto", "dontAsk"}, options.PermissionMode) {
-		return wire.Unsupported(metaOptionPath(metaPermissionModeKey))
+		return wire.Unsupported(wire.MetaOptionPath(vendor, metaPermissionModeKey))
 	}
 
-	if err := process.ValidateNames(options.Env); err != nil {
-		var nameErr *process.NameError
-		if errors.As(err, &nameErr) {
-			return wire.Unsupported(metaOptionPath(metaEnvKey) + "." + nameErr.Key)
-		}
-
-		return wire.Unsupported(metaOptionPath(metaEnvKey))
-	}
-
-	if err := process.ValidateExtraPathDirs(options.ExtraPathDirs); err != nil {
-		var dirErr *process.PathDirError
-		if errors.As(err, &dirErr) {
-			return wire.Unsupported(fmt.Sprintf("%s[%d]", metaOptionPath(metaExtraPathDirsKey), dirErr.Index))
-		}
-
-		return wire.Unsupported(metaOptionPath(metaExtraPathDirsKey))
-	}
-
-	return nil
-}
-
-func metaOptionPath(key string) string {
-	path := "_meta." + vendor + "." + metaOptionsKey
-	if key == "" {
-		return path
-	}
-
-	return path + "." + key
-}
-
-func stringMapOption(value any, path string) (map[string]string, *acp.RequestError) {
-	switch typed := value.(type) {
-	case map[string]string:
-		return cloneStringMap(typed), nil
-	case map[string]any:
-		result := make(map[string]string, len(typed))
-		for key, item := range typed {
-			text, ok := item.(string)
-			if !ok {
-				return nil, wire.Unsupported(path + "." + key)
-			}
-
-			result[key] = text
-		}
-
-		return result, nil
-	default:
-		return nil, wire.Unsupported(path)
-	}
-}
-
-func stringSliceOption(value any, path string) ([]string, *acp.RequestError) {
-	switch typed := value.(type) {
-	case []string:
-		return slices.Clone(typed), nil
-	case []any:
-		result := make([]string, 0, len(typed))
-		for index, item := range typed {
-			text, ok := item.(string)
-			if !ok {
-				return nil, wire.Unsupported(fmt.Sprintf("%s[%d]", path, index))
-			}
-
-			result = append(result, text)
-		}
-
-		return result, nil
-	default:
-		return nil, wire.Unsupported(path)
-	}
-}
-
-func cloneAnyMap(values map[string]any) map[string]any {
-	if values == nil {
-		return nil
-	}
-
-	cloned := make(map[string]any, len(values))
-	for key, value := range values {
-		cloned[key] = cloneAny(value)
-	}
-
-	return cloned
-}
-
-func cloneAny(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		return cloneAnyMap(typed)
-	case []any:
-		cloned := make([]any, len(typed))
-		for index, item := range typed {
-			cloned[index] = cloneAny(item)
-		}
-
-		return cloned
-	case []string:
-		return slices.Clone(typed)
-	default:
-		return typed
-	}
-}
-
-func mergeAnyMap(base map[string]any, overlay map[string]any) map[string]any {
-	result := cloneAnyMap(base)
-	if result == nil {
-		result = map[string]any{}
-	}
-
-	for key, value := range overlay {
-		if valueMap, ok := value.(map[string]any); ok {
-			if existing, ok := result[key].(map[string]any); ok {
-				result[key] = mergeAnyMap(existing, valueMap)
-
-				continue
-			}
-		}
-
-		result[key] = cloneAny(value)
-	}
-
-	return result
+	return wire.ValidateSessionEnvironment(options.Env, options.ExtraPathDirs, wire.MetaOptionPath(vendor, ""))
 }

@@ -3,13 +3,9 @@ package claudeacp
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/coder/acp-go-sdk"
 
@@ -31,9 +27,8 @@ const (
 	// ended: the stats read, the mirror commit, and the terminal lifecycle
 	// event.
 	sessionSettleTimeout = 60 * time.Second
-	// stderrTailBytes is how much of claude's stderr the session retains for the
-	// process-exit cause.
-	stderrTailBytes = 8 << 10
+	// claudeInitializeTimeout bounds the native control-protocol handshake.
+	claudeInitializeTimeout = 60 * time.Second
 )
 
 // session is one ACP session: one claude conversation, driven by one live claude
@@ -42,6 +37,7 @@ type session struct {
 	callbacks             sync.WaitGroup
 	agent                 *Agent
 	id                    acp.SessionId
+	nativeID              string
 	cwd                   string
 	additionalDirectories []string
 	options               ClaudeOptions
@@ -76,26 +72,33 @@ type session struct {
 
 	mirrorMu sync.Mutex
 	lcMu     sync.Mutex
-	lc       lifecycleState
+	lc       lifecycle.Publisher
 }
 
 // runtime is one claude process generation.
 type runtime struct {
 	proc   *process.Process
 	client *claude.Client
-	stderr *stderrTail
 	cancel context.CancelFunc
 	// done is closed when the pump has stopped routing this generation.
-	done chan struct{}
+	done        chan struct{}
+	releaseOnce sync.Once
+}
+
+// release ends this generation's read loop and closes its pipes. It runs once,
+// whichever of the pump and the shutdown ladder reaches it first.
+func (rt *runtime) release() {
+	rt.releaseOnce.Do(func() {
+		rt.cancel()
+		_ = rt.proc.Close()
+	})
 }
 
 // cycle is one foreground run: the work of one accepted prompt, or one
 // agent-origin run claude started between prompts.
 type cycle struct {
-	turnID  string
-	cycleID string
-	origin  lifecycle.Cause
-	state   cycleState
+	lifecycle.Cycle
+	state cycleState
 	// failure records an event-delivery or native control failure.
 	failure error
 }
@@ -119,6 +122,16 @@ type turn struct {
 	settled    chan struct{}
 	settleOnce sync.Once
 	finished   chan struct{}
+	// cancelCtx ends the turn's own context. The session owns it, so a peer
+	// request the SDK refuses never cancels a turn in flight.
+	cancelCtx context.CancelFunc
+}
+
+// cancelTurn ends the turn's context if one was installed.
+func (t *turn) cancelTurn() {
+	if t.cancelCtx != nil {
+		t.cancelCtx()
+	}
 }
 
 func (t *turn) settle(end turnEnd) {
@@ -136,35 +149,6 @@ type dialog struct {
 
 var errDialogCancelled = errors.New("dialog cancelled by the session")
 
-// stderrTail retains the last bytes claude wrote to stderr.
-type stderrTail struct {
-	mu   sync.Mutex
-	data []byte
-}
-
-func (t *stderrTail) Write(p []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.data = append(t.data, p...)
-	if len(t.data) > stderrTailBytes {
-		t.data = t.data[len(t.data)-stderrTailBytes:]
-	}
-
-	return len(p), nil
-}
-
-// lastLine is the final non-empty stderr line, which is where a dying harness
-// names its reason.
-func (t *stderrTail) lastLine() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	lines := strings.Split(strings.TrimSpace(string(t.data)), "\n")
-
-	return strings.TrimSpace(lines[len(lines)-1])
-}
-
 // launch starts one claude process for this session and binds it as the live
 // runtime. sessionPath names the native session file to continue, or is
 // empty for a new conversation.
@@ -180,19 +164,16 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 	}
 
 	if seedErr := process.WriteSeedFiles(s.agentDir, s.agent.options.SeedFiles); seedErr != nil {
-		var refused *process.SeedFileError
-		if errors.As(seedErr, &refused) {
-			return nil, wire.Unsupported("seedFiles")
+		if refusal := wire.SeedFileRefusal(seedErr); refusal != nil {
+			return nil, refusal
 		}
 
 		return nil, s.startFailure(ctx, seedErr)
 	}
 
-	if s.id == "" {
-		s.id = acp.SessionId(uuid.NewString())
-	}
+	s.mu.Lock()
+	s.sessionFile = claude.SessionPath(s.agentDir, s.cwd, s.nativeID)
 
-	s.sessionFile = claude.SessionPath(s.agentDir, s.cwd, string(s.id))
 	if s.model == "" {
 		s.model = s.options.Model
 		if s.model == "" {
@@ -200,22 +181,30 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 		}
 	}
 
+	launch := claude.Launch{SessionID: s.nativeID, Model: s.model,
+		PermissionMode: s.options.PermissionMode, SystemPrompt: s.options.SystemPrompt, Bare: s.options.Bare,
+		OutputSchema: s.options.OutputSchema, SettingSources: s.agent.options.ClaudeSettingSources,
+		SettingsFile: s.agent.options.ClaudeSettingsFile, AdditionalDirectories: s.additionalDirectories}
+	s.mu.Unlock()
+
+	if sessionPath != "" {
+		rows, readErr := claude.ReadRows(sessionPath)
+		if readErr != nil {
+			return nil, s.startFailure(ctx, readErr)
+		}
+
+		launch.Resume = len(rows) > 0
+	}
+
 	proc, err := process.Start(ctx, process.Request{
 		Executable: executable,
-		Args: claude.Launch{SessionID: string(s.id), Resume: sessionPath != "", Model: s.model,
-			PermissionMode: s.options.PermissionMode, SystemPrompt: s.options.SystemPrompt, Bare: s.options.Bare,
-			OutputSchema: s.options.OutputSchema, SettingSources: s.agent.options.ClaudeSettingSources,
-			SettingsFile: s.agent.options.ClaudeSettingsFile, AdditionalDirectories: s.additionalDirectories}.Args(),
-		Env: env,
-		Dir: s.cwd,
+		Args:       launch.Args(),
+		Env:        env,
+		Dir:        s.cwd,
 	})
 	if err != nil {
 		return nil, s.startFailure(ctx, err)
 	}
-
-	tail := &stderrTail{}
-
-	go func() { _, _ = io.Copy(tail, proc.Stderr()) }()
 
 	// The read loop outlives the request that launched claude: the shutdown ladder
 	// ends it.
@@ -226,13 +215,23 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 
 	s.mu.Lock()
 
-	rt := &runtime{proc: proc, client: client, stderr: tail, cancel: cancelRead, done: make(chan struct{})}
+	rt := &runtime{proc: proc, client: client, cancel: cancelRead, done: make(chan struct{})}
 	s.runtime = rt
 	s.mu.Unlock()
 
 	go s.pump(context.WithoutCancel(ctx), rt)
 
 	return rt, nil
+}
+
+// bindRestored records the native file and the row count a restore hydrated,
+// under the lock the mirror and relaunch paths read them with.
+func (s *session) bindRestored(path string, mirrored int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.sessionFile = path
+	s.mirrored = mirrored
 }
 
 // launchEnvironment applies the session overlay to the construction-time environment.
@@ -242,7 +241,7 @@ func (s *session) launchEnvironment() ([]string, error) {
 
 	env, err := environment.Build()
 	if err != nil {
-		return nil, wire.Unsupported(metaOptionPath(metaEnvKey))
+		return nil, wire.Unsupported(wire.MetaOptionPath(vendor, metaEnvKey))
 	}
 
 	return env, nil
@@ -267,7 +266,7 @@ func (s *session) startFailure(ctx context.Context, err error) error {
 
 // configureRuntime discovers the native catalogs and current session settings.
 func (s *session) configureRuntime(ctx context.Context, rt *runtime, model string, expectID string) error {
-	initCtx, cancel := context.WithTimeout(ctx, s.agent.options.ClaudeInitializeTimeout)
+	initCtx, cancel := context.WithTimeout(ctx, claudeInitializeTimeout)
 	defer cancel()
 
 	initialized, err := rt.client.Initialize(initCtx)
@@ -275,18 +274,22 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model strin
 		return s.startFailure(ctx, err)
 	}
 
-	if expectID != "" && string(s.id) != expectID {
+	if expectID != "" && s.nativeID != expectID {
 		return s.startFailure(ctx, errors.New("native session id mismatch"))
 	}
 
-	if model != "" && model != s.model {
+	s.mu.Lock()
+	current, effort, outputStyle := s.model, s.options.Effort, s.outputStyle
+	s.mu.Unlock()
+
+	if model != "" && model != current {
 		if setErr := rt.client.SetModel(ctx, model); setErr != nil {
 			return s.startFailure(ctx, setErr)
 		}
 	}
 
-	if s.options.Effort != "" {
-		if setErr := rt.client.ApplySettings(ctx, map[string]any{nativeEffortLevel: s.options.Effort}); setErr != nil {
+	if effort != "" {
+		if setErr := rt.client.ApplySettings(ctx, map[string]any{nativeEffortLevel: effort}); setErr != nil {
 			return s.startFailure(ctx, setErr)
 		}
 	}
@@ -296,12 +299,12 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model strin
 		return s.startFailure(ctx, err)
 	}
 
-	if s.outputStyle != "" && s.outputStyle != initialized.OutputStyle {
-		if err := rt.client.ApplySettings(ctx, map[string]any{nativeOutputStyle: s.outputStyle}); err != nil {
+	if outputStyle != "" && outputStyle != initialized.OutputStyle {
+		if err := rt.client.ApplySettings(ctx, map[string]any{nativeOutputStyle: outputStyle}); err != nil {
 			return s.startFailure(ctx, err)
 		}
 
-		initialized.OutputStyle = s.outputStyle
+		initialized.OutputStyle = outputStyle
 	}
 
 	s.mu.Lock()
@@ -315,7 +318,12 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model strin
 
 	s.models = initialized.Models
 	s.commands = availableCommands(initialized.Commands)
-	s.options.PermissionMode = initialized.PermissionMode
+
+	// A caller that named no mode adopts whatever native reports; a caller that
+	// named one keeps it as the carrier a later relaunch is built from.
+	if s.options.PermissionMode == "" {
+		s.options.PermissionMode = initialized.PermissionMode
+	}
 
 	s.effort = s.options.Effort
 	if settings.Effective.EffortLevel != "" {
@@ -334,18 +342,19 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model strin
 func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 	s.mu.Lock()
 	rt := s.runtime
+	sessionFile := s.sessionFile
 	s.mu.Unlock()
 
 	if rt != nil {
 		return rt, nil
 	}
 
-	rt, err := s.launch(ctx, s.sessionFile)
+	rt, err := s.launch(ctx, sessionFile)
 	if err != nil {
 		return nil, err
 	}
 
-	if configureErr := s.configureRuntime(ctx, rt, "", string(s.id)); configureErr != nil {
+	if configureErr := s.configureRuntime(ctx, rt, "", s.nativeID); configureErr != nil {
 		s.stopRuntime(context.WithoutCancel(ctx), rt)
 
 		return nil, configureErr
@@ -361,6 +370,7 @@ func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 // pump delivers native records in wire order for one process generation.
 func (s *session) pump(ctx context.Context, rt *runtime) {
 	defer close(rt.done)
+	defer rt.release()
 
 	for event := range rt.client.Events() {
 		s.handleEvent(ctx, rt, event)
@@ -379,7 +389,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event claude.Eve
 		return
 	}
 
-	if event.SessionID != "" && event.SessionID != string(s.id) {
+	if event.SessionID != "" && event.SessionID != s.nativeID {
 		s.poisonSession(ctx, "native_session_identity_drift")
 
 		return
@@ -425,9 +435,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event claude.Eve
 		}
 
 		settled, err := s.projectEvent(ctx, rt, &t.cycle, event)
-		if err != nil && t.failure == nil {
-			t.failure = err
-		}
+		s.recordFailure(&t.cycle, err)
 
 		if settled {
 			t.settle(turnSettled)
@@ -436,12 +444,10 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event claude.Eve
 		}
 	case c != nil:
 		settled, err := s.projectEvent(ctx, rt, c, event)
-		if err != nil && c.failure == nil {
-			c.failure = err
-		}
+		s.recordFailure(c, err)
 
 		if settled {
-			s.settleAgentCycle(ctx, c)
+			s.settleAgentCycle(ctx, rt, c)
 		}
 	}
 }
@@ -452,16 +458,16 @@ func bearsWork(event claude.Event) bool {
 		return true
 	}
 
-	return event.Type == "system" && event.Subtype == "task_notification"
+	return event.Type == nativeSystem && event.Subtype == "task_notification"
 }
 
 // openAgentCycle opens the foreground for work claude began with no prompt in
 // flight, including delegated task notifications.
 func (s *session) openAgentCycle(ctx context.Context) {
-	c := &cycle{origin: lifecycle.CauseActivity}
+	c := &cycle{Cycle: lifecycle.Cycle{Origin: lifecycle.CauseActivity}}
 	c.state.tools = make(map[string]*toolState)
 
-	if err := s.lcOpenAgentCycle(ctx, c); err != nil {
+	if err := s.lc.OpenAgentCycle(ctx, &c.Cycle); err != nil {
 		s.agent.log.ErrorContext(ctx, "open agent-origin cycle failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 
@@ -475,21 +481,27 @@ func (s *session) openAgentCycle(ctx context.Context) {
 
 // settleAgentCycle runs the agent-origin settlement on the pump: usage, the
 // mirror commit, then the terminal idle.
-func (s *session) settleAgentCycle(ctx context.Context, c *cycle) {
+func (s *session) settleAgentCycle(ctx context.Context, rt *runtime, c *cycle) {
 	settleCtx, cancel := context.WithTimeout(ctx, sessionSettleTimeout)
 	defer cancel()
 
 	s.emitUsage(settleCtx, &c.state, nil)
 
 	if err := s.commitMirror(settleCtx); err != nil {
-		s.lcFence()
+		// The cycle's state is not durable, so the incarnation is fenced and the
+		// generation that produced it ends: the child is stopped and its
+		// binding dropped while this cycle still holds the foreground, so the
+		// next operation relaunches and opens a new incarnation.
+		s.lc.Fence()
+		s.signalRuntime(settleCtx, rt)
+		s.dropRuntime(rt)
 		s.agent.log.ErrorContext(settleCtx, "mirror commit after agent-origin cycle failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 	}
 
-	verdict := judgeCycle(c, false)
+	verdict := s.judgeCycle(c, false)
 
-	if err := s.lcIdle(settleCtx, c, verdict); err != nil {
+	if err := s.lc.Idle(settleCtx, c.Cycle, verdict.stopReason, verdict.outcome); err != nil {
 		s.agent.log.ErrorContext(settleCtx, "terminal idle for agent-origin cycle failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 	}
@@ -507,31 +519,64 @@ func (s *session) settleAgentCycle(ctx context.Context, c *cycle) {
 // event is out.
 func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 	s.mu.Lock()
-	if s.runtime == rt {
-		s.runtime = nil
-	}
 
+	generationOwned := s.runtime == rt
 	t := s.turn
 	c := s.cycle
-	s.cycle = nil
+
 	closing := s.closing
+	if !closing {
+		s.cycle = nil
+	}
 	s.mu.Unlock()
 	s.cancelDialogs()
 	s.callbacks.Wait()
 
 	if c != nil && !closing {
-		_ = s.lcIdle(ctx, c, cycleVerdict{outcome: lifecycle.OutcomeFailed})
+		_ = s.lc.Idle(ctx, c.Cycle, "", lifecycle.OutcomeFailed)
 	}
 
 	if t != nil {
-		// The prompt settles the turn and fences the stream after its idle.
+		t.cancelTurn()
 		t.settle(turnTransportEnded)
 
-		return
+		// A turn that already settled still owes its terminal event, so the
+		// incarnation ends only once that turn has published it.
+		select {
+		case <-t.finished:
+		case <-time.After(sessionSettleTimeout):
+		}
 	}
 
-	if !closing {
-		s.lcFence()
+	// The incarnation ends with the generation that produced it, whatever the
+	// turn did, so a relaunch never publishes on the old stream id.
+	if generationOwned && !closing {
+		s.lc.Fence()
+	}
+
+	// The binding is dropped last: a relaunch must not open its incarnation
+	// before this one is fenced.
+	s.dropRuntime(rt)
+}
+
+// dropRuntime unbinds one process generation. Its incarnation is already
+// fenced, so the next operation launches into a new one.
+func (s *session) dropRuntime(rt *runtime) {
+	s.mu.Lock()
+	if s.runtime == rt {
+		s.runtime = nil
+	}
+	s.mu.Unlock()
+}
+
+// signalRuntime ends one process generation: the group is signalled and the
+// root is reaped. It never joins the pump, so the pump itself may call it.
+func (s *session) signalRuntime(ctx context.Context, rt *runtime) {
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionShutdownTimeout)
+	defer cancel()
+
+	if err := rt.proc.Shutdown(shutdownCtx, sessionShutdownGrace); err != nil {
+		_ = rt.proc.Kill()
 	}
 }
 
@@ -539,28 +584,18 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 // generation: signal the process group, wait for the root, join the pump, and
 // release the pipes.
 func (s *session) stopRuntime(ctx context.Context, rt *runtime) {
-	defer rt.cancel()
+	s.signalRuntime(ctx, rt)
 
-	shutdownCtx, cancel := context.WithTimeout(ctx, sessionShutdownTimeout)
+	joinCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionShutdownTimeout)
 	defer cancel()
-
-	if err := rt.proc.Shutdown(shutdownCtx, sessionShutdownGrace); err != nil {
-		_ = rt.proc.Kill()
-	}
 
 	select {
 	case <-rt.done:
-	case <-shutdownCtx.Done():
-		rt.cancel()
+	case <-joinCtx.Done():
 	}
 
-	_ = rt.proc.Close()
-
-	s.mu.Lock()
-	if s.runtime == rt {
-		s.runtime = nil
-	}
-	s.mu.Unlock()
+	rt.release()
+	s.dropRuntime(rt)
 }
 
 // abort interrupts the native run under a bounded context detached from the
@@ -589,6 +624,7 @@ func (s *session) cancel(ctx context.Context) {
 
 	t.cancelled = true
 	s.mu.Unlock()
+	t.cancelTurn()
 
 	s.cancelDialogs()
 
@@ -610,6 +646,7 @@ func (s *session) timeout(ctx context.Context, t *turn) {
 
 	t.timedOut = true
 	s.mu.Unlock()
+	t.cancelTurn()
 
 	s.cancelDialogs()
 
@@ -707,12 +744,15 @@ func (s *session) acquireGate(limit string) (func(), error) {
 		return nil, wire.UnknownSession()
 	}
 
-	select {
-	case s.gate <- struct{}{}:
-		return func() { <-s.gate }, nil
-	default:
-		return nil, wire.Backpressure(limit)
-	}
+	return wire.AcquireSessionGate(s.gate, limit)
+}
+
+// holdGate takes the foreground of a session no request can reach yet, where
+// the gate is always free.
+func (s *session) holdGate() func() {
+	s.gate <- struct{}{}
+
+	return sync.OnceFunc(func() { <-s.gate })
 }
 
 // close runs the shutdown ladder: mark closed, resolve pending dialogs and the
@@ -737,6 +777,10 @@ func (s *session) close(ctx context.Context) error {
 		t.cancelled = true
 	}
 	s.mu.Unlock()
+
+	if t != nil {
+		t.cancelTurn()
+	}
 
 	s.cancelDialogs()
 	s.callbacks.Wait()
@@ -770,13 +814,13 @@ func (s *session) close(ctx context.Context) error {
 	s.cycle = nil
 	s.mu.Unlock()
 
-	if c != nil {
-		if err := s.lcIdle(commitCtx, c, cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}); err != nil {
+	if len(errs) == 0 && c != nil {
+		if err := s.lc.Idle(commitCtx, c.Cycle, lifecycle.StopReasonCancelled, lifecycle.OutcomeCancelled); err != nil {
 			errs = append(errs, err)
 		}
 	}
 
-	s.lcFence()
+	s.lc.Fence()
 
 	s.mu.Lock()
 	s.closeErr = errors.Join(errs...)
@@ -809,6 +853,10 @@ func (s *session) finishDelivery(ctx context.Context, rt *runtime, t *turn) {
 
 			pending = append(pending, event)
 		case <-rt.proc.Done():
+			for index := range pending {
+				s.handleEvent(ctx, rt, pending[index])
+			}
+
 			return
 		}
 	}

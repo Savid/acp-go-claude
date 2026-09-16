@@ -50,15 +50,18 @@ func WriteRows(path string, rows [][]byte) error {
 		return err
 	}
 	defer os.Remove(file.Name())
-	defer file.Close()
 
 	for _, row := range rows {
 		if _, err := file.Write(append(append([]byte(nil), row...), '\n')); err != nil {
+			_ = file.Close()
+
 			return err
 		}
 	}
 
 	if err := file.Sync(); err != nil {
+		_ = file.Close()
+
 		return err
 	}
 
@@ -68,12 +71,23 @@ func WriteRows(path string, rows [][]byte) error {
 
 	return os.Rename(file.Name(), path)
 }
+
+// ValidateRows refuses stored rows that are not this session's transcript:
+// a row whose members disagree with the native shape, or a set that names no
+// session identity at all. Both restore routes run it before the rows reach
+// claude's own home. Every member the replay decoder reads is declared here,
+// so decoding the row is what rejects a wrong type; only SessionID is read
+// afterwards.
 func ValidateRows(rows [][]byte, id string) error {
 	found := false
 
 	for _, row := range rows {
 		var entry struct {
-			SessionID string `json:"sessionId"`
+			SessionID       string   `json:"sessionId"`
+			Type            string   `json:"type"`
+			UUID            string   `json:"uuid"`
+			ParentToolUseID string   `json:"parentToolUseID"` //nolint:tagliatelle // Native transcript spelling.
+			Message         *Message `json:"message"`
 		}
 		if err := json.Unmarshal(row, &entry); err != nil {
 			return err

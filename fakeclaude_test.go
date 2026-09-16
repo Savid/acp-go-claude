@@ -10,12 +10,24 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/savid/acp-go-claude/internal/claude"
 )
 
 const fakeClaudeEnv = "ACP_GO_CLAUDE_TEST_FAKE"
 const fakeClaudeEnvVersion = "ACP_GO_CLAUDE_TEST_VERSION"
+const fakeClaudeEnvArgvDump = "ACP_GO_CLAUDE_TEST_ARGV_DUMP"
+
+// fakeClaudeEnvResumeHold names a file a resumed fake claude creates before it
+// stops answering, so a test can act while the adapter is still relaunching.
+const fakeClaudeEnvResumeHold = "ACP_GO_CLAUDE_TEST_RESUME_HOLD"
+
+// fakeClaudeResumeHold is how long a held resume refuses to serve. It outlasts
+// the shutdown the adapter sends when it gives up on the relaunch.
+const fakeClaudeResumeHold = 30 * time.Second
 
 type fakeClaude struct {
 	id, path string
@@ -23,6 +35,38 @@ type fakeClaude struct {
 	turnMu   sync.Mutex
 	abort    chan struct{}
 	replies  map[string]chan json.RawMessage
+}
+
+// launchFlag returns the value of a repeated <name> <value> launch flag, and
+// whether the flag was present at all.
+func launchFlag(args []string, name string) (string, bool) {
+	for index, arg := range args {
+		if arg == name && index+1 < len(args) {
+			return args[index+1], true
+		}
+
+		if value, found := strings.CutPrefix(arg, name+"="); found {
+			return value, true
+		}
+	}
+
+	return "", false
+}
+
+// fakeClaudeSessionID reads the session id from the launch flags, and holds a
+// resumed launch for as long as a test asked before serving it.
+func fakeClaudeSessionID(args []string) string {
+	id, _ := launchFlag(args, "--session-id")
+	resumed, isResume := launchFlag(args, "--resume")
+	if isResume {
+		id = resumed
+	}
+	if hold := os.Getenv(fakeClaudeEnvResumeHold); hold != "" && isResume {
+		_ = os.WriteFile(hold, []byte("held\n"), 0o600)
+		time.Sleep(fakeClaudeResumeHold)
+	}
+
+	return id
 }
 
 func runFakeClaude(args []string) int {
@@ -36,17 +80,27 @@ func runFakeClaude(args []string) int {
 		return 0
 	}
 	cwd, _ := os.Getwd()
-	id := ""
-	for i, arg := range args {
-		if (arg == "--session-id" || arg == "--resume") && i+1 < len(args) {
-			id = args[i+1]
-		}
-	}
+	id := fakeClaudeSessionID(args)
 	f := &fakeClaude{id: id, path: claude.SessionPath(os.Getenv(claude.EnvConfigDir), cwd, id), replies: make(map[string]chan json.RawMessage)}
 	if dump := os.Getenv("ACP_GO_CLAUDE_TEST_ENV_DUMP"); dump != "" {
 		_ = os.WriteFile(dump, []byte(strings.Join(os.Environ(), "\n")), 0o600)
 	}
-	settings := map[string]any{"model": "default", nativeEffortLevel: "low", nativeOutputStyle: "default"}
+	if dump := os.Getenv(fakeClaudeEnvArgvDump); dump != "" {
+		_ = os.WriteFile(dump, []byte(strings.Join(args, "\n")), 0o600)
+	}
+	// The launch flags decide what the settings report, so a dropped flag is
+	// visible to a test rather than silently absorbed. The handshake reports the
+	// native default permission mode, so a caller's requested mode has to
+	// survive without any echo of --permission-mode.
+	launchModel := nativeDefault
+	if model, ok := launchFlag(args, "--model"); ok {
+		launchModel = model
+	}
+	structured, structuredRequested := launchFlag(args, "--json-schema")
+	settings := map[string]any{"model": launchModel, nativeEffortLevel: "low", nativeOutputStyle: "default"}
+	// Claude Code announces itself before it answers anything, so the adapter
+	// must already be able to forward a record when the process starts.
+	f.write(map[string]any{"type": "system", "subtype": "init", "uuid": uuid.NewString(), "session_id": id})
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 16<<20)
 	for scanner.Scan() {
@@ -68,7 +122,7 @@ func runFakeClaude(args []string) int {
 			result := any(map[string]any{})
 			switch frame.Request["subtype"] {
 			case "initialize":
-				result = claude.InitializeResponse{Models: []claude.Model{{Value: "default", DisplayName: "Default", SupportsEffort: true, SupportedEffortLevels: []string{"low", "high"}, SupportsAutoMode: true}, {Value: "haiku", DisplayName: "Haiku"}}, Commands: []claude.Command{{Name: "compact", Description: "Compact"}, {Name: "clear"}}, PermissionMode: "default", OutputStyle: "default", AvailableOutputStyles: []string{"default", "concise"}}
+				result = claude.InitializeResponse{Models: []claude.Model{{Value: "default", DisplayName: "Default", SupportsEffort: true, SupportedEffortLevels: []string{"low", "high"}, SupportsAutoMode: true}, {Value: "haiku", DisplayName: "Haiku"}}, Commands: []claude.Command{{Name: "compact", Description: "Compact"}, {Name: "clear"}}, PermissionMode: nativeDefault, OutputStyle: "default", AvailableOutputStyles: []string{"default", "concise"}}
 			case "get_settings":
 				result = map[string]any{"effective": settings}
 			case "set_model":
@@ -84,8 +138,13 @@ func runFakeClaude(args []string) int {
 				}
 				maps.Copy(settings, values)
 			case "get_context_usage":
-				result = claude.ContextUsage{TotalTokens: 20, MaxTokens: 1000, Model: "default"}
+				result = claude.ContextUsage{TotalTokens: 20, MaxTokens: 1000}
 			case "interrupt":
+				// A harness that will not abort is the rung the shutdown ladder
+				// has to survive.
+				if os.Getenv("ACP_GO_CLAUDE_TEST_IGNORE_INTERRUPT") == "1" {
+					break
+				}
 				f.turnMu.Lock()
 				if f.abort != nil {
 					close(f.abort)
@@ -114,7 +173,14 @@ func runFakeClaude(args []string) int {
 			f.turnMu.Lock()
 			f.abort = abort
 			f.turnMu.Unlock()
-			go f.turn(text.String(), abort)
+			if text.String() == "EXIT" {
+				// The turn completes and then the harness leaves, so the
+				// generation ends with no ACP request waiting on it.
+				f.turn(text.String(), abort, structured, structuredRequested)
+
+				return 0
+			}
+			go f.turn(text.String(), abort, structured, structuredRequested)
 		case "control_response":
 			f.mu.Lock()
 			reply := f.replies[frame.Response.RequestID]
@@ -139,9 +205,9 @@ func (f *fakeClaude) row(role, text string) {
 		return
 	}
 	defer file.Close()
-	_ = json.NewEncoder(file).Encode(map[string]any{"type": role, "sessionId": f.id, "message": map[string]any{"id": role + text, "role": role, "content": []map[string]any{{"type": "text", "text": text}}}})
+	_ = json.NewEncoder(file).Encode(map[string]any{"type": role, "uuid": uuid.NewString(), "sessionId": f.id, "cwd": filepath.Dir(f.path), "timestamp": "2026-01-01T00:00:00Z", "message": map[string]any{"id": role + text, "role": role, "content": []map[string]any{{"type": "text", "text": text}}}})
 }
-func (f *fakeClaude) turn(text string, abort <-chan struct{}) {
+func (f *fakeClaude) turn(text string, abort <-chan struct{}, structured string, structuredRequested bool) {
 	if text == "NOISE" {
 		fmt.Fprintln(os.Stderr, "native stderr noise")
 		fmt.Println("native stdout noise")
@@ -152,7 +218,7 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}) {
 		os.Exit(23)
 	}
 	f.row("user", text)
-	f.write(map[string]any{"type": "stream_event", "session_id": f.id, "event": map[string]any{"type": nativeMessageStart, "message": map[string]any{"id": "reply-" + text, "role": "assistant", "content": []any{}}}})
+	f.write(map[string]any{"type": "stream_event", "uuid": "stream-" + text, "session_id": f.id, "event": map[string]any{"type": nativeMessageStart, "message": map[string]any{"id": "reply-" + text, "role": "assistant", "content": []any{}}}})
 	if text == "BLOCK" {
 		<-abort
 		f.write(map[string]any{"type": "result", "session_id": f.id, "stop_reason": "aborted"})
@@ -214,10 +280,20 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}) {
 		answer = outcome
 	}
 	f.write(map[string]any{"type": "stream_event", "session_id": f.id, "event": map[string]any{"type": "content_block_delta", "delta": map[string]any{"type": "text_delta", "text": answer[:3]}}})
-	f.write(map[string]any{"type": "assistant", "session_id": f.id, "message": map[string]any{"id": "reply-" + text, "role": "assistant", "content": []map[string]any{{"type": "text", "text": answer}}}})
+	f.write(map[string]any{"type": "assistant", "uuid": "assistant-" + text, "session_id": f.id, "message": map[string]any{"id": "reply-" + text, "role": "assistant", "content": []map[string]any{{"type": "text", "text": answer}}}})
 	f.row("assistant", answer)
-	f.write(map[string]any{"type": "result", "session_id": f.id, "subtype": "success", "usage": map[string]any{"input_tokens": 10, "output_tokens": 5}, "total_cost_usd": 0.01})
+	result := map[string]any{"type": "result", "uuid": "result-" + text, "session_id": f.id, "subtype": "success", "usage": map[string]any{"input_tokens": 10, "output_tokens": 5}, "total_cost_usd": 0.01}
+	if structuredRequested {
+		var decoded any
+		if json.Unmarshal([]byte(structured), &decoded) == nil {
+			result["structured_output"] = map[string]any{"schema": decoded, "answer": answer}
+		}
+	}
+	f.write(result)
+	if text == "AGENTHANG" {
+		f.turn("BLOCK", abort, structured, structuredRequested)
+	}
 	if text == "AGENTWORK" {
-		f.turn("background", abort)
+		f.turn("background", abort, structured, structuredRequested)
 	}
 }

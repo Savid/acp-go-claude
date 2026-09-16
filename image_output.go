@@ -2,9 +2,6 @@ package claudeacp
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"net/url"
 
 	"github.com/coder/acp-go-sdk"
@@ -14,40 +11,14 @@ import (
 	"github.com/savid/acp-go-core/wire"
 )
 
-// outputImage is one validated emitted image: the base64 payload, the
-// sniffed MIME, its decoded size, and its fingerprint.
-type outputImage struct {
-	data        string
-	mime        string
-	fingerprint string
-	sizeBytes   int64
-}
-
-// decodeOutputImage validates one native image block for emission through
-// the core output gate. Output is not format-allowlisted: any sniffable
-// raster is emitted with its sniffed MIME.
-func decodeOutputImage(block claude.ContentBlock, limit int64) (outputImage, *image.OutputError) {
+// decodeOutputImage validates one native image block for emission through the
+// core output gate.
+func decodeOutputImage(block claude.ContentBlock, limit int64) (image.Output, *image.OutputError) {
 	if block.Source == nil {
-		return outputImage{}, &image.OutputError{Reason: image.ReasonInvalidBase64, Message: "image has no source"}
+		return image.Output{}, &image.OutputError{Reason: image.ReasonInvalidBase64, Message: "image has no source"}
 	}
 
-	data, mime, size, failure := image.DecodeInline(block.Source.Data, limit)
-	if failure != nil {
-		return outputImage{}, failure
-	}
-
-	if block.Source.MediaType != "" && block.Source.MediaType != mime && image.IsImageMIME(block.Source.MediaType) {
-		return outputImage{}, &image.OutputError{Reason: image.ReasonMediaTypeMismatch, Message: "declared media type does not match the image"}
-	}
-
-	digest := sha256.Sum256(data)
-
-	return outputImage{
-		data:        base64.StdEncoding.EncodeToString(data),
-		mime:        mime,
-		fingerprint: hex.EncodeToString(digest[:]),
-		sizeBytes:   size,
-	}, nil
+	return image.DecodeOutput(block.Source.Data, block.Source.MediaType, limit)
 }
 
 // toolState is the exact-id lifecycle published for one native tool call.
@@ -252,16 +223,16 @@ func mapToolContent(previous []toolContentItem, blocks []claude.ContentBlock, li
 				return nil, failure
 			}
 
-			key := "image:" + output.mime + ":" + output.fingerprint
+			key := "image:" + output.MIME + ":" + output.Fingerprint
 			if _, exists := seen[key]; exists {
 				continue
 			}
 
 			seen[key] = struct{}{}
 			next = append(next, toolContentItem{
-				content:    acp.ToolContent(acp.ImageBlock(output.data, output.mime)),
+				content:    acp.ToolContent(acp.ImageBlock(output.Data, output.MIME)),
 				key:        key,
-				imageBytes: output.sizeBytes,
+				imageBytes: output.SizeBytes,
 			})
 		}
 	}

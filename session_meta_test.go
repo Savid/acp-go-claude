@@ -4,11 +4,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
 func TestResumeCanDisableBareMode(t *testing.T) {
 	t.Parallel()
-	request := ResumeSessionRequest("stored-session", t.TempDir(), WithSessionClaudeOptions(NewClaudeOptions(WithClaudeBare(false))))
+	request := wire.ResumeSessionRequest("stored-session", t.TempDir(), WithSessionClaudeOptions(NewClaudeOptions(WithClaudeBare(false))))
 	meta, refusal := parseSessionMeta(request.Meta)
 	require.Nil(t, refusal)
 	options := inheritCarrier(meta, sessionRecord{Bare: true})

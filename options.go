@@ -35,8 +35,8 @@ type Options struct {
 	// session as CLAUDE_CONFIG_DIR. Empty leaves claude to resolve its home from
 	// the inherited environment exactly as it would from a shell.
 	Home string
-	// ScratchDir is the parent directory for ephemeral adapter state. Empty
-	// means the system temp directory.
+	// ScratchDir is accepted but never read. This adapter allocates no
+	// ephemeral state.
 	ScratchDir string
 	// InputHandoffRoot is the absolute directory under which handoff-form
 	// prompt images are read. Empty rejects the handoff form.
@@ -79,9 +79,8 @@ type Options struct {
 	ClaudeSettingSources []string
 	// ClaudeSettingsFile passes an additional native settings file.
 	ClaudeSettingsFile string
-	// ClaudeInitializeTimeout bounds the control-protocol handshake.
-	ClaudeInitializeTimeout time.Duration
-	imageLimitsSet          bool
+
+	imageLimitsSet bool
 }
 
 // ConcurrencyLimits controls per-agent backpressure. Zero fields use defaults.
@@ -116,10 +115,9 @@ const (
 
 func applyOptions(opts []Option) Options {
 	options := Options{
-		AgentName:               "acp-go-claude",
-		AgentTitle:              "acp-go-claude",
-		AgentVersion:            "0.1.0",
-		ClaudeInitializeTimeout: 60 * time.Second,
+		AgentName:    "acp-go-claude",
+		AgentTitle:   "acp-go-claude",
+		AgentVersion: "0.1.0",
 	}
 
 	for _, opt := range opts {
@@ -182,7 +180,8 @@ func WithHome(path string) Option {
 	return func(options *Options) { options.Home = path }
 }
 
-// WithScratchDir sets the parent directory for ephemeral adapter state.
+// WithScratchDir is accepted but has no effect. This adapter allocates no
+// ephemeral state, so the configured parent is never written to.
 func WithScratchDir(dir string) Option {
 	return func(options *Options) { options.ScratchDir = dir }
 }
@@ -206,7 +205,7 @@ func WithConfiguredModels(ids []string) Option {
 // WithEnv sets the static agent-scoped environment overlay applied to every
 // claude process after the inherited environment and before the session env.
 func WithEnv(env map[string]string) Option {
-	return func(options *Options) { options.Env = cloneStringMap(env) }
+	return func(options *Options) { options.Env = maps.Clone(env) }
 }
 
 // WithTracerProvider configures the OpenTelemetry tracer provider.
@@ -257,15 +256,7 @@ func WithImageLimits(limits ImageLimits) Option {
 // WithSeedFiles registers files written into claude's config root before each
 // launch. Keys are paths relative to that root; values are the contents.
 func WithSeedFiles(files map[string]string) Option {
-	return func(options *Options) { options.SeedFiles = cloneStringMap(files) }
-}
-
-func cloneStringMap(values map[string]string) map[string]string {
-	if values == nil {
-		return nil
-	}
-
-	return maps.Clone(values)
+	return func(options *Options) { options.SeedFiles = maps.Clone(files) }
 }
 
 // WithClaudeSettingSources selects user, project, and local native settings sources.
@@ -276,9 +267,4 @@ func WithClaudeSettingSources(sources []string) Option {
 // WithClaudeSettingsFile passes an additional native settings file.
 func WithClaudeSettingsFile(path string) Option {
 	return func(options *Options) { options.ClaudeSettingsFile = path }
-}
-
-// WithClaudeInitializeTimeout bounds the native initialize request.
-func WithClaudeInitializeTimeout(timeout time.Duration) Option {
-	return func(options *Options) { options.ClaudeInitializeTimeout = timeout }
 }

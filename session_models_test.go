@@ -6,6 +6,8 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/stretchr/testify/require"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
 func TestConfigCatalogAndReadback(t *testing.T) {
@@ -29,7 +31,7 @@ func TestConfigCatalogAndReadback(t *testing.T) {
 		id    acp.SessionConfigId
 		value string
 	}{{configModel, "future-model"}, {configMode, permissionModePlan}, {configModel, "default"}, {configEffort, "high"}, {configOutputStyle, "concise"}} {
-		response, err := h.conn.SetSessionConfigOption(h.ctx(), SetConfigOptionRequest(session.SessionId, selection.id, acp.SessionConfigValueId(selection.value)))
+		response, err := h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, selection.id, acp.SessionConfigValueId(selection.value)))
 		require.NoError(t, err)
 		found := false
 		for _, option := range response.ConfigOptions {

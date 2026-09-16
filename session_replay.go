@@ -52,7 +52,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 						return s.agent.restoreRefused(ctx, s.id, failure)
 					}
 
-					if err := s.emit(rowCtx, acp.UpdateUserMessage(acp.ImageBlock(out.data, out.mime))); err != nil {
+					if err := s.emit(rowCtx, acp.UpdateUserMessage(acp.ImageBlock(out.Data, out.MIME))); err != nil {
 						return err
 					}
 				}

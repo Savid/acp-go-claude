@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -158,7 +157,7 @@ func (c *Client) Initialize(ctx context.Context) (InitializeResponse, error) {
 	return response, err
 }
 func (c *Client) Prompt(ctx context.Context, id string, content []ContentBlock) error {
-	return c.write(ctx, map[string]any{keyType: "user", "session_id": id, "message": map[string]any{"role": "user", "content": content}, "parent_tool_use_id": nil})
+	return c.write(ctx, map[string]any{keyType: roleUser, "session_id": id, "message": map[string]any{"role": roleUser, "content": content}, "parent_tool_use_id": nil})
 }
 func (c *Client) Abort(ctx context.Context) error {
 	return c.Control(ctx, map[string]any{keySubtype: "interrupt"}, nil)
@@ -187,15 +186,9 @@ func (c *Client) Reply(ctx context.Context, id string, result any, err error) er
 
 	return c.write(ctx, map[string]any{keyType: "control_response", "response": response})
 }
-func ValidModel(value string) error {
-	if value == "" {
-		return errors.New("empty model")
-	}
-
-	return nil
-}
 
 const (
+	roleUser      = "user"
 	keyRequestID  = "request_id"
 	responseError = "error"
 	keySubtype    = "subtype"

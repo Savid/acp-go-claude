@@ -7,7 +7,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,8 +17,36 @@ import (
 )
 
 const fakeClaudeEnv = "ACP_GO_CLAUDE_TEST_FAKE"
-const fakeClaudeEnvVersion = "ACP_GO_CLAUDE_TEST_VERSION"
 const fakeClaudeEnvArgvDump = "ACP_GO_CLAUDE_TEST_ARGV_DUMP"
+
+// fakeClaudeEnvAccountUsage selects the get_usage answer: the allowance below,
+// "unavailable" for a home with no allowance, "refuse" for a control error, or
+// "hold" to create fakeClaudeEnvAccountUsageHold and answer once it is removed.
+const fakeClaudeEnvAccountUsage = "ACP_GO_CLAUDE_TEST_ACCOUNT_USAGE"
+
+// fakeClaudeEnvAccountUsageHold names the file a held get_usage waits on.
+const fakeClaudeEnvAccountUsageHold = "ACP_GO_CLAUDE_TEST_ACCOUNT_USAGE_HOLD"
+
+// fakeScopeKey is the native member scoping one usage limit to a model.
+const fakeScopeKey = "scope"
+
+// fakeAccountUsage is the native get_usage answer shape: fixed window members
+// and null placeholders beside the generic limits list the adapter reads.
+var fakeAccountUsage = map[string]any{
+	"subscription_type":     "enterprise",
+	"rate_limits_available": true,
+	"rate_limits": map[string]any{
+		"five_hour":      map[string]any{"utilization": 4, "resets_at": "2026-09-17T03:30:00.051309+00:00"},
+		"seven_day":      map[string]any{"utilization": 15, "resets_at": "2026-09-19T08:00:00.051333+00:00"},
+		"seven_day_opus": nil,
+		"limits": []any{
+			map[string]any{"kind": limitKindSession, "group": limitKindSession, "percent": 4, "severity": "normal", "resets_at": "2026-09-17T03:30:00.051309+00:00", fakeScopeKey: nil, "is_active": false},
+			map[string]any{"kind": "weekly_all", "group": "weekly", "percent": 15, "severity": "normal", "resets_at": "2026-09-19T08:00:00.051333+00:00", fakeScopeKey: nil, "is_active": false},
+			map[string]any{"kind": "weekly_scoped", "group": "weekly", "percent": 22, "severity": "normal", "resets_at": "2026-09-19T08:00:00.051625+00:00", fakeScopeKey: map[string]any{"model": map[string]any{"id": nil, "display_name": "Fable"}, "surface": nil}, "is_active": true},
+		},
+	},
+	"behaviors": nil,
+}
 
 // fakeClaudeEnvResumeHold names a file a resumed fake claude creates before it
 // stops answering, so a test can act while the adapter is still relaunching.
@@ -28,6 +55,32 @@ const fakeClaudeEnvResumeHold = "ACP_GO_CLAUDE_TEST_RESUME_HOLD"
 // fakeClaudeResumeHold is how long a held resume refuses to serve. It outlasts
 // the shutdown the adapter sends when it gives up on the relaunch.
 const fakeClaudeResumeHold = 30 * time.Second
+
+// accountUsage answers get_usage per fakeClaudeEnvAccountUsage. A refusal is
+// written here and reported as unanswered.
+func (f *fakeClaude) accountUsage(requestID string) (any, bool) {
+	switch os.Getenv(fakeClaudeEnvAccountUsage) {
+	case "unavailable":
+		return map[string]any{"subscription_type": nil, "rate_limits_available": false, "rate_limits": nil, "behaviors": nil}, true
+	case "refuse":
+		f.write(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "error", "request_id": requestID, "error": "usage unavailable"}})
+
+		return nil, false
+	case "hold":
+		hold := os.Getenv(fakeClaudeEnvAccountUsageHold)
+		_ = os.WriteFile(hold, []byte("held\n"), 0o600)
+
+		for {
+			if _, err := os.Stat(hold); err != nil {
+				return fakeAccountUsage, true
+			}
+
+			time.Sleep(10 * time.Millisecond)
+		}
+	default:
+		return fakeAccountUsage, true
+	}
+}
 
 type fakeClaude struct {
 	id, path string
@@ -70,21 +123,13 @@ func fakeClaudeSessionID(args []string) string {
 }
 
 func runFakeClaude(args []string) int {
-	if slices.Contains(args, "--version") {
-		version := os.Getenv(fakeClaudeEnvVersion)
-		if version == "" {
-			version = "2.1.270"
-		}
-		fmt.Println(version + " (Claude Code)")
-
-		return 0
-	}
 	cwd, _ := os.Getwd()
 	id := fakeClaudeSessionID(args)
 	f := &fakeClaude{id: id, path: claude.SessionPath(os.Getenv(claude.EnvConfigDir), cwd, id), replies: make(map[string]chan json.RawMessage)}
 	if dump := os.Getenv("ACP_GO_CLAUDE_TEST_ENV_DUMP"); dump != "" {
 		_ = os.WriteFile(dump, []byte(strings.Join(os.Environ(), "\n")), 0o600)
 	}
+
 	if dump := os.Getenv(fakeClaudeEnvArgvDump); dump != "" {
 		_ = os.WriteFile(dump, []byte(strings.Join(args, "\n")), 0o600)
 	}
@@ -139,6 +184,11 @@ func runFakeClaude(args []string) int {
 				maps.Copy(settings, values)
 			case "get_context_usage":
 				result = claude.ContextUsage{TotalTokens: 20, MaxTokens: 1000}
+			case "get_usage":
+				var answered bool
+				if result, answered = f.accountUsage(frame.RequestID); !answered {
+					continue
+				}
 			case "interrupt":
 				// A harness that will not abort is the rung the shutdown ladder
 				// has to survive.

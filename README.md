@@ -25,7 +25,7 @@ go install github.com/savid/acp-go-claude/cmd/acp-go-claude@latest
 acp-go-claude [-path claude] [-home DIR] [-model MODEL] [-seed-file rel=host]... [-debug]
 ```
 
-Requires Claude Code 2.0.0 or newer. `-path` selects the executable; `-home`
+Verified against Claude Code 2.1.273. `-path` selects the executable; `-home`
 sets `CLAUDE_CONFIG_DIR`; `-model` selects the default native model identifier.
 `-seed-file` writes a file relative to the native home before launch.
 `-scratch-dir` is accepted but has no effect; this adapter allocates no
@@ -54,8 +54,8 @@ are omitted. Executable lookup uses the base environment before session override
 | `WithScratchDir` | Accepted but has no effect; this adapter needs no ephemeral files. |
 | `WithSeedFiles` | Seed native configuration files without overwriting unmanaged files. |
 | `WithDefaultModel`, `WithConfiguredModels` | Set the default model and append host-configured model IDs to the native catalog. |
-| `WithSessionStore`, `WithSessionStoreLoadTimeout` | Select the durability store and bound restore reads. |
-| `WithTurnTimeout`, `WithConcurrencyLimits` | Bound prompt duration and configurable concurrency. |
+| `WithSessionStore` | Select the durability store. |
+| `WithConcurrencyLimits` | Configurable concurrency. |
 | `WithImageLimits`, `WithInputHandoffRoot` | Set image byte limits and the root for image handoffs. |
 | `WithLogger` | Supply the structured logger. |
 | `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator` | Configure OpenTelemetry providers and context propagation. |
@@ -93,6 +93,23 @@ client capability. `mcpServers` on ACP requests must be empty.
 The lifecycle extension reports session and prompt state. Opting into
 `_meta.claude.rawEvent.enabled` also forwards native events on
 `_claude/rawEvent`, with inline image payloads redacted.
+
+### Account usage
+
+`_claude/accountUsage` with `{"sessionId": "<id>"}` reads the subscription
+allowance through that session's process, launching one if needed: the
+subscription type as `plan` and one limit per native window with its used
+percent and reset time, keyed by the native kind and, for a model-scoped
+window, the model's display name. Initialize advertises the read under
+`_meta.claude.accountUsage` as
+`{"method": "_claude/accountUsage", "scope": "session"}`. The read holds the
+session's foreground, so one that arrives during a prompt is refused with
+backpressure.
+A home whose account reports no allowance answers
+`{"available": false, "reason": "not_reported"}`. Claude Code is logged out
+whenever `CLAUDE_CONFIG_DIR` is set, so an Agent built with `WithHome` always
+receives that answer; the windows are readable only on the default home the
+CLI itself logged into.
 
 ### Persistence
 

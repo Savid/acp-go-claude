@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,9 @@ const (
 	// RawEventMethod is the notification carrying one raw claude event when a
 	// session opted in through _meta.claude.rawEvent.enabled.
 	RawEventMethod = "_claude/rawEvent"
+	// AccountUsageMethod is the request reading the subscription allowance
+	// through one session's claude process.
+	AccountUsageMethod = "_claude/accountUsage"
 	// SessionStoreFormat identifies the store layout this package writes: raw
 	// claude session JSONL rows under the main subpath plus the adapter's session
 	// record under the config subpath.
@@ -67,8 +71,6 @@ type Agent struct {
 	deleted      map[acp.SessionId]struct{}
 	clientCalls  chan struct{}
 	incarnations uint64
-
-	executable process.Executable
 }
 
 var (
@@ -178,17 +180,21 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 		return err
 	}
 
-	agent := NewAgent(opts...)
+	return NewAgent(opts...).serve(ctx, input, output)
+}
+
+// serve binds the agent to one host connection until the host or ctx ends it.
+func (a *Agent) serve(ctx context.Context, input io.Reader, output io.Writer) (returnErr error) {
 	defer func() {
-		if closeErr := agent.Close(); closeErr != nil {
+		if closeErr := a.Close(); closeErr != nil {
 			returnErr = closeErr
 		}
 	}()
 
 	transport := wire.NewTransport(input, output)
-	conn := acp.NewAgentSideConnection(agent, transport.Writer(), transport.Reader())
-	conn.SetLogger(agent.log)
-	agent.attach(conn, transport)
+	conn := acp.NewAgentSideConnection(a, transport.Writer(), transport.Reader())
+	conn.SetLogger(a.log)
+	a.attach(conn, transport)
 	transport.Start()
 
 	select {
@@ -304,6 +310,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 				"method": RawEventMethod, "enabledBy": "_meta.claude.rawEvent.enabled",
 				"maxBytes": wire.RawEventMaxBytes, "defaultEnabled": false,
 			},
+			wire.AccountUsageCapabilityKey: wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeSession),
 			metaStructuredOutputKey: map[string]any{
 				// These are advertisement key names, unrelated to the native
 				// config slash command and the native result event type that
@@ -382,9 +389,18 @@ func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeReque
 	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
 }
 
-// HandleExtensionMethod answers every extension method with method-not-found.
-// The only extension surface is the outbound RawEventMethod notification.
-func (a *Agent) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+// HandleExtensionMethod serves the account-usage read; every other extension
+// method is method-not-found.
+func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if method == AccountUsageMethod {
+		response, err := a.accountUsage(ctx, params)
+		if err != nil {
+			return nil, err
+		}
+
+		return response, nil
+	}
+
 	var envelope struct {
 		Meta map[string]any `json:"_meta"` //nolint:tagliatelle // ACP reserves this wire spelling.
 	}
@@ -441,17 +457,20 @@ func (a *Agent) acquireClientCall() (func(), error) {
 	}
 }
 
-// ensureExecutable resolves the claude executable against the base environment
-// and caches its completed version verdict through core.
+// ensureExecutable resolves the claude executable against the base
+// environment, so a session directory can never shadow it.
 func (a *Agent) ensureExecutable(ctx context.Context) (string, error) {
-	executable, err := a.executable.Resolve(ctx, a.environment(nil, nil), a.options.ExecutablePath, vendor, claude.MinimumVersion, claude.ProbeVersion)
-	if err != nil {
-		a.log.ErrorContext(ctx, "claude version probe failed", slog.String("reason", err.Error()))
-
-		return "", wire.InternalFailure(vendor, internalClassNativeStart)
+	base, err := a.environment(nil, nil).Base()
+	if err == nil {
+		var executable string
+		if executable, err = process.ResolveExecutable(cmp.Or(a.options.ExecutablePath, vendor), base); err == nil {
+			return executable, nil
+		}
 	}
 
-	return executable, nil
+	a.log.ErrorContext(ctx, "claude executable resolution failed", slog.String("reason", err.Error()))
+
+	return "", wire.InternalFailure(vendor, internalClassNativeStart)
 }
 
 // environment builds the merge for one launch: the inherited process
@@ -474,6 +493,6 @@ func (a *Agent) environment(sessionEnv map[string]string, owned map[string]strin
 	}
 }
 
-// internalClassNativeStart is the one documented claude_internal_failure class: a
-// native claude process that could not be started or configured for a session.
+// internalClassNativeStart is the claude_internal_failure class of a native
+// claude process that could not be started or configured for a session.
 const internalClassNativeStart = "native_start"

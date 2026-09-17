@@ -190,7 +190,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 		model = a.options.DefaultModel
 	}
 
-	if err := s.configureRuntime(ctx, rt, model, ""); err != nil {
+	if err := s.configureRuntime(ctx, rt, model); err != nil {
 		s.stopRuntime(context.WithoutCancel(ctx), rt)
 
 		return acp.NewSessionResponse{}, err
@@ -346,7 +346,7 @@ func (a *Agent) restore(
 		return nil, nil, err
 	}
 
-	if err := s.configureRuntime(ctx, rt, s.options.Model, s.nativeID); err != nil {
+	if err := s.configureRuntime(ctx, rt, s.options.Model); err != nil {
 		s.stopRuntime(context.WithoutCancel(ctx), rt)
 
 		return nil, nil, err
@@ -531,7 +531,7 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		seen[s.id] = struct{}{}
 	}
 
-	listCtx, cancel := context.WithTimeout(ctx, a.options.SessionStoreLoadTimeout)
+	listCtx, cancel := context.WithTimeout(ctx, acpcore.SessionStoreTimeout)
 	defer cancel()
 
 	listCtx, finishList := a.observe.StartSessionStore(listCtx, "list")

@@ -51,6 +51,7 @@ func TestInitializeShape(t *testing.T) {
 	vendorMeta, _ := meta["claude"].(map[string]any)
 	store, _ := vendorMeta["sessionStore"].(map[string]any)
 	require.Equal(t, SessionStoreFormat, store["format"])
+	require.Equal(t, wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeSession), vendorMeta[wire.AccountUsageCapabilityKey])
 }
 
 func TestInitializeWithoutHandoffOmitsAdvertisement(t *testing.T) {
@@ -317,18 +318,6 @@ func TestActiveSessionLimit(t *testing.T) {
 	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
 	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
 	require.Equal(t, "active_sessions", requestErrorData(t, err)["limit"])
-}
-
-func TestVersionFloor(t *testing.T) {
-	t.Parallel()
-
-	h := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvVersion: "0.1.0"}))
-	h.initialize()
-
-	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
-	require.Equal(t, -32603, requestErrorCode(t, err))
-	require.Equal(t, "claude_internal_failure", requestErrorData(t, err)["error"])
-	require.Equal(t, "native_start", requestErrorData(t, err)["class"])
 }
 
 func TestClosedAgentRefusesRequests(t *testing.T) {

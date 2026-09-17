@@ -117,24 +117,16 @@ func TestRequestCancellationKeepsOtherSessionRunning(t *testing.T) {
 	require.True(t, reduceAll(t, second.SessionId, h.rec.snapshot()).Settled())
 }
 
-func TestNativeFailureAndTimeout(t *testing.T) {
+func TestNativeFailure(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		prompt, cause string
-		timeout       time.Duration
-	}{{"ERROR", "provider", 0}, {"BLOCK", "timeout", 200 * time.Millisecond}} {
-		t.Run(tc.cause, func(t *testing.T) {
-			t.Parallel()
-			h := newHarness(t, WithTurnTimeout(tc.timeout))
-			h.initialize(withLifecycle())
-			session := h.newSession()
-			_, err := h.prompt(session.SessionId, tc.prompt, promptMeta(1))
-			data := requestErrorData(t, err)
-			require.Equal(t, "claude_turn_failed", data["error"])
-			require.Equal(t, tc.cause, data["cause"])
-			require.True(t, reduceAll(t, session.SessionId, h.rec.snapshot()).Settled())
-		})
-	}
+	h := newHarness(t)
+	h.initialize(withLifecycle())
+	session := h.newSession()
+	_, err := h.prompt(session.SessionId, "ERROR", promptMeta(1))
+	data := requestErrorData(t, err)
+	require.Equal(t, "claude_turn_failed", data["error"])
+	require.Equal(t, "provider", data["cause"])
+	require.True(t, reduceAll(t, session.SessionId, h.rec.snapshot()).Settled())
 }
 
 func TestNativeNoiseLeavesACPUsable(t *testing.T) {

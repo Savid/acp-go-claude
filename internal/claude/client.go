@@ -66,7 +66,7 @@ func (c *Client) read(ctx context.Context) {
 			return
 		}
 
-		if header.Type == "control_response" {
+		if header.Type == typeControlResponse {
 			c.mu.Lock()
 			pending := c.pending[header.Response.RequestID]
 			c.mu.Unlock()
@@ -179,19 +179,21 @@ func (c *Client) ContextUsage(ctx context.Context) (ContextUsage, error) {
 	return result, err
 }
 func (c *Client) Reply(ctx context.Context, id string, result any, err error) error {
-	response := map[string]any{keyRequestID: id, keySubtype: "success", "response": result}
+	response := map[string]any{keyRequestID: id, keySubtype: "success", keyResponse: result}
 	if err != nil {
 		response = map[string]any{keyRequestID: id, keySubtype: responseError, responseError: "control request failed"}
 	}
 
-	return c.write(ctx, map[string]any{keyType: "control_response", "response": response})
+	return c.write(ctx, map[string]any{keyType: typeControlResponse, keyResponse: response})
 }
 
 const (
-	roleUser      = "user"
-	keyRequestID  = "request_id"
-	responseError = "error"
-	keySubtype    = "subtype"
+	roleUser            = "user"
+	keyRequestID        = "request_id"
+	keyResponse         = "response"
+	responseError       = "error"
+	keySubtype          = "subtype"
+	typeControlResponse = "control_response"
 )
 
 const keyType = "type"

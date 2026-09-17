@@ -117,7 +117,6 @@ type turn struct {
 	submission lifecycle.Submission
 	accepted   bool
 	cancelled  bool
-	timedOut   bool
 	ended      turnEnd
 	settled    chan struct{}
 	settleOnce sync.Once
@@ -213,11 +212,26 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 
 	client.Start(readCtx)
 
-	s.mu.Lock()
-
 	rt := &runtime{proc: proc, client: client, cancel: cancelRead, done: make(chan struct{})}
-	s.runtime = rt
+
+	s.mu.Lock()
+	closing := s.closing
+
+	if !closing {
+		s.runtime = rt
+	}
 	s.mu.Unlock()
+
+	// A close that began while this launch was in flight has already sampled
+	// the runtime it will stop, so this generation is stopped here instead of
+	// bound. No pump ever routes it, so its done is closed before the ladder
+	// signals, reaps, and releases the process.
+	if closing {
+		close(rt.done)
+		s.stopRuntime(ctx, rt)
+
+		return nil, wire.UnknownSession()
+	}
 
 	go s.pump(context.WithoutCancel(ctx), rt)
 
@@ -265,17 +279,13 @@ func (s *session) startFailure(ctx context.Context, err error) error {
 }
 
 // configureRuntime discovers the native catalogs and current session settings.
-func (s *session) configureRuntime(ctx context.Context, rt *runtime, model string, expectID string) error {
+func (s *session) configureRuntime(ctx context.Context, rt *runtime, model string) error {
 	initCtx, cancel := context.WithTimeout(ctx, claudeInitializeTimeout)
 	defer cancel()
 
 	initialized, err := rt.client.Initialize(initCtx)
 	if err != nil {
 		return s.startFailure(ctx, err)
-	}
-
-	if expectID != "" && s.nativeID != expectID {
-		return s.startFailure(ctx, errors.New("native session id mismatch"))
 	}
 
 	s.mu.Lock()
@@ -354,7 +364,7 @@ func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 		return nil, err
 	}
 
-	if configureErr := s.configureRuntime(ctx, rt, "", s.nativeID); configureErr != nil {
+	if configureErr := s.configureRuntime(ctx, rt, ""); configureErr != nil {
 		s.stopRuntime(context.WithoutCancel(ctx), rt)
 
 		return nil, configureErr
@@ -633,31 +643,9 @@ func (s *session) cancel(ctx context.Context) {
 	}
 }
 
-// timeout ends a turn that exceeded the configured deadline.
-func (s *session) timeout(ctx context.Context, t *turn) {
-	s.mu.Lock()
-	rt := s.runtime
-
-	if s.turn != t || t.cancelled || t.timedOut {
-		s.mu.Unlock()
-
-		return
-	}
-
-	t.timedOut = true
-	s.mu.Unlock()
-	t.cancelTurn()
-
-	s.cancelDialogs()
-
-	if rt != nil {
-		s.abort(ctx, rt)
-	}
-}
-
 func (s *session) registerDialog(id string, cancel context.CancelCauseFunc) func() {
 	s.mu.Lock()
-	if s.closing || s.runtime == nil || (s.turn != nil && (s.turn.cancelled || s.turn.timedOut)) {
+	if s.closing || s.runtime == nil || (s.turn != nil && s.turn.cancelled) {
 		s.mu.Unlock()
 		cancel(errDialogCancelled)
 

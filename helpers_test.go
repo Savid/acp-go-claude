@@ -183,6 +183,7 @@ func (r *recorder) waitFor(t *testing.T, condition func([]acp.SessionNotificatio
 type harness struct {
 	input *requestWriter
 	t     *testing.T
+	agent *Agent
 	conn  *acp.ClientSideConnection
 	rec   *recorder
 }
@@ -196,13 +197,15 @@ func newHarness(t *testing.T, extra ...Option) *harness {
 	rec := newRecorder()
 	served := make(chan error, 1)
 
-	go func() { served <- Serve(ctx, agentReader, agentWriter, testOptions(t, extra...)...) }()
+	agent := NewAgent(testOptions(t, extra...)...)
+
+	go func() { served <- agent.serve(ctx, agentReader, agentWriter) }()
 
 	input := &requestWriter{Writer: clientWriter}
 	conn := acp.NewClientSideConnection(rec, input, clientReader)
 	conn.SetLogger(slog.New(slog.DiscardHandler))
 
-	h := &harness{t: t, conn: conn, rec: rec, input: input}
+	h := &harness{t: t, agent: agent, conn: conn, rec: rec, input: input}
 
 	t.Cleanup(func() {
 		cancel()

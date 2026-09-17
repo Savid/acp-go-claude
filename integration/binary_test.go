@@ -45,6 +45,12 @@ func TestNativeSmoke(t *testing.T) {
 	config, err := h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, "effort", "high"))
 	require.NoError(t, err)
 	require.NotEmpty(t, config.ConfigOptions)
+	raw, err := h.conn.CallExtension(h.ctx(), claudeacp.AccountUsageMethod, map[string]any{"sessionId": session.SessionId})
+	require.NoError(t, err)
+	var usage wire.AccountUsageResponse
+	require.NoError(t, json.Unmarshal(raw, &usage))
+	require.NoError(t, usage.Validate())
+	require.Equal(t, wire.AccountUsageUnavailable(wire.AccountUsageNotReported), usage, "an isolated home is logged out, so the CLI reports no windows")
 	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
 	// A session closed before its first prompt keeps its uuid, so it resumes

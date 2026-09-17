@@ -192,15 +192,13 @@ func TestRelativeNativeHomeUsesSessionCwd(t *testing.T) {
 
 func TestLateDialogAfterCancellationIsRefused(t *testing.T) {
 	t.Parallel()
-	for _, state := range []string{"cancelled", "timed out", "closed", "disconnected"} {
+	for _, state := range []string{"cancelled", "closed", "disconnected"} {
 		t.Run(state, func(t *testing.T) {
 			t.Parallel()
 			s := &session{runtime: &runtime{}, turn: &turn{}}
 			switch state {
 			case "cancelled":
 				s.turn.cancelled = true
-			case "timed out":
-				s.turn.timedOut = true
 			case "closed":
 				s.closing = true
 			case "disconnected":
@@ -314,4 +312,28 @@ func TestNativeCancelResolvesAPendingDialog(t *testing.T) {
 
 	s.handleEvent(t.Context(), s.runtime, claude.Event{Type: "control_cancel_request", RequestID: "native-request", SessionID: "dialog-native"})
 	require.ErrorIs(t, context.Cause(ctx), errDialogCancelled)
+}
+
+// A launch that completes after the session began closing binds nothing and
+// answers that the session is gone; the process it started goes through the
+// shutdown ladder like any other generation.
+func TestLaunchAfterCloseBindsNothing(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+	sessionID := h.newSession().SessionId
+
+	h.agent.mu.Lock()
+	s := h.agent.sessions[sessionID]
+	h.agent.mu.Unlock()
+
+	require.NoError(t, s.close(h.ctx()))
+
+	_, err := s.launch(h.ctx(), "")
+	require.Equal(t, wire.UnknownSession(), err)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	require.Nil(t, s.runtime)
 }

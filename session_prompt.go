@@ -117,7 +117,7 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 
 	// The turn runs under a context the session owns, so a peer request the SDK
 	// refuses for this session never cancels the turn already in flight. Only
-	// session/cancel, the turn timeout, close, and a lost generation end it.
+	// session/cancel, close, and a lost generation end it.
 	turnCtx, cancelTurn := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelTurn()
 
@@ -151,11 +151,6 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 		}
 		s.mu.Unlock()
 	}()
-
-	if timeout := s.agent.options.TurnTimeout; timeout > 0 {
-		timer := time.AfterFunc(timeout, func() { s.timeout(context.WithoutCancel(ctx), t) })
-		defer timer.Stop()
-	}
 
 	mapped, err := s.mapPrompt(turnCtx, params.Prompt)
 	if err != nil {
@@ -308,7 +303,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 	defer cancel()
 
 	s.mu.Lock()
-	cancelled, timedOut := t.cancelled, t.timedOut
+	cancelled := t.cancelled
 	s.mu.Unlock()
 
 	var verdict cycleVerdict
@@ -316,8 +311,6 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 	switch {
 	case cancelled:
 		verdict = cycleVerdict{outcome: lifecycle.OutcomeCancelled, stopReason: lifecycle.StopReasonCancelled}
-	case timedOut:
-		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTimeout, Message: fmt.Sprintf("claude turn exceeded %s", s.agent.options.TurnTimeout)})}
 	case t.ended == turnTransportEnded:
 		verdict = cycleVerdict{outcome: lifecycle.OutcomeFailed, failure: s.transportFailure(settleCtx, rt, nil)}
 	default:

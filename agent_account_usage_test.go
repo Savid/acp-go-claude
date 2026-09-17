@@ -52,11 +52,14 @@ func TestAccountUsageReadsThroughTheSession(t *testing.T) {
 	response, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
 	require.NoError(t, err)
 
-	observed, parseErr := time.Parse(time.RFC3339, response.ObservedAt)
+	observed, parseErr := time.Parse(time.RFC3339, response.Limits[0].ObservedAt)
 	require.NoError(t, parseErr)
 	require.False(t, observed.Before(before.Truncate(time.Second)))
 
-	response.ObservedAt = ""
+	for i := range response.Limits {
+		response.Limits[i].ObservedAt = ""
+		response.Limits[i].StaleAt = ""
+	}
 	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "enterprise", Limits: []wire.AccountUsageLimit{
 		{ID: limitKindSession, UsedPercent: 4, ResetsAt: "2026-09-17T03:30:00Z"},
 		{ID: "weekly_all", UsedPercent: 15, ResetsAt: "2026-09-19T08:00:00Z"},
@@ -129,12 +132,12 @@ func TestAccountUsageResponseMapping(t *testing.T) {
 
 	response, err := accountUsageResponse(claude.AccountUsage{Plan: "pro", Available: true, Windows: &claude.UsageWindows{Limits: []claude.UsageWindow{scoped}}}, now)
 	require.NoError(t, err)
-	require.Equal(t, wire.AccountUsageResponse{Available: true, ObservedAt: "2026-09-17T02:41:03Z", Plan: "pro", Limits: []wire.AccountUsageLimit{{ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22}}}, response, "the display name keys and labels a scoped limit")
+	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "pro", Limits: []wire.AccountUsageLimit{{ObservedAt: "2026-09-17T02:41:03Z", StaleAt: "2026-09-17T02:42:03Z", ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22}}}, response, "the display name keys and labels a scoped limit")
 
 	padded := claude.UsageWindow{Kind: " weekly_scoped ", Percent: 22, ResetsAt: "2026-09-19T08:00:00.051625+00:00", Scope: &claude.UsageScope{Model: &claude.UsageModel{DisplayName: " Fable "}}}
 	response, err = accountUsageResponse(claude.AccountUsage{Plan: " Max ", Available: true, Windows: &claude.UsageWindows{Limits: []claude.UsageWindow{padded}}}, now)
 	require.NoError(t, err)
-	require.Equal(t, wire.AccountUsageResponse{Available: true, ObservedAt: "2026-09-17T02:41:03Z", Plan: "Max", Limits: []wire.AccountUsageLimit{{ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22, ResetsAt: "2026-09-19T08:00:00Z"}}}, response, "native padding is trimmed from the plan, the kind, and the model name")
+	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "Max", Limits: []wire.AccountUsageLimit{{ObservedAt: "2026-09-17T02:41:03Z", StaleAt: "2026-09-17T02:42:03Z", ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22, ResetsAt: "2026-09-19T08:00:00Z"}}}, response, "native padding is trimmed from the plan, the kind, and the model name")
 
 	for name, usage := range map[string]claude.AccountUsage{
 		"not available": {Available: false, Windows: &claude.UsageWindows{Limits: []claude.UsageWindow{scoped}}},

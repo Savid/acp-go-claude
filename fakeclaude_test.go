@@ -269,6 +269,13 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}, structured string,
 	}
 	f.row("user", text)
 	f.write(map[string]any{"type": "stream_event", "uuid": "stream-" + text, "session_id": f.id, "event": map[string]any{"type": nativeMessageStart, "message": map[string]any{"id": "reply-" + text, "role": "assistant", "content": []any{}}}})
+	if text == "QUOTA_SESSION_EXHAUSTED" {
+		f.write(map[string]any{"type": "rate_limit_event", "session_id": f.id, "rate_limit_info": map[string]any{"status": "rejected", "rateLimitType": "five_hour", "utilization": 1, "resetsAt": time.Now().Add(time.Hour).Unix()}})
+		f.write(map[string]any{"type": "assistant", "session_id": f.id, "error": "rate_limit"})
+		f.write(map[string]any{"type": "result", "session_id": f.id, "is_error": true, "errors": []string{"usage limit"}})
+
+		return
+	}
 	if text == "BLOCK" {
 		<-abort
 		f.write(map[string]any{"type": "result", "session_id": f.id, "stop_reason": "aborted"})

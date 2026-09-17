@@ -3,6 +3,7 @@ package claude
 import "encoding/json"
 
 type Event struct {
+	Model            string                `json:"model"`
 	Type             string                `json:"type"`
 	Subtype          string                `json:"subtype"`
 	UUID             string                `json:"uuid"`

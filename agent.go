@@ -50,6 +50,7 @@ type client interface {
 
 // Agent exposes the claude coding agent through ACP.
 type Agent struct {
+	quota     *claude.QuotaCache
 	options   Options
 	log       *slog.Logger
 	observe   *observer.Observer
@@ -97,6 +98,7 @@ func NewAgent(opts ...Option) *Agent {
 
 	agent := &Agent{
 		options: options,
+		quota:   claude.NewQuotaCache(),
 		log:     log,
 		observe: observer.New(observer.Config{
 			Vendor: vendor, NativeClient: "claude-code",
@@ -126,6 +128,7 @@ func (a *Agent) validateOptions() *acp.RequestError {
 		err   error
 	}{
 		{"home", process.ValidateOptionalAbsolutePath(options.Home)},
+		{"scratchDir", process.ValidateOptionalAbsolutePath(options.ScratchDir)},
 		{"inputHandoffRoot", image.ValidateHandoffRoot(options.InputHandoffRoot)},
 		{"configuredModels", validateConfiguredModels(options.ConfiguredModels)},
 		{metaEnvKey, process.ValidateNames(options.Env)},

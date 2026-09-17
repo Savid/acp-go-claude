@@ -34,8 +34,8 @@ type Options struct {
 	// session as CLAUDE_CONFIG_DIR. Empty leaves claude to resolve its home from
 	// the inherited environment exactly as it would from a shell.
 	Home string
-	// ScratchDir is accepted but never read. This adapter allocates no
-	// ephemeral state.
+	// ScratchDir is the absolute parent for temporary quota probes. Empty uses
+	// the system temporary directory.
 	ScratchDir string
 	// InputHandoffRoot is the absolute directory under which handoff-form
 	// prompt images are read. Empty rejects the handoff form.
@@ -170,8 +170,7 @@ func WithHome(path string) Option {
 	return func(options *Options) { options.Home = path }
 }
 
-// WithScratchDir is accepted but has no effect. This adapter allocates no
-// ephemeral state, so the configured parent is never written to.
+// WithScratchDir sets the parent directory for temporary quota probes.
 func WithScratchDir(dir string) Option {
 	return func(options *Options) { options.ScratchDir = dir }
 }

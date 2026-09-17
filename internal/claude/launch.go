@@ -10,7 +10,13 @@ const EnvConfigDir = "CLAUDE_CONFIG_DIR"
 const InternalEnvPrefix = "ACP_GO_CLAUDE_INTERNAL_"
 
 // streamJSON is the native framing the adapter reads and writes.
-const streamJSON = "stream-json"
+const (
+	streamJSON       = "stream-json"
+	flagPrint        = "--print"
+	flagModel        = "--model"
+	flagOutputFormat = "--output-format"
+	flagSystemPrompt = "--system-prompt"
+)
 
 type Launch struct {
 	SessionID             string
@@ -26,14 +32,14 @@ type Launch struct {
 }
 
 func (l Launch) Args() []string {
-	args := []string{"--print", "--input-format", streamJSON, "--output-format", streamJSON, "--verbose", "--include-partial-messages", "--include-hook-events", "--permission-prompt-tool", "stdio"}
+	args := []string{flagPrint, "--input-format", streamJSON, flagOutputFormat, streamJSON, "--verbose", "--include-partial-messages", "--include-hook-events", "--permission-prompt-tool", "stdio"}
 	if l.Resume {
 		args = append(args, "--resume", l.SessionID)
 	} else {
 		args = append(args, "--session-id", l.SessionID)
 	}
 
-	for _, pair := range [][2]string{{"--model", l.Model}, {"--permission-mode", l.PermissionMode}, {"--system-prompt", l.SystemPrompt}, {"--settings", l.SettingsFile}} {
+	for _, pair := range [][2]string{{flagModel, l.Model}, {"--permission-mode", l.PermissionMode}, {flagSystemPrompt, l.SystemPrompt}, {"--settings", l.SettingsFile}} {
 		if pair[1] != "" {
 			args = append(args, pair[0], pair[1])
 		}

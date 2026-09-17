@@ -28,8 +28,7 @@ acp-go-claude [-path claude] [-home DIR] [-model MODEL] [-seed-file rel=host]...
 Verified against Claude Code 2.1.273. `-path` selects the executable; `-home`
 sets `CLAUDE_CONFIG_DIR`; `-model` selects the default native model identifier.
 `-seed-file` writes a file relative to the native home before launch.
-`-scratch-dir` is accepted but has no effect; this adapter allocates no
-ephemeral state. `-version` prints the adapter version. Diagnostics go to
+`-scratch-dir` selects the parent for temporary quota probes; empty uses system temp. `-version` prints the adapter version. Diagnostics go to
 stderr. OpenTelemetry uses the standard `OTEL_*` variables.
 
 ## Embed
@@ -51,7 +50,7 @@ are omitted. Executable lookup uses the base environment before session override
 | `WithExecutablePath` | Select the native executable. |
 | `WithHome` | Set `CLAUDE_CONFIG_DIR`. |
 | `WithEnv` | Overlay the inherited environment. |
-| `WithScratchDir` | Accepted but has no effect; this adapter needs no ephemeral files. |
+| `WithScratchDir` | Parent for temporary quota probes; empty uses system temp. |
 | `WithSeedFiles` | Seed native configuration files without overwriting unmanaged files. |
 | `WithDefaultModel`, `WithConfiguredModels` | Set the default model and append host-configured model IDs to the native catalog. |
 | `WithSessionStore` | Select the durability store. |
@@ -105,11 +104,31 @@ window, the model's display name. Initialize advertises the read under
 `{"method": "_claude/accountUsage", "scope": "session"}`. The read holds the
 session's foreground, so one that arrives during a prompt is refused with
 backpressure.
-A home whose account reports no allowance answers
-`{"available": false, "reason": "not_reported"}`. Claude Code is logged out
-whenever `CLAUDE_CONFIG_DIR` is set, so an Agent built with `WithHome` always
-receives that answer; the windows are readable only on the default home the
-CLI itself logged into.
+Each limit carries `observedAt` and `staleAt`; reading cached data does not
+renew either timestamp. `resetsAt`, when present, also ends freshness.
+A native config directory must have its own login to report saved-account usage.
+
+For an effective `CLAUDE_CODE_OAUTH_TOKEN` setup token without native usage,
+requesting account usage can spend inference tokens. The adapter forwards at
+most one native Haiku request and one native Fable request, with one output
+token each and no tools or project context. Input tokens still count.
+The requests use a temporary conversation and never change the user session.
+Only the first-party HTTPS route and credentials matching native effective
+settings are eligible; bare mode, credential helpers, and alternate routes
+are ineligible.
+
+Observations are shared across sessions with the same effective credentials.
+Haiku refreshes no more than every five minutes and Fable every thirty minutes,
+only when a consumer requests usage. Fable must be probed to read its scoped
+allowance. An unavailable model is checked again after six hours. Failed
+probes back off for five minutes, fifteen minutes, then one hour; provider
+retry deadlines also apply. A 429 carrying quota headers is a usable reading.
+
+Native turn quota events update their reported windows. A scoped quota error
+invalidates only that window. Repeated errors do not bypass cooldowns; a
+reported reset ends exhaustion suppression. Retained readings keep their
+original timestamps during failures. An account with no reported windows
+answers `{"available": false, "reason": "not_reported"}`.
 
 ### Persistence
 

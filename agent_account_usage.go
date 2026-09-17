@@ -64,7 +64,14 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 	if err == nil {
 		var response wire.AccountUsageResponse
 		if response, err = accountUsageResponse(usage, time.Now()); err == nil {
-			return response, nil
+			if response.Available {
+				return response, nil
+			}
+
+			response, err = s.setupTokenUsage(readCtx, rt)
+			if err == nil {
+				return response, nil
+			}
 		}
 	}
 
@@ -88,10 +95,10 @@ func accountUsageResponse(usage claude.AccountUsage, now time.Time) (wire.Accoun
 		return wire.AccountUsageUnavailable(wire.AccountUsageNotReported), nil
 	}
 
-	response := wire.AccountUsageResponse{Available: true, ObservedAt: wire.AccountUsageTime(now), Plan: strings.TrimSpace(usage.Plan)}
+	response := wire.AccountUsageResponse{Available: true, Plan: strings.TrimSpace(usage.Plan)}
 
 	for _, limit := range usage.Windows.Limits {
-		entry := wire.AccountUsageLimit{ID: strings.TrimSpace(limit.Kind), UsedPercent: limit.Percent}
+		entry := wire.AccountUsageLimit{ObservedAt: wire.AccountUsageTime(now), StaleAt: wire.AccountUsageTime(now.Add(time.Minute)), ID: strings.TrimSpace(limit.Kind), UsedPercent: limit.Percent}
 
 		if limit.Scope != nil && limit.Scope.Model != nil {
 			if entry.Label = strings.TrimSpace(limit.Scope.Model.DisplayName); entry.Label != "" {

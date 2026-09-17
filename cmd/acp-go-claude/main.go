@@ -25,7 +25,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 
 	executablePath := flags.String("path", "", "claude executable; a bare name is searched on PATH")
 	home := flags.String("home", "", "claude config root passed as CLAUDE_CONFIG_DIR; empty inherits claude's own resolution")
-	scratchDir := flags.String("scratch-dir", "", "accepted but unused; this adapter allocates no ephemeral state")
+	scratchDir := flags.String("scratch-dir", "", "parent directory for temporary quota probes")
 	model := flags.String("model", "", "default model for new sessions by native identifier")
 	seedFiles := &process.SeedFileFlag{}
 	flags.Var(seedFiles, "seed-file", "file seeded into claude's config root as <relpath>=<hostpath>; repeatable")

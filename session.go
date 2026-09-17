@@ -77,9 +77,14 @@ type session struct {
 
 // runtime is one claude process generation.
 type runtime struct {
-	proc   *process.Process
-	client *claude.Client
-	cancel context.CancelFunc
+	env             []string
+	executable      string
+	quotaAccess     *claude.QuotaAccess
+	quotaClassified bool
+	quotaModel      string
+	proc            *process.Process
+	client          *claude.Client
+	cancel          context.CancelFunc
 	// done is closed when the pump has stopped routing this generation.
 	done        chan struct{}
 	releaseOnce sync.Once
@@ -212,7 +217,7 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 
 	client.Start(readCtx)
 
-	rt := &runtime{proc: proc, client: client, cancel: cancelRead, done: make(chan struct{})}
+	rt := &runtime{env: env, executable: executable, proc: proc, client: client, cancel: cancelRead, done: make(chan struct{})}
 
 	s.mu.Lock()
 	closing := s.closing
@@ -317,7 +322,15 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model strin
 		initialized.OutputStyle = outputStyle
 	}
 
+	access, accessErr := rt.client.QuotaAccess(initCtx, rt.env, s.options.Bare)
+	if accessErr != nil {
+		return s.startFailure(ctx, accessErr)
+	}
+
 	s.mu.Lock()
+	rt.quotaAccess = access
+	rt.quotaModel = settings.Effective.Model
+
 	if model != "" {
 		s.model = model
 	}
@@ -405,6 +418,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event claude.Eve
 		return
 	}
 
+	s.observeQuota(rt, event)
 	s.emitRawEvent(ctx, event)
 
 	if event.Type == "control_cancel_request" {

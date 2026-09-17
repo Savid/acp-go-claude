@@ -214,3 +214,16 @@ func TestQuotaCacheRepeatedRefusalsDoNotRepeatSuccessfulProbe(t *testing.T) {
 	}
 	require.Equal(t, 3, calls)
 }
+
+func TestQuotaCacheKeepsFailureWhenOtherModelIsUnavailable(t *testing.T) {
+	c := NewQuotaCache()
+	failure := errors.New("haiku timeout")
+	_, err := c.Read(t.Context(), [32]byte{1}, func(_ context.Context, fable bool) (QuotaResult, error) {
+		if fable {
+			return QuotaResult{Unavailable: true}, nil
+		}
+
+		return QuotaResult{}, failure
+	})
+	require.ErrorIs(t, err, failure)
+}

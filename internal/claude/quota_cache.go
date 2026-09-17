@@ -25,10 +25,10 @@ type quotaEntry struct {
 	running          chan struct{}
 	lastUsed         time.Time
 	notAuthenticated bool
-	err              error
 }
 
 type quotaLane struct {
+	err      error
 	next     time.Time
 	failures int
 }
@@ -168,7 +168,7 @@ func (e *quotaEntry) applyProbe(lane int, result QuotaResult, err error, version
 			state.next = result.RetryAfter
 		}
 
-		e.err = err
+		state.err = err
 
 		return
 	}
@@ -195,10 +195,11 @@ func (e *quotaEntry) applyProbe(lane int, result QuotaResult, err error, version
 
 		for i := range e.lanes {
 			e.lanes[i].next = state.next
+			e.lanes[i].err = nil
 		}
 	}
 
-	e.err = nil
+	state.err = nil
 
 	for _, w := range result.Windows {
 		if lane == 0 && w.ID == QuotaFable {
@@ -251,8 +252,8 @@ func (e *quotaEntry) snapshot() (QuotaResult, error) {
 		return 0
 	})
 
-	if len(result.Windows) == 0 && e.err != nil {
-		return result, e.err
+	if len(result.Windows) == 0 {
+		return result, errors.Join(e.lanes[0].err, e.lanes[1].err)
 	}
 
 	return result, nil
@@ -268,7 +269,6 @@ func (c *QuotaCache) Observe(key [32]byte, windows []QuotaWindow, exhausted stri
 
 	if len(windows) > 0 {
 		e.notAuthenticated = false
-		e.err = nil
 	}
 
 	seen := make(map[string]bool, len(windows))

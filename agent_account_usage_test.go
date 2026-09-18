@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-core/usage/anthropic"
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -128,34 +129,34 @@ func TestAccountUsageResponseMapping(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 9, 17, 2, 41, 3, 900, time.UTC)
-	scoped := claude.UsageWindow{Kind: "weekly_scoped", Percent: 22, Scope: &claude.UsageScope{Model: &claude.UsageModel{DisplayName: "Fable"}}}
+	scoped := anthropic.Limit{Kind: "weekly_scoped", Percent: new(float64(22)), Scope: &anthropic.Scope{Model: &anthropic.Model{DisplayName: "Fable"}}}
 
-	response, err := accountUsageResponse(claude.AccountUsage{Plan: "pro", Available: true, Windows: &claude.UsageWindows{Limits: []claude.UsageWindow{scoped}}}, now)
+	response, err := accountUsageResponse(claude.AccountUsage{Plan: "pro", Available: true, Windows: &anthropic.Observation{Limits: []anthropic.Limit{scoped}}}, now)
 	require.NoError(t, err)
 	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "pro", Limits: []wire.AccountUsageLimit{{ObservedAt: "2026-09-17T02:41:03Z", StaleAt: "2026-09-17T02:42:03Z", ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22}}}, response, "the display name keys and labels a scoped limit")
 
-	padded := claude.UsageWindow{Kind: " weekly_scoped ", Percent: 22, ResetsAt: "2026-09-19T08:00:00.051625+00:00", Scope: &claude.UsageScope{Model: &claude.UsageModel{DisplayName: " Fable "}}}
-	response, err = accountUsageResponse(claude.AccountUsage{Plan: " Max ", Available: true, Windows: &claude.UsageWindows{Limits: []claude.UsageWindow{padded}}}, now)
+	padded := anthropic.Limit{Kind: " weekly_scoped ", Percent: new(float64(22)), ResetsAt: "2026-09-19T08:00:00.051625+00:00", Scope: &anthropic.Scope{Model: &anthropic.Model{DisplayName: " Fable "}}}
+	response, err = accountUsageResponse(claude.AccountUsage{Plan: " Max ", Available: true, Windows: &anthropic.Observation{Limits: []anthropic.Limit{padded}}}, now)
 	require.NoError(t, err)
 	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "Max", Limits: []wire.AccountUsageLimit{{ObservedAt: "2026-09-17T02:41:03Z", StaleAt: "2026-09-17T02:42:03Z", ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22, ResetsAt: "2026-09-19T08:00:00Z"}}}, response, "native padding is trimmed from the plan, the kind, and the model name")
 
 	for name, usage := range map[string]claude.AccountUsage{
-		"not available": {Available: false, Windows: &claude.UsageWindows{Limits: []claude.UsageWindow{scoped}}},
+		"not available": {Available: false, Windows: &anthropic.Observation{Limits: []anthropic.Limit{scoped}}},
 		"no windows":    {Available: true},
-		"empty list":    {Available: true, Windows: &claude.UsageWindows{}},
+		"empty list":    {Available: true, Windows: &anthropic.Observation{}},
 	} {
 		response, err := accountUsageResponse(usage, now)
 		require.NoError(t, err, name)
 		require.Equal(t, wire.AccountUsageUnavailable(wire.AccountUsageNotReported), response, name)
 	}
 
-	for name, limits := range map[string][]claude.UsageWindow{
-		"bad reset":      {{Kind: limitKindSession, Percent: 1, ResetsAt: "tomorrow"}},
-		"repeated kind":  {{Kind: limitKindSession, Percent: 1}, {Kind: limitKindSession, Percent: 2}},
-		"empty kind":     {{Kind: "", Percent: 1}},
-		"negative usage": {{Kind: limitKindSession, Percent: -1}},
+	for name, limits := range map[string][]anthropic.Limit{
+		"bad reset":      {{Kind: limitKindSession, Percent: new(float64(1)), ResetsAt: "tomorrow"}},
+		"repeated kind":  {{Kind: limitKindSession, Percent: new(float64(1))}, {Kind: limitKindSession, Percent: new(float64(2))}},
+		"empty kind":     {{Kind: "", Percent: new(float64(1))}},
+		"negative usage": {{Kind: limitKindSession, Percent: new(float64(-1))}},
 	} {
-		_, err := accountUsageResponse(claude.AccountUsage{Available: true, Windows: &claude.UsageWindows{Limits: limits}}, now)
+		_, err := accountUsageResponse(claude.AccountUsage{Available: true, Windows: &anthropic.Observation{Limits: limits}}, now)
 		require.Error(t, err, name)
 	}
 }

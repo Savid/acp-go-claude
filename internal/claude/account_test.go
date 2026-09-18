@@ -6,6 +6,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/savid/acp-go-core/usage/anthropic"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,9 +35,9 @@ func TestAccountUsageDecodesTheNativeAnswer(t *testing.T) {
 	require.Equal(t, "enterprise", usage.Plan)
 	require.True(t, usage.Available)
 	require.Len(t, usage.Windows.Limits, 2)
-	require.Equal(t, UsageWindow{Kind: "session", Percent: 4, ResetsAt: "2026-09-17T03:30:00.051309+00:00"}, usage.Windows.Limits[0])
+	require.Equal(t, anthropic.Limit{Kind: "session", Percent: new(float64(4)), ResetsAt: "2026-09-17T03:30:00.051309+00:00"}, usage.Windows.Limits[0])
 	require.Equal(t, "weekly_scoped", usage.Windows.Limits[1].Kind)
-	require.Equal(t, &UsageModel{DisplayName: "Fable"}, usage.Windows.Limits[1].Scope.Model)
+	require.Equal(t, &anthropic.Model{DisplayName: "Fable"}, usage.Windows.Limits[1].Scope.Model)
 
 	var unauthenticated AccountUsage
 
@@ -76,5 +77,5 @@ func TestAccountUsageControlRequest(t *testing.T) {
 	usage, err := client.AccountUsage(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "pro", usage.Plan)
-	require.Equal(t, []UsageWindow{{Kind: "session", Percent: 9}}, usage.Windows.Limits)
+	require.Equal(t, []anthropic.Limit{{Kind: "session", Percent: new(float64(9))}}, usage.Windows.Limits)
 }

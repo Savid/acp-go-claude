@@ -3,9 +3,7 @@ package claudeacp
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/savid/acp-go-claude/internal/claude"
@@ -91,40 +89,10 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 	return wire.AccountUsageResponse{}, wire.InternalFailure(vendor, internalClassAccountUsage)
 }
 
-// accountUsageResponse maps the native get_usage answer to the contract shape.
-// Each limits[] entry is one limit keyed by its kind; a model-scoped entry
-// appends the model's display name and carries it as its label.
 func accountUsageResponse(usage claude.AccountUsage, now time.Time) (wire.AccountUsageResponse, error) {
-	if !usage.Available || usage.Windows == nil || len(usage.Windows.Limits) == 0 {
+	if !usage.Available || usage.Windows == nil {
 		return wire.AccountUsageUnavailable(wire.AccountUsageNotReported), nil
 	}
 
-	response := wire.AccountUsageResponse{Available: true, Plan: strings.TrimSpace(usage.Plan)}
-
-	for _, limit := range usage.Windows.Limits {
-		entry := wire.AccountUsageLimit{ObservedAt: wire.AccountUsageTime(now), StaleAt: wire.AccountUsageTime(now.Add(time.Minute)), ID: strings.TrimSpace(limit.Kind), UsedPercent: limit.Percent}
-
-		if limit.Scope != nil && limit.Scope.Model != nil {
-			if entry.Label = strings.TrimSpace(limit.Scope.Model.DisplayName); entry.Label != "" {
-				entry.ID += "/" + entry.Label
-			}
-		}
-
-		if limit.ResetsAt != "" {
-			at, err := time.Parse(time.RFC3339Nano, limit.ResetsAt)
-			if err != nil {
-				return wire.AccountUsageResponse{}, fmt.Errorf("limit %q resets_at %q: %w", entry.ID, limit.ResetsAt, err)
-			}
-
-			entry.ResetsAt = wire.AccountUsageTime(at)
-		}
-
-		response.Limits = append(response.Limits, entry)
-	}
-
-	if err := response.Validate(); err != nil {
-		return wire.AccountUsageResponse{}, err
-	}
-
-	return response, nil
+	return usage.Windows.Response(usage.Plan, now)
 }

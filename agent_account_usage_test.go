@@ -86,7 +86,7 @@ func TestAccountUsageRefusals(t *testing.T) {
 	}{
 		{"missing session", map[string]any{}, map[string]any{"error": "missing", "field": accountUsageSessionField}},
 		{"unknown session", map[string]any{accountUsageSessionField: "nope"}, map[string]any{"error": "unknown session", "field": accountUsageSessionField}},
-		{"unknown member", map[string]any{accountUsageSessionField: sessionID, "providerId": "anthropic"}, map[string]any{"error": "unsupported", "field": "providerId"}},
+		{"unadvertised provider", map[string]any{accountUsageSessionField: sessionID, "providerId": "anthropic"}, map[string]any{"error": "unsupported", "field": "providerId"}},
 		{"lifecycle key", map[string]any{accountUsageSessionField: sessionID, "_meta": map[string]any{wire.LifecycleKey: map[string]any{}}}, map[string]any{"error": "unsupported", "field": `_meta["` + wire.LifecycleKey + `"]`}},
 	}
 

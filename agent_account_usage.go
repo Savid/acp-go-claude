@@ -28,6 +28,10 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 		return wire.AccountUsageResponse{}, refusal
 	}
 
+	if request.ProviderID != "" {
+		return wire.AccountUsageResponse{}, wire.Unsupported("providerId")
+	}
+
 	s, err := a.session(ctx, request.SessionID)
 	if err != nil {
 		return wire.AccountUsageResponse{}, err

@@ -77,39 +77,17 @@ func stringChoices(names []string) acp.SessionConfigSelectOptionsUngrouped {
 	return values
 }
 func modelSelectOptions(current string, models []claude.Model, configured []string) acp.SessionConfigSelectOptionsUngrouped {
-	values := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(models)+len(configured)+1)
-
-	seen := make(map[string]bool)
+	rows := make([]wire.ModelRow, 0, len(models))
 	for _, model := range models {
-		if model.Value == "" || seen[model.Value] {
-			continue
-		}
-
-		seen[model.Value] = true
-
-		name := model.DisplayName
-		if name == "" {
-			name = model.Value
-		}
-
-		meta := map[string]any{"modelId": model.Value}
+		row := wire.ModelRow{ID: model.Value, Name: model.DisplayName}
 		if len(model.SupportedEffortLevels) > 0 {
-			meta["supportedEffortLevels"] = slices.Clone(model.SupportedEffortLevels)
+			row.Meta = map[string]any{"supportedEffortLevels": slices.Clone(model.SupportedEffortLevels)}
 		}
 
-		values = append(values, acp.SessionConfigSelectOption{Name: name, Value: acp.SessionConfigValueId(model.Value), Meta: map[string]any{vendor: meta}})
+		rows = append(rows, row)
 	}
 
-	for _, id := range append(slices.Clone(configured), current) {
-		if id == "" || seen[id] {
-			continue
-		}
-
-		seen[id] = true
-		values = append(values, acp.SessionConfigSelectOption{Name: id, Value: acp.SessionConfigValueId(id)})
-	}
-
-	return values
+	return wire.ModelSelectOptions(vendor, current, rows, configured)
 }
 func (s *session) setConfigOption(ctx context.Context, id acp.SessionConfigId, value string) ([]acp.SessionConfigOption, error) {
 	if err := s.admissionError(); err != nil {

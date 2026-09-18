@@ -27,13 +27,13 @@ func (s *session) acceptTurn(ctx context.Context, t *turn) {
 	}
 
 	t.accepted = true
-	if err := s.lc.Accept(ctx, &t.Cycle, t.submission); err != nil {
-		t.keepFirstFailure(err)
+	if err := s.lc.Accept(ctx, &t.Cycle, t.submission); err != nil && t.failure == nil {
+		t.failure = err
 	}
 }
 
-// recordFailure keeps the first delivery or control failure of one cycle under
-// the lock acceptTurn writes it with.
+// recordFailure keeps the first failure one cycle observed. The pump and the
+// prompt both reach it, so every write and read goes through lcMu.
 func (s *session) recordFailure(c *cycle, err error) {
 	if err == nil {
 		return
@@ -42,12 +42,6 @@ func (s *session) recordFailure(c *cycle, err error) {
 	s.lcMu.Lock()
 	defer s.lcMu.Unlock()
 
-	c.keepFirstFailure(err)
-}
-
-// keepFirstFailure records err as the cycle's failure unless one is already
-// recorded. Its caller holds the session lcMu.
-func (c *cycle) keepFirstFailure(err error) {
 	if c.failure == nil {
 		c.failure = err
 	}

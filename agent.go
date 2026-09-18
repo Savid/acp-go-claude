@@ -38,6 +38,9 @@ const (
 	SessionStoreFormat = "claude-transcript-jsonl-v1"
 
 	vendor = "claude"
+
+	capabilityMethodKey      = "method"
+	capabilityElicitationKey = "elicitation"
 )
 
 // client is the host side of the connection, as the sessions use it.
@@ -195,6 +198,8 @@ func (a *Agent) serve(ctx context.Context, input io.Reader, output io.Writer) (r
 	}()
 
 	transport := wire.NewTransport(input, output)
+	defer transport.Close()
+
 	conn := acp.NewAgentSideConnection(a, transport.Writer(), transport.Reader())
 	conn.SetLogger(a.log)
 	a.attach(conn, transport)
@@ -235,13 +240,7 @@ func (a *Agent) Close() error {
 	}
 
 	a.closed = true
-	sessions := slices.Collect(func(yield func(*session) bool) {
-		for _, s := range a.sessions {
-			if !yield(s) {
-				return
-			}
-		}
-	})
+	sessions := slices.Collect(maps.Values(a.sessions))
 	a.mu.Unlock()
 
 	var errs []error
@@ -308,21 +307,14 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 
 	capabilityMeta := map[string]any{
 		vendor: map[string]any{
-			controlElicitation: map[string]any{"unstable": true, "scope": "session", "tracks": "ACP v1 elicitation"},
+			capabilityElicitationKey: map[string]any{"unstable": true, "scope": "session", "tracks": "ACP v1 elicitation"},
 			metaRawEventKey: map[string]any{
-				"method": RawEventMethod, "enabledBy": "_meta.claude.rawEvent.enabled",
+				capabilityMethodKey: RawEventMethod, "enabledBy": "_meta.claude.rawEvent.enabled",
 				"maxBytes": wire.RawEventMaxBytes, "defaultEnabled": false,
 			},
 			wire.AccountUsageCapabilityKey: wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeSession),
-			metaStructuredOutputKey: map[string]any{
-				// These are advertisement key names, unrelated to the native
-				// config slash command and the native result event type that
-				// carry the same spelling.
-				"config": wire.MetaOptionPath(vendor, metaOutputSchemaKey),  //nolint:goconst // Advertisement key name.
-				"result": "_meta." + vendor + "." + metaStructuredOutputKey, //nolint:goconst // Advertisement key name.
-				"schema": "json_schema",
-			},
-			"sessionStore": map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
+			metaStructuredOutputKey:        wire.StructuredOutputAdvertisement(vendor),
+			"sessionStore":                 map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
 		},
 		wire.MediaEnvelopeKey: image.MediaEnvelope(a.options.ImageLimits.core(), image.Envelope{DocumentFormats: []string{mimePDF}}),
 	}

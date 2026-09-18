@@ -303,6 +303,9 @@ func TestAbortTimeoutEndsTheGenerationAndFences(t *testing.T) {
 	// opens a new incarnation rather than publishing into the fenced one.
 	_, err := h.prompt(session.SessionId, "HELLO", promptMeta(2))
 	require.NoError(t, err)
+	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool {
+		return len(lifecycleEvents(updates)) >= 7
+	})
 	require.Equal(t, []string{
 		"lifecycle_snapshot", "prompt_accepted", "state_update:running",
 		"lifecycle_snapshot", "prompt_accepted", "state_update:running", "state_update:idle",

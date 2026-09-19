@@ -80,7 +80,7 @@ func TestQuotaCacheScopedInvalidationAndBackoff(t *testing.T) {
 	require.Equal(t, [2]int{1, 2}, calls)
 	require.Equal(t, first.Windows[0], got.Windows[0])
 	require.Equal(t, 99.0, got.Windows[1].Percent)
-	require.Equal(t, now, got.Windows[1].StaleAt)
+	require.Equal(t, now, got.Windows[1].RefreshAt)
 	for range 20 {
 		c.Observe(key, nil, QuotaFable)
 		_, err = c.Read(t.Context(), key, probe)

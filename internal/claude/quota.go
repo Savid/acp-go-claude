@@ -25,11 +25,13 @@ const (
 )
 
 // QuotaWindow retains the source time independently of cache reads.
+// RefreshAt is when the cache probes the window again; an invalidated window
+// refreshes at once.
 type QuotaWindow struct {
 	ID         string
 	Percent    float64
 	ObservedAt time.Time
-	StaleAt    time.Time
+	RefreshAt  time.Time
 	ResetsAt   time.Time
 }
 
@@ -54,11 +56,11 @@ func quotaWindow(id string, utilization float64, reset int64, now time.Time) (Qu
 		return QuotaWindow{}, false
 	}
 
-	w := QuotaWindow{ID: id, Percent: utilization * 100, ObservedAt: now, StaleAt: now.Add(quotaTTL(id))}
+	w := QuotaWindow{ID: id, Percent: utilization * 100, ObservedAt: now, RefreshAt: now.Add(quotaTTL(id))}
 	if reset > 0 {
 		w.ResetsAt = time.Unix(reset, 0).UTC()
-		if w.ResetsAt.Before(w.StaleAt) {
-			w.StaleAt = w.ResetsAt
+		if w.ResetsAt.Before(w.RefreshAt) {
+			w.RefreshAt = w.ResetsAt
 		}
 	}
 

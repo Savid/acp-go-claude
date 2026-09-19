@@ -72,7 +72,7 @@ func setupTokenUsageResponse(result claude.QuotaResult) (wire.AccountUsageRespon
 	response := wire.AccountUsageResponse{Available: true}
 
 	for _, w := range result.Windows {
-		limit := wire.AccountUsageLimit{ID: w.ID, UsedPercent: w.Percent, ObservedAt: wire.AccountUsageTime(w.ObservedAt), StaleAt: wire.AccountUsageTime(w.StaleAt)}
+		limit := wire.AccountUsageLimit{ID: w.ID, UsedPercent: w.Percent, ObservedAt: wire.AccountUsageTime(w.ObservedAt)}
 		if !w.ResetsAt.IsZero() {
 			limit.ResetsAt = wire.AccountUsageTime(w.ResetsAt)
 		}

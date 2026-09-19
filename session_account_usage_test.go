@@ -20,9 +20,9 @@ func TestAccountUsageSharesCachedWindowsAcrossSessionsAndObservesTurnFailures(t 
 	s.mu.Unlock()
 	require.NotNil(t, access)
 	now := time.Now().UTC().Truncate(time.Second)
-	fable := claude.QuotaWindow{ID: claude.QuotaFable, Percent: 99, ObservedAt: now, StaleAt: now.Add(30 * time.Minute), ResetsAt: now.Add(7 * 24 * time.Hour)}
+	fable := claude.QuotaWindow{ID: claude.QuotaFable, Percent: 99, ObservedAt: now, RefreshAt: now.Add(30 * time.Minute), ResetsAt: now.Add(7 * 24 * time.Hour)}
 	h.agent.quota.Observe(access.Key(), []claude.QuotaWindow{
-		{ID: claude.QuotaSession, Percent: 90, ObservedAt: now, StaleAt: now.Add(5 * time.Minute), ResetsAt: now.Add(time.Hour)}, fable,
+		{ID: claude.QuotaSession, Percent: 90, ObservedAt: now, RefreshAt: now.Add(5 * time.Minute), ResetsAt: now.Add(time.Hour)}, fable,
 	}, "")
 	before, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: first})
 	require.NoError(t, err)

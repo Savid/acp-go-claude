@@ -21,7 +21,7 @@ func TestQuotaHeadersRequireFableProbeForFableWindow(t *testing.T) {
 	fable := quotaHeaders(headers, true, now)
 	require.Len(t, fable, 3)
 	require.Equal(t, QuotaFable, fable[2].ID)
-	require.Equal(t, now.Add(30*time.Minute), fable[2].StaleAt)
+	require.Equal(t, now.Add(30*time.Minute), fable[2].RefreshAt)
 	headers.Set("anthropic-ratelimit-unified-5h-utilization", "NaN")
 	headers.Set("anthropic-ratelimit-unified-7d-utilization", "-1")
 	require.Empty(t, quotaHeaders(headers, false, now))

@@ -223,8 +223,8 @@ func (e *quotaEntry) applyProbe(lane int, result QuotaResult, err error, version
 		}
 
 		if w.ID == QuotaFable && lane == 1 || w.ID != QuotaFable && lane == 0 {
-			if w.StaleAt.Before(state.next) && w.StaleAt.After(now) {
-				state.next = w.StaleAt
+			if w.RefreshAt.Before(state.next) && w.RefreshAt.After(now) {
+				state.next = w.RefreshAt
 			}
 		}
 	}
@@ -284,7 +284,7 @@ func (c *QuotaCache) Observe(key [32]byte, windows []QuotaWindow, exhausted stri
 		}
 
 		if e.lanes[lane].failures == 0 {
-			e.lanes[lane].next = w.StaleAt
+			e.lanes[lane].next = w.RefreshAt
 		}
 
 		delete(e.blocked, w.ID)
@@ -317,7 +317,7 @@ func (c *QuotaCache) Observe(key [32]byte, windows []QuotaWindow, exhausted stri
 		e.versions[id]++
 
 		if exists {
-			w.StaleAt = now
+			w.RefreshAt = now
 			e.windows[id] = w
 		}
 

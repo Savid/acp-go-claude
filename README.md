@@ -106,8 +106,7 @@ currency and decimal exponent. Initialize advertises the read under
 `{"method": "_claude/accountUsage", "scope": "session"}`. The read holds the
 session's foreground, so one that arrives during a prompt is refused with
 backpressure.
-Each limit carries `observedAt` and `staleAt`; reading cached data does not
-renew either timestamp. `resetsAt`, when present, also ends freshness.
+Each limit carries `observedAt`; reading cached data does not renew it.
 A native config directory must have its own login to report saved-account usage.
 An account that reports allowances but whose report claude could not fetch is
 the `account_usage` internal failure, so the host retries rather than records

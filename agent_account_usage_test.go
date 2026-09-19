@@ -58,7 +58,6 @@ func TestAccountUsageReadsThroughTheSession(t *testing.T) {
 
 	for i := range response.Limits {
 		response.Limits[i].ObservedAt = ""
-		response.Limits[i].StaleAt = ""
 	}
 	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "enterprise", Limits: []wire.AccountUsageLimit{
 		{ID: limitKindSession, UsedPercent: 4, ResetsAt: "2026-09-17T03:30:00Z"},
@@ -140,12 +139,12 @@ func TestAccountUsageResponseMapping(t *testing.T) {
 
 	response, err := accountUsageResponse(claude.AccountUsage{Plan: "pro", Available: true, Windows: &claude.RateLimits{ModelScoped: []claude.ScopedWindow{scoped}}}, now)
 	require.NoError(t, err)
-	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "pro", Limits: []wire.AccountUsageLimit{{ObservedAt: "2026-09-17T02:41:03Z", StaleAt: "2026-09-17T02:42:03Z", ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22}}}, response, "the display name keys and labels a scoped limit")
+	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "pro", Limits: []wire.AccountUsageLimit{{ObservedAt: "2026-09-17T02:41:03Z", ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22}}}, response, "the display name keys and labels a scoped limit")
 
 	padded := claude.ScopedWindow{Window: claude.Window{Utilization: new(float64(22)), ResetsAt: "2026-09-19T08:00:00.051625+00:00"}, DisplayName: " Fable "}
 	response, err = accountUsageResponse(claude.AccountUsage{Plan: " Max ", Available: true, Windows: &claude.RateLimits{ModelScoped: []claude.ScopedWindow{padded}}}, now)
 	require.NoError(t, err)
-	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "Max", Limits: []wire.AccountUsageLimit{{ObservedAt: "2026-09-17T02:41:03Z", StaleAt: "2026-09-17T02:42:03Z", ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22, ResetsAt: "2026-09-19T08:00:00Z"}}}, response, "native padding is trimmed from the plan and the model name")
+	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "Max", Limits: []wire.AccountUsageLimit{{ObservedAt: "2026-09-17T02:41:03Z", ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22, ResetsAt: "2026-09-19T08:00:00Z"}}}, response, "native padding is trimmed from the plan and the model name")
 
 	for name, usage := range map[string]claude.AccountUsage{
 		"not available": {Available: false, Windows: &claude.RateLimits{ModelScoped: []claude.ScopedWindow{scoped}}},

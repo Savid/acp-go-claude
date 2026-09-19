@@ -11,6 +11,10 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/require"
 
+	"github.com/savid/acp-go-core/usage/anthropic"
+	"github.com/savid/acp-go-core/usage/openaicodex"
+	"github.com/savid/acp-go-core/usage/opencodego"
+	"github.com/savid/acp-go-core/usage/openrouter"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -51,7 +55,7 @@ func TestInitializeShape(t *testing.T) {
 	vendorMeta, _ := meta["claude"].(map[string]any)
 	store, _ := vendorMeta["sessionStore"].(map[string]any)
 	require.Equal(t, SessionStoreFormat, store["format"])
-	require.Equal(t, wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeSession), vendorMeta[wire.AccountUsageCapabilityKey])
+	require.Equal(t, map[string]any{"method": AccountUsageMethod, "scope": "session", "providers": []any{anthropic.ProviderID, openaicodex.ProviderID, opencodego.ProviderID, openrouter.ProviderID}}, vendorMeta[wire.AccountUsageCapabilityKey])
 }
 
 func TestInitializeWithoutHandoffOmitsAdvertisement(t *testing.T) {

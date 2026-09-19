@@ -2,8 +2,11 @@ package claudeacp
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,7 +88,7 @@ func TestAccountUsageRefusals(t *testing.T) {
 	}{
 		{"missing session", map[string]any{}, map[string]any{"error": "missing", "field": accountUsageSessionField}},
 		{"unknown session", map[string]any{accountUsageSessionField: "nope"}, map[string]any{"error": "unknown session", "field": accountUsageSessionField}},
-		{"unadvertised provider", map[string]any{accountUsageSessionField: sessionID, "providerId": "anthropic"}, map[string]any{"error": "unsupported", "field": "providerId"}},
+		{"unadvertised provider", map[string]any{accountUsageSessionField: sessionID, "providerId": "xai"}, map[string]any{"error": "unsupported", "field": "providerId"}},
 		{"lifecycle key", map[string]any{accountUsageSessionField: sessionID, "_meta": map[string]any{wire.LifecycleKey: map[string]any{}}}, map[string]any{"error": "unsupported", "field": `_meta["` + wire.LifecycleKey + `"]`}},
 	}
 
@@ -339,4 +342,44 @@ func TestPromptRefusedWhileReadHoldsTheGate(t *testing.T) {
 	err = <-done
 	require.Equal(t, -32602, requestErrorCode(t, err))
 	require.Equal(t, map[string]any{"error": "unknown session", "field": accountUsageSessionField}, requestErrorData(t, err))
+}
+
+type gatewayTransport func(*http.Request) (*http.Response, error)
+
+func (f gatewayTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+const gatewayReport = `{"generatedAt":1,"reports":[{"provider":"anthropic","fetchedAt":1789807237831,"limits":[{"id":"anthropic:5h","label":"Claude 5 Hour","window":{"id":"5h","durationMs":18000000,"resetsAt":1789817399682},"amount":{"usedFraction":0.25,"unit":"percent"},"status":"ok"}],"metadata":{}},{"provider":"opencode-go","fetchedAt":1789807238149,"limits":[{"id":"rolling-5h","label":"5 Hour limit","window":{"id":"5h","durationMs":18000000,"resetsAt":1789809532318},"amount":{"usedFraction":0.5,"unit":"percent"},"status":"ok"}],"metadata":{"planType":"OpenCode Go"}}]}`
+
+// A home whose Anthropic base is a gateway reads the native report through
+// it when claude reports no allowance, and reads other providers only there.
+func TestAccountUsageReadsThroughTheAnthropicBaseGateway(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvAccountUsage: "unavailable", "ANTHROPIC_BASE_URL": "https://gateway.example", "ANTHROPIC_AUTH_TOKEN": "gateway-key"}))
+	h.agent.usageTransport = gatewayTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "gateway.example" && r.URL.Path == "/v1/usage" && r.Header.Get("Authorization") == "Bearer gateway-key" {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(gatewayReport))}, nil
+		}
+
+		return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: http.NoBody}, nil
+	})
+	h.initialize()
+	session := h.newSession().SessionId
+
+	native, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: session})
+	require.NoError(t, err)
+	require.True(t, native.Available)
+	require.Equal(t, "5h", native.Limits[0].ID)
+	require.InDelta(t, 25, native.Limits[0].UsedPercent, 1e-9)
+
+	brokered, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: session, "providerId": "opencode-go"})
+	require.NoError(t, err)
+	require.Equal(t, "OpenCode Go", brokered.Plan)
+	require.Equal(t, "rolling-5h", brokered.Limits[0].ID)
+
+	absent, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: session, "providerId": "openrouter"})
+	require.NoError(t, err)
+	require.Equal(t, wire.AccountUsageUnavailable(wire.AccountUsageNotAuthenticated), absent)
+
+	_, err = callAccountUsage(t, h, map[string]any{accountUsageSessionField: session, "providerId": "xai"})
+	require.Equal(t, map[string]any{"error": "unsupported", "field": "providerId"}, requestErrorData(t, err))
 }

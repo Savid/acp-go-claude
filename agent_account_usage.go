@@ -8,6 +8,11 @@ import (
 	"time"
 
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-core/usage/anthropic"
+	"github.com/savid/acp-go-core/usage/gateway"
+	"github.com/savid/acp-go-core/usage/openaicodex"
+	"github.com/savid/acp-go-core/usage/opencodego"
+	"github.com/savid/acp-go-core/usage/openrouter"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -27,16 +32,19 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 		return wire.AccountUsageResponse{}, refusal
 	}
 
-	if request.ProviderID != "" {
-		return wire.AccountUsageResponse{}, wire.Unsupported("providerId")
-	}
-
 	s, err := a.session(ctx, request.SessionID)
 	if err != nil {
 		return wire.AccountUsageResponse{}, err
 	}
 
-	return s.accountUsage(ctx)
+	switch request.ProviderID {
+	case "", anthropic.ProviderID:
+		return s.accountUsage(ctx)
+	case openaicodex.ProviderID, opencodego.ProviderID, openrouter.ProviderID:
+		return s.gatewayUsage(ctx, request.ProviderID)
+	default:
+		return wire.AccountUsageResponse{}, wire.Unsupported("providerId")
+	}
 }
 
 // accountUsage reads the subscription allowance through the session's claude
@@ -77,6 +85,10 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 			unread := err
 
 			response, err = s.setupTokenUsage(readCtx, rt)
+			if err == nil && !response.Available && unread == nil {
+				response, err = gateway.ReadRoutes(readCtx, s.agent.usageTransport, claude.GatewayRoutes(rt.env), anthropic.ProviderID, response)
+			}
+
 			if err == nil && (response.Available || unread == nil) {
 				return response, nil
 			}

@@ -3,11 +3,14 @@ package claudeacp
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-core/usage"
+	"github.com/savid/acp-go-core/usage/gateway"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -139,4 +142,37 @@ func (s *session) observeQuota(rt *runtime, event claude.Event) {
 		rt.quotaClassified = false
 		s.mu.Unlock()
 	}
+}
+
+// gatewayUsage reads a provider claude holds no account for through the
+// gateway ANTHROPIC_BASE_URL names, when it names one. The read holds the
+// foreground gate like the native read so it never races a launch.
+func (s *session) gatewayUsage(ctx context.Context, providerID string) (wire.AccountUsageResponse, error) {
+	if err := s.admissionError(); err != nil {
+		return wire.AccountUsageResponse{}, err
+	}
+
+	release, err := s.acquireGate(limitSessionPrompt)
+	if err != nil {
+		return wire.AccountUsageResponse{}, err
+	}
+	defer release()
+
+	rt, err := s.ensureRuntime(ctx)
+	if err != nil {
+		return wire.AccountUsageResponse{}, err
+	}
+
+	readCtx, cancel := context.WithTimeout(ctx, wire.AccountUsageReadTimeout)
+	defer cancel()
+
+	response, err := gateway.ReadRoutes(readCtx, s.agent.usageTransport, claude.GatewayRoutes(rt.env), providerID, wire.AccountUsageUnavailable(wire.AccountUsageNotAuthenticated))
+	if err != nil {
+		s.agent.log.ErrorContext(ctx, "claude account usage read failed",
+			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
+
+		return wire.AccountUsageResponse{}, usage.RequestError(vendor, err)
+	}
+
+	return response, nil
 }

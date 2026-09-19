@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -22,6 +23,10 @@ import (
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/usage/anthropic"
+	"github.com/savid/acp-go-core/usage/openaicodex"
+	"github.com/savid/acp-go-core/usage/opencodego"
+	"github.com/savid/acp-go-core/usage/openrouter"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -53,11 +58,13 @@ type client interface {
 
 // Agent exposes the claude coding agent through ACP.
 type Agent struct {
-	quota     *claude.QuotaCache
-	options   Options
-	log       *slog.Logger
-	observe   *observer.Observer
-	optionErr *acp.RequestError
+	quota *claude.QuotaCache
+	// usageTransport carries shared provider usage reads; nil uses the default.
+	usageTransport http.RoundTripper
+	options        Options
+	log            *slog.Logger
+	observe        *observer.Observer
+	optionErr      *acp.RequestError
 	// processEnv is the adapter's own environment, read once at construction.
 	processEnv []string
 	store      acpcore.SessionStore
@@ -303,12 +310,12 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 
 	capabilityMeta := map[string]any{
 		vendor: map[string]any{
-			capabilityElicitationKey: map[string]any{"unstable": true, "scope": "session", "tracks": "ACP v1 elicitation"},
+			capabilityElicitationKey: map[string]any{"unstable": true, "scope": string(wire.AccountUsageScopeSession), "tracks": "ACP v1 elicitation"},
 			metaRawEventKey: map[string]any{
 				capabilityMethodKey: RawEventMethod, "enabledBy": "_meta.claude.rawEvent.enabled",
 				"maxBytes": wire.RawEventMaxBytes, "defaultEnabled": false,
 			},
-			wire.AccountUsageCapabilityKey: wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeSession),
+			wire.AccountUsageCapabilityKey: wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeSession, anthropic.ProviderID, openaicodex.ProviderID, opencodego.ProviderID, openrouter.ProviderID),
 			metaStructuredOutputKey:        wire.StructuredOutputAdvertisement(vendor),
 			"sessionStore":                 map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
 		},

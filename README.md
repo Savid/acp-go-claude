@@ -108,6 +108,10 @@ session's foreground, so one that arrives during a prompt is refused with
 backpressure.
 Each limit carries `observedAt`; reading cached data does not renew it.
 A native config directory must have its own login to report saved-account usage.
+`providerId` selects `anthropic` (the default), or `openai-codex`, `opencode-go`,
+or `openrouter`. The latter three are read only through the gateway
+`ANTHROPIC_BASE_URL` names, when it publishes a usage report; that gateway also
+answers `anthropic` when the native report and a setup-token probe supply nothing.
 An account that reports allowances but whose report claude could not fetch is
 the `account_usage` internal failure, so the host retries rather than records
 an account without allowance.

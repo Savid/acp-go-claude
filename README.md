@@ -1,163 +1,168 @@
 # acp-go-claude
 
-Go ACP agent that exposes the local Claude Code CLI as an [Agent Client Protocol](https://agentclientprotocol.com/) agent.
+`acp-go-claude` exposes [Claude Code](https://code.claude.com/docs/en/overview)
+through the [Agent Client Protocol](https://agentclientprotocol.com).
+Each ACP session runs one Claude process using stream-json and the native
+control protocol. Claude inherits the adapter's environment and uses its own
+settings, authentication, and permission policies.
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/savid/acp-go-claude.svg)](https://pkg.go.dev/github.com/savid/acp-go-claude)
-[![CI](https://github.com/savid/acp-go-claude/actions/workflows/go-test.yml/badge.svg)](https://github.com/savid/acp-go-claude/actions/workflows/go-test.yml)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-
-It wraps the local `claude` CLI, speaks ACP over JSON-RPC streams, and builds on
-[`github.com/coder/acp-go-sdk`](https://github.com/coder/acp-go-sdk).
-
-Use it as either:
-
-- a standalone ACP subprocess: `acp-go-claude`
-- an embedded Go adapter through `claudeacp.Serve`
-
-## Install
-
-Library:
+A conversation started over ACP can continue through the native CLI with the
+same home and working directory:
 
 ```sh
-go get github.com/savid/acp-go-claude
+claude --resume NATIVE_SESSION_ID
 ```
 
-CLI:
+New, load, and resume responses and session-list entries expose the current
+native ID as `_meta.claude.nativeSessionId`. Use it for native CLI continuation.
+ACP requests continue to use the stable ACP `sessionId`. The store's configuration
+record saves both IDs with the matching native history.
+
+## Install and run
 
 ```sh
 go install github.com/savid/acp-go-claude/cmd/acp-go-claude@latest
+acp-go-claude [-path claude] [-home DIR] [-model MODEL] [-seed-file rel=host]... [-debug]
 ```
 
-The `acp-go-claude` binary speaks ACP over stdin/stdout; an editor or ACP host
-launches it as a subprocess rather than a human-facing chat UI.
+Verified against Claude Code 2.1.273. `-path` selects the executable; `-home`
+sets `CLAUDE_CONFIG_DIR`; `-model` selects the default native model identifier.
+`-seed-file` writes a file relative to the native home before launch.
+`-scratch-dir` selects the parent for temporary quota probes; empty uses system temp. `-version` prints the adapter version. Diagnostics go to
+stderr. OpenTelemetry uses the standard `OTEL_*` variables.
 
-## Quickstart
-
-The example programs run from a checkout of this repo, so clone it first:
-
-```sh
-git clone https://github.com/savid/acp-go-claude && cd acp-go-claude
-```
-
-Run a tiny local client against the agent:
-
-```sh
-go run ./examples/minimal-client "Reply with a short hello from ACP."
-```
-
-Start an interactive session against the agent:
-
-```sh
-go run ./examples/interactive-chat
-```
-
-Load and resume a stored session transcript:
-
-```sh
-go run ./examples/resume-from-file -file ./examples/resume-from-file/session.jsonl
-```
-
-## Embedded Go
+## Embed
 
 ```go
-package main
-
-import (
-	"context"
-	"log"
-	"os"
-
-	claudeacp "github.com/savid/acp-go-claude"
+err := claudeacp.Serve(ctx, os.Stdin, os.Stdout,
+    claudeacp.WithHome("/srv/claude"),
+    claudeacp.WithSessionStore(store),
 )
-
-func main() {
-	err := claudeacp.Serve(context.Background(), os.Stdin, os.Stdout,
-		claudeacp.WithDefaultModel("sonnet"),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-}
 ```
 
-See the [Go API reference](https://pkg.go.dev/github.com/savid/acp-go-claude)
-for options such as the Claude executable path, config home, scratch directory,
-default model, session storage, permissions, raw events, and OpenTelemetry
-providers.
+`WithEnv` overlays the inherited environment. Session `env` applies after it;
+`WithHome` applies last. Only `ACP_GO_CLAUDE_INTERNAL_*` markers are dropped.
+Session `extraPathDirs` prepend to the resulting `PATH`; empty PATH components
+are omitted. Executable lookup uses the base environment before session overrides.
 
-## What It Provides
+| Process option | Meaning |
+|---|---|
+| `WithExecutablePath` | Select the native executable. |
+| `WithHome` | Set `CLAUDE_CONFIG_DIR`. |
+| `WithEnv` | Overlay the inherited environment. |
+| `WithScratchDir` | Parent for temporary quota probes; empty uses system temp. |
+| `WithSeedFiles` | Seed native configuration files without overwriting unmanaged files. |
+| `WithDefaultModel`, `WithConfiguredModels` | Set the default model and append host-configured model IDs to the native catalog. |
+| `WithSessionStore` | Select the durability store. |
+| `WithConcurrencyLimits` | Configurable concurrency. |
+| `WithImageLimits`, `WithInputHandoffRoot` | Set image byte limits and the root for image handoffs. |
+| `WithLogger` | Supply the structured logger. |
+| `WithTracerProvider`, `WithMeterProvider`, `WithTextMapPropagator` | Configure OpenTelemetry providers and context propagation. |
+| `WithAgentName`, `WithAgentTitle`, `WithAgentVersion` | Set the identity advertised at initialize. |
+| `WithClaudeSettingSources` | Select native settings sources. |
+| `WithClaudeSettingsFile` | Add a native settings file. |
 
-- ACP session lifecycle: create, prompt, cancel, close, list, load, resume, and
-  extension-based fork.
-- Negotiated lifecycle streams with prompt/action correlation and close-fenced
-  durable settlement.
-- Claude stream-json subprocess management and control-protocol handling.
-- Prompt streaming for messages, thoughts, tool calls, tool results, plans,
-  usage, and session metadata.
-- Embedded static PNG, JPEG, GIF, and WebP prompt images, or the same images
-  handed over as digest-verified local files under a configured read root, plus
-  typed image and resource-link output from native assistant and tool results.
-- Structured output through session-level JSON Schema.
-- Permission modes, permission prompts, plan mode, elicitation, and
-  `AskUserQuestion` bridging.
-- MCP stdio and HTTP server declarations.
-- Brokered Claude subscription login, setup-token entry, and Anthropic API-key
-  entry over session-scoped `_claude/auth/*` extension methods. Secret methods
-  use one-shot typed credential harvest and session injection; they never write
-  native credential files.
-- Store-authoritative transcript mirroring, in-memory by default and replaceable
-  with a host-provided `SessionStore` for cross-process durability.
-- Optional raw Claude stream-json extension notifications.
-- OpenTelemetry spans, metrics, trace propagation, and structured logs without
-  recording prompt or tool secrets by default.
-- Ordinary same-identity native execution by default on every supported
-  platform. Embedded hosts can supply `WithHostAuthority` to route every native
-  launch and prepared-tree boundary through a host-owned containment service;
-  a supplied authority is strict and never falls back to direct launch.
+### Session options
 
-## Slash Commands
+`_meta.claude.options` on new, load, and resume requests, or
+`WithSessionClaudeOptions(NewClaudeOptions(...))` from Go:
 
-Claude Code slash commands are projected into ACP `AvailableCommand` entries and
-refreshed as the session's command set changes. A slash-prefixed prompt runs the
-corresponding Claude command.
+| Field | Meaning |
+|---|---|
+| `model` | Native model identifier or alias |
+| `env` | Session environment overlay |
+| `extraPathDirs` | Ordered absolute directories prepended to PATH |
+| `permissionMode` | Native permission policy |
+| `systemPrompt` | Native system prompt |
+| `bare` | Native bare mode |
+| `effort` | Native effort setting |
+| `outputSchema` | Nonempty JSON schema for native structured output |
 
-## Docs
+`agentCapabilities._meta.claude.structuredOutput` advertises the schema surface.
+`session/set_config_option` exposes `model`, `mode`, `effort`, and
+`output_style` when available. Model and command catalogs come from native
+initialization. Structured output appears on usage updates at
+`_meta.claude.structuredOutput`. Delegated updates carry
+`_meta.claude.parentToolUseId`.
 
-- [Overview](docs/overview.mdx)
-- [Run modes](docs/get-started/run-modes.mdx)
-- [Go API](docs/reference/go-api.mdx)
-- [Models and config](docs/features/models-config.mdx)
-- [ACP methods](docs/reference/acp-methods.mdx)
-- [Observability](docs/operations/observability.mdx)
-- [Security and host authority](docs/operations/security.mdx)
+Native permission requests are relayed to ACP; a failed or cancelled answer
+denies the operation. Native form and URL elicitations require the matching
+client capability. `mcpServers` on ACP requests must be empty.
 
-Full Go API reference:
-[pkg.go.dev/github.com/savid/acp-go-claude](https://pkg.go.dev/github.com/savid/acp-go-claude).
+The lifecycle extension reports session and prompt state. Opting into
+`_meta.claude.rawEvent.enabled` also forwards native events on
+`_claude/rawEvent`, with inline image payloads redacted.
+
+### Account usage
+
+`_claude/accountUsage` with `{"sessionId": "<id>"}` reads the subscription
+allowance through that session's process, launching one if needed: the
+subscription type as `plan`, the session window as `session`, the weekly
+window as `weekly_all`, and each model-scoped weekly window as
+`weekly_scoped/<model display name>` with that name as its label, each with
+its used percent and reset time. Native monetary spending uses its reported
+currency and decimal exponent. Initialize advertises the read under
+`_meta.claude.accountUsage` as
+`{"method": "_claude/accountUsage", "scope": "session"}`. The read holds the
+session's foreground, so one that arrives during a prompt is refused with
+backpressure.
+Each limit carries `observedAt`; reading cached data does not renew it.
+A native config directory must have its own login to report saved-account usage.
+`providerId` selects `anthropic` (the default), or `openai-codex`, `opencode-go`,
+or `openrouter`. The latter three are read only through the gateway
+`ANTHROPIC_BASE_URL` names, when it publishes a usage report; that gateway also
+answers `anthropic` when the native report and a setup-token probe supply nothing.
+An account that reports allowances but whose report claude could not fetch is
+the `account_usage` internal failure, so the host retries rather than records
+an account without allowance.
+
+For an effective `CLAUDE_CODE_OAUTH_TOKEN` setup token without native usage,
+requesting account usage can spend inference tokens. The adapter forwards at
+most one native Haiku request and one native Fable request, with one output
+token each and no tools or project context. Input tokens still count.
+The requests use a temporary conversation and never change the user session.
+Only the first-party HTTPS route and credentials matching native effective
+settings are eligible; bare mode, credential helpers, and alternate routes
+are ineligible.
+
+Observations are shared across sessions with the same effective credentials.
+Haiku refreshes no more than every five minutes and Fable every thirty minutes,
+only when a consumer requests usage. Fable must be probed to read its scoped
+allowance. An unavailable model is checked again after six hours. Failed
+probes back off for five minutes, fifteen minutes, then one hour; provider
+retry deadlines also apply. A 429 carrying quota headers is a usable reading.
+
+Native turn quota events update their reported windows. A scoped quota error
+invalidates only that window. Repeated errors do not bypass cooldowns; a
+reported reset ends exhaustion suppression. Retained readings keep their
+original timestamps during failures. An account with no reported windows
+answers `{"available": false, "reason": "not_reported"}`.
+
+### Persistence
+
+Provide an `acpcore.SessionStore` through `WithSessionStore` for durable
+recovery. The default is an in-memory store. Format
+`claude-transcript-jsonl-v1` stores native transcript rows and one current
+configuration record under `config`, committed atomically. A session closed
+before its first prompt retains its configuration and empty history.
+
+Transcripts remain in Claude's home under `projects/<project>/<session-id>.jsonl`.
+Load adopts newer native rows when the shared prefix matches, or materializes
+missing rows from the store. Divergent logs fail restore. `session/load`
+replays history; `session/resume` restores without replay. Close and delete
+leave native files in place.
 
 ## Development
 
 ```sh
+make test
 make audit
 make test-integration-smoke
 make test-integration-live
-make test-integration-cover
 ```
 
-`make audit` runs the full local gate: format, lint, build, unit tests,
-coverage, cross-compile, vuln, and docs checks. Live integration tests require a
-local authenticated `claude` CLI and are double-gated: the `integration` build
-tag plus `ACP_GO_CLAUDE_RUN_INTEGRATION=1`. `make test-integration-smoke` runs
-the integration tier without spending model tokens; tests that spend tokens
-additionally require `ACP_GO_CLAUDE_RUN_LIVE_TOKENS=1`, which only
-`make test-integration-live` sets. `make test-integration-cover` runs the
-integration tier against a coverage-instrumented binary. Set `ACP_GO_CLAUDE_MODEL` to override the
-live model. Live tests always launch Claude with an isolated temp
-`CLAUDE_CONFIG_DIR`; set `ACP_GO_CLAUDE_HOME` to choose the source config copied
-into it. When process env auth is present and `ACP_GO_CLAUDE_HOME` is unset,
-tests use a fresh temp home; otherwise they copy the source home and clear copied
-refresh tokens. If neither env auth nor copied portable file auth is available,
-tests fail rather than launch without isolated auth.
-
-## License
-
-Distributed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
+Unit tests use a scripted native process. Smoke requires installed Claude and
+spends no model tokens. Live tests spend tokens and prove ACP → native CLI →
+ACP continuation in a temporary home. Native auth environment variables are
+inherited; `ACP_GO_CLAUDE_HOME` optionally supplies a portable credential file.
+`ACP_GO_CLAUDE_MODEL` selects the live test model.

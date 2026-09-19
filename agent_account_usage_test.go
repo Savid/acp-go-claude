@@ -368,13 +368,13 @@ func TestAccountUsageReadsThroughTheAnthropicBaseGateway(t *testing.T) {
 	native, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: session})
 	require.NoError(t, err)
 	require.True(t, native.Available)
-	require.Equal(t, "5h", native.Limits[0].ID)
+	require.Equal(t, "session", native.Limits[0].ID)
 	require.InDelta(t, 25, native.Limits[0].UsedPercent, 1e-9)
 
 	brokered, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: session, "providerId": "opencode-go"})
 	require.NoError(t, err)
 	require.Equal(t, "OpenCode Go", brokered.Plan)
-	require.Equal(t, "rolling-5h", brokered.Limits[0].ID)
+	require.Equal(t, "rolling", brokered.Limits[0].ID)
 
 	absent, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: session, "providerId": "openrouter"})
 	require.NoError(t, err)

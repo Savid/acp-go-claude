@@ -97,9 +97,10 @@ The lifecycle extension reports session and prompt state. Opting into
 
 `_claude/accountUsage` with `{"sessionId": "<id>"}` reads the subscription
 allowance through that session's process, launching one if needed: the
-subscription type as `plan` and one limit per native window with its used
-percent and reset time, keyed by the native kind and, for a model-scoped
-window, the model's display name. Native monetary spending uses its reported
+subscription type as `plan`, the session window as `session`, the weekly
+window as `weekly_all`, and each model-scoped weekly window as
+`weekly_scoped/<model display name>` with that name as its label, each with
+its used percent and reset time. Native monetary spending uses its reported
 currency and decimal exponent. Initialize advertises the read under
 `_meta.claude.accountUsage` as
 `{"method": "_claude/accountUsage", "scope": "session"}`. The read holds the

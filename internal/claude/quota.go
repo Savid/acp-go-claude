@@ -9,16 +9,19 @@ import (
 )
 
 const (
-	quotaRejected    = "rejected"
-	QuotaEventType   = "rate_limit_event"
-	QuotaUnknown     = "unknown"
-	QuotaFableLabel  = "Fable"
-	quotaWeeklyFable = "seven_day_overage_included"
-	QuotaSession     = "session"
-	QuotaWeekly      = "weekly_all"
-	QuotaFable       = "weekly_scoped/Fable"
-	QuotaHaikuTTL    = 5 * time.Minute
-	QuotaFableTTL    = 30 * time.Minute
+	quotaRejected      = "rejected"
+	quotaWindowSession = "five_hour"
+	quotaWindowWeekly  = "seven_day"
+	QuotaEventType     = "rate_limit_event"
+	QuotaUnknown       = "unknown"
+	QuotaFableLabel    = "Fable"
+	quotaWeeklyFable   = "seven_day_overage_included"
+	QuotaSession       = "session"
+	QuotaWeekly        = "weekly_all"
+	QuotaScoped        = "weekly_scoped"
+	QuotaFable         = QuotaScoped + "/" + QuotaFableLabel
+	QuotaHaikuTTL      = 5 * time.Minute
+	QuotaFableTTL      = 30 * time.Minute
 )
 
 // QuotaWindow retains the source time independently of cache reads.
@@ -143,9 +146,9 @@ func QuotaEvent(event Event, fable bool, now time.Time) ([]QuotaWindow, string) 
 
 func quotaEventID(name string, fable bool) string {
 	switch name {
-	case "five_hour":
+	case quotaWindowSession:
 		return QuotaSession
-	case "seven_day":
+	case quotaWindowWeekly:
 		return QuotaWeekly
 	case quotaWeeklyFable:
 		if fable {

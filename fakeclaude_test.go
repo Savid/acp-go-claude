@@ -27,23 +27,20 @@ const fakeClaudeEnvAccountUsage = "ACP_GO_CLAUDE_TEST_ACCOUNT_USAGE"
 // fakeClaudeEnvAccountUsageHold names the file a held get_usage waits on.
 const fakeClaudeEnvAccountUsageHold = "ACP_GO_CLAUDE_TEST_ACCOUNT_USAGE_HOLD"
 
-// fakeScopeKey is the native member scoping one usage limit to a model.
-const fakeScopeKey = "scope"
-
 // fakeAccountUsage is the native get_usage answer shape: fixed window members
-// and null placeholders beside the generic limits list the adapter reads.
+// with null placeholders for windows the account lacks, the model-scoped
+// windows, and spending.
 var fakeAccountUsage = map[string]any{
 	"subscription_type":     "enterprise",
 	"rate_limits_available": true,
 	"rate_limits": map[string]any{
-		"five_hour":      map[string]any{"utilization": 4, "resets_at": "2026-09-17T03:30:00.051309+00:00"},
-		"seven_day":      map[string]any{"utilization": 15, "resets_at": "2026-09-19T08:00:00.051333+00:00"},
-		"seven_day_opus": nil,
-		"limits": []any{
-			map[string]any{"kind": limitKindSession, "group": limitKindSession, "percent": 4, "severity": "normal", "resets_at": "2026-09-17T03:30:00.051309+00:00", fakeScopeKey: nil, "is_active": false},
-			map[string]any{"kind": "weekly_all", "group": "weekly", "percent": 15, "severity": "normal", "resets_at": "2026-09-19T08:00:00.051333+00:00", fakeScopeKey: nil, "is_active": false},
-			map[string]any{"kind": "weekly_scoped", "group": "weekly", "percent": 22, "severity": "normal", "resets_at": "2026-09-19T08:00:00.051625+00:00", fakeScopeKey: map[string]any{"model": map[string]any{"id": nil, "display_name": "Fable"}, "surface": nil}, "is_active": true},
-		},
+		"five_hour":        map[string]any{"utilization": 4, "resets_at": "2026-09-17T03:30:00.051309+00:00", "limit_dollars": nil, "locked_reason": nil},
+		"seven_day":        map[string]any{"utilization": 15, "resets_at": "2026-09-19T08:00:00.051333+00:00", "limit_dollars": nil, "locked_reason": nil},
+		"seven_day_opus":   nil,
+		"seven_day_sonnet": nil,
+		"extra_usage":      map[string]any{"is_enabled": false, "utilization": nil},
+		"spend":            map[string]any{"used": map[string]any{"amount_minor": 0, "currency": "AUD", "exponent": 2}, "limit": nil, "percent": 0, "enabled": false},
+		"model_scoped":     []any{map[string]any{"display_name": "Fable", "utilization": 22, "resets_at": "2026-09-19T08:00:00.051625+00:00"}},
 	},
 	"behaviors": nil,
 }

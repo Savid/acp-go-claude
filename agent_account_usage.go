@@ -94,5 +94,5 @@ func accountUsageResponse(usage claude.AccountUsage, now time.Time) (wire.Accoun
 		return wire.AccountUsageUnavailable(wire.AccountUsageNotReported), nil
 	}
 
-	return usage.Windows.Response(usage.Plan, now)
+	return usage.Windows.Observation().Response(usage.Plan, now)
 }

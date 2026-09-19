@@ -15,13 +15,15 @@ type AccountUsage struct {
 	Windows   *RateLimits `json:"rate_limits"`           //nolint:tagliatelle // Claude uses this native wire spelling.
 }
 
-// RateLimits is the native allowance report: the shared session and weekly
-// windows as fixed members, the weekly windows scoped to one model, and
-// monetary spending in the shared Anthropic shape.
+// RateLimits is the native allowance report with fixed and model-scoped
+// windows and explicitly denominated monetary spending.
 type RateLimits struct {
-	Session     *Window          `json:"five_hour"`    //nolint:tagliatelle // Claude uses this native wire spelling.
-	Weekly      *Window          `json:"seven_day"`    //nolint:tagliatelle // Claude uses this native wire spelling.
-	ModelScoped []ScopedWindow   `json:"model_scoped"` //nolint:tagliatelle // Claude uses this native wire spelling.
+	Session     *Window          `json:"five_hour"`            //nolint:tagliatelle // Claude uses this native wire spelling.
+	Weekly      *Window          `json:"seven_day"`            //nolint:tagliatelle // Claude uses this native wire spelling.
+	OAuthApps   *Window          `json:"seven_day_oauth_apps"` //nolint:tagliatelle // Claude uses this native wire spelling.
+	Opus        *Window          `json:"seven_day_opus"`       //nolint:tagliatelle // Claude uses this native wire spelling.
+	Sonnet      *Window          `json:"seven_day_sonnet"`     //nolint:tagliatelle // Claude uses this native wire spelling.
+	ModelScoped []ScopedWindow   `json:"model_scoped"`         //nolint:tagliatelle // Claude uses this native wire spelling.
 	Spend       *anthropic.Spend `json:"spend"`
 }
 
@@ -39,17 +41,24 @@ type ScopedWindow struct {
 }
 
 // Observation projects the report onto the shared Anthropic allowance
-// vocabulary: the session window, the weekly window for all models, and one
-// scoped weekly window per model. A window without a percentage is left out.
+// vocabulary. Fixed native windows and model-scoped entries retain distinct
+// identities. A window without a percentage is left out.
 func (r RateLimits) Observation() anthropic.Observation {
 	observation := anthropic.Observation{Spend: r.Spend}
 
-	if r.Session != nil && r.Session.Utilization != nil {
-		observation.Limits = append(observation.Limits, anthropic.Limit{Kind: QuotaSession, Percent: r.Session.Utilization, ResetsAt: r.Session.ResetsAt})
-	}
-
-	if r.Weekly != nil && r.Weekly.Utilization != nil {
-		observation.Limits = append(observation.Limits, anthropic.Limit{Kind: QuotaWeekly, Percent: r.Weekly.Utilization, ResetsAt: r.Weekly.ResetsAt})
+	for _, fixed := range []struct {
+		kind   string
+		window *Window
+	}{
+		{QuotaSession, r.Session},
+		{QuotaWeekly, r.Weekly},
+		{"seven_day_oauth_apps", r.OAuthApps},
+		{"seven_day_opus", r.Opus},
+		{"seven_day_sonnet", r.Sonnet},
+	} {
+		if fixed.window != nil && fixed.window.Utilization != nil {
+			observation.Limits = append(observation.Limits, anthropic.Limit{Kind: fixed.kind, Percent: fixed.window.Utilization, ResetsAt: fixed.window.ResetsAt})
+		}
 	}
 
 	for _, window := range r.ModelScoped {

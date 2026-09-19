@@ -166,7 +166,7 @@ func (s *session) gatewayUsage(ctx context.Context, providerID string) (wire.Acc
 	readCtx, cancel := context.WithTimeout(ctx, wire.AccountUsageReadTimeout)
 	defer cancel()
 
-	response, err := gateway.ReadRoutes(readCtx, s.agent.usageTransport, claude.GatewayRoutes(rt.env), providerID, wire.AccountUsageUnavailable(wire.AccountUsageNotAuthenticated))
+	response, err := gateway.ReadRoutes(readCtx, s.agent.usageTransport, func(context.Context) ([]gateway.Route, error) { return claude.GatewayRoutes(rt.env), nil }, providerID, wire.AccountUsageUnavailable(wire.AccountUsageNotAuthenticated))
 	if err != nil {
 		s.agent.log.ErrorContext(ctx, "claude account usage read failed",
 			slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))

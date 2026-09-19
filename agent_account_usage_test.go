@@ -52,7 +52,7 @@ func TestAccountUsageReadsThroughTheSession(t *testing.T) {
 	sessionID := h.newSession().SessionId
 
 	before := time.Now()
-	response, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
+	response, err := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID})
 	require.NoError(t, err)
 
 	observed, parseErr := time.Parse(time.RFC3339, response.Limits[0].ObservedAt)
@@ -68,7 +68,7 @@ func TestAccountUsageReadsThroughTheSession(t *testing.T) {
 		{ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22, ResetsAt: "2026-09-19T08:00:00Z"},
 	}}, response)
 
-	again, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
+	again, err := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID})
 	require.NoError(t, err, "a second read reuses the live process")
 	require.Len(t, again.Limits, 3)
 	require.Nil(t, again.UsageAllowed, "claude makes no statement about ordinary usage, so none is derived")
@@ -86,10 +86,11 @@ func TestAccountUsageRefusals(t *testing.T) {
 		params any
 		data   map[string]any
 	}{
+		{"missing provider", map[string]any{accountUsageSessionField: sessionID}, map[string]any{"error": "missing", "field": "providerId"}},
 		{"missing session", map[string]any{}, map[string]any{"error": "missing", "field": accountUsageSessionField}},
-		{"unknown session", map[string]any{accountUsageSessionField: "nope"}, map[string]any{"error": "unknown session", "field": accountUsageSessionField}},
+		{"unknown session", map[string]any{"providerId": "anthropic", accountUsageSessionField: "nope"}, map[string]any{"error": "unknown session", "field": accountUsageSessionField}},
 		{"unadvertised provider", map[string]any{accountUsageSessionField: sessionID, "providerId": "xai"}, map[string]any{"error": "unsupported", "field": "providerId"}},
-		{"lifecycle key", map[string]any{accountUsageSessionField: sessionID, "_meta": map[string]any{wire.LifecycleKey: map[string]any{}}}, map[string]any{"error": "unsupported", "field": `_meta["` + wire.LifecycleKey + `"]`}},
+		{"lifecycle key", map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID, "_meta": map[string]any{wire.LifecycleKey: map[string]any{}}}, map[string]any{"error": "unsupported", "field": `_meta["` + wire.LifecycleKey + `"]`}},
 	}
 
 	for _, tc := range cases {
@@ -101,7 +102,7 @@ func TestAccountUsageRefusals(t *testing.T) {
 	_, err := h.conn.UnstableDeleteSession(h.ctx(), wire.DeleteSessionRequest(sessionID))
 	require.NoError(t, err)
 
-	_, err = callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
+	_, err = callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID})
 	require.Equal(t, -32602, requestErrorCode(t, err))
 	require.Equal(t, map[string]any{"error": "unknown session", "field": accountUsageSessionField}, requestErrorData(t, err), "a tombstoned session")
 }
@@ -115,21 +116,21 @@ func TestAccountUsageUnavailableAndRefused(t *testing.T) {
 	unavailable := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvAccountUsage: "unavailable"}))
 	unavailable.initialize()
 
-	response, err := callAccountUsage(t, unavailable, map[string]any{accountUsageSessionField: unavailable.newSession().SessionId})
+	response, err := callAccountUsage(t, unavailable, map[string]any{"providerId": "anthropic", accountUsageSessionField: unavailable.newSession().SessionId})
 	require.NoError(t, err)
 	require.Equal(t, wire.AccountUsageUnavailable(wire.AccountUsageNotReported), response)
 
 	refused := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvAccountUsage: "refuse"}))
 	refused.initialize()
 
-	_, err = callAccountUsage(t, refused, map[string]any{accountUsageSessionField: refused.newSession().SessionId})
+	_, err = callAccountUsage(t, refused, map[string]any{"providerId": "anthropic", accountUsageSessionField: refused.newSession().SessionId})
 	require.Equal(t, -32603, requestErrorCode(t, err))
 	require.Equal(t, map[string]any{"error": "claude_internal_failure", "class": "account_usage"}, requestErrorData(t, err))
 
 	unread := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvAccountUsage: "unread"}))
 	unread.initialize()
 
-	_, err = callAccountUsage(t, unread, map[string]any{accountUsageSessionField: unread.newSession().SessionId})
+	_, err = callAccountUsage(t, unread, map[string]any{"providerId": "anthropic", accountUsageSessionField: unread.newSession().SessionId})
 	require.Equal(t, -32603, requestErrorCode(t, err))
 	require.Equal(t, map[string]any{"error": "claude_internal_failure", "class": "account_usage"}, requestErrorData(t, err))
 }
@@ -190,7 +191,7 @@ func TestAccountUsageRefusedWhilePromptHoldsTheGate(t *testing.T) {
 
 	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool { return len(lifecycleEvents(updates)) >= 3 })
 
-	_, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
+	_, err := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID})
 	require.Equal(t, -32600, requestErrorCode(t, err))
 	require.Equal(t, map[string]any{"error": "backpressure", "limit": limitSessionPrompt}, requestErrorData(t, err))
 
@@ -203,7 +204,7 @@ func TestAccountUsageRefusedWhilePromptHoldsTheGate(t *testing.T) {
 		return len(kinds) > 0 && kinds[len(kinds)-1] == "state_update:idle"
 	})
 
-	response, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
+	response, err := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID})
 	require.NoError(t, err)
 	require.Len(t, response.Limits, 3)
 }
@@ -216,13 +217,13 @@ func TestAccountUsageAfterCloseIsUnknownSession(t *testing.T) {
 	h.initialize()
 	sessionID := h.newSession().SessionId
 
-	_, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
+	_, err := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID})
 	require.NoError(t, err)
 
 	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: sessionID})
 	require.NoError(t, err)
 
-	_, err = callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
+	_, err = callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID})
 	require.Equal(t, -32602, requestErrorCode(t, err))
 	require.Equal(t, map[string]any{"error": "unknown session", "field": accountUsageSessionField}, requestErrorData(t, err))
 }
@@ -241,7 +242,7 @@ func TestAccountUsageColdReadPublishesOpeningUpdates(t *testing.T) {
 
 	before := len(h.rec.snapshot())
 
-	response, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
+	response, err := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID})
 	require.NoError(t, err)
 	require.True(t, response.Available)
 
@@ -272,7 +273,7 @@ func TestAccountUsagePropagatesTraceContext(t *testing.T) {
 
 	const traceID = "0af7651916cd43dd8448eb211c80319c"
 
-	_, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID, "_meta": map[string]any{"traceparent": "00-" + traceID + "-b7ad6b7169203331-01"}})
+	_, err := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID, "_meta": map[string]any{"traceparent": "00-" + traceID + "-b7ad6b7169203331-01"}})
 	require.NoError(t, err)
 
 	var traced bool
@@ -316,7 +317,7 @@ func TestPromptRefusedWhileReadHoldsTheGate(t *testing.T) {
 	done := make(chan error, 1)
 
 	go func() {
-		_, readErr := callAccountUsage(t, h, map[string]any{accountUsageSessionField: sessionID})
+		_, readErr := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID})
 		done <- readErr
 	}()
 
@@ -330,7 +331,7 @@ func TestPromptRefusedWhileReadHoldsTheGate(t *testing.T) {
 	require.NoError(t, <-done)
 
 	go func() {
-		_, readErr := h.conn.CallExtension(h.ctx(), AccountUsageMethod, map[string]any{accountUsageSessionField: sessionID})
+		_, readErr := h.conn.CallExtension(h.ctx(), AccountUsageMethod, map[string]any{"providerId": "anthropic", accountUsageSessionField: sessionID})
 		done <- readErr
 	}()
 
@@ -365,7 +366,7 @@ func TestAccountUsageReadsThroughTheAnthropicBaseGateway(t *testing.T) {
 	h.initialize()
 	session := h.newSession().SessionId
 
-	native, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: session})
+	native, err := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: session})
 	require.NoError(t, err)
 	require.True(t, native.Available)
 	require.Equal(t, "session", native.Limits[0].ID)
@@ -382,4 +383,19 @@ func TestAccountUsageReadsThroughTheAnthropicBaseGateway(t *testing.T) {
 
 	_, err = callAccountUsage(t, h, map[string]any{accountUsageSessionField: session, "providerId": "xai"})
 	require.Equal(t, map[string]any{"error": "unsupported", "field": "providerId"}, requestErrorData(t, err))
+}
+
+func TestAnthropicGatewayRetainsRetryDeadline(t *testing.T) {
+	h := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvAccountUsage: "unavailable", "ANTHROPIC_BASE_URL": "https://gateway.example", "ANTHROPIC_AUTH_TOKEN": "gateway-key"}))
+	h.agent.usageTransport = gatewayTransport(func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, "/v1/usage", r.URL.Path)
+
+		return &http.Response{StatusCode: 429, Header: http.Header{"Retry-After": {"7200"}}, Body: http.NoBody}, nil
+	})
+	h.initialize()
+	session := h.newSession().SessionId
+	_, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: session, "providerId": "anthropic"})
+	require.Equal(t, -32603, requestErrorCode(t, err))
+	require.Contains(t, requestErrorData(t, err), "retryAt")
+	require.EqualValues(t, 429, requestErrorData(t, err)["statusCode"])
 }

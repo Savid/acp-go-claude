@@ -45,13 +45,10 @@ func (s *session) handleControl(ctx context.Context, rt *runtime, event claude.E
 	}
 
 	if c == nil && !closing {
-		s.openAgentCycle(ctx)
-		s.mu.Lock()
-		c = s.cycle
-		s.mu.Unlock()
+		c = s.openAgentCycle(ctx, rt)
 	}
 
-	if c == nil || closing {
+	if c == nil || closing || s.cycleCancelled(c) {
 		_ = rt.client.Reply(ctx, event.RequestID, map[string]any{permissionBehavior: permissionOptionDeny, nativeMessage: "Session closed"}, nil)
 
 		return

@@ -45,7 +45,7 @@ func TestNativeSmoke(t *testing.T) {
 	config, err := h.conn.SetSessionConfigOption(h.ctx(), wire.SetConfigOptionRequest(session.SessionId, "effort", "high"))
 	require.NoError(t, err)
 	require.NotEmpty(t, config.ConfigOptions)
-	raw, err := h.conn.CallExtension(h.ctx(), claudeacp.AccountUsageMethod, map[string]any{"sessionId": session.SessionId})
+	raw, err := h.conn.CallExtension(h.ctx(), claudeacp.AccountUsageMethod, map[string]any{"providerId": "anthropic", "sessionId": session.SessionId})
 	require.NoError(t, err)
 	var usage wire.AccountUsageResponse
 	require.NoError(t, json.Unmarshal(raw, &usage))

@@ -95,20 +95,21 @@ The lifecycle extension reports session and prompt state. Opting into
 
 ### Account usage
 
-`_claude/accountUsage` with `{"sessionId": "<id>"}` reads the subscription
+`_claude/accountUsage` with `{"sessionId": "<id>", "providerId": "anthropic"}` reads the subscription
 allowance through that session's process, launching one if needed: the
 subscription type as `plan`, the session window as `session`, the weekly
-window as `weekly_all`, and each model-scoped weekly window as
+window as `weekly_all`, the fixed weekly windows as `seven_day_oauth_apps`,
+`seven_day_opus`, and `seven_day_sonnet`, and each model-scoped weekly window as
 `weekly_scoped/<model display name>` with that name as its label, each with
-its used percent and reset time. Native monetary spending uses its reported
+its used percent and reset time. When supplied, explicitly denominated native monetary spending uses its reported
 currency and decimal exponent. Initialize advertises the read under
 `_meta.claude.accountUsage` as
-`{"method": "_claude/accountUsage", "scope": "session"}`. The read holds the
+`{"method": "_claude/accountUsage", "scope": "session", "providers": ["anthropic", "openai-codex", "opencode-go", "openrouter"]}`. The read holds the
 session's foreground, so one that arrives during a prompt is refused with
 backpressure.
 Each limit carries `observedAt`; reading cached data does not renew it.
 A native config directory must have its own login to report saved-account usage.
-`providerId` selects `anthropic` (the default), or `openai-codex`, `opencode-go`,
+`providerId` is required and selects `anthropic`, `openai-codex`, `opencode-go`,
 or `openrouter`. The latter three are read only through the gateway
 `ANTHROPIC_BASE_URL` names, when it publishes a usage report; that gateway also
 answers `anthropic` when the native report and a setup-token probe supply nothing.

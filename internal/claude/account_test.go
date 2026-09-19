@@ -5,15 +5,13 @@ import (
 	"encoding/json"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/savid/acp-go-core/usage/anthropic"
 	"github.com/stretchr/testify/require"
 )
 
-// The native answer carries fixed window members, null placeholders for
-// windows the account lacks, model-scoped windows, and spending; the session
-// and weekly windows, the scoped list, spending, and the two account members
-// are read.
+// Fixed and scoped windows are decoded with explicit monetary units when supplied.
 func TestAccountUsageDecodesTheNativeAnswer(t *testing.T) {
 	t.Parallel()
 
@@ -73,6 +71,49 @@ func TestRateLimitsObservationSkipsWindowsWithoutAPercentage(t *testing.T) {
 		{Kind: "weekly_scoped", Percent: new(float64(22)), Scope: &anthropic.Scope{Model: &anthropic.Model{DisplayName: "Fable"}}},
 	}}, limits.Observation())
 	require.Equal(t, anthropic.Observation{}, RateLimits{}.Observation())
+}
+
+func TestFixedWeeklyWindowsRemainDistinctFromModelScopedWindows(t *testing.T) {
+	t.Parallel()
+
+	for _, scoped := range []string{`[]`, `[{"display_name":"Sonnet","utilization":30}]`} {
+		t.Run(scoped, func(t *testing.T) {
+			t.Parallel()
+
+			var usage AccountUsage
+			require.NoError(t, json.Unmarshal([]byte(`{
+				"rate_limits_available":true,
+				"rate_limits":{
+					"five_hour":null,"seven_day":null,
+					"seven_day_oauth_apps":{"utilization":10},
+					"seven_day_opus":{"utilization":20},
+					"seven_day_sonnet":{"utilization":30},
+					"model_scoped":`+scoped+`
+				}
+			}`), &usage))
+			response, err := usage.Windows.Observation().Response("", time.Now())
+			require.NoError(t, err)
+			require.True(t, response.Available)
+			ids := []string{"seven_day_oauth_apps", "seven_day_opus", "seven_day_sonnet"}
+			if scoped != `[]` {
+				ids = append(ids, "weekly_scoped/Sonnet")
+			}
+			require.Len(t, response.Limits, len(ids))
+			for i, id := range ids {
+				require.Equal(t, id, response.Limits[i].ID)
+				require.Zero(t, response.Limits[i].WindowSeconds)
+				if i < 3 {
+					require.Empty(t, response.Limits[i].Label)
+					require.Equal(t, float64((i+1)*10), response.Limits[i].UsedPercent)
+				} else {
+					require.Equal(t, "Sonnet", response.Limits[i].Label)
+				}
+			}
+		})
+	}
+
+	observation := (RateLimits{OAuthApps: &Window{}, Opus: &Window{}, Sonnet: &Window{}}).Observation()
+	require.Empty(t, observation.Limits)
 }
 
 // The control request names get_usage and always asks to skip behaviors.

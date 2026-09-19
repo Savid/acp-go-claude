@@ -24,15 +24,15 @@ func TestAccountUsageSharesCachedWindowsAcrossSessionsAndObservesTurnFailures(t 
 	h.agent.quota.Observe(access.Key(), []claude.QuotaWindow{
 		{ID: claude.QuotaSession, Percent: 90, ObservedAt: now, RefreshAt: now.Add(5 * time.Minute), ResetsAt: now.Add(time.Hour)}, fable,
 	}, "")
-	before, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: first})
+	before, err := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: first})
 	require.NoError(t, err)
 	second := h.newSession().SessionId
-	again, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: second})
+	again, err := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: second})
 	require.NoError(t, err)
 	require.Equal(t, before, again)
 	_, err = h.conn.Prompt(h.ctx(), acp.PromptRequest{SessionId: first, Prompt: []acp.ContentBlock{acp.TextBlock("QUOTA_SESSION_EXHAUSTED")}})
 	require.ErrorContains(t, err, "usage limit")
-	after, err := callAccountUsage(t, h, map[string]any{accountUsageSessionField: second})
+	after, err := callAccountUsage(t, h, map[string]any{"providerId": "anthropic", accountUsageSessionField: second})
 	require.NoError(t, err)
 	require.Equal(t, 100.0, after.Limits[0].UsedPercent)
 	require.Equal(t, before.Limits[1], after.Limits[1])

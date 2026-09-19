@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/savid/acp-go-claude/internal/claude"
+	coreusage "github.com/savid/acp-go-core/usage"
 	"github.com/savid/acp-go-core/usage/anthropic"
 	"github.com/savid/acp-go-core/usage/gateway"
 	"github.com/savid/acp-go-core/usage/openaicodex"
@@ -15,10 +16,6 @@ import (
 	"github.com/savid/acp-go-core/usage/openrouter"
 	"github.com/savid/acp-go-core/wire"
 )
-
-// internalClassAccountUsage is the claude_internal_failure class of a native
-// account-usage read that failed.
-const internalClassAccountUsage = "account_usage"
 
 // accountUsage answers _claude/accountUsage through the addressed session. The
 // request is decoded first so its trace keys open the span.
@@ -38,7 +35,9 @@ func (a *Agent) accountUsage(ctx context.Context, params json.RawMessage) (resp 
 	}
 
 	switch request.ProviderID {
-	case "", anthropic.ProviderID:
+	case "":
+		return wire.AccountUsageResponse{}, wire.Missing("providerId")
+	case anthropic.ProviderID:
 		return s.accountUsage(ctx)
 	case openaicodex.ProviderID, opencodego.ProviderID, openrouter.ProviderID:
 		return s.gatewayUsage(ctx, request.ProviderID)
@@ -86,7 +85,7 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 
 			response, err = s.setupTokenUsage(readCtx, rt)
 			if err == nil && !response.Available && unread == nil {
-				response, err = gateway.ReadRoutes(readCtx, s.agent.usageTransport, claude.GatewayRoutes(rt.env), anthropic.ProviderID, response)
+				response, err = gateway.ReadRoutes(readCtx, s.agent.usageTransport, func(context.Context) ([]gateway.Route, error) { return claude.GatewayRoutes(rt.env), nil }, anthropic.ProviderID, response)
 			}
 
 			if err == nil && (response.Available || unread == nil) {
@@ -108,7 +107,7 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 	s.agent.log.ErrorContext(ctx, "claude account usage read failed",
 		slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 
-	return wire.AccountUsageResponse{}, wire.InternalFailure(vendor, internalClassAccountUsage)
+	return wire.AccountUsageResponse{}, coreusage.RequestError(vendor, err)
 }
 
 // errNativeUsageUnread marks an account that reports allowances whose report

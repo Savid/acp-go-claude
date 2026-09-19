@@ -91,6 +91,10 @@ func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error 
 
 // projectEvent maps native stream records, with result as the turn boundary.
 func (s *session) projectEvent(ctx context.Context, _ *runtime, c *cycle, event claude.Event) (bool, error) {
+	if s.cycleCancelled(c) {
+		return event.Type == nativeResult && event.ParentToolUseID == "", nil
+	}
+
 	ctx = context.WithValue(ctx, parentToolKey{}, event.ParentToolUseID)
 	state := &c.state
 

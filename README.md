@@ -109,6 +109,9 @@ backpressure.
 Each limit carries `observedAt` and `staleAt`; reading cached data does not
 renew either timestamp. `resetsAt`, when present, also ends freshness.
 A native config directory must have its own login to report saved-account usage.
+An account that reports allowances but whose report claude could not fetch is
+the `account_usage` internal failure, so the host retries rather than records
+an account without allowance.
 
 For an effective `CLAUDE_CODE_OAUTH_TOKEN` setup token without native usage,
 requesting account usage can spend inference tokens. The adapter forwards at

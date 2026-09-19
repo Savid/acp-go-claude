@@ -20,8 +20,9 @@ const fakeClaudeEnv = "ACP_GO_CLAUDE_TEST_FAKE"
 const fakeClaudeEnvArgvDump = "ACP_GO_CLAUDE_TEST_ARGV_DUMP"
 
 // fakeClaudeEnvAccountUsage selects the get_usage answer: the allowance below,
-// "unavailable" for a home with no allowance, "refuse" for a control error, or
-// "hold" to create fakeClaudeEnvAccountUsageHold and answer once it is removed.
+// "unavailable" for a home with no allowance, "unread" for an account whose
+// report claude could not fetch, "refuse" for a control error, or "hold" to
+// create fakeClaudeEnvAccountUsageHold and answer once it is removed.
 const fakeClaudeEnvAccountUsage = "ACP_GO_CLAUDE_TEST_ACCOUNT_USAGE"
 
 // fakeClaudeEnvAccountUsageHold names the file a held get_usage waits on.
@@ -59,6 +60,8 @@ func (f *fakeClaude) accountUsage(requestID string) (any, bool) {
 	switch os.Getenv(fakeClaudeEnvAccountUsage) {
 	case "unavailable":
 		return map[string]any{"subscription_type": nil, "rate_limits_available": false, "rate_limits": nil, "behaviors": nil}, true
+	case "unread":
+		return map[string]any{"subscription_type": "max", "rate_limits_available": true, "rate_limits": nil, "behaviors": nil}, true
 	case "refuse":
 		f.write(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "error", "request_id": requestID, "error": "usage unavailable"}})
 

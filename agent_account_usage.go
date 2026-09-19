@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -65,14 +66,23 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 	usage, err := rt.client.AccountUsage(readCtx)
 	if err == nil {
 		var response wire.AccountUsageResponse
-		if response, err = accountUsageResponse(usage, time.Now()); err == nil {
+		if response, err = accountUsageResponse(usage, time.Now()); err == nil || errors.Is(err, errNativeUsageUnread) {
 			if response.Available {
 				return response, nil
 			}
 
+			// A setup token can still supply windows through the probe. Without
+			// one, a native report that failed to arrive stays a failure, so the
+			// host retries it instead of recording an account without allowance.
+			unread := err
+
 			response, err = s.setupTokenUsage(readCtx, rt)
-			if err == nil {
+			if err == nil && (response.Available || unread == nil) {
 				return response, nil
+			}
+
+			if err == nil {
+				err = unread
 			}
 		}
 	}
@@ -89,9 +99,18 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 	return wire.AccountUsageResponse{}, wire.InternalFailure(vendor, internalClassAccountUsage)
 }
 
+// errNativeUsageUnread marks an account that reports allowances whose report
+// is absent: claude could not fetch it, which is a failed read, not an account
+// without allowance.
+var errNativeUsageUnread = errors.New("native usage report missing")
+
 func accountUsageResponse(usage claude.AccountUsage, now time.Time) (wire.AccountUsageResponse, error) {
-	if !usage.Available || usage.Windows == nil {
+	if !usage.Available {
 		return wire.AccountUsageUnavailable(wire.AccountUsageNotReported), nil
+	}
+
+	if usage.Windows == nil {
+		return wire.AccountUsageResponse{}, errNativeUsageUnread
 	}
 
 	return usage.Windows.Observation().Response(usage.Plan, now)

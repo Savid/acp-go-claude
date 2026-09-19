@@ -105,7 +105,8 @@ func TestAccountUsageRefusals(t *testing.T) {
 }
 
 // A home whose account reports no allowance answers not_reported; a native
-// control refusal is the account_usage failure class.
+// control refusal, and an account whose report claude could not fetch, are
+// the account_usage failure class the host retries.
 func TestAccountUsageUnavailableAndRefused(t *testing.T) {
 	t.Parallel()
 
@@ -120,6 +121,13 @@ func TestAccountUsageUnavailableAndRefused(t *testing.T) {
 	refused.initialize()
 
 	_, err = callAccountUsage(t, refused, map[string]any{accountUsageSessionField: refused.newSession().SessionId})
+	require.Equal(t, -32603, requestErrorCode(t, err))
+	require.Equal(t, map[string]any{"error": "claude_internal_failure", "class": "account_usage"}, requestErrorData(t, err))
+
+	unread := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvAccountUsage: "unread"}))
+	unread.initialize()
+
+	_, err = callAccountUsage(t, unread, map[string]any{accountUsageSessionField: unread.newSession().SessionId})
 	require.Equal(t, -32603, requestErrorCode(t, err))
 	require.Equal(t, map[string]any{"error": "claude_internal_failure", "class": "account_usage"}, requestErrorData(t, err))
 }
@@ -141,14 +149,16 @@ func TestAccountUsageResponseMapping(t *testing.T) {
 
 	for name, usage := range map[string]claude.AccountUsage{
 		"not available": {Available: false, Windows: &claude.RateLimits{ModelScoped: []claude.ScopedWindow{scoped}}},
-		"no windows":    {Available: true},
 		"empty report":  {Available: true, Windows: &claude.RateLimits{}},
 		"no percentage": {Available: true, Windows: &claude.RateLimits{Session: &claude.Window{ResetsAt: "2026-09-19T08:00:00Z"}}},
 	} {
-		response, err := accountUsageResponse(usage, now)
+		response, err = accountUsageResponse(usage, now)
 		require.NoError(t, err, name)
 		require.Equal(t, wire.AccountUsageUnavailable(wire.AccountUsageNotReported), response, name)
 	}
+
+	_, err = accountUsageResponse(claude.AccountUsage{Available: true}, now)
+	require.ErrorIs(t, err, errNativeUsageUnread, "an available account without a report is a failed read")
 
 	for name, limits := range map[string]claude.RateLimits{
 		"bad reset":      {Session: &claude.Window{Utilization: new(float64(1)), ResetsAt: "tomorrow"}},

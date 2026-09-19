@@ -62,9 +62,8 @@ type session struct {
 	commands      []acp.AvailableCommand
 	title         string
 	updatedAt     string
-	// installed records that the agent published the session under its id,
-	// so close owes the store its final generation.
-	installed bool
+	// persisted marks a successfully committed mirror.
+	persisted bool
 	closing   bool
 	closeDone chan struct{}
 	closeErr  error
@@ -73,6 +72,7 @@ type session struct {
 	cycle     *cycle
 	dialogs   map[string]*dialog
 
+	openMu   sync.Mutex
 	mirrorMu sync.Mutex
 	lcMu     sync.Mutex
 	lc       lifecycle.Publisher
@@ -80,6 +80,8 @@ type session struct {
 
 // runtime is one claude process generation.
 type runtime struct {
+	// ending is protected by the session mutex.
+	ending          bool
 	env             []string
 	executable      string
 	quotaAccess     *claude.QuotaAccess
@@ -369,11 +371,20 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model strin
 func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 	s.mu.Lock()
 	rt := s.runtime
+	ending := rt != nil && rt.ending
 	sessionFile := s.sessionFile
 	s.mu.Unlock()
 
 	if rt != nil {
-		return rt, nil
+		if !ending {
+			return rt, nil
+		}
+
+		select {
+		case <-rt.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
 	rt, err := s.launch(ctx, sessionFile)
@@ -387,7 +398,7 @@ func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 		return nil, configureErr
 	}
 
-	if openErr := s.publishOpen(ctx); openErr != nil {
+	if openErr := s.openStream(ctx, rt); openErr != nil {
 		return nil, openErr
 	}
 
@@ -528,7 +539,7 @@ func (s *session) settleAgentCycle(ctx context.Context, rt *runtime, c *cycle) {
 		// generation that produced it ends: the child is stopped and its
 		// binding dropped while this cycle still holds the foreground, so the
 		// next operation relaunches and opens a new incarnation.
-		s.lc.Fence()
+		s.fenceStream()
 		s.signalRuntime(settleCtx, rt)
 		s.dropRuntime(rt)
 		s.agent.log.ErrorContext(settleCtx, "mirror commit after agent-origin cycle failed",
@@ -562,6 +573,7 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 		return
 	}
 
+	rt.ending = true
 	t := s.turn
 	c := s.cycle
 
@@ -589,6 +601,7 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 		}
 	}
 
+	s.openMu.Lock()
 	s.mu.Lock()
 	if s.runtime == rt {
 		if !s.closing {
@@ -598,6 +611,7 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 		s.runtime = nil
 	}
 	s.mu.Unlock()
+	s.openMu.Unlock()
 }
 
 // dropRuntime unbinds one process generation. Its incarnation is already
@@ -780,8 +794,8 @@ func (s *session) close(ctx context.Context) error {
 	}
 
 	s.closing = true
+	joinEstablishment := !s.persisted
 	s.closeDone = make(chan struct{})
-	installed := s.installed
 	t := s.turn
 	rt := s.runtime
 
@@ -812,12 +826,22 @@ func (s *session) close(ctx context.Context) error {
 		s.stopRuntime(ctx, rt)
 	}
 
+	// An initial mirror may not have started yet; its establishment owns the gate.
+	if joinEstablishment {
+		s.gate <- struct{}{}
+		defer func() { <-s.gate }()
+	}
+
+	s.mu.Lock()
+	persisted := s.persisted
+	s.mu.Unlock()
+
 	var errs []error
 
 	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettleTimeout)
 	defer cancel()
 
-	if installed {
+	if persisted {
 		if err := s.commitMirror(commitCtx); err != nil {
 			errs = append(errs, err)
 		}
@@ -834,7 +858,7 @@ func (s *session) close(ctx context.Context) error {
 		}
 	}
 
-	s.lc.Fence()
+	s.fenceStream()
 
 	s.mu.Lock()
 	s.closeErr = errors.Join(errs...)

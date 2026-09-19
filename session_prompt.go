@@ -294,7 +294,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 		if err := s.commitMirror(settleCtx); err != nil {
 			// The turn is not durable, so the incarnation is fenced and the
 			// generation ends before this response is answered.
-			s.lc.Fence()
+			s.fenceStream()
 			s.signalRuntime(settleCtx, rt)
 			s.dropRuntime(rt)
 			verdict.failure = s.mirrorFailure(&t.state, err)
@@ -307,7 +307,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 	// does not back, and its generation is unbound before this response is
 	// answered.
 	if t.ended == turnTransportEnded {
-		s.lc.Fence()
+		s.fenceStream()
 		s.dropRuntime(rt)
 	}
 

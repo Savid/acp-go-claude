@@ -36,7 +36,7 @@ func TestPermissionAnswerControlsNativeDecision(t *testing.T) {
 	}
 }
 
-func TestElicitationCapabilityMatrix(t *testing.T) {
+func TestElicitationCapabilityGating(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name, json string

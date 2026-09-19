@@ -12,9 +12,6 @@ import (
 func (s *session) lifecycleNegotiated() lifecycle.Negotiated { return s.agent.lifecycleNegotiated() }
 
 func (s *session) openStream(ctx context.Context) error {
-	s.lcMu.Lock()
-	defer s.lcMu.Unlock()
-
 	return s.lc.Open(ctx, fmt.Sprintf("%s:%d", s.id, s.agent.nextIncarnation()), s.lifecycleNegotiated(), s.deliverLifecycle)
 }
 
@@ -30,6 +27,14 @@ func (s *session) acceptTurn(ctx context.Context, t *turn) {
 	if err := s.lc.Accept(ctx, &t.Cycle, t.submission); err != nil && t.failure == nil {
 		t.failure = err
 	}
+}
+
+// turnAccepted reports whether the turn's acceptance has been published.
+func (s *session) turnAccepted(t *turn) bool {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
+
+	return t.accepted
 }
 
 // recordFailure keeps the first failure one cycle observed. The pump and the

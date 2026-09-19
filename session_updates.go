@@ -26,6 +26,7 @@ type messageState struct {
 	finalized          map[string]struct{}
 	images             map[string]struct{}
 }
+
 type cycleState struct {
 	replay           bool
 	usage            *acp.Usage
@@ -181,6 +182,7 @@ func (s *session) projectStream(ctx context.Context, state *cycleState, event cl
 
 	return nil
 }
+
 func (s *session) projectAssistant(ctx context.Context, state *cycleState, parent string, rowID string, native claude.Message) error {
 	message := state.message(parent)
 	if _, seen := message.finalized[rowID]; rowID != "" && seen {
@@ -268,6 +270,7 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 
 	return nil
 }
+
 func (s *session) projectToolResults(ctx context.Context, state *cycleState, blocks []claude.ContentBlock) error {
 	for index := range blocks {
 		block := &blocks[index]
@@ -314,6 +317,7 @@ func consumeAssistantText(pending *string, full string) string {
 
 	return suffix
 }
+
 func optionalString(value string) *string {
 	if value == "" {
 		return nil
@@ -321,11 +325,13 @@ func optionalString(value string) *string {
 
 	return &value
 }
+
 func mapUsage(usage claude.Usage) *acp.Usage {
 	read, write := int(usage.CacheReadInputTokens), int(usage.CacheCreationInputTokens)
 
 	return &acp.Usage{InputTokens: int(usage.InputTokens), OutputTokens: int(usage.OutputTokens), CachedReadTokens: &read, CachedWriteTokens: &write, TotalTokens: int(usage.InputTokens+usage.OutputTokens) + read + write}
 }
+
 func (s *session) emitUsage(ctx context.Context, state *cycleState, stats *claude.ContextUsage) {
 	s.mu.Lock()
 	size := s.contextWindow
@@ -357,6 +363,7 @@ func (s *session) emitUsage(ctx context.Context, state *cycleState, stats *claud
 
 	_ = s.emit(ctx, acp.SessionUpdate{UsageUpdate: update})
 }
+
 func (s *session) emitRestoredUsage(ctx context.Context, rt *runtime) {
 	stats, err := rt.client.ContextUsage(ctx)
 	if err != nil {
@@ -371,6 +378,7 @@ func (s *session) emitRestoredUsage(ctx context.Context, rt *runtime) {
 
 	s.emitUsage(ctx, &cycleState{}, &stats)
 }
+
 func suppressedCommand(name string) bool {
 	switch name {
 	case "clear", "reset", "new", configCommand, "settings", "logout", "login", "mcp", "resume", "fork":

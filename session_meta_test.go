@@ -23,7 +23,8 @@ func TestSessionOptionCarrierCopiesMutableInputs(t *testing.T) {
 	t.Parallel()
 	env := map[string]string{"PATH": "/bin", "EMPTY": ""}
 	dirs := []string{"/first", "/second"}
-	options := NewClaudeOptions(WithClaudeEnv(env), WithClaudeExtraPathDirs(dirs...), WithClaudePermissionMode(permissionModePlan), WithClaudeBare(false))
+	schema := map[string]any{"type": "object"}
+	options := NewClaudeOptions(WithClaudeEnv(env), WithClaudeExtraPathDirs(dirs...), WithClaudePermissionMode(permissionModePlan), WithClaudeBare(false), WithClaudeSystemPrompt("be terse"), WithClaudeOutputSchema(schema))
 	meta := options.Meta()
 	parsed, refusal := parseSessionMeta(meta)
 	require.Nil(t, refusal)
@@ -32,8 +33,24 @@ func TestSessionOptionCarrierCopiesMutableInputs(t *testing.T) {
 	require.Equal(t, options, parsed.options)
 	env["PATH"] = "mutated"
 	dirs[0] = "/mutated"
+	schema["type"] = "mutated"
 	options.Env["EMPTY"] = "mutated"
 	options.ExtraPathDirs[1] = "/mutated"
+	options.OutputSchema["type"] = "array"
 	require.Equal(t, map[string]string{"PATH": "/bin", "EMPTY": ""}, parsed.options.Env)
 	require.Equal(t, []string{"/first", "/second"}, parsed.options.ExtraPathDirs)
+	require.Equal(t, map[string]any{"type": "object"}, parsed.options.OutputSchema)
+	require.Equal(t, "be terse", parsed.options.SystemPrompt)
+}
+
+func TestSameCarrierIgnoresExplicitPresence(t *testing.T) {
+	t.Parallel()
+	cwd := t.TempDir()
+	s := &session{cwd: cwd}
+	request := wire.ResumeSessionRequest("stored-session", cwd, WithSessionClaudeOptions(NewClaudeOptions(WithClaudeBare(false))))
+	meta, refusal := parseSessionMeta(request.Meta)
+	require.Nil(t, refusal)
+	require.True(t, sameCarrier(s, sessionStart{cwd: cwd, meta: meta}))
+	s.options.Bare = true
+	require.False(t, sameCarrier(s, sessionStart{cwd: cwd, meta: meta}))
 }

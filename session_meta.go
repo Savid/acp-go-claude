@@ -43,9 +43,11 @@ type ClaudeOptions struct {
 	Effort string `json:"effort,omitempty"`
 	// PermissionMode selects Claude's native permission policy.
 	PermissionMode string `json:"permissionMode,omitempty"`
-	Bare           bool   `json:"bare,omitempty"`
-	bareSet        bool
-	SystemPrompt   string `json:"systemPrompt,omitempty"`
+	// Bare requests Claude's native bare mode; an explicit false travels.
+	Bare    bool `json:"bare,omitempty"`
+	bareSet bool
+	// SystemPrompt replaces the native system prompt.
+	SystemPrompt string `json:"systemPrompt,omitempty"`
 }
 
 // ClaudeOption configures ClaudeOptions values.
@@ -93,6 +95,18 @@ func WithClaudePermissionMode(mode string) ClaudeOption {
 // WithClaudeBare requests Claude's native bare mode.
 func WithClaudeBare(enabled bool) ClaudeOption {
 	return func(options *ClaudeOptions) { options.Bare = enabled; options.bareSet = true }
+}
+
+// WithClaudeSystemPrompt replaces the native system prompt.
+func WithClaudeSystemPrompt(text string) ClaudeOption {
+	return func(options *ClaudeOptions) { options.SystemPrompt = text }
+}
+
+// WithClaudeOutputSchema configures native structured output.
+func WithClaudeOutputSchema(schema map[string]any) ClaudeOption {
+	cloned := wire.CloneMap(schema)
+
+	return func(options *ClaudeOptions) { options.OutputSchema = wire.CloneMap(cloned) }
 }
 
 // Meta returns exactly {"claude": {"options": {...}}} with the non-zero fields.

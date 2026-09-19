@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -25,10 +24,6 @@ const (
 	stopReasonMaxTokens = "max_tokens"
 	stopReasonAborted   = "aborted"
 	stopReasonError     = "error"
-
-	// processExitGrace is how long failure classification waits for a dead
-	// child to be reaped after its stdout closed.
-	processExitGrace = 2 * time.Second
 )
 
 // nativePrompt carries Anthropic content blocks in their request order.
@@ -177,20 +172,16 @@ func (s *session) prompt(ctx context.Context, params acp.PromptRequest, raw json
 	}
 
 	if err := rt.client.Prompt(turnCtx, s.nativeID, mapped.content); err != nil {
-		s.lcMu.Lock()
-		accepted := t.accepted
-		s.lcMu.Unlock()
-
-		if !accepted {
+		if !s.turnAccepted(t) {
 			if turnCtx.Err() != nil {
 				return wire.CancelledResponse(params), nil
 			}
 
-			return acp.PromptResponse{}, s.dispatchFailure(ctx, rt, err)
+			return acp.PromptResponse{}, s.dispatchFailure(context.WithoutCancel(ctx), rt, err)
 		}
 	}
 
-	s.acceptTurn(ctx, t)
+	s.acceptTurn(turnCtx, t)
 
 	select {
 	case <-t.settled:
@@ -226,31 +217,7 @@ func (s *session) dispatchFailure(ctx context.Context, rt *runtime, err error) e
 // child's exit status and last stderr line where it died, otherwise the
 // transport error.
 func (s *session) transportFailure(ctx context.Context, rt *runtime, err error) error {
-	waitCtx, cancel := context.WithTimeout(ctx, processExitGrace)
-	defer cancel()
-
-	if result, waitErr := rt.proc.Wait(waitCtx); waitErr == nil {
-		message := fmt.Sprintf("claude process exited with status %d", result.ExitCode)
-		if result.Signal != 0 {
-			message = fmt.Sprintf("claude process was killed by signal %d", result.Signal)
-		}
-
-		if line := rt.proc.StderrLastLine(); line != "" {
-			message += ": " + line
-		}
-
-		return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseProcessExit, Message: message})
-	}
-
-	if err == nil {
-		err = rt.client.Err()
-	}
-
-	if err == nil {
-		err = errors.New("claude event stream closed mid-turn")
-	}
-
-	return wire.TurnFailed(vendor, wire.TurnFailure{Cause: wire.CauseTransport, Message: err.Error()})
+	return wire.TurnFailed(vendor, wire.TransportFailure(ctx, rt.proc, "claude process", err, rt.client.Err))
 }
 
 // cycleVerdict is how one cycle ended, in the terms the lifecycle stream and

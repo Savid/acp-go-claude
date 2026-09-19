@@ -4,11 +4,16 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"sync"
 )
+
+// ErrTransportClosed reports that the claude stdout stream ended before a
+// control request received its response.
+var ErrTransportClosed = errors.New("claude event stream closed")
 
 type CommandError struct{ Message string }
 
@@ -100,6 +105,7 @@ func (c *Client) read(ctx context.Context) {
 
 	c.fail(scanner.Err())
 }
+
 func (c *Client) fail(err error) { c.mu.Lock(); defer c.mu.Unlock(); c.err = err }
 
 func (c *Client) write(ctx context.Context, value any) error {
@@ -145,7 +151,7 @@ func (c *Client) Control(ctx context.Context, request map[string]any, result any
 			return err
 		}
 
-		return io.EOF
+		return ErrTransportClosed
 	}
 }
 
@@ -156,21 +162,27 @@ func (c *Client) Initialize(ctx context.Context) (InitializeResponse, error) {
 
 	return response, err
 }
+
 func (c *Client) Prompt(ctx context.Context, id string, content []ContentBlock) error {
 	return c.write(ctx, map[string]any{keyType: roleUser, "session_id": id, "message": map[string]any{"role": roleUser, "content": content}, "parent_tool_use_id": nil})
 }
+
 func (c *Client) Abort(ctx context.Context) error {
 	return c.Control(ctx, map[string]any{keySubtype: "interrupt"}, nil)
 }
+
 func (c *Client) SetModel(ctx context.Context, model string) error {
 	return c.Control(ctx, map[string]any{keySubtype: "set_model", "model": model}, nil)
 }
+
 func (c *Client) SetPermissionMode(ctx context.Context, mode string) error {
 	return c.Control(ctx, map[string]any{keySubtype: "set_permission_mode", "mode": mode}, nil)
 }
+
 func (c *Client) ApplySettings(ctx context.Context, settings map[string]any) error {
 	return c.Control(ctx, map[string]any{keySubtype: "apply_flag_settings", "settings": settings}, nil)
 }
+
 func (c *Client) ContextUsage(ctx context.Context) (ContextUsage, error) {
 	var result ContextUsage
 
@@ -178,6 +190,7 @@ func (c *Client) ContextUsage(ctx context.Context) (ContextUsage, error) {
 
 	return result, err
 }
+
 func (c *Client) Reply(ctx context.Context, id string, result any, err error) error {
 	response := map[string]any{keyRequestID: id, keySubtype: "success", keyResponse: result}
 	if err != nil {

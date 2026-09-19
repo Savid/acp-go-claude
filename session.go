@@ -62,13 +62,16 @@ type session struct {
 	commands      []acp.AvailableCommand
 	title         string
 	updatedAt     string
-	closing       bool
-	closeDone     chan struct{}
-	closeErr      error
-	poison        string
-	turn          *turn
-	cycle         *cycle
-	dialogs       map[string]*dialog
+	// installed records that the agent published the session under its id,
+	// so close owes the store its final generation.
+	installed bool
+	closing   bool
+	closeDone chan struct{}
+	closeErr  error
+	poison    string
+	turn      *turn
+	cycle     *cycle
+	dialogs   map[string]*dialog
 
 	mirrorMu sync.Mutex
 	lcMu     sync.Mutex
@@ -265,6 +268,7 @@ func (s *session) launchEnvironment() ([]string, error) {
 
 	return env, nil
 }
+
 func (s *session) permissionMode() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -552,7 +556,12 @@ func (s *session) settleAgentCycle(ctx context.Context, rt *runtime, c *cycle) {
 func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 	s.mu.Lock()
 
-	generationOwned := s.runtime == rt
+	if s.runtime != rt {
+		s.mu.Unlock()
+
+		return
+	}
+
 	t := s.turn
 	c := s.cycle
 
@@ -580,15 +589,15 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 		}
 	}
 
-	// The incarnation ends with the generation that produced it, whatever the
-	// turn did, so a relaunch never publishes on the old stream id.
-	if generationOwned && !closing {
-		s.lc.Fence()
-	}
+	s.mu.Lock()
+	if s.runtime == rt {
+		if !s.closing {
+			s.lc.Fence()
+		}
 
-	// The binding is dropped last: a relaunch must not open its incarnation
-	// before this one is fenced.
-	s.dropRuntime(rt)
+		s.runtime = nil
+	}
+	s.mu.Unlock()
 }
 
 // dropRuntime unbinds one process generation. Its incarnation is already
@@ -757,14 +766,6 @@ func (s *session) acquireGate(limit string) (func(), error) {
 	return wire.AcquireSessionGate(s.gate, limit)
 }
 
-// holdGate takes the foreground of a session no request can reach yet, where
-// the gate is always free.
-func (s *session) holdGate() func() {
-	s.gate <- struct{}{}
-
-	return sync.OnceFunc(func() { <-s.gate })
-}
-
 // close runs the shutdown ladder: mark closed, resolve pending dialogs and the
 // in-flight turn, stop the process, commit the owed rows, terminalize what the
 // stream still owns, and fence it.
@@ -780,6 +781,7 @@ func (s *session) close(ctx context.Context) error {
 
 	s.closing = true
 	s.closeDone = make(chan struct{})
+	installed := s.installed
 	t := s.turn
 	rt := s.runtime
 
@@ -815,8 +817,10 @@ func (s *session) close(ctx context.Context) error {
 	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettleTimeout)
 	defer cancel()
 
-	if err := s.commitMirror(commitCtx); err != nil {
-		errs = append(errs, err)
+	if installed {
+		if err := s.commitMirror(commitCtx); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	s.mu.Lock()

@@ -54,6 +54,7 @@ func (s *session) configOptions() []acp.SessionConfigOption {
 
 	return options
 }
+
 func selectConfig(id acp.SessionConfigId, name, current string, values acp.SessionConfigSelectOptionsUngrouped) acp.SessionConfigOption {
 	category := acp.SessionConfigOptionCategory("model_config")
 
@@ -68,6 +69,7 @@ func selectConfig(id acp.SessionConfigId, name, current string, values acp.Sessi
 
 	return acp.SessionConfigOption{Select: &acp.SessionConfigOptionSelect{Id: id, Category: &category, Name: name, Type: configTypeSelect, CurrentValue: acp.SessionConfigValueId(current), Options: acp.SessionConfigSelectOptions{Ungrouped: &values}}}
 }
+
 func stringChoices(names []string) acp.SessionConfigSelectOptionsUngrouped {
 	values := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(names))
 	for _, name := range names {
@@ -76,6 +78,7 @@ func stringChoices(names []string) acp.SessionConfigSelectOptionsUngrouped {
 
 	return values
 }
+
 func modelSelectOptions(current string, models []claude.Model, configured []string) acp.SessionConfigSelectOptionsUngrouped {
 	rows := make([]wire.ModelRow, 0, len(models))
 	for _, model := range models {
@@ -89,6 +92,7 @@ func modelSelectOptions(current string, models []claude.Model, configured []stri
 
 	return wire.ModelSelectOptions(vendor, current, rows, configured)
 }
+
 func (s *session) setConfigOption(ctx context.Context, id acp.SessionConfigId, value string) ([]acp.SessionConfigOption, error) {
 	if err := s.admissionError(); err != nil {
 		return nil, err
@@ -109,6 +113,14 @@ func (s *session) setConfigOption(ctx context.Context, id acp.SessionConfigId, v
 		return nil, err
 	}
 	defer release()
+
+	s.mu.Lock()
+	busy := s.cycle != nil
+	s.mu.Unlock()
+
+	if busy {
+		return nil, wire.Backpressure(limitSessionPrompt)
+	}
 
 	rt, err := s.ensureRuntime(ctx)
 	if err != nil {

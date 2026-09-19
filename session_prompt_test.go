@@ -129,7 +129,7 @@ func TestNativeFailure(t *testing.T) {
 	require.True(t, reduceAll(t, session.SessionId, h.rec.snapshot()).Settled())
 }
 
-func TestNativeNoiseLeavesACPUsable(t *testing.T) {
+func TestNativeNoiseCannotCorruptACPStdout(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.initialize()

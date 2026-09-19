@@ -70,25 +70,30 @@ type ContentBlock struct {
 	IsError   bool            `json:"is_error,omitempty"` //nolint:tagliatelle // Claude uses this native wire spelling.
 	Source    *Source         `json:"source,omitempty"`
 }
+
 type Source struct {
 	Type      string `json:"type"`
 	MediaType string `json:"media_type,omitempty"` //nolint:tagliatelle // Claude uses this native wire spelling.
 	Data      string `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`
 }
+
 type Usage struct {
 	InputTokens              int64 `json:"input_tokens"`                //nolint:tagliatelle // Claude uses this native wire spelling.
 	OutputTokens             int64 `json:"output_tokens"`               //nolint:tagliatelle // Claude uses this native wire spelling.
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`     //nolint:tagliatelle // Claude uses this native wire spelling.
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"` //nolint:tagliatelle // Claude uses this native wire spelling.
 }
+
 type ModelUsage struct {
 	ContextWindow int64 `json:"contextWindow"`
 }
+
 type ContextUsage struct {
 	TotalTokens int64 `json:"totalTokens"`
 	MaxTokens   int64 `json:"maxTokens"`
 }
+
 type Model struct {
 	Value                 string   `json:"value"`
 	DisplayName           string   `json:"displayName"`
@@ -96,10 +101,12 @@ type Model struct {
 	SupportedEffortLevels []string `json:"supportedEffortLevels"`
 	SupportsAutoMode      bool     `json:"supportsAutoMode"`
 }
+
 type Command struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }
+
 type InitializeResponse struct {
 	Models                []Model   `json:"models"`
 	Commands              []Command `json:"commands"`
@@ -107,6 +114,7 @@ type InitializeResponse struct {
 	AvailableOutputStyles []string  `json:"available_output_styles"` //nolint:tagliatelle // Claude uses this native wire spelling.
 	PermissionMode        string    `json:"current_permission_mode"` //nolint:tagliatelle // Claude uses this native wire spelling.
 }
+
 type ControlRequest struct {
 	Subtype         string          `json:"subtype"`
 	ToolName        string          `json:"tool_name"` //nolint:tagliatelle // Claude uses this native wire spelling.

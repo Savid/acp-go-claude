@@ -15,7 +15,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/savid/acp-go-claude/internal/claude"
-	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
@@ -56,8 +55,11 @@ func (s *session) record() sessionRecord {
 		Model:                 s.model,
 		Effort:                s.effort,
 		PermissionMode:        s.options.PermissionMode,
-		Bare:                  s.options.Bare, SystemPrompt: s.options.SystemPrompt, OutputSchema: wire.CloneMap(s.options.OutputSchema), OutputStyle: s.outputStyle,
-		UpdatedAtUnixMilli: time.Now().UnixMilli(),
+		Bare:                  s.options.Bare,
+		SystemPrompt:          s.options.SystemPrompt,
+		OutputSchema:          wire.CloneMap(s.options.OutputSchema),
+		OutputStyle:           s.outputStyle,
+		UpdatedAtUnixMilli:    time.Now().UnixMilli(),
 	}
 }
 
@@ -109,10 +111,7 @@ type storedSession struct {
 
 // loadStored reads the native rows and required current configuration.
 func (a *Agent) loadStored(ctx context.Context, sessionID acp.SessionId) (storedSession, error) {
-	loadCtx, cancel := context.WithTimeout(ctx, acpcore.SessionStoreTimeout)
-	defer cancel()
-
-	loadCtx, finish := a.observe.StartSessionStore(loadCtx, "load")
+	loadCtx, finish := a.observe.StartSessionStore(ctx, "load")
 
 	var record sessionRecord
 
@@ -176,10 +175,7 @@ func (a *Agent) hydrate(ctx context.Context, sessionID acp.SessionId, stored sto
 
 	if nativeWins {
 		if len(rows) > len(stored.rows) {
-			commitCtx, cancel := context.WithTimeout(ctx, acpcore.SessionStoreTimeout)
-			defer cancel()
-
-			if err := sessionlog.Commit(commitCtx, a.store, string(sessionID), rows, stored.record); err != nil {
+			if err := sessionlog.Commit(ctx, a.store, string(sessionID), rows, stored.record); err != nil {
 				return "", nil, a.restoreRefused(ctx, sessionID, err)
 			}
 		}

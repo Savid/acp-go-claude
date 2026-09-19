@@ -12,6 +12,7 @@ import (
 func SessionPath(home, cwd, id string) string {
 	return filepath.Join(home, "projects", ProjectDirName(cwd), id+".jsonl")
 }
+
 func ReadRows(path string) ([][]byte, error) {
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -40,6 +41,7 @@ func ReadRows(path string) ([][]byte, error) {
 
 	return rows, scanner.Err()
 }
+
 func WriteRows(path string, rows [][]byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err

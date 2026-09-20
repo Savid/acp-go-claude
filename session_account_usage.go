@@ -98,6 +98,10 @@ func setupTokenUsageResponse(result claude.QuotaResult) (wire.AccountUsageRespon
 
 func (s *session) observeQuota(rt *runtime, event claude.Event) {
 	s.mu.Lock()
+	if event.Type == nativeResult && event.ParentToolUseID == "" {
+		rt.reported = true
+	}
+
 	access := rt.quotaAccess
 	model := s.model
 
@@ -142,6 +146,14 @@ func (s *session) observeQuota(rt *runtime, event claude.Event) {
 		rt.quotaClassified = false
 		s.mu.Unlock()
 	}
+}
+
+// processReported reports whether rt has completed a turn.
+func (s *session) processReported(rt *runtime) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return rt.reported
 }
 
 // gatewayUsage reads a provider claude holds no account for through the

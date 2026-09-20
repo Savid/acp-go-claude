@@ -81,6 +81,10 @@ type session struct {
 
 // runtime is one claude process generation.
 type runtime struct {
+	// reported is set once the process has completed a turn. claude fills its
+	// rate-limit report from the first API response, so a null report before
+	// then is absent, not failed.
+	reported bool
 	// ending is protected by the session mutex.
 	ending          bool
 	env             []string

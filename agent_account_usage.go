@@ -73,7 +73,14 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 	usage, err := rt.client.AccountUsage(readCtx)
 	if err == nil {
 		var response wire.AccountUsageResponse
-		if response, err = accountUsageResponse(usage, time.Now()); err == nil || errors.Is(err, errNativeUsageUnread) {
+
+		response, err = accountUsageResponse(usage, time.Now())
+		if errors.Is(err, errNativeUsageUnread) && !s.processReported(rt) {
+			// The process has completed no turn, so it has no report yet.
+			response, err = wire.AccountUsageUnavailable(wire.AccountUsageNotReported), nil
+		}
+
+		if err == nil || errors.Is(err, errNativeUsageUnread) {
 			if response.Available {
 				return response, nil
 			}
@@ -111,8 +118,8 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 }
 
 // errNativeUsageUnread marks an account that reports allowances whose report
-// is absent: claude could not fetch it, which is a failed read, not an account
-// without allowance.
+// is absent. After a completed turn that is a failed read, not an account
+// without allowance; before one the process simply has no report yet.
 var errNativeUsageUnread = errors.New("native usage report missing")
 
 func accountUsageResponse(usage claude.AccountUsage, now time.Time) (wire.AccountUsageResponse, error) {

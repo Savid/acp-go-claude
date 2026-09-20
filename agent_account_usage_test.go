@@ -107,9 +107,10 @@ func TestAccountUsageRefusals(t *testing.T) {
 	require.Equal(t, map[string]any{"error": "unknown session", "field": accountUsageSessionField}, requestErrorData(t, err), "a tombstoned session")
 }
 
-// A home whose account reports no allowance answers not_reported; a native
-// control refusal, and an account whose report claude could not fetch, are
-// the account_usage failure class the host retries.
+// A home whose account reports no allowance answers not_reported, as does a
+// process that has completed no turn; a native control refusal, and a report
+// still absent after a completed turn, are the account_usage failure class
+// the host retries.
 func TestAccountUsageUnavailableAndRefused(t *testing.T) {
 	t.Parallel()
 
@@ -129,10 +130,18 @@ func TestAccountUsageUnavailableAndRefused(t *testing.T) {
 
 	unread := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvAccountUsage: "unread"}))
 	unread.initialize()
+	unreadSession := unread.newSession().SessionId
 
-	_, err = callAccountUsage(t, unread, map[string]any{"providerId": "anthropic", accountUsageSessionField: unread.newSession().SessionId})
+	response, err = callAccountUsage(t, unread, map[string]any{"providerId": "anthropic", accountUsageSessionField: unreadSession})
+	require.NoError(t, err)
+	require.Equal(t, wire.AccountUsageUnavailable(wire.AccountUsageNotReported), response, "a process that has completed no turn has no report yet")
+
+	_, err = unread.prompt(unreadSession, "1+1", nil)
+	require.NoError(t, err)
+
+	_, err = callAccountUsage(t, unread, map[string]any{"providerId": "anthropic", accountUsageSessionField: unreadSession})
 	require.Equal(t, -32603, requestErrorCode(t, err))
-	require.Equal(t, map[string]any{"error": "claude_internal_failure", "class": "account_usage"}, requestErrorData(t, err))
+	require.Equal(t, map[string]any{"error": "claude_internal_failure", "class": "account_usage"}, requestErrorData(t, err), "a null report after a completed turn is a failed read")
 }
 
 func TestAccountUsageResponseMapping(t *testing.T) {

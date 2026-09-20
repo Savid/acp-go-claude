@@ -54,3 +54,11 @@ func TestSameCarrierIgnoresExplicitPresence(t *testing.T) {
 	s.options.Bare = true
 	require.False(t, sameCarrier(s, sessionStart{cwd: cwd, meta: meta}))
 }
+
+func TestValidateClaudeSessionMeta(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, ValidateClaudeSessionMeta(nil))
+	require.NoError(t, ValidateClaudeSessionMeta(NewClaudeOptions(WithClaudeModel("model")).Meta()))
+	require.Error(t, ValidateClaudeSessionMeta(map[string]any{"claude": "x"}))
+}

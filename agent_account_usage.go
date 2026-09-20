@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/savid/acp-go-claude/internal/claude"
-	coreusage "github.com/savid/acp-go-core/usage"
+	"github.com/savid/acp-go-core/usage"
 	"github.com/savid/acp-go-core/usage/anthropic"
 	"github.com/savid/acp-go-core/usage/gateway"
 	"github.com/savid/acp-go-core/usage/openaicodex"
@@ -70,11 +70,11 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 	readCtx, cancel := context.WithTimeout(ctx, wire.AccountUsageReadTimeout)
 	defer cancel()
 
-	usage, err := rt.client.AccountUsage(readCtx)
+	report, err := rt.client.AccountUsage(readCtx)
 	if err == nil {
 		var response wire.AccountUsageResponse
 
-		response, err = accountUsageResponse(usage, time.Now())
+		response, err = accountUsageResponse(report, time.Now())
 		if errors.Is(err, errNativeUsageUnread) && !s.processReported(rt) {
 			// The process has completed no turn, so it has no report yet.
 			response, err = wire.AccountUsageUnavailable(wire.AccountUsageNotReported), nil
@@ -114,7 +114,7 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 	s.agent.log.ErrorContext(ctx, "claude account usage read failed",
 		slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
 
-	return wire.AccountUsageResponse{}, coreusage.RequestError(vendor, err)
+	return wire.AccountUsageResponse{}, usage.RequestError(vendor, err)
 }
 
 // errNativeUsageUnread marks an account that reports allowances whose report
@@ -122,14 +122,14 @@ func (s *session) accountUsage(ctx context.Context) (wire.AccountUsageResponse, 
 // without allowance; before one the process simply has no report yet.
 var errNativeUsageUnread = errors.New("native usage report missing")
 
-func accountUsageResponse(usage claude.AccountUsage, now time.Time) (wire.AccountUsageResponse, error) {
-	if !usage.Available {
+func accountUsageResponse(report claude.AccountUsage, now time.Time) (wire.AccountUsageResponse, error) {
+	if !report.Available {
 		return wire.AccountUsageUnavailable(wire.AccountUsageNotReported), nil
 	}
 
-	if usage.Windows == nil {
+	if report.Windows == nil {
 		return wire.AccountUsageResponse{}, errNativeUsageUnread
 	}
 
-	return usage.Windows.Observation().Response(usage.Plan, now)
+	return report.Windows.Observation().Response(report.Plan, now)
 }

@@ -2,12 +2,15 @@ package claudeacp
 
 import (
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
 	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -98,4 +101,53 @@ func TestCloseBackgroundCycleRequiresCommit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCapturedNativeAgentOrigin replays the captured Claude Code stream-json
+// frames under testdata/native through the real decoder and the session's own
+// event handling with no prompt in flight: the turn Claude Code ran on its own
+// to report a finished background task opens an agent-origin cycle on its
+// first stream record and settles on its result.
+func TestCapturedNativeAgentOrigin(t *testing.T) {
+	a := NewAgent(testOptions(t)...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(rec, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	rt := s.runtime
+	require.Nil(t, s.turn)
+	s.mu.Unlock()
+
+	data, err := os.ReadFile("testdata/native/agent-origin.json")
+	require.NoError(t, err)
+	data = []byte(strings.ReplaceAll(string(data), "fixture-session", s.nativeID))
+	var frames []json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &frames))
+	require.NotEmpty(t, frames)
+
+	before := len(lifecycleEvents(rec.snapshot()))
+	for _, frame := range frames {
+		var event claude.Event
+		require.NoError(t, json.Unmarshal(frame, &event))
+		event.Raw = frame
+		s.handleEvent(t.Context(), rt, event)
+	}
+
+	events := lifecycleEvents(rec.snapshot())[before:]
+	require.Equal(t, []string{"state_update:running", "state_update:idle"}, eventTypes(events))
+	require.Equal(t, "activity", events[0]["cause"])
+	require.Equal(t, "activity", events[1]["cause"])
+	require.Equal(t, "success", events[1]["outcome"])
+	require.Contains(t, agentText(rec.snapshot()), "background agent")
+	s.mu.Lock()
+	require.Nil(t, s.cycle)
+	s.mu.Unlock()
 }

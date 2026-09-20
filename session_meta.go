@@ -251,7 +251,7 @@ func parseClaudeOptions(values map[string]any) (ClaudeOptions, *acp.RequestError
 		switch key {
 		case metaModelKey:
 			model, ok := item.(string)
-			if !ok {
+			if !ok || model == "" {
 				return ClaudeOptions{}, wire.Unsupported(wire.MetaOptionPath(vendor, key))
 			}
 

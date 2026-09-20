@@ -545,10 +545,13 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 		return acp.ListSessionsResponse{}, wire.Unsupported("cwd")
 	}
 
+	// Sessions are keyed by canonical cwd. A filter that cannot be resolved
+	// names no session's directory, so it matches nothing rather than being
+	// refused.
 	if filter != "" {
 		canonical, pathErr := filepath.EvalSymlinks(filter)
 		if pathErr != nil {
-			return acp.ListSessionsResponse{}, wire.Unsupported("cwd")
+			return acp.ListSessionsResponse{Sessions: []acp.SessionInfo{}}, nil
 		}
 
 		filter = canonical

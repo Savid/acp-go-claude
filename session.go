@@ -11,6 +11,7 @@ import (
 
 	"github.com/savid/acp-go-claude/internal/claude"
 	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/process"
 	"github.com/savid/acp-go-core/wire"
 )
@@ -88,6 +89,7 @@ type runtime struct {
 	quotaClassified bool
 	quotaModel      string
 	proc            *process.Process
+	observe         *observer.Observer
 	client          *claude.Client
 	cancel          context.CancelFunc
 	// done is closed when the pump has stopped routing this generation.
@@ -100,6 +102,13 @@ type runtime struct {
 func (rt *runtime) release() {
 	rt.releaseOnce.Do(func() {
 		rt.cancel()
+
+		waitCtx, cancel := context.WithTimeout(context.Background(), sessionShutdownTimeout)
+		defer cancel()
+
+		_, waitErr := rt.proc.Wait(waitCtx)
+		rt.observe.RecordProcessExit(waitCtx, "exited", waitErr)
+
 		_ = rt.proc.Close()
 	})
 }
@@ -224,7 +233,7 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 
 	client.Start(readCtx)
 
-	rt := &runtime{env: env, executable: executable, proc: proc, client: client, cancel: cancelRead, done: make(chan struct{})}
+	rt := &runtime{env: env, executable: executable, proc: proc, observe: s.agent.observe, client: client, cancel: cancelRead, done: make(chan struct{})}
 
 	s.mu.Lock()
 	closing := s.closing

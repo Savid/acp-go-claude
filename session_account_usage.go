@@ -29,7 +29,7 @@ func (s *session) setupTokenUsage(ctx context.Context, rt *runtime) (wire.Accoun
 	s.mu.Unlock()
 
 	result, err := s.agent.quota.Read(ctx, access.Key(), func(probeCtx context.Context, fable bool) (claude.QuotaResult, error) {
-		dir, scratchErr := s.agent.quotaScratch()
+		dir, scratchErr := s.agent.scratchDir("quota")
 		if scratchErr != nil {
 			return claude.QuotaResult{}, scratchErr
 		}

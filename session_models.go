@@ -39,7 +39,7 @@ func (s *session) configOptions() []acp.SessionConfigOption {
 
 	options = append(options, selectConfig(configMode, "Permission mode", s.options.PermissionMode, stringChoices(modes)))
 	for _, model := range s.models {
-		if model.Value != s.model || !model.SupportsEffort || s.effort == "" {
+		if model.Value != s.model || !model.SupportsEffort {
 			continue
 		}
 

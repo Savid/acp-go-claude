@@ -18,6 +18,7 @@ import (
 
 const fakeClaudeEnv = "ACP_GO_CLAUDE_TEST_FAKE"
 const fakeClaudeEnvArgvDump = "ACP_GO_CLAUDE_TEST_ARGV_DUMP"
+const fakeClaudeEnvUnsetEffort = "ACP_GO_CLAUDE_TEST_UNSET_EFFORT"
 
 // fakeClaudeEnvAccountUsage selects the get_usage answer: the allowance below,
 // "unavailable" for a home with no allowance, "unread" for an account whose
@@ -142,7 +143,10 @@ func runFakeClaude(args []string) int {
 		launchModel = model
 	}
 	structured, structuredRequested := launchFlag(args, "--json-schema")
-	settings := map[string]any{"model": launchModel, nativeEffortLevel: "low", nativeOutputStyle: "default"}
+	settings := map[string]any{"model": launchModel, nativeOutputStyle: "default"}
+	if os.Getenv(fakeClaudeEnvUnsetEffort) != "1" {
+		settings[nativeEffortLevel] = "low"
+	}
 	// Claude Code announces itself before it answers anything, so the adapter
 	// must already be able to forward a record when the process starts.
 	f.write(map[string]any{"type": "system", "subtype": "init", "uuid": uuid.NewString(), "session_id": id})

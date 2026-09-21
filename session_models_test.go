@@ -44,6 +44,44 @@ func TestConfigCatalogAndReadback(t *testing.T) {
 	}
 }
 
+func TestEffortCatalogIsAdvertisedWhenNativeCurrentIsUnset(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, WithEnv(map[string]string{
+		fakeClaudeEnv: "1", fakeClaudeEnvUnsetEffort: "1",
+	}))
+	h.initialize()
+	created := h.newSession()
+
+	var effort *acp.SessionConfigOptionSelect
+	for _, option := range created.ConfigOptions {
+		if option.Select != nil && option.Select.Id == configEffort {
+			effort = option.Select
+
+			break
+		}
+	}
+	require.NotNil(t, effort)
+	require.Empty(t, effort.CurrentValue,
+		"an unset native effort stays unset rather than guessing a supported level")
+	values := *effort.Options.Ungrouped
+	require.Len(t, values, 2)
+	require.Equal(t, []acp.SessionConfigValueId{"low", "high"},
+		[]acp.SessionConfigValueId{values[0].Value, values[1].Value})
+
+	updated, err := h.conn.SetSessionConfigOption(
+		h.ctx(), wire.SetConfigOptionRequest(created.SessionId, configEffort, "high"),
+	)
+	require.NoError(t, err)
+	for _, option := range updated.ConfigOptions {
+		if option.Select != nil && option.Select.Id == configEffort {
+			require.Equal(t, acp.SessionConfigValueId("high"), option.Select.CurrentValue)
+
+			return
+		}
+	}
+	t.Fatal("updated effort option was not advertised")
+}
+
 func TestModelCatalogPreservesNativeIdentity(t *testing.T) {
 	t.Parallel()
 	values := modelSelectOptions("current", []claude.Model{{Value: "one", DisplayName: "One", SupportedEffortLevels: []string{"high"}}, {Value: "one"}}, []string{"one", "listed"})

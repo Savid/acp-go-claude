@@ -66,6 +66,10 @@ func (s *session) record() sessionRecord {
 // commitMirror publishes the native rows and current session configuration
 // as one durable generation.
 func (s *session) commitMirror(ctx context.Context) error {
+	if s.ephemeral {
+		return nil
+	}
+
 	s.mirrorMu.Lock()
 	defer s.mirrorMu.Unlock()
 

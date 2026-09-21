@@ -2,6 +2,7 @@ package claudeacp
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -239,4 +240,108 @@ func contentUpdates(updates []acp.SessionNotification, sessionID acp.SessionId) 
 	}
 
 	return count
+}
+
+// streamFrame is one delivered lifecycle envelope's ordering identity and the
+// event it carried, rendered as the canonical JSON a consumer compares.
+type streamFrame struct {
+	stream   string
+	sequence float64
+	event    string
+}
+
+// streamFrames reads the envelopes one recorder observed for a session.
+func streamFrames(t *testing.T, updates []acp.SessionNotification, sessionID acp.SessionId) []streamFrame {
+	t.Helper()
+
+	frames := make([]streamFrame, 0, len(updates))
+
+	for _, update := range updates {
+		envelope, ok := update.Meta[wire.LifecycleKey].(map[string]any)
+		if !ok || update.SessionId != sessionID {
+			continue
+		}
+
+		stream, ok := envelope["streamId"].(string)
+		require.True(t, ok, "an envelope named no stream")
+		sequence, ok := envelope["sequence"].(float64)
+		require.True(t, ok, "an envelope named no sequence")
+		event, err := json.Marshal(envelope["event"])
+		require.NoError(t, err)
+
+		frames = append(frames, streamFrame{stream: stream, sequence: sequence, event: string(event)})
+	}
+
+	return frames
+}
+
+// Resuming a stored session through a new adapter must open a fresh stream.
+// Each live adapter retains its stream across prompts, and each stream/sequence
+// pair must identify the same content throughout the conversation.
+func TestResumedProcessNamesItsOwnIncarnation(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	cwd := t.TempDir()
+	store := acpcore.NewInMemorySessionStore()
+
+	earlier := newHarness(t, WithHome(home), WithSessionStore(store))
+	earlier.initialize(withLifecycle())
+	created, err := earlier.conn.NewSession(earlier.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+
+	for n, text := range []string{"first", "second"} {
+		_, promptErr := earlier.prompt(created.SessionId, text, promptMeta(n+1))
+		require.NoError(t, promptErr)
+	}
+
+	_, err = earlier.conn.CloseSession(earlier.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+
+	later := newHarness(t, WithHome(home), WithSessionStore(store))
+	later.initialize(withLifecycle())
+	_, err = later.conn.ResumeSession(later.ctx(), wire.ResumeSessionRequest(created.SessionId, cwd))
+	require.NoError(t, err)
+	_, err = later.prompt(created.SessionId, "third", promptMeta(3))
+	require.NoError(t, err)
+
+	before := streamFrames(t, earlier.rec.snapshot(), created.SessionId)
+	after := streamFrames(t, later.rec.snapshot(), created.SessionId)
+	require.NotEmpty(t, before)
+	require.NotEmpty(t, after)
+
+	firstStream := before[0].stream
+	for _, frame := range before {
+		require.Equal(t, firstStream, frame.stream, "one live process retained one incarnation across its prompts")
+	}
+
+	secondStream := after[0].stream
+	for _, frame := range after {
+		require.Equal(t, secondStream, frame.stream, "the resumed process retained its own incarnation")
+	}
+
+	require.NotEqual(t, firstStream, secondStream, "the resumed process reopened the name the earlier process published")
+	require.True(t, strings.HasPrefix(firstStream, string(created.SessionId)+":"))
+	require.True(t, strings.HasPrefix(secondStream, string(created.SessionId)+":"))
+
+	require.Equal(t, float64(1), before[0].sequence)
+	require.Equal(t, float64(1), after[0].sequence, "a fresh incarnation opens at sequence 1")
+	require.Greater(t, before[len(before)-1].sequence, float64(1), "the earlier process published past the sequence the resumed one reuses")
+
+	// The rule the host enforces: one (streamId, sequence) names one event
+	// forever. The earlier process's frames and the resumed process's frames
+	// are held to it together, so a resumed conversation can never present
+	// itself as a rewrite of the stream already recorded.
+	recorded := make(map[string]string, len(before)+len(after))
+
+	for _, frame := range append(append([]streamFrame(nil), before...), after...) {
+		identity := fmt.Sprintf("%s#%d", frame.stream, uint64(frame.sequence))
+		if previous, seen := recorded[identity]; seen {
+			require.Equal(t, previous, frame.event, "two different events claimed %s", identity)
+
+			continue
+		}
+
+		recorded[identity] = frame.event
+	}
 }

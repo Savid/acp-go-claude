@@ -3,920 +3,509 @@ package claudeacp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
-	"sync"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/savid/acp-go-claude/internal/claude"
-	"github.com/savid/acp-go-claude/internal/lifecycle"
 	"github.com/stretchr/testify/require"
+
+	"github.com/savid/acp-go-core/usage/anthropic"
+	"github.com/savid/acp-go-core/usage/openaicodex"
+	"github.com/savid/acp-go-core/usage/opencodego"
+	"github.com/savid/acp-go-core/usage/openrouter"
+	"github.com/savid/acp-go-core/wire"
 )
 
-func TestInitializeContractCapabilities(t *testing.T) {
-	agent := NewAgent(WithAgentVersion("test"))
-
-	resp, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
-	require.NoError(t, err)
-	require.Empty(t, resp.AuthMethods)
-	require.True(t, resp.AgentCapabilities.LoadSession)
-	require.True(t, resp.AgentCapabilities.McpCapabilities.Http)
-	require.False(t, resp.AgentCapabilities.McpCapabilities.Acp)
-	require.False(t, resp.AgentCapabilities.McpCapabilities.Sse)
-	require.Nil(t, resp.AgentCapabilities.SessionCapabilities.Fork)
-	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Delete)
-	require.Nil(t, resp.AgentCapabilities.Nes)
-	require.True(t, resp.AgentCapabilities.PromptCapabilities.Image)
-
-	claudeMeta := requireAnyMap(t, resp.AgentCapabilities.Meta[claudeMetaKey])
-	require.Equal(t, ForkSessionMethod, requireAnyMap(t, claudeMeta["fork"])["method"])
-	require.Equal(t, "ACP v1 elicitation", requireAnyMap(t, claudeMeta["elicitation"])["tracks"])
-	require.Equal(t, RawEventMethod, requireAnyMap(t, claudeMeta["rawEvent"])["method"])
-	require.Equal(t, SessionStoreFormat, requireAnyMap(t, claudeMeta["sessionStore"])["format"])
-	require.Equal(t, "_meta.claude.options.outputSchema", requireAnyMap(t, claudeMeta["structuredOutput"])["config"])
-}
-
-func TestLifecycleMetaStrictAllowlist(t *testing.T) {
+func TestInitializeShape(t *testing.T) {
 	t.Parallel()
 
-	valid := map[string]any{
-		claudeMetaKey: map[string]any{
-			metaOptionsKey: map[string]any{
-				metaModelKey:        "sonnet",
-				metaOutputSchemaKey: map[string]any{"type": "object"},
-			},
-			metaRawEventKey: map[string]any{metaRawEventEnabledKey: true},
-		},
-		"other": map[string]any{"ignored": true},
-		// The full module path is foreign to the owned "claude" namespace and
-		// MUST be ignored, never rejected.
-		"github.com/savid/acp-go-claude": map[string]any{"ignored": true},
-	}
-	options, err := claudeOptionsFromMeta(valid)
-	require.NoError(t, err)
-	require.Equal(t, "sonnet", options.Model)
-	require.Equal(t, map[string]any{"type": "object"}, options.OutputSchema)
-	require.True(t, rawMessageConfigFromMeta(valid).Enabled())
+	h := newHarness(t, WithInputHandoffRoot(t.TempDir()))
+	resp := h.initialize(func(request *acp.InitializeRequest) {
+		request.ClientCapabilities.PositionEncodings = []acp.PositionEncodingKind{acp.PositionEncodingKindUtf8}
+	})
 
-	tests := []struct {
+	require.Empty(t, resp.AuthMethods)
+	require.Nil(t, resp.Meta)
+	require.True(t, resp.AgentCapabilities.LoadSession)
+	require.True(t, resp.AgentCapabilities.PromptCapabilities.Image)
+	require.True(t, resp.AgentCapabilities.PromptCapabilities.EmbeddedContext)
+	require.False(t, resp.AgentCapabilities.McpCapabilities.Http)
+	require.Nil(t, resp.AgentCapabilities.SessionCapabilities.Fork)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Close)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Delete)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.List)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.Resume)
+	require.NotNil(t, resp.AgentCapabilities.SessionCapabilities.AdditionalDirectories)
+	require.Equal(t, acp.PositionEncodingKindUtf8, *resp.AgentCapabilities.PositionEncoding)
+
+	meta := resp.AgentCapabilities.Meta
+	require.Contains(t, meta, "claude")
+	require.Contains(t, meta, wire.MediaEnvelopeKey)
+	require.Contains(t, meta, wire.HandoffKey)
+
+	envelope, _ := meta[wire.MediaEnvelopeKey].(map[string]any)
+	require.EqualValues(t, 6291456, envelope["maxBytes"])
+	require.EqualValues(t, 6291456, envelope["maxPromptBytes"])
+	require.EqualValues(t, 0, envelope["maxDimension"])
+	require.Equal(t, []any{"image/png", "image/jpeg", "image/gif", "image/webp"}, envelope["imageFormats"])
+	require.Equal(t, []any{"application/pdf"}, envelope["documentFormats"])
+
+	vendorMeta, _ := meta["claude"].(map[string]any)
+	store, _ := vendorMeta["sessionStore"].(map[string]any)
+	require.Equal(t, SessionStoreFormat, store["format"])
+	require.Equal(t, map[string]any{"method": AccountUsageMethod, "scope": "session", "providers": []any{anthropic.ProviderID, openaicodex.ProviderID, opencodego.ProviderID, openrouter.ProviderID}}, vendorMeta[wire.AccountUsageCapabilityKey])
+}
+
+func TestInitializeWithoutHandoffOmitsAdvertisement(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	resp := h.initialize()
+	require.NotContains(t, resp.AgentCapabilities.Meta, wire.HandoffKey)
+	require.Equal(t, acp.PositionEncodingKindUtf16, *resp.AgentCapabilities.PositionEncoding)
+}
+
+func TestInitializeLifecycleAnswer(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	resp := h.initialize(withLifecycle())
+
+	answer, ok := resp.Meta[wire.LifecycleKey].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, 1, answer["version"])
+	require.Equal(t, true, answer["updatesOutsidePrompt"])
+	require.Equal(t, []any{}, answer["activityKinds"])
+	require.NotContains(t, resp.AgentCapabilities.Meta, wire.LifecycleKey)
+}
+
+func TestInitializeLifecycleStrictness(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]any{
+		"string version": map[string]any{"version": "1"},
+		"fraction":       map[string]any{"version": json.Number("1.0")},
+		"other version":  map[string]any{"version": 2},
+		"unknown member": map[string]any{"version": 1, "extra": true},
+		"non-object":     true,
+	}
+
+	for name, value := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newHarness(t)
+			meta := map[string]any{wire.LifecycleKey: value}
+
+			_, err := h.conn.Initialize(h.ctx(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, Meta: meta})
+			require.Equal(t, -32602, requestErrorCode(t, err))
+
+			data := requestErrorData(t, err)
+			require.Equal(t, "unsupported", data["error"])
+			require.Contains(t, data["field"], wire.LifecycleKey)
+		})
+	}
+}
+
+func TestProtocolAdmission(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize()
+
+	for _, method := range []string{"_claude/anything"} {
+		_, err := h.conn.CallExtension(h.ctx(), method, map[string]any{})
+		require.Equal(t, -32601, requestErrorCode(t, err), method)
+	}
+
+	var err error
+
+	_, err = h.conn.SetSessionMode(h.ctx(), acp.SetSessionModeRequest{SessionId: "x", ModeId: permissionModePlan})
+	require.Equal(t, -32601, requestErrorCode(t, err))
+
+	_, err = h.conn.Authenticate(h.ctx(), acp.AuthenticateRequest{MethodId: "oauth"})
+	require.Equal(t, -32602, requestErrorCode(t, err))
+	require.Equal(t, "oauth", requestErrorData(t, err)["methodId"])
+
+	_, err = h.conn.Logout(h.ctx(), acp.LogoutRequest{})
+	require.Equal(t, -32601, requestErrorCode(t, err))
+}
+
+func TestSessionMetaStrictness(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
 		name  string
 		meta  map[string]any
 		field string
 	}{
-		{
-			name:  "deleted goal",
-			meta:  map[string]any{claudeMetaKey: map[string]any{"goal": map[string]any{}}},
-			field: "_meta.claude.goal",
-		},
-		{
-			name:  "deleted raw sdk",
-			meta:  map[string]any{claudeMetaKey: map[string]any{"emitRawSDKMessages": true}},
-			field: "_meta.claude.emitRawSDKMessages",
-		},
-		{
-			name:  "unknown option",
-			meta:  map[string]any{claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{"extra": true}}},
-			field: "_meta.claude.options.extra",
-		},
-		{
-			name:  "unknown raw event key",
-			meta:  map[string]any{claudeMetaKey: map[string]any{metaRawEventKey: map[string]any{"extra": true}}},
-			field: "_meta.claude.rawEvent.extra",
-		},
+		{"unknown own key", map[string]any{"claude": map[string]any{"bogus": 1}}, "_meta.claude.bogus"},
+		{"unknown option", map[string]any{"claude": map[string]any{"options": map[string]any{"bogus": 1}}}, "_meta.claude.options.bogus"},
+		{"output schema", map[string]any{"claude": map[string]any{"options": map[string]any{"outputSchema": map[string]any{}}}}, "_meta.claude.options.outputSchema"},
+		{"relative path dir", map[string]any{"claude": map[string]any{"options": map[string]any{"extraPathDirs": []any{"rel"}}}}, "_meta.claude.options.extraPathDirs[0]"},
+		{"bad env name", map[string]any{"claude": map[string]any{"options": map[string]any{"env": map[string]any{"A=B": "x"}}}}, "_meta.claude.options.env.A=B"},
+		{"lifecycle literal", map[string]any{wire.LifecycleKey: map[string]any{"version": 1}}, `_meta["` + wire.LifecycleKey + `"]`},
 	}
 
-	for _, tc := range tests {
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := claudeOptionsFromMeta(tc.meta)
-			requireExactUnsupportedField(t, err, tc.field)
+			h := newHarness(t)
+			h.initialize()
+
+			request := wire.NewSessionRequest(t.TempDir())
+			request.Meta = tc.meta
+
+			_, err := h.conn.NewSession(h.ctx(), request)
+			require.Equal(t, -32602, requestErrorCode(t, err))
+
+			data := requestErrorData(t, err)
+			require.Equal(t, "unsupported", data["error"])
+			require.Equal(t, tc.field, data["field"])
 		})
 	}
 }
 
-func TestLifecycleMetaUnsupportedErrorsPreserveRequestErrorShape(t *testing.T) {
+func TestForeignMetaIgnored(t *testing.T) {
 	t.Parallel()
 
-	agent := NewAgent()
-	tests := []struct {
-		name string
-		call func() error
-	}{
-		{
-			name: "new session",
-			call: func() error {
-				_, err := agent.NewSession(context.Background(), NewSessionRequest("/tmp/project", WithSessionMeta(map[string]any{
-					claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{"extra": true}},
-				})))
+	h := newHarness(t)
+	h.initialize()
 
-				return err
-			},
-		},
-		{
-			name: "fork extension",
-			call: func() error {
-				raw, err := json.Marshal(ForkSessionRequest("parent", "/tmp/project", WithSessionMeta(map[string]any{
-					claudeMetaKey: map[string]any{metaOptionsKey: map[string]any{"extra": true}},
-				})))
-				require.NoError(t, err)
-				_, err = agent.HandleExtensionMethod(context.Background(), ForkSessionMethod, raw)
-
-				return err
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			requireExactUnsupportedField(t, tc.call(), "_meta.claude.options.extra")
-		})
-	}
+	session := h.newSession(wire.WithSessionMeta(map[string]any{"other": map[string]any{"x": 1}, "traceparent": "00-1-2-01"}))
+	require.NotEmpty(t, session.SessionId)
 }
 
-func requireExactUnsupportedField(t *testing.T, err error, field string) {
-	t.Helper()
-
-	require.Error(t, err)
-	var reqErr *acp.RequestError
-	require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
-	require.Equal(t, -32602, reqErr.Code)
-	require.Equal(t, "Invalid params", reqErr.Message)
-	require.Equal(t, map[string]any{
-		jsonFieldError: valUnsupported,
-		jsonFieldField: field,
-	}, reqErr.Data)
-}
-
-// requireExactMissingField asserts the `missing` verdict: a reserved key the
-// contract requires on this surface and the caller left out. It is a different
-// wire fact from requireExactUnsupportedField and the two are never merged.
-func requireExactMissingField(t *testing.T, err error, field string) {
-	t.Helper()
-
-	require.Error(t, err)
-	var reqErr *acp.RequestError
-	require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
-	require.Equal(t, -32602, reqErr.Code)
-	require.Equal(t, "Invalid params", reqErr.Message)
-	require.Equal(t, map[string]any{
-		jsonFieldError: valMissing,
-		jsonFieldField: field,
-	}, reqErr.Data)
-}
-
-// requireClosedOffPromptFailure asserts the uniform off-prompt -32603 shape: the
-// JSON-RPC constant message, one closed vendor-prefixed token in `data.error`,
-// exactly the extra members that token documents, and nothing else — no
-// `message` member, no Go error text, no native harness text.
-func requireClosedOffPromptFailure(t *testing.T, err error, data map[string]any) {
-	t.Helper()
-
-	require.Error(t, err)
-	var reqErr *acp.RequestError
-	require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
-	require.Equal(t, -32603, reqErr.Code)
-	require.Equal(t, "Internal error", reqErr.Message)
-	require.Equal(t, data, reqErr.Data)
-	require.NotContains(t, data, jsonFieldMessage)
-}
-
-// requireClosedInternalFailure is requireClosedOffPromptFailure for a token that
-// carries no additional member.
-func requireClosedInternalFailure(t *testing.T, err error, token string) {
-	t.Helper()
-
-	requireClosedOffPromptFailure(t, err, map[string]any{jsonFieldError: token})
-}
-
-// requireAgentClosedRefusal asserts the closed-agent verdict every entry point
-// shares: the request cannot be accepted at all, so it is -32600 and not the
-// -32603 a refused construction option answers.
-func requireAgentClosedRefusal(t *testing.T, err error) {
-	t.Helper()
-
-	require.Error(t, err)
-	var reqErr *acp.RequestError
-	require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
-	require.Equal(t, -32600, reqErr.Code)
-	require.Equal(t, "Invalid request", reqErr.Message)
-	require.Equal(t, map[string]any{jsonFieldError: errAgentClosed.Error()}, reqErr.Data)
-}
-
-func requireUnknownSession(t *testing.T, err error) {
-	t.Helper()
-
-	require.Error(t, err)
-	var reqErr *acp.RequestError
-	require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
-	require.Equal(t, -32602, reqErr.Code)
-	require.Equal(t, "Invalid params", reqErr.Message)
-	require.Equal(t, map[string]any{
-		jsonFieldError: "unknown session",
-		jsonFieldField: acpFieldSessionID,
-	}, reqErr.Data)
-}
-
-func TestInMemorySessionStoreContract(t *testing.T) {
+func TestUniformRejections(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
-	store := NewInMemorySessionStore()
-	main := SessionKey{SessionID: "session-1"}
-	sub := SessionKey{SessionID: "session-1", Subpath: "subagents/a"}
+	h := newHarness(t)
+	h.initialize()
 
-	require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{json.RawMessage(`{"type":"user"}`)}))
-	require.NoError(t, store.Append(ctx, sub, []SessionStoreEntry{json.RawMessage(`{"type":"assistant"}`)}))
+	_, err := h.conn.NewSession(h.ctx(), acp.NewSessionRequest{Cwd: "relative", McpServers: []acp.McpServer{}})
+	require.Equal(t, "cwd", requestErrorData(t, err)["field"])
 
-	entries, err := store.Load(ctx, main)
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
+	var server acp.McpServer
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"stdio","name":"x","command":"x","args":[],"env":[]}`), &server))
 
-	subkeys, err := store.ListSubkeys(ctx, main)
-	require.NoError(t, err)
-	require.Equal(t, []string{"subagents/a"}, subkeys)
+	_, err = h.conn.NewSession(h.ctx(), acp.NewSessionRequest{Cwd: t.TempDir(), McpServers: []acp.McpServer{server}})
+	require.Equal(t, "mcpServers", requestErrorData(t, err)["field"])
 
-	replacement := []SessionStoreReplacement{{
-		Key:     main,
-		Entries: []SessionStoreEntry{json.RawMessage(`{"type":"system"}`)},
-	}}
-	require.NoError(t, store.Replace(ctx, main, replacement))
+	session := h.newSession()
 
-	subkeys, err = store.ListSubkeys(ctx, main)
-	require.NoError(t, err)
-	require.Empty(t, subkeys)
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId))
+	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
 
-	summaries, err := store.ListSessions(ctx)
-	require.NoError(t, err)
-	require.Len(t, summaries, 1)
-	require.Equal(t, "session-1", summaries[0].SessionID)
-	require.Positive(t, summaries[0].UpdatedAtUnixMilli)
+	_, err = h.conn.Prompt(h.ctx(), wire.PromptRequest(session.SessionId, acp.ContentBlock{Audio: &acp.ContentBlockAudio{Data: "x", MimeType: "audio/wav"}}))
+	require.Equal(t, "prompt", requestErrorData(t, err)["field"])
 
-	require.NoError(t, store.Delete(ctx, main))
-	entries, err = store.Load(ctx, main)
-	require.NoError(t, err)
-	require.Empty(t, entries)
+	_, err = h.conn.Prompt(h.ctx(), wire.TextPromptRequest("00000000-0000-4000-8000-000000000000", "hi"))
+	require.Equal(t, -32602, requestErrorCode(t, err))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
 
-	summaries, err = store.ListSessions(ctx)
-	require.NoError(t, err)
-	require.Empty(t, summaries)
-
-	require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{json.RawMessage(`{"type":"late"}`)}))
-	entries, err = store.Load(ctx, main)
-	require.NoError(t, err)
-	require.Empty(t, entries)
-
-	require.NoError(t, store.Append(ctx, sub, []SessionStoreEntry{json.RawMessage(`{"type":"late-sub"}`)}))
-	entries, err = store.Load(ctx, sub)
-	require.NoError(t, err)
-	require.Empty(t, entries)
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest("00000000-0000-4000-8000-000000000000")))
 }
 
-func TestDeleteSessionTombstoneHidesNativeTranscriptAndSurfacesCleanupError(t *testing.T) {
-	ctx := context.Background()
-	home := t.TempDir()
-	cwd := t.TempDir()
-	sessionID := acp.SessionId("11111111-1111-4111-8111-111111111111")
-	nativePath := writeNativeTranscript(t, home, cwd, sessionID)
-
-	originalDeleteNativeTranscript := deleteNativeTranscript
-	t.Cleanup(func() { deleteNativeTranscript = originalDeleteNativeTranscript })
-
-	cleanupErr := errors.New("cleanup failed")
-	deleteCalls := 0
-	deleteNativeTranscript = func(context.Context, string, string) error {
-		deleteCalls++
-
-		return cleanupErr
-	}
-
-	agent := NewAgent(WithHome(home))
-	_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
-	require.ErrorIs(t, err, cleanupErr)
-	require.FileExists(t, nativePath)
-
-	listResp, err := agent.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
-	require.NoError(t, err)
-	require.Empty(t, listResp.Sessions)
-	require.Equal(t, 1, deleteCalls)
-}
-
-func TestDeleteSessionTombstoneSurvivesRestartAndRetriesNativeCleanup(t *testing.T) {
-	ctx := context.Background()
-	home := t.TempDir()
-	cwd := t.TempDir()
-	sessionID := acp.SessionId("22222222-2222-4222-8222-222222222222")
-	nativePath := writeNativeTranscript(t, home, cwd, sessionID)
-	store := NewInMemorySessionStore()
-
-	originalDeleteNativeTranscript := deleteNativeTranscript
-	t.Cleanup(func() { deleteNativeTranscript = originalDeleteNativeTranscript })
-
-	cleanupErr := errors.New("cleanup failed")
-	deleteNativeTranscript = func(context.Context, string, string) error { return cleanupErr }
-	agent := NewAgent(WithHome(home), WithSessionStore(store))
-	_, err := agent.UnstableDeleteSession(ctx, DeleteSessionRequest(sessionID))
-	require.ErrorIs(t, err, cleanupErr)
-	require.FileExists(t, nativePath)
-
-	deleteNativeTranscript = originalDeleteNativeTranscript
-	restarted := NewAgent(WithHome(home), WithSessionStore(store))
-
-	listResp, err := restarted.ListSessions(ctx, ListSessionsRequest(WithListSessionsCwd(cwd)))
-	require.NoError(t, err)
-	require.Empty(t, listResp.Sessions)
-	require.FileExists(t, nativePath)
-
-	_, err = restarted.LoadSession(ctx, LoadSessionRequest(sessionID, cwd))
-	requireUnknownSession(t, err)
-	require.NoFileExists(t, nativePath)
-
-	_, err = restarted.ResumeSession(ctx, ResumeSessionRequest(sessionID, cwd))
-	requireUnknownSession(t, err)
-}
-
-func writeNativeTranscript(t *testing.T, home string, cwd string, sessionID acp.SessionId) string {
-	t.Helper()
-
-	projectKey, err := projectKeyForDirectory(cwd)
-	require.NoError(t, err)
-
-	path := filepath.Join(home, "projects", projectKey, string(sessionID)+".jsonl")
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	entry := map[string]any{
-		jsonFieldType: "user",
-		jsonFieldCwd:  cwd,
-		"message": map[string]any{
-			"content": "hello",
-		},
-	}
-	data, err := json.Marshal(entry)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, append(data, '\n'), 0o600))
-
-	return path
-}
-
-func TestRequestBuildersContract(t *testing.T) {
+func TestPromptCorrelationGate(t *testing.T) {
 	t.Parallel()
 
-	schema := map[string]any{"type": "object"}
-	req := NewSessionRequest(
-		"/repo",
-		WithSessionOutputSchema(schema),
-		WithSessionRawEvents(true),
-		WithSessionMCPServers(StdioMCPServer("fs", "server", []string{"--root", "/repo"}, map[string]string{"A": "B"})),
-	)
-	require.Equal(t, "/repo", req.Cwd)
-	require.Len(t, req.McpServers, 1)
-
-	claudeMeta := requireAnyMap(t, req.Meta[claudeMetaKey])
-	options := requireAnyMap(t, claudeMeta[metaOptionsKey])
-	require.Equal(t, schema, options[metaOutputSchemaKey])
-	require.Equal(t, map[string]any{metaRawEventEnabledKey: true}, claudeMeta[metaRawEventKey])
-
-	setModel := SetModelRequest("session-1", "sonnet")
-	require.Equal(t, configModel, setModel.ValueId.ConfigId)
-	require.Equal(t, acp.SessionConfigValueId("sonnet"), setModel.ValueId.Value)
-
-	deleteReq := DeleteSessionRequest("session-1")
-	require.Equal(t, acp.SessionId("session-1"), deleteReq.SessionId)
-}
-
-func TestConcurrencyLimitValidation(t *testing.T) {
-	for _, limits := range []ConcurrencyLimits{
-		{MaxActiveSessions: -1},
-		{MaxConcurrentClientCalls: -1},
-	} {
-		agent := NewAgent(WithConcurrencyLimits(limits))
-
-		// A construction verdict is the agent's own state rather than a defect in
-		// the caller's request, so it is never -32602, and a concurrency field is
-		// refused one at a time and names itself.
-		var constructionErr *acp.RequestError
-		require.ErrorAs(t, agent.configurationError(), &constructionErr)
-		require.Equal(t, -32603, constructionErr.Code)
-		require.Equal(t, "Internal error", constructionErr.Message)
-		require.Equal(t, map[string]any{
-			jsonFieldError: invalidOptionsError,
-			jsonFieldField: refusedConcurrencyLimit(limits),
-		}, constructionErr.Data)
-
-		_, err := agent.Initialize(context.Background(), acp.InitializeRequest{})
-		var initializeErr *acp.RequestError
-		require.ErrorAs(t, err, &initializeErr)
-		require.Equal(t, -32603, initializeErr.Code)
-		require.Equal(t, constructionErr.Data, initializeErr.Data)
-	}
-}
-
-func TestCancelDuringPromptBypassesClientCallLimit(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	agent := NewAgent()
-	transport := newAutoControlTransport()
-	client := claude.NewClient(nil, claude.Options{InitializeTimeout: time.Second}, transport)
-	require.NoError(t, client.Start(ctx))
-	t.Cleanup(func() { require.NoError(t, client.Close()) })
-
-	_, cancelTurn := context.WithCancel(ctx)
-	defer cancelTurn()
-
-	agent.mu.Lock()
-	agent.sessions["session-1"] = &agentSession{
-		agent:     agent,
-		id:        "session-1",
-		client:    client,
-		cancel:    cancelTurn,
-		turnNonce: "turn-1",
-	}
-	agent.mu.Unlock()
-
-	release, err := agent.acquireClientCall(ctx)
-	require.NoError(t, err)
-	defer release()
-
-	raw, err := json.Marshal(CancelRequest("session-1", "turn-1"))
-	require.NoError(t, err)
-
-	conn := &localAgentConnection{agent: agent}
-	conn.initialized.Store(true)
-	_, reqErr := conn.handle(ctx, acp.AgentMethodSessionCancel, raw)
-	require.Nil(t, reqErr)
-}
-
-type autoControlTransport struct {
-	incoming chan map[string]any
-	errs     chan error
-
-	mu     sync.Mutex
-	closed bool
-}
-
-func newAutoControlTransport() *autoControlTransport {
-	return &autoControlTransport{
-		incoming: make(chan map[string]any, 16),
-		errs:     make(chan error, 1),
-	}
-}
-
-func (t *autoControlTransport) Start(context.Context) error { return nil }
-
-func (t *autoControlTransport) Send(_ context.Context, payload any) error {
-	if req, ok := payload.(claude.ControlRequest); ok {
-		t.incoming <- map[string]any{
-			jsonFieldType: "control_response",
-			"response": map[string]any{
-				"request_id":     req.RequestID,
-				jsonFieldSubtype: "success",
-			},
-		}
-	}
-
-	return nil
-}
-
-func (t *autoControlTransport) Events(ctx context.Context) <-chan claude.TransportEvent {
-	events := make(chan claude.TransportEvent)
-	go func() {
-		defer close(events)
-		for {
-			select {
-			case msg, ok := <-t.incoming:
-				if !ok {
-					return
-				}
-				events <- claude.TransportEvent{Message: msg}
-			case err, ok := <-t.errs:
-				if !ok {
-					return
-				}
-				events <- claude.TransportEvent{Err: err}
-
-				return
-			case <-ctx.Done():
-				events <- claude.TransportEvent{Err: ctx.Err()}
-
-				return
-			}
-		}
-	}()
-
-	return events
-}
-
-func (t *autoControlTransport) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if !t.closed {
-		close(t.incoming)
-		close(t.errs)
-		t.closed = true
-	}
-
-	return nil
-}
-
-func TestRawEventLimit(t *testing.T) {
-	_, replaced := rawEventMarker(map[string]any{"ok": true})
-	require.False(t, replaced)
-
-	marker, replaced := rawEventMarker(map[string]any{"data": string(make([]byte, rawEventMaxBytes))})
-	require.True(t, replaced)
-	require.Equal(t, rawEventReasonOversize, marker[rawEventFieldReason])
-	require.Equal(t, rawEventMaxBytes, marker[rawEventFieldMaxBytes])
-}
-
-func TestSetSessionModeUnsupported(t *testing.T) {
-	agent := NewAgent()
-	_, err := agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{})
-	require.Error(t, err)
-	var reqErr *acp.RequestError
-	require.ErrorAs(t, err, &reqErr)
-	require.Equal(t, -32601, reqErr.Code)
-
-	_, err = agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{Meta: lifecycleKeyMeta()})
-	requireRequestError(t, err, -32602, lifecycle.MetaPath)
-}
-
-func TestValidateMCPServersRejectsSSEAndACP(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		servers []acp.McpServer
-		data    map[string]any
-	}{
-		{
-			name:    "sse",
-			servers: []acp.McpServer{{Sse: &acp.McpServerSseInline{Name: "events"}}},
-			data: map[string]any{
-				jsonFieldError:  valUnsupported,
-				jsonFieldField:  "mcpServers[0]",
-				jsonFieldServer: "events",
-			},
-		},
-		{
-			name:    "acp",
-			servers: []acp.McpServer{{Acp: &acp.McpServerAcpInline{Name: "bridge"}}},
-			data: map[string]any{
-				jsonFieldError:  valUnsupported,
-				jsonFieldField:  "mcpServers[0]",
-				jsonFieldServer: "bridge",
-			},
-		},
-		{
-			name:    "no transport",
-			servers: []acp.McpServer{{}},
-			data: map[string]any{
-				jsonFieldError: "no_transport",
-				jsonFieldField: "mcpServers[0]",
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := validateMCPServers(tc.servers)
-			require.Error(t, err)
-			var reqErr *acp.RequestError
-			require.ErrorAs(t, err, &reqErr)
-			require.Equal(t, -32602, reqErr.Code)
-			require.Equal(t, tc.data, reqErr.Data)
-		})
-	}
-}
-
-func TestValidateMCPServersNameRules(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		servers []acp.McpServer
-		data    map[string]any
-	}{
-		{
-			name:    "empty name",
-			servers: []acp.McpServer{{Stdio: &acp.McpServerStdio{Command: "mcp"}}},
-			data:    map[string]any{"mcpServers[0].name": valRequired},
-		},
-		{
-			name: "whitespace-only name",
-			servers: []acp.McpServer{
-				{Http: &acp.McpServerHttpInline{Name: "   ", Url: "https://example.com/mcp"}},
-			},
-			data: map[string]any{"mcpServers[0].name": valRequired},
-		},
-		{
-			name: "empty name at later index",
-			servers: []acp.McpServer{
-				{Stdio: &acp.McpServerStdio{Name: "fs", Command: "mcp"}},
-				{Http: &acp.McpServerHttpInline{Name: "", Url: "https://example.com/mcp"}},
-			},
-			data: map[string]any{"mcpServers[1].name": valRequired},
-		},
-		{
-			name: "duplicate name reports later entry",
-			servers: []acp.McpServer{
-				{Stdio: &acp.McpServerStdio{Name: "dup", Command: "one"}},
-				{Http: &acp.McpServerHttpInline{Name: "dup", Url: "https://example.com/mcp"}},
-			},
-			data: map[string]any{"mcpServers[1].name": valDuplicate},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := validateMCPServers(tc.servers)
-			require.Error(t, err)
-			var reqErr *acp.RequestError
-			require.True(t, errors.As(err, &reqErr), "error = %T %[1]v", err)
-			require.Equal(t, -32602, reqErr.Code)
-			require.Equal(t, "Invalid params", reqErr.Message)
-			require.Equal(t, tc.data, reqErr.Data)
-		})
-	}
-}
-
-func requireAnyMap(t *testing.T, value any) map[string]any {
-	t.Helper()
-
-	result, ok := value.(map[string]any)
-	require.Truef(t, ok, "expected map[string]any, got %T", value)
-
-	return result
-}
-
-func TestStoreOrderingUsesUnixMillis(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	store := NewInMemorySessionStore()
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: "b"}, []SessionStoreEntry{json.RawMessage(`{}`)}))
-	time.Sleep(time.Millisecond)
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: "a"}, []SessionStoreEntry{json.RawMessage(`{}`)}))
-
-	summaries, err := store.ListSessions(ctx)
-	require.NoError(t, err)
-	require.Len(t, summaries, 2)
-	require.Equal(t, "a", summaries[0].SessionID)
-	require.Less(t, summaries[0].UpdatedAtUnixMilli, time.Now().Add(time.Second).UnixMilli())
-}
-
-// TestProviderAuthAdvertisedLegsMatchWhatAnswers pins the host's only discovery
-// surface: every advertised name answers, and every absent one returns
-// method-not-found.
-func TestProviderAuthAdvertisedLegsMatchWhatAnswers(t *testing.T) {
-	newAuthSeams(t)
-
-	home := t.TempDir()
-
-	for _, testCase := range []struct {
-		name      string
-		options   []Option
-		advertise []string
-	}{
-		{
-			name:    "without the consent gate",
-			options: []Option{WithHome(home)},
-			advertise: []string{
-				AuthMethodsMethod, AuthAuthorizeMethod, AuthCallbackMethod,
-				AuthStatusMethod, AuthCancelMethod, AuthInventoryMethod,
-				AuthCredentialMethod, AuthDisconnectMethod,
-			},
-		},
-		{
-			name:    "with the consent gate",
-			options: []Option{WithHome(home), WithProviderAuthDirectHome(home)},
-			advertise: []string{
-				AuthMethodsMethod, AuthAuthorizeMethod, AuthCallbackMethod,
-				AuthStatusMethod, AuthCancelMethod, AuthInventoryMethod,
-				AuthCredentialMethod, AuthDisconnectMethod,
-			},
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			broker, sessionID := newAuthBroker(t, testCase.options...)
-
-			response, err := broker.agent.Initialize(t.Context(), acp.InitializeRequest{})
-			require.NoError(t, err)
-
-			vendor, ok := response.AgentCapabilities.Meta[claudeMetaKey].(map[string]any)
-			require.True(t, ok)
-
-			capability, ok := vendor[providerAuthCapabilityKey].(map[string]any)
-			require.True(t, ok)
-			require.Equal(t, testCase.advertise, capability[providerAuthMethodsField])
-			require.Len(t, capability, 2)
-			require.Equal(t, providerAuthOptionPath, capability[providerAuthInjectionKey])
-
-			advertised := make(map[string]struct{}, len(testCase.advertise))
-			for _, name := range testCase.advertise {
-				advertised[name] = struct{}{}
-
-				_, err := broker.agent.HandleExtensionMethod(t.Context(), name,
-					authParams(t, map[string]any{"sessionId": string(sessionID)}))
-
-				var requestErr *acp.RequestError
-				if errors.As(err, &requestErr) {
-					require.NotEqual(t, -32601, requestErr.Code, name)
-				}
-			}
-
-			for _, name := range []string{
-				AuthMethodsMethod, AuthAuthorizeMethod, AuthCallbackMethod, AuthStatusMethod,
-				AuthCancelMethod, AuthInventoryMethod, AuthDisconnectMethod,
-				"_claude/auth/credential",
-			} {
-				if _, ok := advertised[name]; ok {
-					continue
-				}
-
-				_, err := broker.agent.HandleExtensionMethod(t.Context(), name, nil)
-
-				var requestErr *acp.RequestError
-
-				require.ErrorAs(t, err, &requestErr)
-				require.Equal(t, -32601, requestErr.Code, name)
-			}
-		})
-	}
-}
-
-// TestProviderAuthStateReasonMatrixIsClosed pins the legal pairs. No pair
-// outside this matrix is producible, which is what makes the flow record
-// schema-closable.
-func TestProviderAuthStateReasonMatrixIsClosed(t *testing.T) {
-	legal := map[string][]string{
-		authStatePending:       {""},
-		authStateAuthenticated: {""},
-		authStateSaved:         {""},
-		authStateFailed: {
-			authReasonProviderRefused, authReasonNativeVeto, authReasonTransport,
-			authReasonProcess, authReasonAcceptanceUnknown, authReasonHarvestFailed,
-		},
-		authStateCancelled: {authReasonOwnerCancel, authReasonSuperseded, authReasonSessionClosed},
-		authStateExpired:   {authReasonDeadline},
-	}
-
-	produced := map[string]map[string]struct{}{}
-
-	for _, cause := range []string{
-		authCauseNativeVeto, authCauseProviderRefused, authCauseTransport, authCauseProcess,
-		authCauseTimeout, authCauseHarvestFailed, authCauseUnsupportedVariant,
-		authCauseFlowExpired, authCauseFlowState, authCauseFlowCancelled, authCausePolicy,
-		authCauseBindingConflict,
-	} {
-		for _, inFlight := range []bool{false, true} {
-			state, reason := authFlowTransition(cause, inFlight)
-			if state == "" {
-				require.Empty(t, reason, cause)
-
-				continue
-			}
-
-			if produced[state] == nil {
-				produced[state] = map[string]struct{}{}
-			}
-
-			produced[state][reason] = struct{}{}
-			require.Contains(t, legal[state], reason, "%s/%s", state, reason)
-		}
-	}
-
-	require.Contains(t, produced, authStateFailed)
-	require.Contains(t, produced, authStateExpired)
-}
-
-// TestProviderAuthFailureCarriesNoNativeText pins the closed error shape: a
-// native refusal is reported by its cause alone.
-func TestProviderAuthFailureCarriesNoNativeText(t *testing.T) {
-	seams := newAuthSeams(t)
-	broker, sessionID := newAuthBroker(t)
-
-	generation := authCatalogGeneration(t, broker, sessionID)
-	seams.loginErr = errors.New("HTTP/1.1 403 Forbidden\nset-cookie: session=live-material")
-
-	_, err := broker.authorize(t.Context(), authParams(t, authorizeParams(sessionID, generation)))
-
-	var requestErr *acp.RequestError
-
-	require.ErrorAs(t, err, &requestErr)
-
-	encoded, marshalErr := json.Marshal(requestErr.Data)
-	require.NoError(t, marshalErr)
-	require.NotContains(t, string(encoded), "live-material")
-	require.NotContains(t, string(encoded), "Forbidden")
-
-	data, ok := requestErr.Data.(map[string]any)
-	require.True(t, ok)
-
-	for key := range data {
-		require.Contains(t, []string{
-			jsonFieldError, failureFieldCause, authFieldRetryable,
-			authFieldProviderID, authFieldMethod, authFieldFlowID,
-		}, key)
-	}
-}
-
-// TestProviderAuthLedgerIsValuesFree pins that no credential material,
-// authorization URL, or pasted value is ever written under the ledger root.
-func TestProviderAuthLedgerIsValuesFree(t *testing.T) {
-	seams := newAuthSeams(t)
-
-	root := t.TempDir()
-	broker, sessionID := newAuthBroker(t, WithProviderAuthRoot(root))
-
-	flow := startAuthFlow(t, broker, sessionID)
-
-	_, err := broker.callback(t.Context(), authParams(t, callbackParams(string(sessionID), flow.FlowID, testPastedValue)))
-	require.NoError(t, err)
-
-	banned := []string{seams.loginURL, testPastedValue, flow.Message, "canary"}
-
-	require.NoError(t, filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() {
-			return walkErr
-		}
-
-		contents, readErr := os.ReadFile(path)
-		require.NoError(t, readErr)
-
-		for _, value := range banned {
-			require.NotContains(t, string(contents), value, path)
-		}
-
-		return nil
-	}))
-}
-
-// requirePoisonedSession asserts the closed poisoned-session refusal: -32603 with
-// the vendor-prefixed token and one documented `cause`, and nothing else.
-func requirePoisonedSession(t *testing.T, err error, cause string) {
-	t.Helper()
-
-	requireClosedOffPromptFailure(t, err, map[string]any{
-		jsonFieldError:    sessionPoisonedError,
-		failureFieldCause: cause,
+	t.Run("required when negotiated", func(t *testing.T) {
+		t.Parallel()
+
+		h := newHarness(t)
+		h.initialize(withLifecycle())
+		session := h.newSession()
+
+		_, err := h.prompt(session.SessionId, "HELLO", nil)
+		data := requestErrorData(t, err)
+		require.Equal(t, "missing", data["error"])
+		require.Equal(t, `_meta["`+wire.LifecycleKey+`"]`, data["field"])
+
+		_, err = h.prompt(session.SessionId, "HELLO", map[string]any{wire.LifecycleKey: map[string]any{"version": 1, "submission": map[string]any{"submissionId": "", "clientNonce": "n"}}})
+		data = requestErrorData(t, err)
+		require.Equal(t, "unsupported", data["error"])
+		require.Contains(t, data["field"], "submissionId")
+	})
+
+	t.Run("refused when omitted", func(t *testing.T) {
+		t.Parallel()
+
+		h := newHarness(t)
+		h.initialize()
+		session := h.newSession()
+
+		_, err := h.prompt(session.SessionId, "HELLO", promptMeta(1))
+		data := requestErrorData(t, err)
+		require.Equal(t, "unsupported", data["error"])
+		require.Equal(t, `_meta["`+wire.LifecycleKey+`"]`, data["field"])
+	})
+
+	t.Run("fraction version refused over the wire", func(t *testing.T) {
+		t.Parallel()
+
+		h := newHarness(t)
+		h.initialize(withLifecycle())
+		session := h.newSession()
+
+		_, err := h.prompt(session.SessionId, "HELLO", map[string]any{wire.LifecycleKey: map[string]any{"version": json.Number("1.0"), "submission": map[string]any{"submissionId": "s", "clientNonce": "n"}}})
+		require.Equal(t, "unsupported", requestErrorData(t, err)["error"])
 	})
 }
 
-// TestRelativeCwdIsRefusedOnEverySessionEstablishingSurface pins the uniform
-// rejection in one place: `session/new`, `session/load`, `session/resume`, and
-// the fork route each answer the identical `{"error":"unsupported","field":"cwd"}`
-// before any native process or store entry exists. No surface substitutes a
-// token of its own or a message-shaped data object here.
-func TestRelativeCwdIsRefusedOnEverySessionEstablishingSurface(t *testing.T) {
+func TestInvalidOptionsVerdict(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
-	const sessionID = acp.SessionId("11111111-1111-4111-8111-111111111111")
+	cases := map[string]Option{
+		"home":              WithHome("relative/home"),
+		"configuredModels":  WithConfiguredModels([]string{"fake/a", "fake/a"}),
+		"env":               WithEnv(map[string]string{"": "x"}),
+		"imageLimits":       WithImageLimits(ImageLimits{MaxInputBytesPerImage: -1}),
+		"concurrencyLimits": WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: -1}),
+		"inputHandoffRoot":  WithInputHandoffRoot("relative"),
+	}
 
-	for _, tc := range []struct {
-		name string
-		call func(*Agent) error
-	}{
-		{"session/new", func(agent *Agent) error {
-			_, err := agent.NewSession(ctx, NewSessionRequest("relative"))
-
-			return err
-		}},
-		{"session/load", func(agent *Agent) error {
-			_, err := agent.LoadSession(ctx, LoadSessionRequest(sessionID, "relative"))
-
-			return err
-		}},
-		{"session/resume", func(agent *Agent) error {
-			_, err := agent.ResumeSession(ctx, ResumeSessionRequest(sessionID, "relative"))
-
-			return err
-		}},
-		{ForkSessionMethod, func(agent *Agent) error {
-			raw, marshalErr := json.Marshal(ForkSessionRequest(sessionID, "relative"))
-			require.NoError(t, marshalErr)
-			_, err := agent.HandleExtensionMethod(ctx, ForkSessionMethod, raw)
-
-			return err
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	for field, option := range cases {
+		t.Run(field, func(t *testing.T) {
 			t.Parallel()
 
-			agent := NewAgent(WithHome(t.TempDir()))
-			t.Cleanup(func() { require.NoError(t, agent.Close()) })
+			agent := NewAgent(testOptions(t, option)...)
+			t.Cleanup(func() { _ = agent.Close() })
 
-			requireExactUnsupportedField(t, tc.call(agent), jsonFieldCwd)
+			_, err := agent.Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+			require.Equal(t, -32603, requestErrorCode(t, err))
 
-			agent.mu.Lock()
-			defer agent.mu.Unlock()
-			require.Empty(t, agent.sessions, "a refused cwd installs no session")
+			data := requestErrorData(t, err)
+			require.Equal(t, "claude_invalid_options", data["error"])
+			require.Equal(t, field, data["field"])
+
+			_, err = agent.NewSession(context.Background(), wire.NewSessionRequest(t.TempDir()))
+			require.Equal(t, "claude_invalid_options", requestErrorData(t, err)["error"])
 		})
 	}
+}
+
+func TestPromptBackpressure(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.initialize(withLifecycle())
+	session := h.newSession()
+
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := h.prompt(session.SessionId, "BLOCK", promptMeta(1))
+		done <- err
+	}()
+
+	h.rec.waitFor(t, func(updates []acp.SessionNotification) bool { return len(lifecycleEvents(updates)) >= 3 })
+
+	_, err := h.prompt(session.SessionId, "HELLO", promptMeta(2))
+	require.Equal(t, -32600, requestErrorCode(t, err))
+	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
+	require.Equal(t, "session_prompt", requestErrorData(t, err)["limit"])
+
+	require.NoError(t, h.conn.Cancel(h.ctx(), wire.CancelRequest(session.SessionId)))
+	require.NoError(t, <-done)
+}
+
+func TestActiveSessionLimit(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
+	h.initialize()
+	h.newSession()
+
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
+	require.Equal(t, "backpressure", requestErrorData(t, err)["error"])
+	require.Equal(t, "active_sessions", requestErrorData(t, err)["limit"])
+
+	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, listed.Sessions, 1)
+}
+
+func TestClosedAgentRefusesRequests(t *testing.T) {
+	t.Parallel()
+
+	agent := NewAgent(testOptions(t)...)
+	require.NoError(t, agent.Close())
+	require.NoError(t, agent.Close())
+
+	t.Run("Initialize", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Initialize(t.Context(), acp.InitializeRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("Authenticate", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Authenticate(t.Context(), acp.AuthenticateRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("Logout", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Logout(t.Context(), acp.LogoutRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("NewSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.NewSession(t.Context(), acp.NewSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("LoadSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.LoadSession(t.Context(), acp.LoadSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("ResumeSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.ResumeSession(t.Context(), acp.ResumeSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("ListSessions", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.ListSessions(t.Context(), acp.ListSessionsRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("Prompt", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.Prompt(t.Context(), acp.PromptRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("CloseSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.CloseSession(t.Context(), acp.CloseSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("UnstableDeleteSession", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.UnstableDeleteSession(t.Context(), acp.UnstableDeleteSessionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("SetSessionConfigOption", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.SetSessionConfigOption(t.Context(), acp.SetSessionConfigOptionRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("SetSessionMode", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.SetSessionMode(t.Context(), acp.SetSessionModeRequest{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("extension", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.HandleExtensionMethod(t.Context(), "_unknown/read", json.RawMessage(`{}`))
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("cancel", func(t *testing.T) {
+		t.Parallel()
+
+		err := agent.Cancel(t.Context(), acp.CancelNotification{})
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+
+	t.Run("account usage", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := agent.HandleExtensionMethod(t.Context(), AccountUsageMethod, json.RawMessage(`{}`))
+		require.Equal(t, -32600, requestErrorCode(t, err))
+		require.Equal(t, map[string]any{"error": "agent closed"}, requestErrorData(t, err))
+	})
+}
+
+func TestNegativeClientCallLimitReturnsOptionsError(t *testing.T) {
+	t.Parallel()
+	agent := NewAgent(WithConcurrencyLimits(ConcurrencyLimits{MaxConcurrentClientCalls: -1}))
+	defer agent.Close()
+	_, err := agent.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	require.Equal(t, "claude_invalid_options", requestErrorData(t, err)["error"])
+}
+
+func TestStructuredOutputIsAdvertisedAndDelivered(t *testing.T) {
+	t.Parallel()
+
+	argv := filepath.Join(t.TempDir(), "argv")
+	h := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvArgvDump: argv}))
+	resp := h.initialize()
+
+	vendorMeta, ok := resp.AgentCapabilities.Meta["claude"].(map[string]any)
+	require.True(t, ok)
+
+	discovery, ok := vendorMeta["structuredOutput"].(map[string]any)
+	require.True(t, ok, "outputSchema is accepted, so the surface must be discoverable")
+	require.Equal(t, "_meta.claude.options.outputSchema", discovery["config"])
+	require.Equal(t, "_meta.claude.structuredOutput", discovery["result"])
+	require.Equal(t, "json_schema", discovery["schema"])
+
+	schema := map[string]any{"type": "object"}
+	session := h.newSession(WithSessionOutputSchema(schema))
+
+	args, err := os.ReadFile(argv)
+	require.NoError(t, err)
+	require.Contains(t, strings.Split(string(args), "\n"), "--json-schema", "the schema never reached the child")
+	require.Contains(t, strings.Split(string(args), "\n"), `{"type":"object"}`)
+
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+
+	for _, update := range h.rec.snapshot() {
+		usage := update.Update.UsageUpdate
+		if usage == nil || usage.Meta == nil {
+			continue
+		}
+
+		meta, ok := usage.Meta["claude"].(map[string]any)
+		require.True(t, ok)
+
+		result, ok := meta["structuredOutput"].(map[string]any)
+		require.True(t, ok, "the native structured result did not land where the capability names it")
+		require.Equal(t, schema, result["schema"])
+
+		return
+	}
+
+	t.Fatal("no usage update carried the structured output")
 }

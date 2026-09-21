@@ -2,313 +2,593 @@ package claudeacp
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/coder/acp-go-sdk"
+	"github.com/savid/acp-go-claude/internal/claude"
+	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/sessionlog"
+	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
 )
 
-func TestInMemorySessionStoreBranches(t *testing.T) {
+func TestMalformedStoreRecordFailsRestore(t *testing.T) {
 	t.Parallel()
-
-	ctx := context.Background()
-	var nilStore *InMemorySessionStore
-	require.Error(t, nilStore.Append(ctx, SessionKey{SessionID: "s"}, []SessionStoreEntry{[]byte(`{}`)}))
-	_, err := nilStore.Load(ctx, SessionKey{SessionID: "s"})
-	require.Error(t, err)
-	require.Error(t, nilStore.Replace(ctx, SessionKey{SessionID: "s"}, nil))
-	require.Error(t, nilStore.Delete(ctx, SessionKey{}))
-	_, err = nilStore.ListSessions(ctx)
-	require.Error(t, err)
-	_, err = nilStore.ListSubkeys(ctx, SessionKey{SessionID: "s"})
-	require.Error(t, err)
-
-	cancelled, cancel := context.WithCancel(ctx)
-	cancel()
-	store := &InMemorySessionStore{}
-	require.ErrorIs(t, store.Append(cancelled, SessionKey{SessionID: "s"}, nil), context.Canceled)
-	_, err = store.Load(cancelled, SessionKey{SessionID: "s"})
-	require.ErrorIs(t, err, context.Canceled)
-	require.ErrorIs(t, store.Replace(cancelled, SessionKey{SessionID: "s"}, nil), context.Canceled)
-	require.ErrorIs(t, store.Delete(cancelled, SessionKey{SessionID: "s"}), context.Canceled)
-	_, err = store.ListSessions(cancelled)
-	require.ErrorIs(t, err, context.Canceled)
-	_, err = store.ListSubkeys(cancelled, SessionKey{SessionID: "s"})
-	require.ErrorIs(t, err, context.Canceled)
-
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: "s"}, nil))
-	require.Error(t, store.Append(ctx, SessionKey{}, []SessionStoreEntry{[]byte(`{"a":1}`)}))
-	require.NoError(t, store.Delete(ctx, SessionKey{}))
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: "s"}, []SessionStoreEntry{[]byte(`{"a":1}`)}))
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: "other"}, []SessionStoreEntry{[]byte(`{"z":0}`)}))
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: "s", Subpath: "sub/a.jsonl"}, []SessionStoreEntry{[]byte(`{"b":2}`)}))
-
-	entries, err := store.Load(ctx, SessionKey{SessionID: "s"})
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	session := h.newSession()
+	_, err := h.prompt(session.SessionId, "HELLO", nil)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"a":1}`, string(entries[0]))
-	entries[0][0] = '['
-	reloaded, err := store.Load(ctx, SessionKey{SessionID: "s"})
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
 	require.NoError(t, err)
-	require.JSONEq(t, `{"a":1}`, string(reloaded[0]))
-
-	subkeys, err := store.ListSubkeys(ctx, SessionKey{SessionID: "s"})
+	rows, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
 	require.NoError(t, err)
-	require.Equal(t, []string{"sub/a.jsonl"}, subkeys)
-
-	summaries, err := store.ListSessions(ctx)
-	require.NoError(t, err)
-	require.Len(t, summaries, 2)
-	require.Equal(t, "other", summaries[0].SessionID)
-
-	// Two sessions stamped in the same millisecond fall back to their ids, so the
-	// listing is stable however close together the writes landed.
-	store.mu.Lock()
-	store.updatedAt[SessionKey{SessionID: "s"}] = 7
-	store.updatedAt[SessionKey{SessionID: "other"}] = 7
-	store.mu.Unlock()
-
-	summaries, err = store.ListSessions(ctx)
-	require.NoError(t, err)
-	require.Equal(t, []string{"other", "s"}, []string{summaries[0].SessionID, summaries[1].SessionID})
-
-	require.EqualError(t, store.Replace(ctx, SessionKey{}, nil), "session id is required")
-	require.Error(t, store.Replace(ctx, SessionKey{SessionID: "s", Subpath: "sub"}, nil))
-	require.Error(t, store.Replace(ctx, SessionKey{SessionID: "s"}, []SessionStoreReplacement{{Key: SessionKey{SessionID: "other"}}}))
-	require.Error(t, store.Replace(ctx, SessionKey{SessionID: "s"}, nil))
-	require.Error(t, store.Replace(ctx, SessionKey{SessionID: "s"}, []SessionStoreReplacement{
-		{Key: SessionKey{SessionID: "s"}},
-		{Key: SessionKey{SessionID: "s"}},
+	main := acpcore.SessionKey{SessionID: string(session.SessionId)}
+	require.NoError(t, store.Replace(t.Context(), main, []acpcore.SessionStoreReplacement{
+		{Key: main, Entries: rows},
+		{Key: acpcore.SessionKey{SessionID: main.SessionID, Subpath: "config"}, Entries: []acpcore.SessionStoreEntry{[]byte(`{"sessionId":"wrong"}`)}},
 	}))
-	require.NoError(t, store.Replace(ctx, SessionKey{SessionID: "s"}, []SessionStoreReplacement{
-		{Key: SessionKey{SessionID: "s"}, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
-		{Key: SessionKey{SessionID: "s", Subpath: "sub/b.jsonl"}, Entries: []SessionStoreEntry{nil}},
-	}))
-	subkeys, err = store.ListSubkeys(ctx, SessionKey{SessionID: "s"})
-	require.NoError(t, err)
-	require.Equal(t, []string{"sub/b.jsonl"}, subkeys)
-
-	require.NoError(t, store.Delete(ctx, SessionKey{SessionID: "s", Subpath: "sub/b.jsonl"}))
-	subkeys, err = store.ListSubkeys(ctx, SessionKey{SessionID: "s"})
-	require.NoError(t, err)
-	require.Empty(t, subkeys)
-
-	require.NoError(t, store.Delete(ctx, SessionKey{SessionID: "s"}))
-	entries, err = store.Load(ctx, SessionKey{SessionID: "s"})
-	require.NoError(t, err)
-	require.Empty(t, entries)
-	require.NoError(t, store.Append(ctx, SessionKey{SessionID: "s", Subpath: "sub/c.jsonl"}, []SessionStoreEntry{[]byte(`{}`)}))
-	entries, err = store.Load(ctx, SessionKey{SessionID: "s", Subpath: "sub/c.jsonl"})
-	require.NoError(t, err)
-	require.Empty(t, entries)
-
-	require.Nil(t, cloneStoreEntries(nil))
-	require.Nil(t, cloneStoreEntry(nil))
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, t.TempDir()))
+	require.Equal(t, "claude_restore_failed", requestErrorData(t, err)["error"])
 }
 
-// TestInMemorySessionStoreReplaceNeverResurrectsATombstone pins that a delete is
-// final against the one writer that rewrites a whole session. The teardown a
-// delete runs behind its own tombstone still commits the session mirror, and that
-// commit is a Replace: were it to clear the tombstone it never wrote, the id the
-// host was told is gone would be listable and loadable again.
-func TestInMemorySessionStoreReplaceNeverResurrectsATombstone(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	store := &InMemorySessionStore{}
-	main := SessionKey{SessionID: "s"}
-	sub := SessionKey{SessionID: "s", Subpath: "sub/a.jsonl"}
-
-	require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{[]byte(`{"a":1}`)}))
-	require.NoError(t, store.Delete(ctx, main))
-
-	require.NoError(t, store.Replace(ctx, main, []SessionStoreReplacement{
-		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
-		{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"d":4}`)}},
-	}))
-
-	entries, err := store.Load(ctx, main)
-	require.NoError(t, err)
-	require.Empty(t, entries, "a tombstoned key holds nothing a later replace wrote")
-
-	subEntries, err := store.Load(ctx, sub)
-	require.NoError(t, err)
-	require.Empty(t, subEntries, "the tombstone cascades to every subpath of the deleted session")
-
-	subkeys, err := store.ListSubkeys(ctx, main)
-	require.NoError(t, err)
-	require.Empty(t, subkeys)
-
-	summaries, err := store.ListSessions(ctx)
-	require.NoError(t, err)
-	require.Empty(t, summaries, "a deleted session is never listable again")
+type mirrorFaultStore struct {
+	acpcore.SessionStore
+	fail atomic.Bool
 }
 
-// TestSessionStoreReplaceIsOneSessions is the store-contract conformance case
-// for the one-session rule: every Replace rewrites exactly one session's rows.
-// A replacement key naming another session and a replacement set naming one key
-// twice are both refused by name, both before any write, so a refused generation
-// leaves the committed one exactly as it stood — in the addressed session and in
-// the session the bad key named.
-func TestSessionStoreReplaceIsOneSessions(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	main := SessionKey{SessionID: "s"}
-	sub := SessionKey{SessionID: "s", Subpath: "sub/a.jsonl"}
-	foreign := SessionKey{SessionID: "other"}
-	foreignSub := SessionKey{SessionID: "other", Subpath: "sub/b.jsonl"}
-
-	for _, tc := range []struct {
-		name         string
-		replacements []SessionStoreReplacement
-		wantErr      string
-	}{
-		{
-			name: "a foreign session id",
-			replacements: []SessionStoreReplacement{
-				{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
-				{Key: foreign, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
-			},
-			wantErr: `replacement key {SessionID:other Subpath:} does not belong to main session "s"`,
-		},
-		{
-			name: "a foreign session id on a subkey",
-			replacements: []SessionStoreReplacement{
-				{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
-				{Key: foreignSub, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
-			},
-			wantErr: `replacement key {SessionID:other Subpath:sub/b.jsonl} does not belong to main session "s"`,
-		},
-		{
-			name: "the foreign key alone, without the main key",
-			replacements: []SessionStoreReplacement{
-				{Key: foreign, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
-			},
-			wantErr: `replacement key {SessionID:other Subpath:} does not belong to main session "s"`,
-		},
-		{
-			name: "one key named twice",
-			replacements: []SessionStoreReplacement{
-				{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
-				{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
-				{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"d":4}`)}},
-			},
-			wantErr: `duplicate replacement key {SessionID:s Subpath:sub/a.jsonl}`,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			store := NewInMemorySessionStore()
-			require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{[]byte(`{"a":1}`)}))
-			require.NoError(t, store.Append(ctx, foreign, []SessionStoreEntry{[]byte(`{"z":0}`)}))
-
-			require.EqualError(t, store.Replace(ctx, main, tc.replacements), tc.wantErr)
-
-			// Nothing was written: both sessions still hold their committed rows,
-			// and no key the refused set named was created.
-			entries, err := store.Load(ctx, main)
-			require.NoError(t, err)
-			require.Equal(t, []SessionStoreEntry{[]byte(`{"a":1}`)}, entries)
-
-			foreignEntries, err := store.Load(ctx, foreign)
-			require.NoError(t, err)
-			require.Equal(t, []SessionStoreEntry{[]byte(`{"z":0}`)}, foreignEntries,
-				"a refused generation never touches the session its bad key named")
-
-			subkeys, err := store.ListSubkeys(ctx, main)
-			require.NoError(t, err)
-			require.Empty(t, subkeys)
-
-			foreignSubkeys, err := store.ListSubkeys(ctx, foreign)
-			require.NoError(t, err)
-			require.Empty(t, foreignSubkeys)
-
-			// The session the refused generation addressed is still listable and
-			// still replaceable: a refusal fences nothing.
-			summaries, err := store.ListSessions(ctx)
-			require.NoError(t, err)
-			require.Len(t, summaries, 2)
-
-			require.NoError(t, store.Replace(ctx, main, []SessionStoreReplacement{
-				{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
-			}))
-			entries, err = store.Load(ctx, main)
-			require.NoError(t, err)
-			require.Equal(t, []SessionStoreEntry{[]byte(`{"b":2}`)}, entries)
-		})
+func (s *mirrorFaultStore) Replace(ctx context.Context, key acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail.Load() {
+		return errors.New("mirror unavailable")
 	}
+
+	return s.SessionStore.Replace(ctx, key, replacements)
 }
 
-// TestInMemorySessionStoreReplaceRefusesDuplicateKeys pins the one answer a
-// generation that names a key twice gets. A generation states what each key
-// holds, so a set stating two things about one key states neither; resolving it
-// by keeping whichever replacement arrived last would durably commit an order
-// the caller never expressed. The refusal names the duplicate and lands before
-// anything is written, so the previous generation is still exactly what the
-// store holds.
-func TestInMemorySessionStoreReplaceRefusesDuplicateKeys(t *testing.T) {
+func TestMirrorFailureFencesTurnAndAllowsRetry(t *testing.T) {
 	t.Parallel()
-
-	ctx := context.Background()
-	store := &InMemorySessionStore{}
-	main := SessionKey{SessionID: "s"}
-	sub := SessionKey{SessionID: "s", Subpath: "sub/a.jsonl"}
-
-	require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{[]byte(`{"a":1}`)}))
-
-	require.EqualError(t, store.Replace(ctx, main, []SessionStoreReplacement{
-		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
-		{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
-		{Key: sub, Entries: []SessionStoreEntry{[]byte(`{"d":4}`)}},
-	}), `duplicate replacement key {SessionID:s Subpath:sub/a.jsonl}`)
-
-	require.EqualError(t, store.Replace(ctx, main, []SessionStoreReplacement{
-		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"b":2}`)}},
-		{Key: main, Entries: []SessionStoreEntry{[]byte(`{"c":3}`)}},
-	}), `duplicate replacement key {SessionID:s Subpath:}`)
-
-	entries, err := store.Load(ctx, main)
+	store := &mirrorFaultStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize(withLifecycle())
+	session := h.newSession()
+	store.fail.Store(true)
+	_, err := h.prompt(session.SessionId, "HELLO", promptMeta(1))
+	require.Equal(t, "claude_turn_failed", requestErrorData(t, err)["error"])
+	types := eventTypes(lifecycleEvents(h.rec.snapshot()))
+	require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update:running"}, types)
+	store.fail.Store(false)
+	_, err = h.prompt(session.SessionId, "HELLO", promptMeta(2))
 	require.NoError(t, err)
-	require.Equal(t, []SessionStoreEntry{[]byte(`{"a":1}`)}, entries,
-		"a refused generation writes nothing, so the committed one still stands")
-
-	subkeys, err := store.ListSubkeys(ctx, main)
-	require.NoError(t, err)
-	require.Empty(t, subkeys, "the key named twice is not created by the call that named it twice")
+	types = eventTypes(lifecycleEvents(h.rec.snapshot()))
+	require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update:running", "lifecycle_snapshot", "prompt_accepted", "state_update:running", "state_update:idle"}, types)
 }
 
-func TestInMemorySessionStoreReplaceEmptyEntrySurvives(t *testing.T) {
+func TestLoadReplayResumeAndDelete(t *testing.T) {
+	t.Parallel()
+	home, cwd := t.TempDir(), t.TempDir()
+	h := newHarness(t, WithHome(home))
+	h.initialize()
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "stored", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	before := len(h.rec.snapshot())
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+	require.Equal(t, "reply: stored", agentText(h.rec.snapshot()[before:]))
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	before = len(h.rec.snapshot())
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+	require.Empty(t, agentText(h.rec.snapshot()[before:]))
+	_, err = h.conn.UnstableDeleteSession(h.ctx(), acp.UnstableDeleteSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	list, err := h.conn.ListSessions(h.ctx(), acp.ListSessionsRequest{})
+	require.NoError(t, err)
+	require.Empty(t, list.Sessions)
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+	canonical, err := filepath.EvalSymlinks(cwd)
+	require.NoError(t, err)
+	require.FileExists(t, claude.SessionPath(home, canonical, string(session.SessionId)))
+}
+
+func TestNativeFilesRequireStoreAuthority(t *testing.T) {
+	t.Parallel()
+	home, cwd := t.TempDir(), t.TempDir()
+	first := newHarness(t, WithHome(home))
+	first.initialize()
+	session, err := first.conn.NewSession(first.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = first.prompt(session.SessionId, "stored", nil)
+	require.NoError(t, err)
+	_, err = first.conn.CloseSession(first.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	second := newHarness(t, WithHome(home))
+	second.initialize()
+	list, err := second.conn.ListSessions(second.ctx(), acp.ListSessionsRequest{})
+	require.NoError(t, err)
+	require.Empty(t, list.Sessions)
+	_, err = second.conn.LoadSession(second.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+}
+
+type blockedLoadStore struct {
+	acpcore.SessionStore
+	block            atomic.Bool
+	entered, release chan struct{}
+}
+
+func (s *blockedLoadStore) Load(ctx context.Context, sessionID string) (map[string][]acpcore.SessionStoreEntry, error) {
+	rows, err := s.SessionStore.Load(ctx, sessionID)
+	if err == nil && s.block.CompareAndSwap(true, false) {
+		close(s.entered)
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	return rows, err
+}
+func TestDeleteWinsAgainstPreparedLoad(t *testing.T) {
+	t.Parallel()
+	store := &blockedLoadStore{SessionStore: acpcore.NewInMemorySessionStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	session := h.newSession()
+	_, err := h.prompt(session.SessionId, "stored", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	store.block.Store(true)
+	done := make(chan error, 1)
+	go func() {
+		_, loadErr := h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, t.TempDir()))
+		done <- loadErr
+	}()
+	select {
+	case <-store.entered:
+	case <-h.ctx().Done():
+		t.Fatal("load did not reach stored configuration")
+	}
+	_, err = h.conn.UnstableDeleteSession(h.ctx(), acp.UnstableDeleteSessionRequest{SessionId: session.SessionId})
+	close(store.release)
+	require.NoError(t, err)
+	require.Equal(t, "unknown session", requestErrorData(t, <-done)["error"])
+	list, err := h.conn.ListSessions(h.ctx(), acp.ListSessionsRequest{})
+	require.NoError(t, err)
+	require.Empty(t, list.Sessions)
+}
+
+func TestDivergentNativeRowsRefuseRestore(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	session := h.newSession()
+	_, err := h.prompt(session.SessionId, "stored", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	records, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: "config"})
+	require.NoError(t, err)
+	var record sessionRecord
+	require.NoError(t, json.Unmarshal(records[0], &record))
+	require.NoError(t, os.WriteFile(record.SessionFile, []byte(`{"type":"user","message":{"content":"different"}}`+"\n"), 0600))
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, record.Cwd))
+	require.Equal(t, "claude_restore_failed", requestErrorData(t, err)["error"])
+}
+
+func TestCloseCommitsAfterMirrorFailureWithoutReopeningStream(t *testing.T) {
+	t.Parallel()
+	store := &mirrorFaultStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize(withLifecycle())
+	session := h.newSession()
+	store.fail.Store(true)
+	_, err := h.prompt(session.SessionId, "HELLO", promptMeta(1))
+	require.Equal(t, "claude_turn_failed", requestErrorData(t, err)["error"])
+	events := lifecycleEvents(h.rec.snapshot())
+	store.fail.Store(false)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	require.Equal(t, events, lifecycleEvents(h.rec.snapshot()))
+	rows, err := loadEntries(t.Context(), store, acpcore.SessionKey{SessionID: string(session.SessionId)})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+}
+
+func TestConcurrentColdRestoreIsRefusedBeforeBinding(t *testing.T) {
+	t.Parallel()
+	store := &blockedLoadStore{SessionStore: acpcore.NewInMemorySessionStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	store.block.Store(true)
+	done := make(chan error, 1)
+	ctx := h.ctx()
+	go func() {
+		_, loadErr := h.conn.LoadSession(ctx, wire.LoadSessionRequest(session.SessionId, cwd))
+		done <- loadErr
+	}()
+	select {
+	case <-store.entered:
+	case <-ctx.Done():
+		t.Fatal("load did not reach configuration")
+	}
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
+	close(store.release)
+	require.Equal(t, "session_restore", requestErrorData(t, err)["limit"])
+	require.NoError(t, <-done)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+}
+
+func TestLiveResumeAppliesOptionsAndRetainsDirectories(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd, directory := t.TempDir(), t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, wire.WithSessionAdditionalDirectories(directory)))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd,
+		WithSessionClaudeOptions(NewClaudeOptions(WithClaudeModel("sonnet")))))
+	require.NoError(t, err)
+	rows, err := loadEntries(h.ctx(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: "config"})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	var record sessionRecord
+	require.NoError(t, json.Unmarshal(rows[0], &record))
+	require.Equal(t, "sonnet", record.Model)
+	require.Equal(t, []string{directory}, record.AdditionalDirectories)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+}
+
+func TestRestoreIntoDifferentNativeHome(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	home := t.TempDir()
+	restored := newHarness(t, WithSessionStore(store), WithHome(home))
+	restored.initialize()
+	_, err = restored.conn.LoadSession(restored.ctx(), wire.LoadSessionRequest(session.SessionId, cwd))
+	require.NoError(t, err)
+	_, err = restored.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	rows, err := loadEntries(restored.ctx(), store, acpcore.SessionKey{SessionID: string(session.SessionId), Subpath: "config"})
+	require.NoError(t, err)
+	var record sessionRecord
+	require.Len(t, rows, 1)
+	require.NoError(t, json.Unmarshal(rows[0], &record))
+	relative, err := filepath.Rel(home, record.SessionFile)
+	require.NoError(t, err)
+	require.True(t, filepath.IsLocal(relative))
+	require.FileExists(t, record.SessionFile)
+}
+
+func TestEmptySessionRestores(t *testing.T) {
+	h := newHarness(t)
+	h.initialize()
+	cwd := t.TempDir()
+	created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(created.SessionId, cwd))
+	require.NoError(t, err, "a successfully created session must remain recoverable before its first prompt")
+}
+
+// commitFaultStore fails exactly the failAt'th commit and serves every other.
+type commitFaultStore struct {
+	acpcore.SessionStore
+	failAt int32
+	calls  atomic.Int32
+}
+
+func (s *commitFaultStore) Replace(ctx context.Context, key acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	if s.calls.Add(1) == s.failAt {
+		return errors.New("mirror unavailable")
+	}
+
+	return s.SessionStore.Replace(ctx, key, replacements)
+}
+
+func TestAgentCycleCommitFailureEndsTheGeneration(t *testing.T) {
+	store := &commitFaultStore{SessionStore: acpcore.NewInMemorySessionStore(), failAt: 3}
+	a := NewAgent(testOptions(t, WithSessionStore(store))...)
+	t.Cleanup(func() { _ = a.Close() })
+	rec := newRecorder()
+	a.attach(rec, nil)
+	init := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&init)
+	_, err := a.Initialize(t.Context(), init)
+	require.NoError(t, err)
+	created, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+	s, err := a.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	rt := s.runtime
+	s.mu.Unlock()
+	request := wire.TextPromptRequest(created.SessionId, "AGENTWORK")
+	request.Meta = promptMeta(1)
+	_, err = a.Prompt(t.Context(), request)
+	require.NoError(t, err)
+
+	// A failed background commit has no terminal wire event. Wait for the
+	// pump to finish shutdown, then submit exactly one recovery prompt.
+	select {
+	case <-rt.done:
+	case <-time.After(testTimeout):
+		t.Fatal("failed background commit did not end its generation")
+	}
+	require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update:running", "state_update:idle", "state_update:running"},
+		eventTypes(lifecycleEvents(rec.snapshot())), "an uncommitted agent-origin cycle must not publish a terminal idle")
+	request = wire.TextPromptRequest(created.SessionId, "HELLO")
+	request.Meta = promptMeta(2)
+	response, err := a.Prompt(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+	require.Equal(t, 2, lifecycleIncarnations(rec.snapshot()), "a fenced stream never reopened")
+}
+
+// Residual native state with no store entry is neither listed nor adopted.
+func TestResidualNativeStateIsNeverAdopted(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
-	store := &InMemorySessionStore{}
-	main := SessionKey{SessionID: "s"}
-	sub := SessionKey{SessionID: "s", Subpath: "sub/a.jsonl"}
+	home, cwd := t.TempDir(), t.TempDir()
+	h := newHarness(t, WithHome(home))
+	h.initialize()
 
-	require.NoError(t, store.Append(ctx, main, []SessionStoreEntry{[]byte(`{"a":1}`)}))
-	require.NoError(t, store.Append(ctx, sub, []SessionStoreEntry{[]byte(`{"b":2}`)}))
-
-	// Replace lists the main key plus a subkey with empty (len==0) Entries.
-	// Both survive as live, non-tombstoned keys; only unlisted keys tombstone.
-	require.NoError(t, store.Replace(ctx, main, []SessionStoreReplacement{
-		{Key: main, Entries: []SessionStoreEntry{}},
-		{Key: sub, Entries: []SessionStoreEntry{}},
+	orphan := "00000000-0000-4000-8000-00000000abcd"
+	require.NoError(t, claude.WriteRows(claude.SessionPath(home, cwd, orphan), [][]byte{
+		[]byte(`{"type":"user","uuid":"11111111-1111-4111-8111-111111111111","sessionId":"` + orphan + `","cwd":"` + cwd + `","timestamp":"2026-09-15T00:00:00Z","message":{"id":"m1","role":"user","content":[{"type":"text","text":"hello"}]}}`),
 	}))
 
-	entries, err := store.Load(ctx, main)
+	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
 	require.NoError(t, err)
-	require.Empty(t, entries)
+	require.Empty(t, list.Sessions)
 
-	subEntries, err := store.Load(ctx, sub)
-	require.NoError(t, err)
-	require.Empty(t, subEntries)
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(acp.SessionId(orphan), cwd))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
 
-	subkeys, err := store.ListSubkeys(ctx, main)
-	require.NoError(t, err)
-	require.Equal(t, []string{"sub/a.jsonl"}, subkeys)
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(acp.SessionId(orphan), cwd))
+	require.Equal(t, "unknown session", requestErrorData(t, err)["error"])
+}
 
-	summaries, err := store.ListSessions(ctx)
+type recoveryFaultStore struct {
+	acpcore.SessionStore
+	fail atomic.Bool
+}
+
+func (s *recoveryFaultStore) Replace(ctx context.Context, main acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail.Load() {
+		return errors.New("injected store failure")
+	}
+
+	return s.SessionStore.Replace(ctx, main, replacements)
+}
+
+func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
+	t.Parallel()
+	store := acpcore.NewInMemorySessionStore()
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	cwd := t.TempDir()
+	created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
 	require.NoError(t, err)
-	require.Len(t, summaries, 1)
-	require.Equal(t, "s", summaries[0].SessionID)
+	_, err = h.prompt(created.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+	var record sessionRecord
+	rows, found, err := sessionlog.Load(t.Context(), store, string(created.SessionId), &record)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NotEmpty(t, record.NativeSessionID)
+	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), created.Meta)
+	id := acp.SessionId("acp-conversation-independent-of-native-id")
+	record.SessionID = string(id)
+	require.NoError(t, sessionlog.Commit(t.Context(), store, string(id), rows, record))
+	require.NoError(t, store.Delete(t.Context(), acpcore.SessionKey{SessionID: string(created.SessionId)}))
+
+	before := len(h.rec.snapshot())
+	loaded, err := h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(id, cwd))
+	require.NoError(t, err)
+	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), loaded.Meta)
+	_, err = h.prompt(id, "HELLO", nil)
+	require.NoError(t, err)
+	for _, update := range h.rec.snapshot()[before:] {
+		require.Equal(t, id, update.SessionId)
+	}
+	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, listed.Sessions, 1)
+	require.Equal(t, id, listed.Sessions[0].SessionId)
+	require.Equal(t, loaded.Meta, listed.Sessions[0].Meta)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: id})
+	require.NoError(t, err)
+	listed, err = h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Len(t, listed.Sessions, 1)
+	require.Equal(t, loaded.Meta, listed.Sessions[0].Meta)
+	resumed, err := h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(id, cwd))
+	require.NoError(t, err)
+	require.Equal(t, loaded.Meta, resumed.Meta)
+	_, err = h.prompt(id, "HELLO", nil)
+	require.NoError(t, err)
+	var after sessionRecord
+	_, found, err = sessionlog.Load(t.Context(), store, string(id), &after)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, record.NativeSessionID, after.NativeSessionID)
+	require.Equal(t, string(id), after.SessionID)
+}
+
+type firstMirrorFailureStore struct {
+	acpcore.SessionStore
+	calls atomic.Int32
+}
+
+func (s *firstMirrorFailureStore) Replace(ctx context.Context, key acpcore.SessionKey, rows []acpcore.SessionStoreReplacement) error {
+	if s.calls.Add(1) == 1 {
+		return errors.New("initial mirror unavailable")
+	}
+
+	return s.SessionStore.Replace(ctx, key, rows)
+}
+
+func TestFailedNewSessionDoesNotPersistDuringCleanup(t *testing.T) {
+	t.Parallel()
+	store := &firstMirrorFailureStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	response, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
+	require.Error(t, err)
+	require.Empty(t, response.SessionId)
+	rows, err := store.ListSessions(h.ctx())
+	require.NoError(t, err)
+	require.Empty(t, rows)
+	listed, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Empty(t, listed.Sessions)
+}
+
+type firstOpenFailureClient struct {
+	*recorder
+	failed atomic.Bool
+}
+
+func (c *firstOpenFailureClient) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
+	if c.failed.CompareAndSwap(false, true) {
+		return errors.New("initial publication unavailable")
+	}
+
+	return c.recorder.SessionUpdate(ctx, notification)
+}
+
+func TestFailedSessionOpenReleasesActiveSlot(t *testing.T) {
+	t.Parallel()
+	a := NewAgent(testOptions(t, WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))...)
+	t.Cleanup(func() { _ = a.Close() })
+	a.attach(&firstOpenFailureClient{recorder: newRecorder()}, nil)
+	request := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber}
+	withLifecycle()(&request)
+	_, err := a.Initialize(t.Context(), request)
+	require.NoError(t, err)
+	first, err := a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.Error(t, err)
+	require.Empty(t, first.SessionId)
+	_, err = a.NewSession(t.Context(), wire.NewSessionRequest(t.TempDir()))
+	require.NoError(t, err)
+}
+
+// countingStore records every write the sibling makes to the store.
+type countingStore struct {
+	acpcore.SessionStore
+	replaces atomic.Int32
+	deletes  atomic.Int32
+}
+
+func (s *countingStore) Replace(ctx context.Context, key acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
+	s.replaces.Add(1)
+
+	return s.SessionStore.Replace(ctx, key, replacements)
+}
+
+func (s *countingStore) Delete(ctx context.Context, key acpcore.SessionKey) error {
+	s.deletes.Add(1)
+
+	return s.SessionStore.Delete(ctx, key)
+}
+
+func ephemeralMeta() wire.SessionRequestOption {
+	return wire.WithSessionMeta(wire.SessionMeta{Ephemeral: true}.Apply(nil))
+}
+
+func TestEphemeralSessionNeverReachesTheStore(t *testing.T) {
+	t.Parallel()
+	store := &countingStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	session := h.newSession(ephemeralMeta())
+	_, err := h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Empty(t, list.Sessions, "a live ephemeral session is never listed")
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	_, err = h.conn.UnstableDeleteSession(h.ctx(), acp.UnstableDeleteSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	require.Zero(t, store.replaces.Load())
+	require.Zero(t, store.deletes.Load())
+	generation, err := store.Load(h.ctx(), string(session.SessionId))
+	require.NoError(t, err)
+	require.Nil(t, generation)
+	summaries, err := store.ListSessions(h.ctx())
+	require.NoError(t, err)
+	require.Empty(t, summaries)
+	list, err = h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
+	require.NoError(t, err)
+	require.Empty(t, list.Sessions)
+
+	durable := h.newSession()
+	_, err = h.prompt(durable.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	require.Positive(t, store.replaces.Load())
+	_, err = h.conn.UnstableDeleteSession(h.ctx(), acp.UnstableDeleteSessionRequest{SessionId: durable.SessionId})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, store.deletes.Load())
+}
+
+func TestSessionMetaIsRefusedOutsideNew(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.initialize()
+	cwd := t.TempDir()
+	session, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: session.SessionId})
+	require.NoError(t, err)
+	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, cwd, ephemeralMeta()))
+	require.Equal(t, "_meta."+wire.SessionMetaKey, requestErrorData(t, err)["field"])
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd, ephemeralMeta()))
+	require.Equal(t, "_meta."+wire.SessionMetaKey, requestErrorData(t, err)["field"])
+	_, err = h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd, wire.WithSessionMeta(map[string]any{
+		wire.SessionMetaKey: map[string]any{"persist": false},
+	})))
+	require.Equal(t, "_meta."+wire.SessionMetaKey+".persist", requestErrorData(t, err)["field"])
 }

@@ -2,32 +2,22 @@ package claudeacp
 
 import (
 	"log/slog"
+	"maps"
 	"slices"
-	"time"
 
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+
+	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/image"
 )
 
-// Option configures the Claude ACP agent.
+// Option configures the claude ACP agent.
 type Option func(*Options)
 
-const privateAdapterEnvPrefix = "ACP_" + "GO_CLAUDE_INTERNAL_"
-
-// SettingSource selects one Claude Code filesystem settings source.
-type SettingSource string
-
-const (
-	// SettingSourceUser loads user-level Claude settings and user Claude Code features.
-	SettingSourceUser SettingSource = "user"
-	// SettingSourceProject loads project-level Claude settings and Claude Code features from the session cwd.
-	SettingSourceProject SettingSource = "project"
-	// SettingSourceLocal loads local project Claude settings and local Claude Code features from the session cwd.
-	SettingSourceLocal SettingSource = "local"
-)
-
-// Options configures the ACP agent process and the Claude CLI sessions it starts.
+// Options configures the ACP agent process and the claude stream-json sessions it
+// starts.
 type Options struct {
 	// AgentName is the protocol identifier advertised during ACP initialize.
 	AgentName string
@@ -36,46 +26,27 @@ type Options struct {
 	// AgentVersion is the agent version advertised during ACP initialize.
 	AgentVersion string
 
-	// ExecutablePath is the Claude CLI executable path. If empty, PATH is searched.
+	// ExecutablePath selects the claude executable. A bare name is searched on the
+	// base PATH; a path containing a separator is used as given. Empty means
+	// "claude".
 	ExecutablePath string
-	// Home sets CLAUDE_CONFIG_DIR for launched Claude CLI sessions.
+	// Home is claude's native config, auth, and runtime root, passed to every
+	// session as CLAUDE_CONFIG_DIR. Empty leaves claude to resolve its home from
+	// the inherited environment exactly as it would from a shell.
 	Home string
-	// ScratchDir is the parent directory for all ephemeral on-disk
-	// materialization (per-session roots, hydration temp files, probe dirs).
-	// Empty means the system temp directory. Relative paths resolve against
-	// the adapter's working directory.
+	// ScratchDir is the absolute parent for temporary quota probes. Empty uses
+	// the system temporary directory.
 	ScratchDir string
-	// InputHandoffRoot is the absolute directory a host hands prompt-image
-	// bytes over in. It is a read root only: nothing is ever written, moved, or
-	// deleted under it. Empty rejects every handoff-form image block.
+	// InputHandoffRoot is the absolute directory under which handoff-form
+	// prompt images are read. Empty rejects the handoff form.
 	InputHandoffRoot string
-	// ProviderAuthRoot is the absolute host-owned durable directory holding the
-	// adapter's values-free provider-auth ledger. Empty, bare mode, or
-	// agent-wide static authentication leaves every `_claude/auth/*` leg
-	// unadvertised.
-	ProviderAuthRoot string
-	// ProviderAuthDirectHome is the exact canonical Claude config directory the
-	// operator consents to native-login disconnect clearing. Empty or unequal
-	// to Home refuses that operation; all eight broker legs remain advertised.
-	ProviderAuthDirectHome string
-	// DefaultModel is passed to newly created Claude sessions when non-empty.
+	// DefaultModel selects the model for new sessions by native identifier.
 	DefaultModel string
-	// ConfiguredModels are the model ids the host lists explicitly. Each is a
-	// configured catalog entry: published after the native rows on every route,
-	// standing aside for a native row of the same identity, and carrying no
-	// invented facts.
+	// ConfiguredModels are the model ids the host lists explicitly, using native identifiers.
 	ConfiguredModels []string
-	// Env is merged into every launched Claude process environment. Managed
-	// config and identity root variables are rejected.
+	// Env is the static agent-scoped overlay on the inherited process
+	// environment every claude process runs with.
 	Env map[string]string
-	// AmbientEnvironment replaces the adapter's own process environment as the
-	// block ordinary execution inherits from. Its names are judged exactly as
-	// inherited names are; WithEnv and session environments overlay it. Nil
-	// inherits from the adapter's process. Managed execution never reads it.
-	AmbientEnvironment map[string]string
-	// HostAuthority delegates native process and residence ownership to the
-	// embedding host. Omission selects ordinary same-identity execution.
-	HostAuthority HostAuthority
 
 	// Logger receives structured diagnostic logs. If nil, the default logger is used.
 	Logger *slog.Logger
@@ -83,75 +54,38 @@ type Options struct {
 	TracerProvider trace.TracerProvider
 	// MeterProvider records adapter metrics. If nil, metrics are no-ops.
 	MeterProvider metric.MeterProvider
-	// TextMapPropagator extracts ACP _meta trace context and injects Claude launch env.
-	// If nil, W3C trace context plus baggage propagation is used.
+	// TextMapPropagator extracts trace context from ACP _meta. If nil, W3C
+	// trace context plus baggage propagation is used.
 	TextMapPropagator propagation.TextMapPropagator
 
-	// SessionStore replaces the default in-memory authority for transcript discovery and restore.
-	SessionStore SessionStore
-	// SessionStoreLoadTimeout bounds store reads used for restore and listing.
-	SessionStoreLoadTimeout time.Duration
+	// SessionStore is the durability boundary for session rows. Nil installs a
+	// fresh in-memory store.
+	SessionStore acpcore.SessionStore
 	// ConcurrencyLimits controls process-local backpressure.
 	ConcurrencyLimits ConcurrencyLimits
-	// ImageLimits controls decoded image bytes accepted from prompts and
-	// emitted in session updates.
-	ImageLimits ImageLimits
-	// SeedFiles maps paths relative to the resolved Claude config directory to
-	// file contents written into that directory before each Claude CLI session
-	// launches, so the launched CLI reads them as its own config (e.g.
-	// settings.json).
+	// SeedFiles maps paths relative to claude's config root to file contents
+	// written there before each launch.
 	SeedFiles map[string]string
-	// SettingsFile is a path relative to the resolved Claude config directory
-	// passed to the Claude CLI as --settings, loading an additional settings
-	// layer on top of the base settings.json. It requires an explicit Home.
-	SettingsFile string
+	// ImageLimits bounds decoded image bytes on prompt input and emitted
+	// output. Every field defaults to 6 MiB when the option is omitted.
+	ImageLimits ImageLimits
 
-	// DirectAPI enables Models API discovery with direct Anthropic credentials
-	// and the setup-token quota probe for `_claude/rateLimits`. Catalog GETs send
-	// no inference. The quota probe may make billable max_tokens:1 requests.
-	// Enabled by default; false confines both operations to native discovery.
-	DirectAPI bool
+	// ClaudeSettingSources selects native settings sources. Nil uses native defaults.
+	ClaudeSettingSources []string
+	// ClaudeSettingsFile passes an additional native settings file.
+	ClaudeSettingsFile string
 
-	// DefaultPermissionMode is the initial Claude permission mode.
-	DefaultPermissionMode string
-	// DefaultSystemPrompt is passed to newly created Claude sessions when non-empty.
-	DefaultSystemPrompt string
-	// HideAuth withdraws the Claude subscription sign-in from the advertised
-	// provider auth catalog. The setup-token and API-key methods still stand.
-	HideAuth bool
-	// BareMode launches Claude with --bare for deterministic sessions that opt
-	// out of Claude's automatic project/context discovery. Bare mode also
-	// requires explicit API-key or apiKeyHelper auth.
-	BareMode bool
-	// SettingSources controls Claude Code filesystem settings sources loaded by
-	// the Claude CLI. Nil uses the adapter default: user, project, local. An
-	// empty slice passes --setting-sources= and disables those sources.
-	SettingSources []SettingSource
-
-	// AllowSkipPermissionsFlag permits adding Claude's skip-permissions capability flag.
-	AllowSkipPermissionsFlag bool
-	// InitializeTimeout bounds the Claude control-protocol initialize request.
-	InitializeTimeout time.Duration
-	// ControlHandlerTimeout bounds one inbound Claude control request the
-	// adapter answers on its own, such as a hook callback. A permission or
-	// elicitation request waits on the ACP client instead and is bounded only by
-	// the session's cancellation and teardown.
-	ControlHandlerTimeout time.Duration
-	// TurnTimeout bounds one Claude prompt turn. Zero (the default) means no
-	// deadline. On expiry the turn is aborted and fails with cause "timeout".
-	TurnTimeout              time.Duration
-	defaultPermissionModeSet bool
-	hostAuthoritySet         bool
+	imageLimitsSet bool
 }
 
-// ConcurrencyLimits controls process-local backpressure. Zero fields use their
-// defaults.
+// ConcurrencyLimits controls per-agent backpressure. Zero fields use defaults.
 type ConcurrencyLimits struct {
 	MaxActiveSessions        int
 	MaxConcurrentClientCalls int
 }
 
-// ImageLimits controls decoded image bytes at the ACP boundary.
+// ImageLimits bounds decoded image bytes. A zero field disables that policy
+// limit; the frame clamp still applies.
 type ImageLimits struct {
 	MaxInputBytesPerImage     int64
 	MaxInputBytesPerPrompt    int64
@@ -159,337 +93,156 @@ type ImageLimits struct {
 	MaxOutputBytesPerToolCall int64
 }
 
-const defaultImageBytes int64 = 6 * 1024 * 1024
+func (l ImageLimits) core() image.Limits {
+	return image.Limits{
+		MaxInputBytesPerImage:     l.MaxInputBytesPerImage,
+		MaxInputBytesPerPrompt:    l.MaxInputBytesPerPrompt,
+		MaxOutputBytesPerImage:    l.MaxOutputBytesPerImage,
+		MaxOutputBytesPerToolCall: l.MaxOutputBytesPerToolCall,
+	}
+}
+
+const (
+	defaultMaxActiveSessions        = 32
+	defaultMaxConcurrentClientCalls = 16
+)
 
 func applyOptions(opts []Option) Options {
 	options := Options{
-		AgentName:             "acp-go-claude",
-		AgentTitle:            "acp-go-claude",
-		AgentVersion:          "0.1.0",
-		DirectAPI:             true,
-		DefaultPermissionMode: string(modeDefault),
-		SettingSources:        defaultSettingSources(),
-		InitializeTimeout:     time.Minute,
-		ControlHandlerTimeout: 5 * time.Minute,
-		ImageLimits: ImageLimits{
-			MaxInputBytesPerImage:     defaultImageBytes,
-			MaxInputBytesPerPrompt:    defaultImageBytes,
-			MaxOutputBytesPerImage:    defaultImageBytes,
-			MaxOutputBytesPerToolCall: defaultImageBytes,
-		},
+		AgentName:    "acp-go-claude",
+		AgentTitle:   "acp-go-claude",
+		AgentVersion: "0.1.0",
 	}
 
 	for _, opt := range opts {
 		opt(&options)
 	}
 
-	return options
-}
-
-func defaultSettingSources() []SettingSource {
-	return []SettingSource{SettingSourceUser, SettingSourceProject, SettingSourceLocal}
-}
-
-func settingSourceArgs(sources []SettingSource) []string {
-	args := make([]string, len(sources))
-	for index, source := range sources {
-		args[index] = string(source)
+	if !options.imageLimitsSet {
+		limits := image.DefaultLimits()
+		options.ImageLimits = ImageLimits{
+			MaxInputBytesPerImage:     limits.MaxInputBytesPerImage,
+			MaxInputBytesPerPrompt:    limits.MaxInputBytesPerPrompt,
+			MaxOutputBytesPerImage:    limits.MaxOutputBytesPerImage,
+			MaxOutputBytesPerToolCall: limits.MaxOutputBytesPerToolCall,
+		}
 	}
 
-	return args
+	if options.ConcurrencyLimits.MaxActiveSessions == 0 {
+		options.ConcurrencyLimits.MaxActiveSessions = defaultMaxActiveSessions
+	}
+
+	if options.ConcurrencyLimits.MaxConcurrentClientCalls == 0 {
+		options.ConcurrencyLimits.MaxConcurrentClientCalls = defaultMaxConcurrentClientCalls
+	}
+
+	return options
 }
 
 // WithLogger configures structured diagnostic logging.
 func WithLogger(logger *slog.Logger) Option {
-	return func(options *Options) {
-		options.Logger = logger
-	}
+	return func(options *Options) { options.Logger = logger }
 }
 
 // WithAgentName sets the protocol identifier advertised during ACP initialize.
 func WithAgentName(name string) Option {
-	return func(options *Options) {
-		options.AgentName = name
-	}
+	return func(options *Options) { options.AgentName = name }
 }
 
 // WithAgentTitle sets the human-readable agent name advertised during ACP initialize.
 func WithAgentTitle(title string) Option {
-	return func(options *Options) {
-		options.AgentTitle = title
-	}
+	return func(options *Options) { options.AgentTitle = title }
 }
 
-// WithAgentVersion sets the agent version advertised during ACP initialize and
-// used by adapter OpenTelemetry instrumentation.
+// WithAgentVersion sets the agent version advertised during ACP initialize.
 func WithAgentVersion(version string) Option {
-	return func(options *Options) {
-		options.AgentVersion = version
-	}
+	return func(options *Options) { options.AgentVersion = version }
 }
 
-// WithMeterProvider configures the OpenTelemetry meter provider used for
-// adapter metrics. If unset, metrics are no-ops.
-func WithMeterProvider(provider metric.MeterProvider) Option {
-	return func(options *Options) {
-		options.MeterProvider = provider
-	}
-}
-
-// WithTextMapPropagator configures trace-context propagation for ACP _meta and
-// Claude process launch environment. If unset, W3C trace context plus baggage
-// propagation is used.
-func WithTextMapPropagator(propagator propagation.TextMapPropagator) Option {
-	return func(options *Options) {
-		options.TextMapPropagator = propagator
-	}
-}
-
-// WithTracerProvider configures the OpenTelemetry tracer provider used for
-// adapter spans. If unset, tracing is a no-op.
-func WithTracerProvider(provider trace.TracerProvider) Option {
-	return func(options *Options) {
-		options.TracerProvider = provider
-	}
-}
-
-// WithExecutablePath sets the Claude CLI executable path. If unset, PATH is searched.
+// WithExecutablePath selects the claude executable.
 func WithExecutablePath(path string) Option {
-	return func(options *Options) {
-		options.ExecutablePath = path
-	}
+	return func(options *Options) { options.ExecutablePath = path }
 }
 
-// WithHostAuthority routes native processes and tree ownership through authority.
-func WithHostAuthority(authority HostAuthority) Option {
-	return func(options *Options) {
-		options.HostAuthority = authority
-		options.hostAuthoritySet = true
-	}
-}
-
-// WithHome sets CLAUDE_CONFIG_DIR for launched Claude CLI sessions.
+// WithHome sets claude's native config root, passed to every session as
+// CLAUDE_CONFIG_DIR.
 func WithHome(path string) Option {
-	return func(options *Options) {
-		options.Home = path
-	}
+	return func(options *Options) { options.Home = path }
 }
 
-// WithScratchDir sets the parent directory for all ephemeral on-disk
-// materialization (per-session roots, hydration temp files, probe dirs).
-// Empty means the system temp directory. Relative paths resolve against the
-// adapter's working directory. The directory is created 0700 when missing.
+// WithScratchDir sets the parent directory for temporary quota probes.
 func WithScratchDir(dir string) Option {
-	return func(options *Options) {
-		options.ScratchDir = dir
-	}
+	return func(options *Options) { options.ScratchDir = dir }
 }
 
-// WithInputHandoffRoot sets the absolute directory prompt images may be handed
-// over in as local files instead of embedded base64. An image block with empty
-// `data`, a `file://` uri under this root, and a valid handoff envelope is read
-// and digest-verified before it reaches Claude. The directory is read-only to
-// the adapter, which never writes, moves, or deletes anything under it, and it
-// is the host's to create and clean up. Unset (the default) rejects every
-// handoff-form block; a relative path fails initialization.
+// WithInputHandoffRoot sets the absolute directory under which handoff-form
+// prompt images are read. The adapter never writes there.
 func WithInputHandoffRoot(dir string) Option {
-	return func(options *Options) {
-		options.InputHandoffRoot = dir
-	}
+	return func(options *Options) { options.InputHandoffRoot = dir }
 }
 
-// WithProviderAuthRoot sets the absolute host-owned durable directory holding
-// the adapter's values-free provider-auth ledger. The ledger records which
-// native slot each connection generation owns and never credential material,
-// authorization URLs, or pasted values. The directory is created 0700 when
-// missing and entries are written 0600. Unset (the default), unusable, or
-// relative leaves every `_claude/auth/*` leg absent from the capability
-// advertisement and answering method-not-found. A configured
-// ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, an
-// agent-wide settings credential, apiKeyHelper, or bare mode does the same
-// because it overrides or ignores the durable login this surface installs; a
-// relative path additionally fails initialization.
-func WithProviderAuthRoot(path string) Option {
-	return func(options *Options) {
-		options.ProviderAuthRoot = path
-	}
-}
-
-// WithProviderAuthDirectHome names the exact canonical Claude config directory
-// the operator consents to native-login disconnect clearing. Both paths must
-// resolve to the same directory, whose identity is checked again at removal.
-// The broker advertises all eight legs with or without consent. Disconnecting
-// a secret binding only updates the ledger and needs no native-home consent.
-func WithProviderAuthDirectHome(path string) Option {
-	return func(options *Options) {
-		options.ProviderAuthDirectHome = path
-	}
-}
-
-// WithSessionStore replaces the default in-memory session authority with a host store.
-func WithSessionStore(store SessionStore) Option {
-	return func(options *Options) {
-		options.SessionStore = store
-	}
-}
-
-// WithSessionStoreLoadTimeout bounds session store reads used during restore and listing.
-func WithSessionStoreLoadTimeout(timeout time.Duration) Option {
-	return func(options *Options) {
-		options.SessionStoreLoadTimeout = timeout
-	}
-}
-
-// WithDefaultModel selects a Claude model for newly created sessions.
+// WithDefaultModel selects the model for new sessions by native identifier.
 func WithDefaultModel(model string) Option {
-	return func(options *Options) {
-		options.DefaultModel = model
-	}
+	return func(options *Options) { options.DefaultModel = model }
 }
 
 // WithConfiguredModels names the models the host lists explicitly.
 func WithConfiguredModels(ids []string) Option {
-	return func(options *Options) {
-		options.ConfiguredModels = slices.Clone(ids)
-	}
+	return func(options *Options) { options.ConfiguredModels = slices.Clone(ids) }
 }
 
-// WithClaudeDefaultPermissionMode sets the initial Claude permission mode.
-func WithClaudeDefaultPermissionMode(mode string) Option {
-	return func(options *Options) {
-		options.DefaultPermissionMode = mode
-		options.defaultPermissionModeSet = true
-	}
-}
-
-// WithClaudeDefaultSystemPrompt sets the system prompt passed to Claude sessions.
-func WithClaudeDefaultSystemPrompt(prompt string) Option {
-	return func(options *Options) {
-		options.DefaultSystemPrompt = prompt
-	}
-}
-
-// WithClaudeHideAuth withdraws the Claude subscription sign-in from the
-// advertised provider auth catalog.
-func WithClaudeHideAuth(enabled bool) Option {
-	return func(options *Options) {
-		options.HideAuth = enabled
-	}
-}
-
-// WithClaudeBareMode launches Claude sessions with --bare. Bare mode disables
-// Claude's automatic project/context discovery and keychain/OAuth auth; explicit
-// ACP-provided MCP config, system prompt, additional directories, and
-// API-key/apiKeyHelper auth are still passed.
-func WithClaudeBareMode(enabled bool) Option {
-	return func(options *Options) {
-		options.BareMode = enabled
-	}
-}
-
-// WithClaudeSettingSources configures Claude Code filesystem settings sources passed
-// as --setting-sources. With no arguments, user/project/local sources are
-// disabled for launched Claude sessions.
-func WithClaudeSettingSources(sources ...SettingSource) Option {
-	return func(options *Options) {
-		options.SettingSources = make([]SettingSource, len(sources))
-		copy(options.SettingSources, sources)
-	}
-}
-
-// WithClaudeSettingsFile registers a settings-overlay file loaded on top of the
-// base settings.json. relpath is confined to the resolved Claude config
-// directory (the same anchor as WithSeedFiles) and passed to the Claude CLI as
-// --settings <abspath>. It requires an explicit Home: setting it without a
-// resolvable home, an absolute path, a ".." escape, or an empty key fails
-// closed at session start.
-func WithClaudeSettingsFile(relpath string) Option {
-	return func(options *Options) {
-		options.SettingsFile = relpath
-	}
-}
-
-// WithClaudeDirectAPI enables Models API discovery and the setup-token quota
-// probe. It defaults to true. Catalog requests send no inference; the quota
-// probe may make one billable Fable request and one Haiku fallback, each
-// max_tokens:1. False uses native model and quota discovery only.
-func WithClaudeDirectAPI(enabled bool) Option {
-	return func(options *Options) { options.DirectAPI = enabled }
-}
-
-// WithClaudeAllowSkipPermissionsFlag permits adding Claude's skip-permissions capability flag.
-func WithClaudeAllowSkipPermissionsFlag(enabled bool) Option {
-	return func(options *Options) {
-		options.AllowSkipPermissionsFlag = enabled
-	}
-}
-
-// WithClaudeInitializeTimeout bounds the Claude control-protocol initialize request.
-func WithClaudeInitializeTimeout(timeout time.Duration) Option {
-	return func(options *Options) {
-		options.InitializeTimeout = timeout
-	}
-}
-
-// WithClaudeControlHandlerTimeout bounds one inbound Claude control request the
-// adapter answers on its own. It does not bound a permission or elicitation
-// request, which waits on the ACP client's answer.
-func WithClaudeControlHandlerTimeout(timeout time.Duration) Option {
-	return func(options *Options) {
-		options.ControlHandlerTimeout = timeout
-	}
-}
-
-// WithTurnTimeout bounds one Claude prompt turn. Zero (the default) disables the
-// deadline. On expiry the native turn is aborted and session/prompt fails with a
-// claude_turn_failed error whose cause is "timeout" (never cancelled).
-func WithTurnTimeout(timeout time.Duration) Option {
-	return func(options *Options) {
-		options.TurnTimeout = timeout
-	}
-}
-
-// WithEnv adds environment variables to every launched Claude process. Managed
-// config and identity root variables are rejected during agent initialization.
+// WithEnv sets the static agent-scoped environment overlay applied to every
+// claude process after the inherited environment and before the session env.
 func WithEnv(env map[string]string) Option {
-	return func(options *Options) {
-		options.Env = cloneStringMap(env)
-	}
+	return func(options *Options) { options.Env = maps.Clone(env) }
 }
 
-// WithAmbientEnvironment supplies the block ordinary execution inherits from in
-// place of the adapter's own process environment. Entries are filtered like
-// inherited entries; an entry that could not be an environment entry fails
-// Agent construction. Managed execution reads nothing from it.
-func WithAmbientEnvironment(env map[string]string) Option {
-	return func(options *Options) {
-		options.AmbientEnvironment = cloneStringMap(env)
-	}
+// WithTracerProvider configures the OpenTelemetry tracer provider.
+func WithTracerProvider(provider trace.TracerProvider) Option {
+	return func(options *Options) { options.TracerProvider = provider }
 }
 
-// WithConcurrencyLimits sets process-local session and outbound client-call
-// limits. Zero fields use their defaults.
+// WithMeterProvider configures the OpenTelemetry meter provider.
+func WithMeterProvider(provider metric.MeterProvider) Option {
+	return func(options *Options) { options.MeterProvider = provider }
+}
+
+// WithTextMapPropagator configures trace-context extraction from ACP _meta.
+func WithTextMapPropagator(propagator propagation.TextMapPropagator) Option {
+	return func(options *Options) { options.TextMapPropagator = propagator }
+}
+
+// WithSessionStore configures the session store.
+func WithSessionStore(store acpcore.SessionStore) Option {
+	return func(options *Options) { options.SessionStore = store }
+}
+
+// WithConcurrencyLimits sets process-local backpressure limits.
 func WithConcurrencyLimits(limits ConcurrencyLimits) Option {
-	return func(options *Options) {
-		options.ConcurrencyLimits = limits
-	}
+	return func(options *Options) { options.ConcurrencyLimits = limits }
 }
 
-// WithImageLimits sets decoded image byte limits. Zero fields disable the
-// corresponding adapter policy limit.
+// WithImageLimits bounds decoded image bytes. A zero field disables that
+// policy limit; a negative field fails construction.
 func WithImageLimits(limits ImageLimits) Option {
 	return func(options *Options) {
 		options.ImageLimits = limits
+		options.imageLimitsSet = true
 	}
 }
 
-// WithSeedFiles registers files written into the session's resolved Claude
-// config directory before the Claude CLI launches. Keys are paths relative to
-// that directory and values are the file contents (e.g. settings.json). Paths
-// are confined to the config directory: absolute paths, ".." escapes, and
-// empty keys fail closed at session start.
+// WithSeedFiles registers files written into claude's config root before each
+// launch. Keys are paths relative to that root; values are the contents.
 func WithSeedFiles(files map[string]string) Option {
-	return func(options *Options) {
-		options.SeedFiles = cloneStringMap(files)
-	}
+	return func(options *Options) { options.SeedFiles = maps.Clone(files) }
+}
+
+// WithClaudeSettingSources selects user, project, and local native settings sources.
+func WithClaudeSettingSources(sources []string) Option {
+	return func(options *Options) { options.ClaudeSettingSources = slices.Clone(sources) }
+}
+
+// WithClaudeSettingsFile passes an additional native settings file.
+func WithClaudeSettingsFile(path string) Option {
+	return func(options *Options) { options.ClaudeSettingsFile = path }
 }

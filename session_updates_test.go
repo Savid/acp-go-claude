@@ -1,279 +1,89 @@
 package claudeacp
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"strings"
+	"encoding/base64"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/savid/acp-go-claude/internal/claude"
-	"github.com/savid/acp-go-claude/internal/mapper"
+
 	"github.com/stretchr/testify/require"
 )
 
-func TestSessionUpdateEmitAndInfoHelpers(t *testing.T) {
+func TestReplayKeepsFragmentsWithOneAPIMessageID(t *testing.T) {
 	t.Parallel()
-
 	agent := NewAgent()
-	session := &agentSession{agent: agent, id: "session-1", cwd: "/tmp/project", additionalDirectories: []string{"/tmp/extra"}}
-	require.NoError(t, session.emitUpdates(context.Background(), nil))
-	require.ErrorIs(t, session.emitUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}), errACPConnectionNotAttached)
-
-	conn := newRecordingAgentClient()
-	agent.setConnection(conn)
-	turnCtx := withTurnRoute(context.Background(), "turn-1")
-	require.NoError(t, session.emitUpdates(turnCtx, []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}))
-	require.Len(t, conn.Updates(), 1)
-	require.Equal(t, turnRouteMeta("turn-1"), conn.Updates()[0].Meta)
-	identityMeta := assistantIdentityNotificationMeta(context.Background(), "message-1")
-	identityClaudeMeta, ok := identityMeta[claudeMetaKey].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, "message-1", identityClaudeMeta["messageId"])
-
-	conn.sessionUpdateErr = errors.New("update failed")
-	require.ErrorContains(t, session.emitUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}), "update failed")
-	conn.sessionUpdateErr = nil
-
-	require.NoError(t, session.emitLiveSessionInfoUpdate(context.Background(), []acp.ContentBlock{acp.TextBlock("  hello   world  ")}))
-	info := session.sessionInfo(session.id)
-	require.Equal(t, "hello world", *info.Title)
-	require.Equal(t, "/tmp/project", info.Cwd)
-	info.AdditionalDirectories[0] = "changed"
-	require.Equal(t, "/tmp/extra", session.additionalDirectories[0])
-	require.Equal(t, "hello world", liveSessionTitleFromPrompt([]acp.ContentBlock{acp.TextBlock("hello world")}))
-	require.Equal(t, "", liveSessionTitleFromPrompt([]acp.ContentBlock{{}}))
-	require.Equal(t, "", normalizeLiveSessionTitle("   "))
-	require.True(t, strings.HasSuffix(normalizeLiveSessionTitle(strings.Repeat("x", liveSessionTitleMaxRunes+10)), "..."))
-
-	agent.closed = true
-	require.ErrorIs(t, session.emitUpdates(context.Background(), []acp.SessionUpdate{acp.UpdateAgentMessageText("x")}), errAgentClosed)
+	rec := newRecorder()
+	agent.attach(rec, nil)
+	session := agent.newSession(sessionStart{cwd: t.TempDir()})
+	session.id = "replay-session"
+	rows := make([][]byte, 0, 3)
+	rows = append(rows,
+		[]byte(`{"type":"assistant","uuid":"thought","message":{"id":"api-message","role":"assistant","content":[{"type":"thinking","thinking":"considering"}]}}`),
+		[]byte(`{"type":"assistant","uuid":"text","message":{"id":"api-message","role":"assistant","content":[{"type":"text","text":"answer"}]}}`),
+	)
+	rows = append(rows, rows[1])
+	require.NoError(t, session.replay(t.Context(), rows))
+	require.Equal(t, "answer", agentText(rec.snapshot()))
+}
+func TestPromptContentOrderAndDocuments(t *testing.T) {
+	t.Parallel()
+	agent := NewAgent()
+	session := agent.newSession(sessionStart{cwd: t.TempDir()})
+	mime := "application/pdf"
+	blocks := []acp.ContentBlock{acp.TextBlock("before"), {Resource: &acp.ContentBlockResource{Resource: acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{MimeType: &mime, Blob: base64.StdEncoding.EncodeToString([]byte("%PDF-"))}}}}, acp.TextBlock("after")}
+	prompt, err := session.mapPrompt(t.Context(), blocks)
+	require.NoError(t, err)
+	require.Len(t, prompt.content, 3)
+	require.Equal(t, "before", prompt.content[0].Text)
+	require.Equal(t, "document", prompt.content[1].Type)
+	require.Equal(t, mime, prompt.content[1].Source.MediaType)
+	require.Equal(t, "after", prompt.content[2].Text)
 }
 
-func TestAvailableCommandUpdateHelperBranches(t *testing.T) {
+func TestReplayRejectsInvalidImageBytes(t *testing.T) {
 	t.Parallel()
-
-	left := []acp.AvailableCommand{{
-		Name:        "help",
-		Description: "Help",
-		Input: &acp.AvailableCommandInput{
-			Unstructured: &acp.UnstructuredCommandInput{Hint: "[topic]"},
-		},
-	}}
-	require.True(t, availableCommandsEqual(left, cloneAvailableCommands(left)))
-	require.False(t, availableCommandsEqual(left, nil))
-	require.False(t, availableCommandsEqual(left, []acp.AvailableCommand{{Name: "other", Description: "Help"}}))
-	require.False(t, availableCommandsEqual(left, []acp.AvailableCommand{{Name: "help", Description: "Other"}}))
-	require.False(t, availableCommandsEqual(left, []acp.AvailableCommand{{
-		Name:        "help",
-		Description: "Help",
-		Input: &acp.AvailableCommandInput{
-			Unstructured: &acp.UnstructuredCommandInput{Hint: "[other]"},
-		},
-	}}))
-	require.Empty(t, availableCommandHint(acp.AvailableCommand{}))
-	require.Equal(t, "[topic]", availableCommandHint(left[0]))
-
 	agent := NewAgent()
-	conn := newRecordingAgentClient()
-	agent.setConnection(conn)
-	session := &agentSession{agent: agent, id: "session-1", availableCommands: []claude.SlashCommand{{Name: "help"}}}
-	require.NoError(t, session.emitAvailableCommandsUpdate(context.Background(), false))
-	require.NoError(t, session.emitAvailableCommandsUpdate(context.Background(), false))
-	require.Len(t, availableCommandUpdates(conn.Updates()), 1)
-
-	conn.sessionUpdateErr = errors.New("clear failed")
-	require.ErrorContains(t, session.emitClearAvailableCommandsUpdate(context.Background()), "clear failed")
+	agent.attach(newRecorder(), nil)
+	session := agent.newSession(sessionStart{cwd: t.TempDir()})
+	session.id = "replay-session"
+	rows := [][]byte{[]byte(`{"type":"assistant","uuid":"image","message":{"id":"api-image","role":"assistant","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"%%%"}}]}}`)}
+	err := session.replay(t.Context(), rows)
+	require.Equal(t, "claude_restore_failed", requestErrorData(t, err)["error"])
 }
 
-func TestPoisonBranches(t *testing.T) {
+func TestCommandCatalogFollowsRuntime(t *testing.T) {
 	t.Parallel()
-
-	ctx := context.Background()
-	cancelled := make(chan struct{})
-	agent := NewAgent()
-	conn := newRecordingAgentClient()
-	conn.sessionUpdateErr = errors.New("clear failed")
-	agent.setConnection(conn)
-	session := &agentSession{
-		agent:              agent,
-		id:                 "session-1",
-		cancel:             func() { close(cancelled) },
-		advertisedCommands: []acp.AvailableCommand{{Name: "help"}},
+	for _, commands := range []string{"native", "empty"} {
+		t.Run(commands, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, WithEnv(map[string]string{fakeClaudeEnv: "1", "ACP_GO_CLAUDE_TEST_COMMANDS": commands}))
+			h.initialize()
+			session := h.newSession()
+			h.rec.waitFor(t, func(updates []acp.SessionNotification) bool { return len(commandSnapshots(updates)) > 0 })
+			initial := commandSnapshots(h.rec.snapshot())[0]
+			if commands == "empty" {
+				require.Empty(t, initial)
+			} else {
+				require.Len(t, initial, 1)
+				require.Equal(t, "compact", initial[0].Name)
+			}
+			_, err := h.prompt(session.SessionId, "CRASH", nil)
+			require.Equal(t, "claude_turn_failed", requestErrorData(t, err)["error"])
+			_, err = h.prompt(session.SessionId, "HELLO", nil)
+			require.NoError(t, err)
+			catalogs := commandSnapshots(h.rec.snapshot())
+			require.Len(t, catalogs, 2)
+			require.Equal(t, initial, catalogs[len(catalogs)-1])
+		})
+	}
+}
+func commandSnapshots(updates []acp.SessionNotification) [][]acp.AvailableCommand {
+	var snapshots [][]acp.AvailableCommand
+	for _, update := range updates {
+		if commands := update.Update.AvailableCommandsUpdate; commands != nil {
+			snapshots = append(snapshots, commands.AvailableCommands)
+		}
 	}
 
-	err := session.poison(ctx, poisonCauseConversationReset)
-	requirePoisonedSession(t, err, poisonCauseConversationReset)
-	requirePoisonedSession(t, session.poisonedError(), poisonCauseConversationReset)
-	select {
-	case <-cancelled:
-	default:
-		t.Fatal("poison did not cancel active turn")
-	}
-
-	// The first cause is the session's cause for good: a later violation never
-	// rewrites what poisoned it.
-	err = session.poison(ctx, poisonCauseSessionIDDrift)
-	requirePoisonedSession(t, err, poisonCauseConversationReset)
-
-	nilAgent := &agentSession{id: "session-2"}
-	err = nilAgent.poison(ctx, poisonCauseSessionIDDrift)
-	requirePoisonedSession(t, err, poisonCauseSessionIDDrift)
-}
-
-func TestPoisonBeforeAdvertisementEmitsNoCommandUpdate(t *testing.T) {
-	t.Parallel()
-
-	agent := NewAgent()
-	conn := newRecordingAgentClient()
-	agent.setConnection(conn)
-	session := &agentSession{agent: agent, id: "session-1"}
-
-	err := session.poison(context.Background(), poisonCauseConversationReset)
-	requirePoisonedSession(t, err, poisonCauseConversationReset)
-	require.Empty(t, availableCommandUpdates(conn.Updates()))
-}
-
-func TestRawAndUsageUpdateHelpers(t *testing.T) {
-	t.Parallel()
-
-	agent := NewAgent()
-	session := &agentSession{agent: agent, id: "session-1", rawMessages: rawMessageConfig{All: true}}
-	require.Error(t, session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
-	conn := newRecordingAgentClient()
-	agent.setConnection(conn)
-	require.NoError(t, session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
-	require.Len(t, conn.Extensions(), 1)
-	require.Equal(t, RawEventMethod, conn.Extensions()[0].method)
-
-	// Raw delivery is optional: failure is observed, consumes no sequence, and a
-	// later raw event reuses that exact sequence.
-	conn.extensionErr = errors.New("extension failed")
-	require.NoError(t, session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
-	conn.extensionErr = nil
-	require.NoError(t, session.emitRawClaudeMessage(context.Background(), &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
-	require.Len(t, conn.Extensions(), 2)
-	var first, second map[string]any
-	require.NoError(t, json.Unmarshal(conn.Extensions()[0].params, &first))
-	require.NoError(t, json.Unmarshal(conn.Extensions()[1].params, &second))
-	firstSequence, firstOK := first[rawEventFieldSequence].(float64)
-	require.True(t, firstOK)
-	require.Equal(t, firstSequence+1, second[rawEventFieldSequence])
-	// Oversized events are emitted as a marker (consuming a sequence), never dropped.
-	before := len(conn.Extensions())
-	huge := &claude.SystemMessage{Raw: map[string]any{"type": "system", "data": strings.Repeat("x", rawEventMaxBytes)}}
-	require.NoError(t, session.emitRawClaudeMessage(context.Background(), huge))
-	require.Len(t, conn.Extensions(), before+1)
-
-	require.Equal(t, "", resultOriginKind(nil))
-	require.Equal(t, originKindTaskNotification, resultOriginKind(&claude.ResultMessage{Origin: map[string]any{"kind": originKindTaskNotification}}))
-
-	require.Nil(t, mergeUsage(nil, nil))
-	left := &acp.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3, CachedReadTokens: new(4)}
-	right := &acp.Usage{InputTokens: 10, OutputTokens: 20, TotalTokens: 30, CachedReadTokens: new(5), CachedWriteTokens: new(5), ThoughtTokens: new(6)}
-	merged := mergeUsage(left, right)
-	require.Equal(t, 11, merged.InputTokens)
-	require.Equal(t, 9, *merged.CachedReadTokens)
-	require.Equal(t, 5, *merged.CachedWriteTokens)
-	require.Equal(t, 6, *merged.ThoughtTokens)
-	cloned := cloneUsage(left)
-	cloned.InputTokens = 99
-	*cloned.CachedReadTokens = 99
-	require.Equal(t, 1, left.InputTokens)
-	require.Equal(t, 4, *left.CachedReadTokens)
-	require.Nil(t, cloneUsage(nil))
-	require.Nil(t, optionalIntSum(nil, nil))
-	require.Equal(t, 4, *optionalIntSum(new(4), nil))
-	require.Equal(t, 5, *optionalIntSum(nil, new(5)))
-}
-
-func TestSystemMessageSideEffects(t *testing.T) {
-	t.Parallel()
-
-	agent := NewAgent()
-	conn := newRecordingAgentClient()
-	agent.setConnection(conn)
-	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Url: &acp.ElicitationUrlCapabilities{}}
-	session := &agentSession{agent: agent, id: "session-1", contextWindowSize: 100}
-
-	require.NoError(t, session.emitMessageSideEffects(context.Background(), &claude.SystemMessage{Subtype: systemStatus, Raw: map[string]any{systemStatus: systemStatusCompacting}}))
-	require.NoError(t, session.emitMessageSideEffects(context.Background(), &claude.SystemMessage{Subtype: systemStatus, Raw: map[string]any{systemStatus: "idle"}}))
-	require.NoError(t, session.emitMessageSideEffects(context.Background(), &claude.SystemMessage{Subtype: systemSubtypeCompactBoundary, Raw: map[string]any{}}))
-	require.NoError(t, session.emitMessageSideEffects(context.Background(), &claude.SystemMessage{Subtype: systemSubtypeLocalCommandOutput, Raw: map[string]any{systemContent: "output"}}))
-	require.NoError(t, session.emitMessageSideEffects(context.Background(), &claude.SystemMessage{Subtype: systemSubtypeLocalCommandOutput, Raw: map[string]any{}}))
-	require.NoError(t, session.emitMessageSideEffects(context.Background(), &claude.SystemMessage{Subtype: elicitationComplete, Raw: map[string]any{"elicitation_id": "e1"}}))
-	require.Len(t, conn.Completions(), 1)
-	require.NoError(t, session.emitMessageSideEffects(context.Background(), &claude.AssistantMessage{}))
-	require.NoError(t, session.emitMessageSideEffects(context.Background(), &claude.SystemMessage{Subtype: "other", Raw: map[string]any{}}))
-}
-
-func TestSessionUpdateEdgeBranches(t *testing.T) {
-	ctx := context.Background()
-	agent := NewAgent()
-	session := &agentSession{agent: agent, id: "session-1", cwd: "/tmp/project", contextWindowSize: 100}
-
-	require.NoError(t, session.emitUpdates(ctx, nil))
-	info := session.sessionInfo("session-1")
-	require.Equal(t, "session-1", *info.Title)
-	session.rawMessages = rawMessageConfig{All: true}
-	agent.closed = true
-	require.Error(t, session.emitRawClaudeMessage(ctx, &claude.SystemMessage{Raw: map[string]any{"type": "system"}}))
-	agent.closed = false
-
-	cloned := cloneUsage(&acp.Usage{CachedWriteTokens: new(1), ThoughtTokens: new(2)})
-	*cloned.CachedWriteTokens = 3
-	*cloned.ThoughtTokens = 4
-	require.Equal(t, 1, *cloneUsage(&acp.Usage{CachedWriteTokens: new(1)}).CachedWriteTokens)
-
-	conn := newRecordingAgentClient()
-	agent.setConnection(conn)
-	require.NoError(t, session.replayTranscriptEntries(ctx, []SessionStoreEntry{
-		json.RawMessage(`{"type":"assistant","message":{"content":"done"}}`),
-	}))
-	require.NotEmpty(t, conn.Updates())
-
-	overCap := make([]SessionStoreEntry, 10001)
-	for index := range overCap {
-		overCap[index] = json.RawMessage(`{"type":"user","message":{"content":"hello"}}`)
-	}
-
-	require.NoError(t, session.replayTranscriptEntries(ctx, overCap))
-
-	agent.clientCapabilities.Elicitation = nil
-	require.NoError(t, session.emitElicitationComplete(ctx, &claude.SystemMessage{Raw: map[string]any{"elicitation_id": "e1"}}))
-	agent.clientCapabilities.Elicitation = &acp.ElicitationCapabilities{Url: &acp.ElicitationUrlCapabilities{}}
-	agent.setConnection(nil)
-	require.NoError(t, session.emitElicitationComplete(ctx, &claude.SystemMessage{Raw: map[string]any{"elicitation_id": "e1"}}))
-	agent.setConnection(conn)
-	require.NoError(t, session.emitElicitationComplete(ctx, &claude.SystemMessage{Raw: map[string]any{}}))
-
-	require.NoError(t, session.emitHookResponseUpdates(ctx, &claude.AssistantMessage{}, mapper.ToolUpdateOptions{}))
-	require.NoError(t, session.emitHookResponseUpdates(ctx, &claude.SystemMessage{Subtype: systemSubtypeHookResponse, Raw: map[string]any{systemHookEventName: "pre_tool_use"}}, mapper.ToolUpdateOptions{}))
-	require.NoError(t, session.emitHookResponseUpdates(ctx, &claude.SystemMessage{Subtype: systemSubtypeHookResponse, Raw: map[string]any{systemHookEventName: systemHookPostToolUse}}, mapper.ToolUpdateOptions{}))
-	session.markHookHandled("tool-1")
-	require.NoError(t, session.emitHookResponseUpdates(ctx, &claude.SystemMessage{Subtype: systemSubtypeHookResponse, Raw: map[string]any{systemHookEventName: systemHookPostToolUse, systemToolUseID: "tool-1"}}, mapper.ToolUpdateOptions{}))
-
-	conn.sessionUpdateErr = errors.New("hook update failed")
-	err := session.emitHookResponseUpdates(ctx, &claude.SystemMessage{Subtype: systemSubtypeHookResponse, Raw: map[string]any{
-		systemHookEventName: systemHookPostToolUse,
-		systemToolUseID:     "tool-2",
-		systemToolResponse: map[string]any{
-			"filePath": "/tmp/a.go",
-			"structuredPatch": []any{
-				map[string]any{"newStart": 1, "lines": []any{"-old", "+new"}},
-			},
-		},
-	}}, mapper.ToolUpdateOptions{ToolUses: map[string]claude.ToolUseBlock{"tool-2": {ID: "tool-2", Name: "Edit"}}})
-	require.ErrorContains(t, err, "hook update failed")
-}
-
-func TestSessionUpdateCloseAndPoisonEdges(t *testing.T) {
-	closing := &agentSession{agent: NewAgent(), closing: true}
-	require.Error(t, closing.emitAvailableCommandsUpdate(t.Context(), true))
-
-	cancelled := false
-	poisoned := &agentSession{cancel: func() { cancelled = true }}
-	require.Error(t, poisoned.poison(t.Context(), "native invariant"))
-	require.True(t, cancelled)
+	return snapshots
 }

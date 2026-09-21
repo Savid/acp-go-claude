@@ -1,0 +1,787 @@
+[
+  {
+    "type": "system",
+    "subtype": "init",
+    "cwd": "/workspace",
+    "session_id": "fixture-session",
+    "tools": [
+      "Task",
+      "Bash",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "DesignSync",
+      "Edit",
+      "EnterWorktree",
+      "ExitWorktree",
+      "ListAgents",
+      "ListMcpResourcesTool",
+      "LSP",
+      "Monitor",
+      "NotebookEdit",
+      "PushNotification",
+      "Read",
+      "ReadMcpResourceDirTool",
+      "ReadMcpResourceTool",
+      "RemoteTrigger",
+      "ReportFindings",
+      "ScheduleWakeup",
+      "SendMessage",
+      "Skill",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskStop",
+      "TaskUpdate",
+      "ToolSearch",
+      "WebFetch",
+      "WebSearch",
+      "Write",
+      "mcp__claude_ai_Claude_Docs__batch",
+      "mcp__claude_ai_Claude_Docs__create",
+      "mcp__claude_ai_Claude_Docs__delete",
+      "mcp__claude_ai_Claude_Docs__export",
+      "mcp__claude_ai_Claude_Docs__guide",
+      "mcp__claude_ai_Claude_Docs__query",
+      "mcp__claude_ai_Claude_Docs__read",
+      "mcp__claude_ai_Claude_Docs__update",
+      "mcp__ethpandaops-mcp__execute_python",
+      "mcp__ethpandaops-mcp__manage_session",
+      "mcp__ethpandaops-mcp__search",
+      "mcp__grafana-finance__create_folder",
+      "mcp__grafana-finance__generate_deeplink",
+      "mcp__grafana-finance__get_dashboard_by_uid",
+      "mcp__grafana-finance__get_dashboard_panel_queries",
+      "mcp__grafana-finance__get_dashboard_property",
+      "mcp__grafana-finance__get_dashboard_summary",
+      "mcp__grafana-finance__get_datasource_by_name",
+      "mcp__grafana-finance__get_datasource_by_uid",
+      "mcp__grafana-finance__list_datasources",
+      "mcp__grafana-finance__list_loki_label_names",
+      "mcp__grafana-finance__list_loki_label_values",
+      "mcp__grafana-finance__list_prometheus_label_names",
+      "mcp__grafana-finance__list_prometheus_label_values",
+      "mcp__grafana-finance__list_prometheus_metric_metadata",
+      "mcp__grafana-finance__list_prometheus_metric_names",
+      "mcp__grafana-finance__list_teams",
+      "mcp__grafana-finance__list_users_by_org",
+      "mcp__grafana-finance__query_loki_logs",
+      "mcp__grafana-finance__query_loki_stats",
+      "mcp__grafana-finance__query_prometheus",
+      "mcp__grafana-finance__search_dashboards",
+      "mcp__grafana-finance__search_folders",
+      "mcp__grafana-finance__update_dashboard",
+      "mcp__grafana-observability__create_folder",
+      "mcp__grafana-observability__generate_deeplink",
+      "mcp__grafana-observability__get_dashboard_by_uid",
+      "mcp__grafana-observability__get_dashboard_panel_queries",
+      "mcp__grafana-observability__get_dashboard_property",
+      "mcp__grafana-observability__get_dashboard_summary",
+      "mcp__grafana-observability__get_datasource_by_name",
+      "mcp__grafana-observability__get_datasource_by_uid",
+      "mcp__grafana-observability__list_datasources",
+      "mcp__grafana-observability__list_loki_label_names",
+      "mcp__grafana-observability__list_loki_label_values",
+      "mcp__grafana-observability__list_prometheus_label_names",
+      "mcp__grafana-observability__list_prometheus_label_values",
+      "mcp__grafana-observability__list_prometheus_metric_metadata",
+      "mcp__grafana-observability__list_prometheus_metric_names",
+      "mcp__grafana-observability__list_teams",
+      "mcp__grafana-observability__list_users_by_org",
+      "mcp__grafana-observability__query_loki_logs",
+      "mcp__grafana-observability__query_loki_stats",
+      "mcp__grafana-observability__query_prometheus",
+      "mcp__grafana-observability__search_dashboards",
+      "mcp__grafana-observability__search_folders",
+      "mcp__grafana-observability__update_dashboard",
+      "mcp__grafana-primary__create_alert_rule",
+      "mcp__grafana-primary__create_folder",
+      "mcp__grafana-primary__delete_alert_rule",
+      "mcp__grafana-primary__generate_deeplink",
+      "mcp__grafana-primary__get_alert_rule_by_uid",
+      "mcp__grafana-primary__get_dashboard_by_uid",
+      "mcp__grafana-primary__get_dashboard_panel_queries",
+      "mcp__grafana-primary__get_dashboard_property",
+      "mcp__grafana-primary__get_dashboard_summary",
+      "mcp__grafana-primary__get_datasource_by_name",
+      "mcp__grafana-primary__get_datasource_by_uid",
+      "mcp__grafana-primary__list_alert_rules",
+      "mcp__grafana-primary__list_contact_points",
+      "mcp__grafana-primary__list_datasources",
+      "mcp__grafana-primary__list_loki_label_names",
+      "mcp__grafana-primary__list_loki_label_values",
+      "mcp__grafana-primary__list_prometheus_label_names",
+      "mcp__grafana-primary__list_prometheus_label_values",
+      "mcp__grafana-primary__list_prometheus_metric_metadata",
+      "mcp__grafana-primary__list_prometheus_metric_names",
+      "mcp__grafana-primary__list_teams",
+      "mcp__grafana-primary__list_users_by_org",
+      "mcp__grafana-primary__query_loki_logs",
+      "mcp__grafana-primary__query_loki_stats",
+      "mcp__grafana-primary__query_prometheus",
+      "mcp__grafana-primary__search_dashboards",
+      "mcp__grafana-primary__search_folders",
+      "mcp__grafana-primary__update_alert_rule",
+      "mcp__grafana-primary__update_dashboard"
+    ],
+    "mcp_servers": [
+      {
+        "name": "ethpandaops-mcp",
+        "status": "connected",
+        "source": "user"
+      },
+      {
+        "name": "grafana-finance",
+        "status": "connected",
+        "source": "user"
+      },
+      {
+        "name": "grafana-primary",
+        "status": "connected",
+        "source": "user"
+      },
+      {
+        "name": "grafana-observability",
+        "status": "connected",
+        "source": "user"
+      },
+      {
+        "name": "grafana-local",
+        "status": "failed",
+        "source": "user"
+      },
+      {
+        "name": "claude.ai Claude Docs",
+        "status": "connected",
+        "source": "claudeai"
+      },
+      {
+        "name": "claude.ai Google Calendar",
+        "status": "needs-auth",
+        "source": "claudeai"
+      },
+      {
+        "name": "claude.ai Google Drive",
+        "status": "needs-auth",
+        "source": "claudeai"
+      },
+      {
+        "name": "claude.ai Gmail",
+        "status": "needs-auth",
+        "source": "claudeai"
+      }
+    ],
+    "model": "claude-haiku-4-5-20251001",
+    "permissionMode": "bypassPermissions",
+    "slash_commands": [
+      "eip",
+      "prd",
+      "ralph",
+      "typesafe:typesafe-ai",
+      "design",
+      "design-sync",
+      "dataviz",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "run",
+      "run-skill-generator",
+      "advisor",
+      "agents",
+      "auto-mode-setup",
+      "autocompact",
+      "clear",
+      "color",
+      "compact",
+      "config",
+      "output-style",
+      "context",
+      "effort",
+      "fast",
+      "heapdump",
+      "init",
+      "mcp",
+      "import",
+      "model",
+      "__remote-workflow",
+      "workflow-launch-exec",
+      "reload-plugins",
+      "reload-skills",
+      "rename",
+      "ultrareview",
+      "security-review",
+      "usage-credits",
+      "extra-usage",
+      "usage",
+      "insights",
+      "recap",
+      "skill-doctor",
+      "goal",
+      "design-consent",
+      "design-revoke",
+      "list-agents",
+      "team-onboarding",
+      "anthropic-skills:docs",
+      "anthropic-skills:docx",
+      "anthropic-skills:import-memory",
+      "anthropic-skills:morning",
+      "anthropic-skills:pdf",
+      "anthropic-skills:pptx",
+      "anthropic-skills:skill-creator",
+      "anthropic-skills:xlsx"
+    ],
+    "terminal_slash_commands": [
+      "doctor",
+      "color",
+      "reload-plugins"
+    ],
+    "apiKeySource": "none",
+    "claude_code_version": "2.1.278",
+    "output_style": "default",
+    "agents": [
+      "claude",
+      "Explore",
+      "general-purpose",
+      "Plan",
+      "statusline-setup"
+    ],
+    "skills": [
+      "eip",
+      "prd",
+      "ralph",
+      "typesafe:typesafe-ai",
+      "design",
+      "design-sync",
+      "dataviz",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "run",
+      "run-skill-generator",
+      "anthropic-skills:docs",
+      "anthropic-skills:docx",
+      "anthropic-skills:import-memory",
+      "anthropic-skills:morning",
+      "anthropic-skills:pdf",
+      "anthropic-skills:pptx",
+      "anthropic-skills:skill-creator",
+      "anthropic-skills:xlsx"
+    ],
+    "plugins": [
+      {
+        "name": "gopls-lsp",
+        "path": "/home/operator",
+        "source": "gopls-lsp@claude-plugins-official",
+        "version": "1.0.0"
+      },
+      {
+        "name": "rust-analyzer-lsp",
+        "path": "/home/operator",
+        "source": "rust-analyzer-lsp@claude-plugins-official",
+        "version": "1.0.0"
+      },
+      {
+        "name": "typescript-lsp",
+        "path": "/home/operator",
+        "source": "typescript-lsp@claude-plugins-official",
+        "version": "1.0.0"
+      },
+      {
+        "name": "pyright-lsp",
+        "path": "/home/operator",
+        "source": "pyright-lsp@claude-plugins-official",
+        "version": "1.0.0"
+      },
+      {
+        "name": "typesafe",
+        "path": "/home/operator",
+        "source": "typesafe@typesafe-ai",
+        "version": "0.5.7"
+      },
+      {
+        "name": "agents-md",
+        "path": "builtin",
+        "source": "agents-md@builtin"
+      }
+    ],
+    "capabilities": [
+      "interrupt_receipt_v1",
+      "interrupt_cancel_queued_v1",
+      "msg_lifecycle_v1"
+    ],
+    "analytics_disabled": false,
+    "product_feedback_disabled": false,
+    "uuid": "6c68aad0-2950-437c-9d13-0ac6b0d0135d",
+    "messaging_socket_path": "/run/user/1000/cc-socks/1663197.sock",
+    "fast_mode_state": "off",
+    "fast_mode_disabled_reason": "sdk_opt_in_required"
+  },
+  {
+    "type": "system",
+    "subtype": "status",
+    "status": "requesting",
+    "session_id": "fixture-session",
+    "uuid": "f6218666-e840-432b-8fe7-f89ef895a3b8"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "message_start",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CfE7zbtSB2RP8qyTWDQHM",
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "container": null,
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 480,
+          "cache_read_input_tokens": 21003,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 480
+          },
+          "output_tokens": 2,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "input_transformations": [],
+        "diagnostics": null,
+        "context_management": null
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "65f35b67-fa26-475a-a350-29ba56c488f7",
+    "ttft_ms": 964
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_start",
+      "index": 0,
+      "content_block": {
+        "type": "thinking",
+        "thinking": "",
+        "signature": ""
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "4de3b464-6cb1-4ebc-b80e-4435e5f4321e"
+  },
+  {
+    "type": "system",
+    "subtype": "thinking_tokens",
+    "estimated_tokens": 50,
+    "estimated_tokens_delta": 50,
+    "session_id": "fixture-session",
+    "uuid": "81b8c7a1-40f1-456b-a643-65c2a407d228"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {
+        "type": "thinking_delta",
+        "thinking": "",
+        "estimated_tokens": 50
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "573c2d29-b8f7-4f3a-80ca-b247d2687cd6"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {
+        "type": "thinking_delta",
+        "thinking": "",
+        "estimated_tokens": null
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "0ac19cd1-4709-4dd5-9d88-51ea61e49ebc"
+  },
+  {
+    "type": "system",
+    "subtype": "thinking_tokens",
+    "estimated_tokens": 185,
+    "estimated_tokens_delta": 135,
+    "session_id": "fixture-session",
+    "uuid": "4ad66558-d4cd-4f86-90fa-d341292c4678"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {
+        "type": "signature_delta",
+        "signature": "EtwFCrIBCBIYAipA7RvDyWaTT0V8Nv/TFe8kWdpS1QVuwVfYDF33F3JXnQVwWrS7XvPjtFUGJoGHfFFTo0IqqAp5Ll/hlPF0Xzo81zIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okYmFjN2U3MTEtZmU0Zi00N2FjLWE2NzQtMjAyNDQyMzMzYzFjchACA4oNgbHAXYUrY1XR/SmtiAEBqAHM173VBrABAhIMOsY3z+8mXH86igI6GgzCZU15Bp9/FbxxAzUiMGbwL5vb/Lx6L+cV/YgsNwj4900avgPyzBDuGkgXEoEe21rkvw+JjubNCNIUxpBF3SrWA1LjWYnyapQYTogwpks8b3LnMUkGMhjTGWfyFkJe04ACuN5b7rCmsg1rgwKoPxaCnoryo+SNClWma7n/+aSyz1g7KzEl6d9DmPVMSEG9rIOO8annbqObsVPkMrlJsDPtd5O98tOtHqmdBKn1GUjpfVB5uI1OdSgQmXx9D8+hbUofP9AfTQ8/5lAhvcIf1P7KWUrmghO7A5J+uhbQ9UXmHTrw90hjx7TB7OHm25nqX3LdK6z4l4VOiWrWijsPuSrFLAMDAiiffS3nZavt/u+Xcjz7CJktmUiNO3uWpmRl/aQa6oka5rjf9/av22dcB+QJaZfTE8u8U7edgYzbYfLLyKB1MAH1dhSRTMz35ZdgBxl3ztoxGx7Xt5VZIl2rTgS8wjqAdfMOQg0JBuSjO26YTP9bwYpVhiPLbYS+8vg0OB1lFvQUFUFwxUbMtMxCKL42Zzn4ZqNkc9YdSwmHxrhUCIPAUIz5V5rduR4bbEON4tWve9RVwPb0kdcQBTK426gAwygWcpaFshuak6zktm9FmSaLEf+JiMHbytKKZwL9P5/JkSnXv3LpAH/euBdzMGamMHOFFpXBdO/IT86bS0xthEDoz8YrYrrckP/rHB7NtRjDKIr8HOxcGAE="
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "7c4eb04a-2113-4bd4-a229-44b50a3570b3"
+  },
+  {
+    "type": "assistant",
+    "message": {
+      "model": "claude-haiku-4-5-20251001",
+      "id": "msg_011CfE7zbtSB2RP8qyTWDQHM",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "",
+          "signature": "EtwFCrIBCBIYAipA7RvDyWaTT0V8Nv/TFe8kWdpS1QVuwVfYDF33F3JXnQVwWrS7XvPjtFUGJoGHfFFTo0IqqAp5Ll/hlPF0Xzo81zIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okYmFjN2U3MTEtZmU0Zi00N2FjLWE2NzQtMjAyNDQyMzMzYzFjchACA4oNgbHAXYUrY1XR/SmtiAEBqAHM173VBrABAhIMOsY3z+8mXH86igI6GgzCZU15Bp9/FbxxAzUiMGbwL5vb/Lx6L+cV/YgsNwj4900avgPyzBDuGkgXEoEe21rkvw+JjubNCNIUxpBF3SrWA1LjWYnyapQYTogwpks8b3LnMUkGMhjTGWfyFkJe04ACuN5b7rCmsg1rgwKoPxaCnoryo+SNClWma7n/+aSyz1g7KzEl6d9DmPVMSEG9rIOO8annbqObsVPkMrlJsDPtd5O98tOtHqmdBKn1GUjpfVB5uI1OdSgQmXx9D8+hbUofP9AfTQ8/5lAhvcIf1P7KWUrmghO7A5J+uhbQ9UXmHTrw90hjx7TB7OHm25nqX3LdK6z4l4VOiWrWijsPuSrFLAMDAiiffS3nZavt/u+Xcjz7CJktmUiNO3uWpmRl/aQa6oka5rjf9/av22dcB+QJaZfTE8u8U7edgYzbYfLLyKB1MAH1dhSRTMz35ZdgBxl3ztoxGx7Xt5VZIl2rTgS8wjqAdfMOQg0JBuSjO26YTP9bwYpVhiPLbYS+8vg0OB1lFvQUFUFwxUbMtMxCKL42Zzn4ZqNkc9YdSwmHxrhUCIPAUIz5V5rduR4bbEON4tWve9RVwPb0kdcQBTK426gAwygWcpaFshuak6zktm9FmSaLEf+JiMHbytKKZwL9P5/JkSnXv3LpAH/euBdzMGamMHOFFpXBdO/IT86bS0xthEDoz8YrYrrckP/rHB7NtRjDKIr8HOxcGAE="
+        }
+      ],
+      "container": null,
+      "stop_reason": null,
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 10,
+        "cache_creation_input_tokens": 480,
+        "cache_read_input_tokens": 21003,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 480
+        },
+        "output_tokens": 2,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "input_transformations": [],
+      "diagnostics": null,
+      "context_management": null
+    },
+    "parent_tool_use_id": null,
+    "session_id": "fixture-session",
+    "uuid": "1f435f24-fa4c-4518-bd51-9d3f4c627d4e",
+    "timestamp": "2026-09-20T05:14:52.781Z",
+    "request_id": "req_011CfE7zbSPsYt6J8C6zpZcL"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_stop",
+      "index": 0
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "b331de5f-0a5d-4084-8109-02ac04191f30"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_start",
+      "index": 1,
+      "content_block": {
+        "type": "text",
+        "text": ""
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "b7a4ebe4-f6a5-403e-a54c-8eb6c585dda3"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_delta",
+      "index": 1,
+      "delta": {
+        "type": "text_delta",
+        "text": "The"
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "b97820a4-7515-4d72-b840-78f19ea1f18d"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_delta",
+      "index": 1,
+      "delta": {
+        "type": "text_delta",
+        "text": " background"
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "ff75ff28-af77-40ca-b7f6-cbf644499493"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_delta",
+      "index": 1,
+      "delta": {
+        "type": "text_delta",
+        "text": " agent has completed with"
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "d3e6778e-f9ee-4585-9125-4b839540e0ef"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_delta",
+      "index": 1,
+      "delta": {
+        "type": "text_delta",
+        "text": " the result"
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "9ce051cf-9c1c-4597-94be-bcad0ffc6f36"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_delta",
+      "index": 1,
+      "delta": {
+        "type": "text_delta",
+        "text": " \"ok\"."
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "1cd5300b-d8b9-4c0f-bb0c-cfe9187587e1"
+  },
+  {
+    "type": "assistant",
+    "message": {
+      "model": "claude-haiku-4-5-20251001",
+      "id": "msg_011CfE7zbtSB2RP8qyTWDQHM",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "The background agent has completed with the result \"ok\"."
+        }
+      ],
+      "container": null,
+      "stop_reason": null,
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 10,
+        "cache_creation_input_tokens": 480,
+        "cache_read_input_tokens": 21003,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 480
+        },
+        "output_tokens": 2,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "input_transformations": [],
+      "diagnostics": null,
+      "context_management": null
+    },
+    "parent_tool_use_id": null,
+    "session_id": "fixture-session",
+    "uuid": "d42442b9-fa18-4450-87c3-662cb7926d06",
+    "timestamp": "2026-09-20T05:14:52.879Z",
+    "request_id": "req_011CfE7zbSPsYt6J8C6zpZcL"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "content_block_stop",
+      "index": 1
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "536cf6e1-ecc6-454b-bfa2-2bea82ec1b18"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "message_delta",
+      "delta": {
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "stop_details": null,
+        "container": null
+      },
+      "usage": {
+        "input_tokens": 10,
+        "cache_creation_input_tokens": 480,
+        "cache_read_input_tokens": 21003,
+        "output_tokens": 112,
+        "output_tokens_details": {
+          "thinking_tokens": 95
+        },
+        "iterations": [
+          {
+            "input_tokens": 10,
+            "output_tokens": 112,
+            "cache_read_input_tokens": 21003,
+            "cache_creation_input_tokens": 480,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 480
+            },
+            "type": "message"
+          }
+        ]
+      },
+      "context_management": {
+        "applied_edits": []
+      }
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "70cdabaf-ab18-4c29-acf7-e3eb77595d99"
+  },
+  {
+    "type": "stream_event",
+    "event": {
+      "type": "message_stop"
+    },
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "uuid": "25a1f759-44fa-42fa-bc7d-0fe6cb0334b7"
+  },
+  {
+    "duration_api_ms": 11581,
+    "stop_reason": "end_turn",
+    "session_id": "fixture-session",
+    "total_cost_usd": 0.0330726,
+    "usage": {
+      "input_tokens": 10,
+      "cache_creation_input_tokens": 480,
+      "cache_read_input_tokens": 21003,
+      "output_tokens": 112,
+      "output_tokens_details": {
+        "thinking_tokens": 95
+      },
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 480,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 10,
+          "output_tokens": 112,
+          "cache_read_input_tokens": 21003,
+          "cache_creation_input_tokens": 480,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 480
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 38,
+        "outputTokens": 976,
+        "cacheReadInputTokens": 62351,
+        "cacheCreationInputTokens": 12591,
+        "webSearchRequests": 0,
+        "costUSD": 0.0330726,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000,
+        "thinkingTokens": 847,
+        "canonicalModel": "claude-haiku-4-5",
+        "provider": "firstParty",
+        "costBasis": "list"
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "fast_mode_disabled_reason": "sdk_opt_in_required",
+    "origin": {
+      "kind": "task-notification"
+    },
+    "subagent_stats": {
+      "spawned": 1,
+      "requested": {
+        "background": 1,
+        "foreground": 0,
+        "unset": 0
+      },
+      "started_in_background": 1,
+      "max_depth": 1,
+      "spawned_by_subagents": 0,
+      "completed": 1,
+      "failed": 0,
+      "killed": {
+        "parent": 0,
+        "user": 0,
+        "system": 0
+      },
+      "refused": {
+        "depth_limit": 0,
+        "concurrency_limit": 0,
+        "budget": 0
+      },
+      "by_type": {
+        "general-purpose": 1
+      }
+    },
+    "is_error": false,
+    "num_turns": 1,
+    "subtype": "success",
+    "api_error_status": null,
+    "result": "The background agent has completed with the result \"ok\".",
+    "ttft_ms": 1870,
+    "type": "result",
+    "duration_ms": 1983,
+    "uuid": "c3b976c9-a2c1-4514-9d82-42dde543b50f",
+    "ttft_stream_ms": 971,
+    "time_to_request_ms": 7,
+    "first_content_frame_ms": 971,
+    "queued_turn_count": 0,
+    "result_index": 1
+  }
+]

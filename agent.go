@@ -1,116 +1,90 @@
 package claudeacp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
+
 	"github.com/savid/acp-go-claude/internal/claude"
-	"github.com/savid/acp-go-claude/internal/lifecycle"
-	"github.com/savid/acp-go-claude/internal/observer"
+	acpcore "github.com/savid/acp-go-core"
+	"github.com/savid/acp-go-core/image"
+	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/observer"
+	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/usage/anthropic"
+	"github.com/savid/acp-go-core/usage/openaicodex"
+	"github.com/savid/acp-go-core/usage/opencodego"
+	"github.com/savid/acp-go-core/usage/openrouter"
+	"github.com/savid/acp-go-core/wire"
 )
 
 const (
-	ForkSessionMethod = "_claude/session/fork"
-	RawEventMethod    = "_claude/rawEvent"
-	metaElicitation   = "elicitation"
+	// RawEventMethod is the notification carrying one raw claude event when a
+	// session opted in through _meta.claude.rawEvent.enabled.
+	RawEventMethod = "_claude/rawEvent"
+	// AccountUsageMethod is the request reading the subscription allowance
+	// through one session's claude process.
+	AccountUsageMethod = "_claude/accountUsage"
+	// SessionStoreFormat identifies the store layout this package writes: raw
+	// claude session JSONL rows under the main subpath plus the adapter's session
+	// record under the config subpath.
+	SessionStoreFormat = "claude-transcript-jsonl-v1"
+
+	vendor = "claude"
+
+	capabilityMethodKey      = "method"
+	capabilityElicitationKey = "elicitation"
 )
 
-const (
-	modeDefault           acp.SessionModeId = "default"
-	modePlan              acp.SessionModeId = "plan"
-	modeAcceptEdits       acp.SessionModeId = "accept_edits"
-	modeBypassPermissions acp.SessionModeId = "bypass_permissions"
-	modeAuto              acp.SessionModeId = "auto"
-	modeDontAsk           acp.SessionModeId = "dont_ask"
+// client is the host side of the connection, as the sessions use it.
+type client interface {
+	SessionUpdate(ctx context.Context, params acp.SessionNotification) error
+	RequestPermission(ctx context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
+	UnstableCreateElicitation(ctx context.Context, params acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
+	NotifyExtension(ctx context.Context, method string, params any) error
+}
 
-	modeNameDefault = "Default"
-	modeNameAuto    = "Auto"
-	modeNameDontAsk = "Don't Ask"
-
-	permissionModeAcceptEdits       = "acceptEdits"
-	permissionModeBypassPermissions = "bypassPermissions"
-	permissionModeDontAsk           = "dontAsk"
-
-	configModel       acp.SessionConfigId = "model"
-	configMode        acp.SessionConfigId = "mode"
-	configOutputStyle acp.SessionConfigId = "output_style"
-	configEffort      acp.SessionConfigId = "effort"
-
-	configTypeSelect = "select"
-	effortLow        = "low"
-	effortMedium     = "medium"
-	effortHigh       = "high"
-	effortXHigh      = "xhigh"
-	effortMax        = "max"
-
-	clientMetaTerminalOutput = "terminal_output"
-	permissionPromptTool     = "stdio"
-	valRequired              = "required"
-	valUnsupported           = "unsupported"
-	valDuplicate             = "duplicate"
-
-	// valMissing is the distinct verdict for a reserved key the contract
-	// requires and the caller left out. It is never collapsed into
-	// valUnsupported: `unsupported` names a value that is present and
-	// refused, `missing` names one the caller owed and did not send, and a host
-	// fixes its own request from the difference.
-	valMissing = "missing"
-
-	listSessionsPageSize = 50
-)
-
-var osGeteuid = os.Geteuid
-var newServeAgent = NewAgent
-
-// Agent exposes Claude Code through ACP.
+// Agent exposes the claude coding agent through ACP.
 type Agent struct {
-	options Options
-	log     *slog.Logger
-	observe *observer.Observer
-	// ordinaryEnv is the one-time sanitized ambient capture ordinary native
-	// launches run with when no host authority was configured.
-	ordinaryEnv map[string]string
+	quota *claude.QuotaCache
+	// usageTransport carries shared provider usage reads; nil uses the default.
+	usageTransport http.RoundTripper
+	options        Options
+	log            *slog.Logger
+	observe        *observer.Observer
+	optionErr      *acp.RequestError
+	// processEnv is the adapter's own environment, read once at construction.
+	processEnv []string
+	store      acpcore.SessionStore
 
-	// Lock order: acquire mu before docsMu when both are needed. Do not call
-	// session or bridge close methods while holding either lock.
-	mu                  sync.Mutex
-	closed              bool
-	conn                agentClient
-	sessions            map[acp.SessionId]*agentSession
-	store               SessionStore
-	deleted             map[acp.SessionId]struct{}
-	clientCalls         chan struct{}
-	clientCapabilities  acp.ClientCapabilities
-	positionEncoding    acp.PositionEncodingKind
-	lifecycle           lifecycle.Negotiated
-	lifecycleCarrier    *bool
-	permissionCache     map[acp.SessionId]map[string]string
-	activeLimitField    string
-	configurationErr    error
-	containmentErr      error
-	authorityFanoutDone chan struct{}
-	lifecycleFlights    map[acp.SessionId]*sessionLifecycleFlight
-	lifecycleCancels    map[uint64]context.CancelCauseFunc
-	lifecycleNext       uint64
-	lifecycleOps        sync.WaitGroup
-	constructions       sync.WaitGroup
-	closeOnce           sync.Once
-	closeErr            error
-
-	rateLimitsEpoch uint64
-	modelCatalog    modelCatalogService
-	providerAuth    *providerAuth
-	managedImages   *managedImageRoots
-
-	newClaudeClient func(*slog.Logger, claude.Options) *claude.Client
-	queryRateLimits func(context.Context, *claude.Client) (claude.RateLimits, error)
+	mu                 sync.Mutex
+	conn               client
+	transport          *wire.Transport
+	closed             bool
+	clientCapabilities acp.ClientCapabilities
+	// lifecycle is the answer this connection gave at initialize. An absent
+	// answer leaves the extension dormant for every session on it.
+	lifecycle lifecycle.Negotiated
+	restores  wire.SessionRequests
+	sessions  map[acp.SessionId]*session
+	deleted   map[acp.SessionId]bool
+	// ephemeral holds the ids the host opened as ephemeral, kept past close so
+	// their delete never touches the store.
+	ephemeral    map[acp.SessionId]bool
+	clientCalls  chan struct{}
+	incarnations uint64
 }
 
 var (
@@ -119,7 +93,9 @@ var (
 	_ acp.ExtensionMethodHandler = (*Agent)(nil)
 )
 
-// NewAgent creates an ACP agent for Claude Code.
+// NewAgent creates an ACP agent for the claude coding agent CLI. Construction
+// never fails; a refused option is reported by Initialize and every
+// session-establishing method as claude_invalid_options.
 func NewAgent(opts ...Option) *Agent {
 	options := applyOptions(opts)
 
@@ -128,76 +104,109 @@ func NewAgent(opts ...Option) *Agent {
 		log = slog.Default()
 	}
 
-	observe := observer.New(observer.Config{MeterProvider: options.MeterProvider, Propagator: options.TextMapPropagator, TracerProvider: options.TracerProvider, Version: options.AgentVersion})
+	store := options.SessionStore
+	if store == nil {
+		store = acpcore.NewInMemorySessionStore()
+	}
+
 	agent := &Agent{
-		options:          options,
-		log:              log,
-		observe:          observe,
-		ordinaryEnv:      captureOrdinaryEnvironment(options),
-		modelCatalog:     claude.NewModelCatalogCache(),
-		sessions:         make(map[acp.SessionId]*agentSession),
-		store:            NewInMemorySessionStore(),
-		deleted:          make(map[acp.SessionId]struct{}),
-		positionEncoding: acp.PositionEncodingKindUtf16,
-		permissionCache:  make(map[acp.SessionId]map[string]string),
-		lifecycleFlights: make(map[acp.SessionId]*sessionLifecycleFlight),
-		lifecycleCancels: make(map[uint64]context.CancelCauseFunc),
-		activeLimitField: refusedConcurrencyLimit(options.ConcurrencyLimits),
-		configurationErr: errors.Join(
-			validateHostAuthorityOptions(options),
-			validateImageLimits(options.ImageLimits),
-			validateInputHandoffRoot(options.InputHandoffRoot),
-			validateProviderAuthRoot(options),
-			validateProviderAuthDirectHome(options.ProviderAuthDirectHome),
-			validateAmbientEnvironment(options.AmbientEnvironment),
-			validateConfiguredModels(options.ConfiguredModels),
-		),
-		newClaudeClient: func(log *slog.Logger, options claude.Options) *claude.Client {
-			return claude.NewClient(log, options, nil)
-		},
-		queryRateLimits: func(ctx context.Context, client *claude.Client) (claude.RateLimits, error) {
-			if client == nil {
-				return claude.RateLimits{}, claude.ErrClientNotStarted
-			}
-
-			return client.ReadRateLimitsWithFallback(ctx, options.DirectAPI)
-		},
+		options: options,
+		quota:   claude.NewQuotaCache(),
+		log:     log,
+		observe: observer.New(observer.Config{
+			Vendor: vendor, NativeClient: "claude-code",
+			MeterProvider:  options.MeterProvider,
+			Propagator:     options.TextMapPropagator,
+			TracerProvider: options.TracerProvider,
+			Version:        options.AgentVersion,
+		}),
+		processEnv:  os.Environ(),
+		store:       store,
+		sessions:    make(map[acp.SessionId]*session),
+		deleted:     make(map[acp.SessionId]bool),
+		ephemeral:   make(map[acp.SessionId]bool),
+		clientCalls: make(chan struct{}, max(0, options.ConcurrencyLimits.MaxConcurrentClientCalls)),
 	}
-
-	// A configured root is validated before it is advertised: a leg that cannot
-	// record what it does must not be offered.
-	if agent.configurationErr == nil {
-		if options.hostAuthoritySet {
-			agent.managedImages = &managedImageRoots{
-				domainPaths: managedImageDomains(options),
-				handoff:     options.InputHandoffRoot,
-			}
-			agent.options.HostAuthority = &managedImageAuthority{HostAuthority: options.HostAuthority, images: agent.managedImages}
-		}
-
-		agent.providerAuth = newProviderAuth(agent)
-	}
+	agent.optionErr = agent.validateOptions()
 
 	return agent
 }
 
-// Serve runs an ACP agent over the provided streams.
-func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (serveErr error) {
+// validateOptions reports the first refused option. The reason goes to the
+// log; the wire answer names only the option.
+func (a *Agent) validateOptions() *acp.RequestError {
+	options := a.options
+
+	checks := []struct {
+		field string
+		err   error
+	}{
+		{"home", process.ValidateOptionalAbsolutePath(options.Home)},
+		{"scratchDir", process.ValidateOptionalAbsolutePath(options.ScratchDir)},
+		{"inputHandoffRoot", image.ValidateHandoffRoot(options.InputHandoffRoot)},
+		{"configuredModels", validateConfiguredModels(options.ConfiguredModels)},
+		{metaEnvKey, process.ValidateNames(options.Env)},
+		{"concurrencyLimits", wire.ValidateConcurrencyLimits(options.ConcurrencyLimits.MaxActiveSessions, options.ConcurrencyLimits.MaxConcurrentClientCalls)},
+		{"imageLimits", options.ImageLimits.core().Validate()},
+	}
+
+	for _, check := range checks {
+		if check.err == nil {
+			continue
+		}
+
+		a.log.Error("claude agent option rejected", slog.String("field", check.field), slog.String("reason", check.err.Error()))
+
+		return wire.InvalidOptions(vendor, check.field)
+	}
+
+	return nil
+}
+
+func validateConfiguredModels(ids []string) error {
+	seen := make(map[string]struct{}, len(ids))
+
+	for index, id := range ids {
+		if id == "" || id != strings.TrimSpace(id) {
+			return fmt.Errorf("configured model %d %q is not a model id", index, id)
+		}
+
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("configured model %q is listed twice", id)
+		}
+
+		seen[id] = struct{}{}
+	}
+
+	return nil
+}
+
+// Serve runs an ACP agent over the provided streams. It blocks until the
+// context is cancelled or the peer closes the connection, then closes the
+// agent.
+func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Option) (returnErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	agent := newServeAgent(opts...)
+	return NewAgent(opts...).serve(ctx, input, output)
+}
+
+// serve binds the agent to one host connection until the host or ctx ends it.
+func (a *Agent) serve(ctx context.Context, input io.Reader, output io.Writer) (returnErr error) {
 	defer func() {
-		if closeErr := agent.Close(); closeErr != nil {
-			agent.log.DebugContext(context.Background(), "close Claude ACP agent failed",
-				slog.String("class", safeErrorClass(closeErr)))
-			serveErr = closeErr
+		if closeErr := a.Close(); closeErr != nil {
+			returnErr = closeErr
 		}
 	}()
 
-	conn := newLocalAgentConnection(agent, output, input)
-	agent.setConnection(conn)
+	transport := wire.NewTransport(input, output)
+	defer transport.Close()
+
+	conn := acp.NewAgentSideConnection(a, transport.Writer(), transport.Reader())
+	conn.SetLogger(a.log)
+	a.attach(conn, transport)
+	transport.Start()
 
 	select {
 	case <-ctx.Done():
@@ -207,231 +216,61 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, opts ...Optio
 	}
 }
 
-// Close cancels and closes all resources owned by the agent.
-func (a *Agent) Close() error {
-	a.closeOnce.Do(func() {
-		a.closeErr = a.close()
-		if a.managedImages != nil {
-			a.managedImages.close()
-		}
-	})
-
-	return a.closeErr
-}
-
-func (a *Agent) close() error {
-	a.mu.Lock()
-	a.closed = true
-
-	lifecycleCancels := make([]context.CancelCauseFunc, 0, len(a.lifecycleCancels))
-	for _, cancel := range a.lifecycleCancels {
-		lifecycleCancels = append(lifecycleCancels, cancel)
-	}
-	a.mu.Unlock()
-
-	for _, cancel := range lifecycleCancels {
-		cancel(acp.NewInvalidRequest(map[string]any{jsonFieldError: errAgentClosed.Error()}))
-	}
-
-	if a.modelCatalog != nil {
-		a.modelCatalog.Close()
-	}
-
-	connectionErr := a.interruptActiveHostWrite()
-
-	a.lifecycleOps.Wait()
-	a.constructions.Wait()
-
-	a.mu.Lock()
-	connection := a.conn
-	a.mu.Unlock()
-
-	if local, ok := connection.(*localAgentConnection); ok {
-		local.hooks.cancelPending()
-	}
-
-	a.mu.Lock()
-
-	sessions := make([]*agentSession, 0, len(a.sessions))
-	for _, session := range a.sessions {
-		sessions = append(sessions, session)
-	}
-
-	a.sessions = make(map[acp.SessionId]*agentSession)
-	a.permissionCache = make(map[acp.SessionId]map[string]string)
-	a.deleted = make(map[acp.SessionId]struct{})
-	a.mu.Unlock()
-
-	if a.providerAuth != nil {
-		a.providerAuth.fenceLogins()
-	}
-
-	if len(sessions) > 0 {
-		a.observe.AddActiveSession(context.Background(), -int64(len(sessions)))
-	}
-
-	// Each session's close waits, bounded, for its own in-flight turn. Closing
-	// them one after another would make agent shutdown take that bound once per
-	// session, so every session serves its wait at the same time.
-	closeErrs := make([]error, len(sessions))
-
-	var closes sync.WaitGroup
-
-	for index, session := range sessions {
-		closes.Go(func() {
-			defer recoverAgentGoroutine(context.Background(), a.log, "session close")
-
-			closeErrs[index] = session.Close(context.Background())
-		})
-	}
-
-	closes.Wait()
-
-	var authCleanupErr error
-	if a.providerAuth != nil {
-		authCleanupErr = a.providerAuth.retryRetainedLogins()
-	}
-
-	for index, closeErr := range closeErrs {
-		if errors.Is(closeErr, ErrNativeTreeBusy) {
-			closeErrs[index] = sessions[index].Close(context.Background())
-		}
-	}
-
-	// A first managed authority failure starts detached per-session teardown so
-	// the session that reported it never waits on its own locks. Agent shutdown
-	// joins that work before returning, keeping every owned goroutine and cleanup
-	// rung inside the Agent lifetime.
-	a.mu.Lock()
-	authorityFanoutDone := a.authorityFanoutDone
-	a.mu.Unlock()
-
-	if authorityFanoutDone != nil {
-		<-authorityFanoutDone
-	}
-
-	// The connection outlives the close ladders that run on it. Each session's
-	// close is the containment-proving boundary, and the terminal actions, the
-	// terminal idle and the quiescence fact it proves are the last thing this
-	// agent owes the host: discarding the carrier first would leave every one of
-	// them undeliverable, and a shutdown that closed cleanly would report the
-	// adapter's own missing connection as a lifecycle violation.
-	a.mu.Lock()
-	conn := a.conn
-	a.conn = nil
-	containmentErr := a.containmentErr
-	a.mu.Unlock()
-
-	if local, ok := conn.(*localAgentConnection); ok {
-		connectionErr = errors.Join(connectionErr, local.hooks.closeWrites())
-	}
-
-	return errors.Join(errors.Join(closeErrs...), authCleanupErr, containmentErr, connectionErr)
-}
-
-func (a *Agent) beginSessionConstruction() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.closed {
-		return errAgentClosed
-	}
-
-	if a.containmentErr != nil {
-		return a.containmentErr
-	}
-
-	a.constructions.Add(1)
-
-	return nil
-}
-
-func (a *Agent) endSessionConstruction() {
-	a.constructions.Done()
-}
-
-func (a *Agent) recordContainmentError(err error) {
-	if !errors.Is(err, ErrContainmentIncomplete) && !errors.Is(err, ErrHostAuthorityUnavailable) {
-		return
-	}
-
-	a.mu.Lock()
-	if a.containmentErr == nil {
-		a.containmentErr = err
-	}
-
-	if !a.options.hostAuthoritySet || a.authorityFanoutDone != nil {
-		a.mu.Unlock()
-
-		return
-	}
-
-	sessions := make(map[acp.SessionId]*agentSession, len(a.sessions))
-	maps.Copy(sessions, a.sessions)
-
-	done := make(chan struct{})
-	a.authorityFanoutDone = done
-	a.mu.Unlock()
-
-	go a.closeAuthorityFailedSessions(sessions, done)
-}
-
-func (a *Agent) closeAuthorityFailedSessions(sessions map[acp.SessionId]*agentSession, done chan struct{}) {
-	defer close(done)
-
-	// The reporting stack may own one session's lock. Do not touch any session
-	// until this detached fanout is running independently of that stack.
-	for _, session := range sessions {
-		session.fenceAuthorityFailure()
-	}
-
-	var closes sync.WaitGroup
-	for id, session := range sessions {
-		closes.Go(func() {
-			defer recoverAgentGoroutine(context.Background(), a.log, "authority-loss session close")
-
-			closeErr := session.Close(context.Background())
-			if closeErr != nil {
-				a.log.DebugContext(context.Background(), "close authority-failed Claude session failed",
-					slog.String("class", safeErrorClass(closeErr)))
-			}
-
-			if !errors.Is(closeErr, errSessionCloseUnsettled) {
-				a.dropSession(context.Background(), id, session)
-			}
-		})
-	}
-
-	closes.Wait()
-}
-
-func (a *Agent) setConnection(conn agentClient) {
+// attach binds the host connection the sessions emit through.
+func (a *Agent) attach(conn client, transport *wire.Transport) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	a.conn = conn
+	a.transport = transport
 }
 
-func (a *Agent) setLifecycleCarrier(interruptible bool) {
-	a.mu.Lock()
-	a.lifecycleCarrier = &interruptible
-	a.mu.Unlock()
-}
-
-func (a *Agent) lifecycleCarrierSupported() bool {
+func (a *Agent) connection() client {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	return a.lifecycleCarrier == nil || *a.lifecycleCarrier
+	return a.conn
 }
 
-func (a *Agent) interruptActiveHostWrite() error {
+// Close runs the shutdown ladder for every session and refuses every later
+// request.
+func (a *Agent) Close() error {
 	a.mu.Lock()
-	conn := a.conn
+	if a.closed {
+		a.mu.Unlock()
+
+		return nil
+	}
+
+	a.closed = true
+	sessions := slices.Collect(maps.Values(a.sessions))
 	a.mu.Unlock()
 
-	if local, ok := conn.(*localAgentConnection); ok {
-		return local.hooks.interruptActiveWrite()
+	var errs []error
+
+	// The ladder's terminal events still need the connection, so it is cleared
+	// only once every session has run its own shutdown.
+	for _, s := range sessions {
+		if err := s.close(context.Background()); err != nil {
+			errs = append(errs, err)
+		}
+
+		a.detach(context.Background(), s)
+	}
+
+	a.mu.Lock()
+	a.conn = nil
+	a.mu.Unlock()
+
+	return errors.Join(errs...)
+}
+
+func (a *Agent) ensureOpen() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.closed {
+		return wire.AgentClosed()
 	}
 
 	return nil
@@ -439,29 +278,66 @@ func (a *Agent) interruptActiveHostWrite() error {
 
 // Initialize implements ACP initialize.
 func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (resp acp.InitializeResponse, err error) {
-	_, finish := a.observe.StartACP(ctx, params.Meta, "initialize")
-	defer func() { finish(observer.ACPResult{Err: err}) }()
-
-	if configurationErr := a.configurationError(); configurationErr != nil {
-		return acp.InitializeResponse{}, configurationErr
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.InitializeResponse{}, openErr
 	}
 
-	lifecycleMeta, err := a.negotiateLifecycle(params.Meta)
-	if err != nil {
-		return acp.InitializeResponse{}, err
+	_, finish := a.observe.StartACP(ctx, params.Meta, acp.AgentMethodInitialize)
+	defer func() { finish(err) }()
+
+	if a.optionErr != nil {
+		return acp.InitializeResponse{}, a.optionErr
 	}
 
-	title := a.options.AgentTitle
-	positionEncoding := selectPositionEncoding(params.ClientCapabilities.PositionEncodings)
+	meta := params.Meta
+	if t := a.transportRef(); t != nil {
+		meta = lifecycle.RetainRequestMetadata(meta, t.TakeRaw(acp.AgentMethodInitialize))
+	}
+
+	present, paramErr := lifecycle.DecodeOffer(meta)
+	if paramErr != nil {
+		return acp.InitializeResponse{}, wire.ParamRefusal(paramErr)
+	}
+
+	var negotiated lifecycle.Negotiated
+	if present {
+		negotiated = lifecycle.Answer(lifecycle.Negotiated{UpdatesOutsidePrompt: true, ActivityKinds: []lifecycle.ActivityKind{}})
+	}
+
+	encoding := wire.SelectPositionEncoding(params.ClientCapabilities.PositionEncodings)
 
 	a.mu.Lock()
 	a.clientCapabilities = params.ClientCapabilities
-	a.positionEncoding = positionEncoding
+	a.lifecycle = negotiated
 	a.mu.Unlock()
 
-	resp = acp.InitializeResponse{
+	title := a.options.AgentTitle
+
+	capabilityMeta := map[string]any{
+		vendor: map[string]any{
+			capabilityElicitationKey: map[string]any{"unstable": true, "scope": string(wire.AccountUsageScopeSession), "tracks": "ACP v1 elicitation"},
+			metaRawEventKey: map[string]any{
+				capabilityMethodKey: RawEventMethod, "enabledBy": "_meta.claude.rawEvent.enabled",
+				"maxBytes": wire.RawEventMaxBytes, "defaultEnabled": false,
+			},
+			wire.AccountUsageCapabilityKey: wire.AccountUsageAdvertisement(AccountUsageMethod, wire.AccountUsageScopeSession, anthropic.ProviderID, openaicodex.ProviderID, opencodego.ProviderID, openrouter.ProviderID),
+			metaStructuredOutputKey:        wire.StructuredOutputAdvertisement(vendor),
+			"sessionStore":                 map[string]any{"format": SessionStoreFormat, "key": []string{"sessionId", "subpath"}},
+		},
+		wire.MediaEnvelopeKey: image.MediaEnvelope(a.options.ImageLimits.core(), image.Envelope{DocumentFormats: []string{mimePDF}}),
+	}
+	if a.options.InputHandoffRoot != "" {
+		capabilityMeta[wire.HandoffKey] = image.HandoffAdvertisement()
+	}
+
+	var responseMeta map[string]any
+	if negotiated.Present() {
+		responseMeta = map[string]any{wire.LifecycleKey: negotiated.Advertisement()}
+	}
+
+	return acp.InitializeResponse{
+		Meta:            responseMeta,
 		ProtocolVersion: acp.ProtocolVersionNumber,
-		Meta:            lifecycleMeta,
 		AgentInfo: &acp.Implementation{
 			Name:    a.options.AgentName,
 			Title:   &title,
@@ -469,12 +345,9 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 		},
 		AuthMethods: []acp.AuthMethod{},
 		AgentCapabilities: acp.AgentCapabilities{
-			Meta:        a.capabilityMeta(),
-			LoadSession: true,
-			McpCapabilities: acp.McpCapabilities{
-				Http: true,
-			},
-			PositionEncoding: &positionEncoding,
+			Meta:             capabilityMeta,
+			LoadSession:      true,
+			PositionEncoding: &encoding,
 			PromptCapabilities: acp.PromptCapabilities{
 				EmbeddedContext: true,
 				Image:           true,
@@ -487,125 +360,158 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (r
 				AdditionalDirectories: &acp.SessionAdditionalDirectoriesCapabilities{},
 			},
 		},
-	}
-
-	return resp, nil
+	}, nil
 }
 
-// capabilityMeta builds the advertised capability metadata: the reserved
-// family literals beside the Claude namespace descriptors. The handoff literal
-// is present only when a handoff read root is configured, so its absence tells
-// a host its option never reached this adapter.
-func (a *Agent) capabilityMeta() map[string]any {
-	meta := map[string]any{
-		routeMetaKey:         map[string]any{metaVersionKey: routeVersion},
-		mediaEnvelopeMetaKey: mediaEnvelope(a.options.ImageLimits),
-		claudeMetaKey: map[string]any{
-			"fork": map[string]any{
-				"unstable":        true,
-				jsonFieldMethod:   ForkSessionMethod,
-				jsonFieldRequest:  "acp.UnstableForkSessionRequest JSON payload only",
-				jsonFieldResponse: "acp.UnstableForkSessionResponse JSON payload only",
-			},
-			metaElicitation: map[string]any{
-				"unstable": true,
-				"scope":    sessionCapabilityScope,
-				"tracks":   "ACP v1 elicitation",
-			},
-			"rawEvent": map[string]any{
-				jsonFieldMethod:  RawEventMethod,
-				"enabledBy":      "_meta.claude.rawEvent.enabled",
-				"maxBytes":       rawEventMaxBytes,
-				"defaultEnabled": false,
-			},
-			"sessionStore": map[string]any{
-				"format":     SessionStoreFormat,
-				jsonFieldKey: []string{acpFieldSessionID, "subpath"},
-			},
-			"structuredOutput": map[string]any{
-				acpFieldConfig:  "_meta.claude.options.outputSchema",
-				jsonFieldResult: "_meta.claude.structuredOutput",
-				"schema":        "json_schema",
-			},
-		},
+// Authenticate exists because the SDK interface requires it. The harness
+// authenticates itself in its own home, outside ACP.
+func (a *Agent) Authenticate(_ context.Context, params acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.AuthenticateResponse{}, openErr
 	}
 
-	if a.options.InputHandoffRoot != "" {
-		meta[handoffMetaKey] = map[string]any{metaVersionKey: handoffVersion}
-	}
-
-	// The methods array is the host's only discovery surface for which legs
-	// exist, so it is present only when the surface is, and it lists exactly
-	// the enabled names. There is no injection key: Claude brokers no
-	// credential back out and accepts none in.
-	if a.providerAuth != nil {
-		vendor, _ := meta[claudeMetaKey].(map[string]any)
-		vendor[providerAuthCapabilityKey] = a.providerAuth.capability()
-	}
-
-	return meta
-}
-
-// Authenticate rejects agent-handled auth methods because Claude owns auth.
-func (a *Agent) Authenticate(ctx context.Context, params acp.AuthenticateRequest) (resp acp.AuthenticateResponse, err error) {
-	_, finish := a.observe.StartACP(ctx, params.Meta, "authenticate")
-	defer func() { finish(observer.ACPResult{Err: err}) }()
-
-	if err := rejectLifecycleMeta(params.Meta); err != nil {
-		return acp.AuthenticateResponse{}, err
+	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
+		return acp.AuthenticateResponse{}, wire.ParamRefusal(refusal)
 	}
 
 	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
 }
 
-// HandleExtensionMethod handles Claude-specific ACP extension methods. A
-// closed agent rejects every extension call up front (-32600), before method
-// dispatch and before any parameter validation.
+// Logout exists because the SDK interface requires it.
+func (a *Agent) Logout(_ context.Context, params acp.LogoutRequest) (acp.LogoutResponse, error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.LogoutResponse{}, openErr
+	}
+
+	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
+		return acp.LogoutResponse{}, wire.ParamRefusal(refusal)
+	}
+
+	return acp.LogoutResponse{}, acp.NewMethodNotFound(acp.AgentMethodLogout)
+}
+
+// SetSessionMode exists because the SDK interface requires it. Native modes
+// are config options, never ACP session modes.
+func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+	if openErr := a.ensureOpen(); openErr != nil {
+		return acp.SetSessionModeResponse{}, openErr
+	}
+
+	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
+		return acp.SetSessionModeResponse{}, wire.ParamRefusal(refusal)
+	}
+
+	return acp.SetSessionModeResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionSetMode)
+}
+
+// HandleExtensionMethod serves the account-usage read; every other extension
+// method is method-not-found.
 func (a *Agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
-	if err := a.ensureOpen(); err != nil {
-		return nil, err
+	if openErr := a.ensureOpen(); openErr != nil {
+		return nil, openErr
 	}
 
-	// The reserved lifecycle key is refused here, at the dispatch boundary and
-	// before any leg's own closed-member validation, so every extension surface
-	// names the exact family path rather than the `_meta` object its own decoder
-	// happens to reject first. No side effect of any leg runs behind it.
-	if err := rejectLifecycleExtensionMeta(params); err != nil {
-		return nil, err
+	if method == AccountUsageMethod {
+		response, err := a.accountUsage(ctx, params)
+		if err != nil {
+			return nil, err
+		}
+
+		return response, nil
 	}
 
-	switch method {
-	case ForkSessionMethod:
-		return a.handleForkSession(ctx, params)
-	case RateLimitsMethod:
-		return a.handleRateLimits(ctx, params)
-	default:
+	var envelope struct {
+		Meta map[string]any `json:"_meta"` //nolint:tagliatelle // ACP reserves this wire spelling.
 	}
 
-	// An unadvertised provider-auth leg is not handled here and falls through
-	// to the uniform method-not-found, exactly as an unknown method does.
-	if result, handled, err := a.handleAuthExtensionMethod(ctx, method, params); handled {
-		return result, err
+	if err := json.Unmarshal(params, &envelope); err == nil {
+		if refusal := lifecycle.RejectKey(envelope.Meta); refusal != nil {
+			return nil, wire.ParamRefusal(refusal)
+		}
 	}
 
 	return nil, acp.NewMethodNotFound(method)
 }
 
-type sessionStart struct {
-	Cwd                      string
-	AdditionalDirectories    []string
-	McpServers               []acp.McpServer
-	ResumeID                 string
-	StoreEntries             []SessionStoreEntry
-	StoreConfigurationLoaded bool
-	ActiveSessionResume      bool
-	ForkSession              bool
-	PermissionRules          map[string]string
-	MetaOptions              ClaudeOptions
-	RawMessages              rawMessageConfig
+func (a *Agent) transportRef() *wire.Transport {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.transport
 }
 
-type initialModelSelection struct {
-	Model       string
-	ShouldApply bool
+func (a *Agent) lifecycleNegotiated() lifecycle.Negotiated {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.lifecycle
 }
+
+func (a *Agent) clientSupportsFormElicitation() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.clientCapabilities.Elicitation != nil && a.clientCapabilities.Elicitation.Form != nil
+}
+
+// nextIncarnation mints a stream identity no earlier incarnation of any
+// session on this agent used.
+func (a *Agent) nextIncarnation() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.incarnations++
+
+	return a.incarnations
+}
+
+// acquireClientCall takes one slot of the server-to-client call budget
+// without waiting.
+func (a *Agent) acquireClientCall() (func(), error) {
+	select {
+	case a.clientCalls <- struct{}{}:
+		return func() { <-a.clientCalls }, nil
+	default:
+		return nil, wire.Backpressure("client_calls")
+	}
+}
+
+// ensureExecutable resolves the claude executable against the base
+// environment, so a session directory can never shadow it.
+func (a *Agent) ensureExecutable(ctx context.Context) (string, error) {
+	base, err := a.environment(nil, nil).Base()
+	if err == nil {
+		var executable string
+		if executable, err = process.ResolveExecutable(cmp.Or(a.options.ExecutablePath, vendor), base); err == nil {
+			return executable, nil
+		}
+	}
+
+	a.log.ErrorContext(ctx, "claude executable resolution failed", slog.String("reason", err.Error()))
+
+	return "", wire.InternalFailure(vendor, internalClassNativeStart)
+}
+
+// environment builds the merge for one launch: the inherited process
+// environment, the agent overlay, the session env, then the keys this
+// adapter owns because of how it launches claude.
+func (a *Agent) environment(sessionEnv map[string]string, owned map[string]string) process.Environment {
+	merged := make(map[string]string, len(owned)+1)
+	if a.options.Home != "" {
+		merged[claude.EnvConfigDir] = a.options.Home
+	}
+
+	maps.Copy(merged, owned)
+
+	return process.Environment{
+		Process:        a.processEnv,
+		Agent:          a.options.Env,
+		Session:        sessionEnv,
+		Owned:          merged,
+		InternalPrefix: claude.InternalEnvPrefix,
+	}
+}
+
+// internalClassNativeStart is the claude_internal_failure class of a native
+// claude process that could not be started or configured for a session.
+const internalClassNativeStart = "native_start"

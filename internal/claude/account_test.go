@@ -37,7 +37,7 @@ func TestAccountUsageDecodesTheNativeAnswer(t *testing.T) {
 	require.True(t, usage.Available)
 	require.Equal(t, &Window{Utilization: new(float64(2)), ResetsAt: "2026-09-19T09:20:00.194239+00:00"}, usage.Windows.Session)
 	require.Equal(t, &Window{Utilization: new(float64(0)), ResetsAt: "2026-09-25T05:00:00.194262+00:00"}, usage.Windows.Weekly)
-	require.Equal(t, []ScopedWindow{{Window: Window{Utilization: new(float64(1)), ResetsAt: "2026-09-25T05:00:00.194557+00:00"}, DisplayName: "Fable"}}, usage.Windows.ModelScoped)
+	require.Equal(t, []ScopedWindow{{Utilization: new(float64(1)), ResetsAt: "2026-09-25T05:00:00.194557+00:00", DisplayName: "Fable"}}, usage.Windows.ModelScoped)
 	require.Equal(t, &anthropic.Spend{Used: &anthropic.Money{AmountMinor: new(float64(0)), Currency: "AUD", Exponent: new(int(2))}}, usage.Windows.Spend)
 
 	require.Equal(t, anthropic.Observation{
@@ -63,7 +63,7 @@ func TestRateLimitsObservationSkipsWindowsWithoutAPercentage(t *testing.T) {
 	limits := RateLimits{
 		Session:     &Window{ResetsAt: "2026-09-19T09:20:00+00:00"},
 		Weekly:      &Window{Utilization: new(float64(15))},
-		ModelScoped: []ScopedWindow{{DisplayName: "Opus"}, {Window: Window{Utilization: new(float64(22))}, DisplayName: "Fable"}},
+		ModelScoped: []ScopedWindow{{DisplayName: "Opus"}, {Utilization: new(float64(22)), DisplayName: "Fable"}},
 	}
 
 	require.Equal(t, anthropic.Observation{Limits: []anthropic.Limit{

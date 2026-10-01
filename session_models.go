@@ -139,8 +139,7 @@ func (s *session) setConfigOption(ctx context.Context, id acp.SessionConfigId, v
 	}
 
 	if err != nil {
-		var commandErr *claude.CommandError
-		if errors.As(err, &commandErr) {
+		if _, ok := errors.AsType[*claude.CommandError](err); ok {
 			return nil, wire.Unsupported("value")
 		}
 

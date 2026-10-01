@@ -85,6 +85,14 @@ initialization. Structured output appears on the turn's final usage update at
 `_meta.claude.structuredOutput`. Delegated updates carry
 `_meta.claude.parentToolUseId`.
 
+Each top-level model call reports `usage_update` with the context its request
+occupies at `message_start` and the context it leaves at `message_delta`. The
+`message_delta` update carries the call's token breakdown from claude's
+`input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, and
+`output_tokens`, leaving out any figure claude did not report. A usage report
+whose figures are all zero or absent, as a gateway replaying a cached response
+sends, reports nothing.
+
 Native permission requests are relayed to ACP; a failed or cancelled answer
 denies the operation. Native form and URL elicitations require the matching
 client capability. `mcpServers` on ACP requests must be empty.

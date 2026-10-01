@@ -47,6 +47,10 @@ var fakeAccountUsage = map[string]any{
 	"behaviors": nil,
 }
 
+// fakeClaudeEnvEmptyContext makes get_context_usage estimate an empty
+// context, as claude does before it can count one.
+const fakeClaudeEnvEmptyContext = "ACP_GO_CLAUDE_TEST_EMPTY_CONTEXT"
+
 // fakeClaudeEnvResumeHold names a file a resumed fake claude creates before it
 // stops answering, so a test can act while the adapter is still relaunching.
 const fakeClaudeEnvResumeHold = "ACP_GO_CLAUDE_TEST_RESUME_HOLD"
@@ -128,6 +132,9 @@ func (c fakeCall) end() map[string]any {
 	return map[string]any{"input_tokens": c.input, "cache_read_input_tokens": c.cacheRead, "cache_creation_input_tokens": c.cacheWrite, "output_tokens": c.output}
 }
 
+// helloCall is the one model call a plain prompt makes.
+var helloCall = fakeCall{input: 10, output: 5}
+
 // fakeRun accumulates one query's calls as claude sums them for its result.
 type fakeRun struct {
 	f     *fakeClaude
@@ -159,6 +166,11 @@ func (r *fakeRun) spend(call fakeCall) {
 	r.sum.cacheRead += call.cacheRead
 	r.sum.cacheWrite += call.cacheWrite
 	r.sum.output += call.output
+
+	// A replayed response costs nothing.
+	if call == (fakeCall{}) {
+		return
+	}
 
 	r.f.usageMu.Lock()
 	r.f.cost += fakeCallCost
@@ -292,6 +304,9 @@ func runFakeClaude(args []string) int {
 			case "get_context_usage":
 				f.usageMu.Lock()
 				result = claude.ContextUsage{TotalTokens: 20, MaxTokens: fakeContextWindow(f.model)}
+				if os.Getenv(fakeClaudeEnvEmptyContext) != "" {
+					result = claude.ContextUsage{MaxTokens: fakeContextWindow(f.model)}
+				}
 				f.usageMu.Unlock()
 			case "get_usage":
 				var answered bool
@@ -381,7 +396,7 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}, structured string,
 	run := &fakeRun{f: f, model: f.model}
 	f.usageMu.Unlock()
 
-	id, call := "reply-"+text, fakeCall{input: 10, output: 5}
+	id, call := "reply-"+text, helloCall
 
 	if text == "NOSTREAM" {
 		// A call claude made without streaming reports only through its
@@ -502,7 +517,13 @@ func (r *fakeRun) prelude(text string, id string, call fakeCall) (fakeCall, map[
 		// the call with zeros and no cache figures.
 		return fakeCall{input: 300, cacheRead: 700, output: 40}, map[string]any{"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": nil, "cache_creation_input_tokens": nil}
 	case "EMPTY":
-		// A provider that reports no usage for the call at all.
+		// A gateway replaying a cached response reports every figure as zero,
+		// at the start of the stream and at its end.
+		return fakeCall{}, fakeCall{}.end()
+	case "REPLAY":
+		// A real call, then one a gateway answers from its response cache.
+		r.step(id+"-1", fakeCall{input: 100, cacheRead: 1000, output: 20})
+
 		return fakeCall{}, fakeCall{}.end()
 	}
 

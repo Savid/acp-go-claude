@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"strings"
@@ -52,10 +53,11 @@ type cycleState struct {
 	// when no call has reported since the cycle opened or claude compacted.
 	context int
 	// call is the native message id of the latest top-level model call and
-	// callInput the context its request occupied; callOpen holds until the
-	// call's message_delta reports its output.
+	// callStart the usage its message_start reported, empty when that report
+	// stated nothing; callOpen holds until the call's message_delta reports
+	// its output.
 	call      string
-	callInput int
+	callStart wire.CallUsage
 	callOpen  bool
 	// model is the latest top-level call's model, the result's modelUsage
 	// entry that states its context window.
@@ -318,8 +320,10 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 	// record's output_tokens is the stream's opening figure, so output is
 	// left out.
 	state.call, state.callOpen = native.ID, false
+	record := callUsage(native.Usage)
+	record.OutputTokens = nil
 
-	return s.emitContext(ctx, state, requestTokens(native.Usage))
+	return s.emitContext(ctx, state, requestTokens(record), record)
 }
 
 func (s *session) projectToolResults(ctx context.Context, state *cycleState, blocks []claude.ContentBlock) error {
@@ -377,47 +381,78 @@ func optionalString(value string) *string {
 	return &value
 }
 
+// mapUsage is the turn's summed consumption as result reports it; a report
+// that states nothing is unknown.
 func mapUsage(usage claude.Usage) *acp.Usage {
-	read, write := int(usage.CacheReadInputTokens), int(usage.CacheCreationInputTokens)
+	call := callUsage(usage)
+	if !call.Known() {
+		return nil
+	}
 
-	return &acp.Usage{InputTokens: int(usage.InputTokens), OutputTokens: int(usage.OutputTokens), CachedReadTokens: &read, CachedWriteTokens: &write, TotalTokens: int(usage.InputTokens+usage.OutputTokens) + read + write}
+	input, output := tokens(call.InputTokens), tokens(call.OutputTokens)
+
+	return &acp.Usage{InputTokens: input, OutputTokens: output, CachedReadTokens: call.CachedReadTokens, CachedWriteTokens: call.CachedWriteTokens, TotalTokens: input + output + tokens(call.CachedReadTokens) + tokens(call.CachedWriteTokens)}
+}
+
+// callUsage maps a native usage report onto the call breakdown. Claude's
+// input_tokens already excludes the cache tokens.
+func callUsage(usage claude.Usage) wire.CallUsage {
+	return wire.CallUsage{InputTokens: usage.InputTokens, CachedReadTokens: usage.CacheReadInputTokens, CachedWriteTokens: usage.CacheCreationInputTokens, OutputTokens: usage.OutputTokens}
+}
+
+// tokens is a reported figure, 0 when the report left it out.
+func tokens(member *int) int {
+	if member == nil {
+		return 0
+	}
+
+	return *member
 }
 
 // requestTokens is the context a model call's request occupies, counted as
 // claude counts it: input plus cache reads and cache writes.
-func requestTokens(usage claude.Usage) int {
-	return int(usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens)
+func requestTokens(usage wire.CallUsage) int {
+	return tokens(usage.InputTokens) + tokens(usage.CachedReadTokens) + tokens(usage.CachedWriteTokens)
 }
 
-// contextTokens is the context a finished model call leaves occupied, counted
-// as claude counts it: its request plus its whole output. The request comes
-// from message_delta where the provider restates it, else from the call's
-// message_start. A call whose request reported nothing carries no usable
-// figure.
-func contextTokens(usage claude.Usage, opening int) (int, bool) {
-	request := requestTokens(usage)
-	if request == 0 {
-		request = opening
+// responseUsage is a finished model call's breakdown. Its request members come
+// from message_delta where the provider restates the request, each falling
+// back to the call's message_start when message_delta leaves it out; its
+// output comes from message_delta alone, since message_start states only an
+// opening figure.
+func responseUsage(start wire.CallUsage, end wire.CallUsage) wire.CallUsage {
+	call := wire.CallUsage{InputTokens: start.InputTokens, CachedReadTokens: start.CachedReadTokens, CachedWriteTokens: start.CachedWriteTokens, OutputTokens: end.OutputTokens}
+	if requestTokens(end) > 0 {
+		call.InputTokens = cmp.Or(end.InputTokens, start.InputTokens)
+		call.CachedReadTokens = cmp.Or(end.CachedReadTokens, start.CachedReadTokens)
+		call.CachedWriteTokens = cmp.Or(end.CachedWriteTokens, start.CachedWriteTokens)
 	}
 
-	return request + int(usage.OutputTokens), request > 0
+	return call
 }
 
 // emitResponseInput reports the context a top-level model call's request
 // occupies the moment the call starts, before its thinking and output stream.
 // A provider that reports usage only at the end of the stream opens the call
-// with zeros and reports nothing here.
+// with an empty report, which states nothing.
 func (s *session) emitResponseInput(ctx context.Context, state *cycleState, message claude.Message) error {
-	state.call, state.callInput, state.callOpen = message.ID, requestTokens(message.Usage), true
+	start := callUsage(message.Usage)
+	if !start.Known() {
+		start = wire.CallUsage{}
+	}
+
+	state.call, state.callStart, state.callOpen = message.ID, start, true
 	if message.Model != "" {
 		state.model = message.Model
 	}
 
-	return s.emitContext(ctx, state, state.callInput)
+	return s.emitContext(ctx, state, requestTokens(start), wire.CallUsage{})
 }
 
 // emitResponseUsage reports the context a top-level model call leaves
-// occupied once its message_delta states the whole output.
+// occupied once its message_delta states the whole output, with the call's
+// breakdown. An empty report, as a gateway replaying a cached response sends,
+// states nothing and leaves the last figure in place.
 func (s *session) emitResponseUsage(ctx context.Context, state *cycleState, usage claude.Usage) error {
 	if !state.callOpen {
 		return nil
@@ -425,25 +460,33 @@ func (s *session) emitResponseUsage(ctx context.Context, state *cycleState, usag
 
 	state.callOpen = false
 
-	used, ok := contextTokens(usage, state.callInput)
-	if !ok {
+	end := callUsage(usage)
+	if !end.Known() {
 		return nil
 	}
 
-	return s.emitContext(ctx, state, used)
+	call := responseUsage(state.callStart, end)
+
+	request := requestTokens(call)
+	if request == 0 {
+		return nil
+	}
+
+	return s.emitContext(ctx, state, request+tokens(call.OutputTokens), call)
 }
 
-// emitContext reports one model call's context occupancy and keeps it as the
-// cycle's latest figure. A call without a figure reports nothing. size is the
+// emitContext reports one model call's context occupancy, with the call's
+// breakdown when the update reports its response, and keeps it as the cycle's
+// latest figure. A call without a figure reports nothing. size is the
 // session's known context window.
-func (s *session) emitContext(ctx context.Context, state *cycleState, used int) error {
+func (s *session) emitContext(ctx context.Context, state *cycleState, used int, call wire.CallUsage) error {
 	if used <= 0 {
 		return nil
 	}
 
 	state.context = used
 
-	return s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: s.knownContextWindow(), Used: used}})
+	return s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: s.knownContextWindow(), Used: used, Meta: call.Apply(nil)}})
 }
 
 // emitSettledUsage reports a settled cycle: the context its last model call
@@ -499,6 +542,11 @@ func (s *session) emitRestoredUsage(ctx context.Context, rt *runtime) {
 		s.mu.Lock()
 		s.contextWindow = stats.MaxTokens
 		s.mu.Unlock()
+	}
+
+	// An empty estimate states nothing.
+	if stats.TotalTokens <= 0 {
+		return
 	}
 
 	_ = s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: s.knownContextWindow(), Used: int(stats.TotalTokens)}})

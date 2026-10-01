@@ -84,11 +84,13 @@ type Source struct {
 	URL       string `json:"url,omitempty"`
 }
 
+// Usage is one native usage report. A nil member is a figure the report left
+// out or sent as null. InputTokens excludes the cache tokens.
 type Usage struct {
-	InputTokens              int64 `json:"input_tokens"`                //nolint:tagliatelle // Claude uses this native wire spelling.
-	OutputTokens             int64 `json:"output_tokens"`               //nolint:tagliatelle // Claude uses this native wire spelling.
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`     //nolint:tagliatelle // Claude uses this native wire spelling.
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"` //nolint:tagliatelle // Claude uses this native wire spelling.
+	InputTokens              *int `json:"input_tokens"`                //nolint:tagliatelle // Claude uses this native wire spelling.
+	OutputTokens             *int `json:"output_tokens"`               //nolint:tagliatelle // Claude uses this native wire spelling.
+	CacheReadInputTokens     *int `json:"cache_read_input_tokens"`     //nolint:tagliatelle // Claude uses this native wire spelling.
+	CacheCreationInputTokens *int `json:"cache_creation_input_tokens"` //nolint:tagliatelle // Claude uses this native wire spelling.
 }
 
 type ModelUsage struct {

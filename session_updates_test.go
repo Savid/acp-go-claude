@@ -108,11 +108,11 @@ func TestUsageFollowsEachResponse(t *testing.T) {
 
 	require.Equal(t, []acp.SessionUsageUpdate{
 		{Size: 1000, Used: 1100},
-		{Size: 1000, Used: 1120, Meta: fakeCall{input: 100, cacheRead: 1000, output: 20}.meta()},
+		{Size: 1000, Used: 1120, Meta: fakeCall{input: 100, cacheRead: 1000, output: 20}.meta("reply-MULTI-1")},
 		{Size: 1000, Used: 1170},
-		{Size: 1000, Used: 1200, Meta: fakeCall{input: 50, cacheRead: 1120, output: 30}.meta()},
+		{Size: 1000, Used: 1200, Meta: fakeCall{input: 50, cacheRead: 1120, output: 30}.meta("reply-MULTI-2")},
 		{Size: 1000, Used: 1240},
-		{Size: 1000, Used: 1250, Meta: fakeCall{input: 40, cacheRead: 1200, output: 10}.meta()},
+		{Size: 1000, Used: 1250, Meta: fakeCall{input: 40, cacheRead: 1200, output: 10}.meta("reply-MULTI")},
 		{Size: 1000, Used: 1250, Cost: usageCost(3)},
 	}, usageUpdates(h.rec.snapshot()))
 	require.NotNil(t, resp.Usage)
@@ -164,13 +164,13 @@ func TestUnusableResponsesReportNoUsage(t *testing.T) {
 		"replayed call alone": {"EMPTY", nil, nil},
 		"replayed call after a real call": {"REPLAY", []acp.SessionUsageUpdate{
 			{Size: 1000, Used: 1100},
-			{Size: 1000, Used: 1120, Meta: fakeCall{input: 100, cacheRead: 1000, output: 20}.meta()},
+			{Size: 1000, Used: 1120, Meta: fakeCall{input: 100, cacheRead: 1000, output: 20}.meta("reply-REPLAY-1")},
 			{Size: 1000, Used: 1120, Cost: usageCost(1)},
 		}, &acp.Usage{InputTokens: 100, CachedReadTokens: new(1000), CachedWriteTokens: new(0), OutputTokens: 20, TotalTokens: 1120}},
 		"dropped attempt retried": {"RETRY", []acp.SessionUsageUpdate{
 			{Size: 1000, Used: 1100},
 			{Size: 1000, Used: 1100},
-			{Size: 1000, Used: 1120, Meta: fakeCall{input: 100, cacheRead: 1000, output: 20}.meta()},
+			{Size: 1000, Used: 1120, Meta: fakeCall{input: 100, cacheRead: 1000, output: 20}.meta("reply-RETRY")},
 			{Size: 1000, Used: 1120, Cost: usageCost(1)},
 		}, &acp.Usage{InputTokens: 100, CachedReadTokens: new(1000), CachedWriteTokens: new(0), OutputTokens: 20, TotalTokens: 1120}},
 	} {
@@ -200,20 +200,20 @@ func TestUsageResponseShapes(t *testing.T) {
 		want   []acp.SessionUsageUpdate
 	}{
 		"usage only at stream end": {"GATEWAY", []acp.SessionUsageUpdate{
-			{Size: 1000, Used: 1040, Meta: fakeCall{input: 300, cacheRead: 700, output: 40}.meta()},
+			{Size: 1000, Used: 1040, Meta: fakeCall{input: 300, cacheRead: 700, output: 40}.meta("reply-GATEWAY")},
 			{Size: 1000, Used: 1040, Cost: usageCost(1)},
 		}},
 		// The records' output_tokens is the stream's opening figure, so the
 		// breakdown leaves output out.
 		"no stream": {"NOSTREAM", []acp.SessionUsageUpdate{
-			{Size: 1000, Used: 500, Meta: callMeta(wire.CallUsage{InputTokens: new(200), CachedReadTokens: new(300), CachedWriteTokens: new(0)})},
+			{Size: 1000, Used: 500, Meta: callMeta(wire.CallUsage{ResponseID: "reply-NOSTREAM", InputTokens: new(200), CachedReadTokens: new(300), CachedWriteTokens: new(0)})},
 			{Size: 1000, Used: 500, Cost: usageCost(1)},
 		}},
 		"input queued mid-run": {"STEER", []acp.SessionUsageUpdate{
 			{Size: 1000, Used: 1100},
-			{Size: 1000, Used: 1120, Meta: fakeCall{input: 100, cacheRead: 1000, output: 20}.meta()},
+			{Size: 1000, Used: 1120, Meta: fakeCall{input: 100, cacheRead: 1000, output: 20}.meta("reply-STEER-1")},
 			{Size: 1000, Used: 1150},
-			{Size: 1000, Used: 1160, Meta: fakeCall{input: 30, cacheRead: 1120, output: 10}.meta()},
+			{Size: 1000, Used: 1160, Meta: fakeCall{input: 30, cacheRead: 1120, output: 10}.meta("reply-STEER")},
 			{Size: 1000, Used: 1160, Cost: usageCost(2)},
 		}},
 	} {
@@ -248,9 +248,9 @@ func TestSettledUsageAfterCompaction(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []acp.SessionUsageUpdate{
 			{Size: 1000, Used: 900},
-			{Size: 1000, Used: 950, Meta: fakeCall{input: 100, cacheRead: 800, output: 50}.meta()},
+			{Size: 1000, Used: 950, Meta: fakeCall{input: 100, cacheRead: 800, output: 50}.meta("reply-COMPACT-1")},
 			{Size: 1000, Used: 310},
-			{Size: 1000, Used: 315, Meta: fakeCall{input: 10, cacheRead: 300, output: 5}.meta()},
+			{Size: 1000, Used: 315, Meta: fakeCall{input: 10, cacheRead: 300, output: 5}.meta("reply-COMPACT")},
 			{Size: 1000, Used: 315, Cost: usageCost(2)},
 		}, usageUpdates(h.rec.snapshot()))
 	})
@@ -264,7 +264,7 @@ func TestSettledUsageAfterCompaction(t *testing.T) {
 
 		_, err := h.prompt(session.SessionId, "COMPACTEND", nil)
 		require.NoError(t, err)
-		compacted := fakeCall{input: 100, cacheRead: 800, output: 50}.meta()
+		compacted := fakeCall{input: 100, cacheRead: 800, output: 50}.meta("reply-COMPACTEND")
 		require.Equal(t, []acp.SessionUsageUpdate{{Size: 1000, Used: 900}, {Size: 1000, Used: 950, Meta: compacted}}, usageUpdates(h.rec.snapshot()))
 
 		_, err = h.prompt(session.SessionId, "HELLO", nil)
@@ -273,7 +273,7 @@ func TestSettledUsageAfterCompaction(t *testing.T) {
 			{Size: 1000, Used: 900},
 			{Size: 1000, Used: 950, Meta: compacted},
 			{Size: 1000, Used: 10},
-			{Size: 1000, Used: 15, Meta: helloCall.meta()},
+			{Size: 1000, Used: 15, Meta: helloCall.meta("reply-HELLO")},
 			{Size: 1000, Used: 15, Cost: usageCost(2)},
 		}, usageUpdates(h.rec.snapshot()))
 	})
@@ -300,10 +300,10 @@ func TestUsageSizeFollowsSelectedModel(t *testing.T) {
 
 	require.Equal(t, []acp.SessionUsageUpdate{
 		{Size: 1000, Used: 10},
-		{Size: 1000, Used: 15, Meta: helloCall.meta()},
+		{Size: 1000, Used: 15, Meta: helloCall.meta("reply-HELLO")},
 		{Size: 1000, Used: 15, Cost: usageCost(1)},
 		{Size: 500, Used: 10},
-		{Size: 500, Used: 15, Meta: helloCall.meta()},
+		{Size: 500, Used: 15, Meta: helloCall.meta("reply-HELLO")},
 		{Size: 500, Used: 15, Cost: usageCost(2)},
 	}, usageUpdates(h.rec.snapshot()))
 }
@@ -328,7 +328,7 @@ func TestCancelledTurnReportsNoUsageAfterCancel(t *testing.T) {
 
 	require.Equal(t, []acp.SessionUsageUpdate{
 		{Size: 1000, Used: 1100},
-		{Size: 1000, Used: 1120, Meta: fakeCall{input: 100, cacheRead: 1000, output: 20}.meta()},
+		{Size: 1000, Used: 1120, Meta: fakeCall{input: 100, cacheRead: 1000, output: 20}.meta("reply-STEPSLOW-1")},
 		{Size: 1000, Used: 1170},
 	}, usageUpdates(h.rec.snapshot()))
 }
@@ -347,10 +347,10 @@ func TestAgentOriginUsageFollowsEachResponse(t *testing.T) {
 
 	require.Equal(t, []acp.SessionUsageUpdate{
 		{Size: 1000, Used: 10},
-		{Size: 1000, Used: 15, Meta: helloCall.meta()},
+		{Size: 1000, Used: 15, Meta: helloCall.meta("reply-AGENTWORK")},
 		{Size: 1000, Used: 15, Cost: usageCost(1)},
 		{Size: 1000, Used: 10},
-		{Size: 1000, Used: 15, Meta: helloCall.meta()},
+		{Size: 1000, Used: 15, Meta: helloCall.meta("reply-background")},
 		{Size: 1000, Used: 15, Cost: usageCost(2)},
 	}, usageUpdates(h.rec.snapshot()))
 }
@@ -373,7 +373,7 @@ func TestCancelledAgentOriginCycleReportsNoUsageAfterCancel(t *testing.T) {
 	require.Equal(t, "cancelled", events[len(events)-1]["outcome"])
 	require.Equal(t, []acp.SessionUsageUpdate{
 		{Size: 1000, Used: 10},
-		{Size: 1000, Used: 15, Meta: helloCall.meta()},
+		{Size: 1000, Used: 15, Meta: helloCall.meta("reply-AGENTHANG")},
 		{Size: 1000, Used: 15, Cost: usageCost(1)},
 		{Size: 1000, Used: 10},
 	}, usageUpdates(h.rec.snapshot()))
@@ -394,10 +394,10 @@ func TestCapturedCallUsageShapes(t *testing.T) {
 	for name, want := range map[string][]acp.SessionUsageUpdate{
 		"anthropic": {
 			{Size: 200000, Used: 21714},
-			{Size: 200000, Used: 21908, Meta: callMeta(wire.CallUsage{InputTokens: new(10), CachedReadTokens: new(14704), CachedWriteTokens: new(7000), OutputTokens: new(194)})},
+			{Size: 200000, Used: 21908, Meta: callMeta(wire.CallUsage{ResponseID: "msg-anthropic", InputTokens: new(10), CachedReadTokens: new(14704), CachedWriteTokens: new(7000), OutputTokens: new(194)})},
 		},
-		"gateway":    {{Size: 200000, Used: 20298, Meta: callMeta(wire.CallUsage{InputTokens: new(19797), CachedReadTokens: new(256), CachedWriteTokens: new(0), OutputTokens: new(245)})}},
-		"openrouter": {{Size: 200000, Used: 20202, Meta: callMeta(wire.CallUsage{InputTokens: new(6), CachedReadTokens: new(0), CachedWriteTokens: new(20115), OutputTokens: new(81)})}},
+		"gateway":    {{Size: 200000, Used: 20298, Meta: callMeta(wire.CallUsage{ResponseID: "msg-gateway", InputTokens: new(19797), CachedReadTokens: new(256), CachedWriteTokens: new(0), OutputTokens: new(245)})}},
+		"openrouter": {{Size: 200000, Used: 20202, Meta: callMeta(wire.CallUsage{ResponseID: "msg-openrouter", InputTokens: new(6), CachedReadTokens: new(0), CachedWriteTokens: new(20115), OutputTokens: new(81)})}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -470,7 +470,7 @@ func TestCallBreakdownMembers(t *testing.T) {
 	}
 	realUpdates := []acp.SessionUsageUpdate{
 		{Size: 1000, Used: 1000},
-		{Size: 1000, Used: 1050, Meta: callMeta(wire.CallUsage{InputTokens: new(10), CachedReadTokens: new(900), CachedWriteTokens: new(90), OutputTokens: new(50)})},
+		{Size: 1000, Used: 1050, Meta: callMeta(wire.CallUsage{ResponseID: "real", InputTokens: new(10), CachedReadTokens: new(900), CachedWriteTokens: new(90), OutputTokens: new(50)})},
 	}
 	gatewayZero := `{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}`
 
@@ -481,7 +481,7 @@ func TestCallBreakdownMembers(t *testing.T) {
 	}{
 		"output only at message_delta": {
 			frames: []string{
-				start("one", `{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":1}`),
+				start("real", `{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":1}`),
 				delta(`{"output_tokens":50}`),
 			},
 			want:    realUpdates,
@@ -489,7 +489,7 @@ func TestCallBreakdownMembers(t *testing.T) {
 		},
 		"member message_delta leaves out": {
 			frames: []string{
-				start("one", `{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":1}`),
+				start("real", `{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":1}`),
 				delta(`{"input_tokens":10,"cache_read_input_tokens":900,"output_tokens":50}`),
 			},
 			want:    realUpdates,
@@ -497,15 +497,15 @@ func TestCallBreakdownMembers(t *testing.T) {
 		},
 		"null cache counts reported nowhere": {
 			frames: []string{
-				start("one", `{"input_tokens":0,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"output_tokens":0}`),
+				start("real", `{"input_tokens":0,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"output_tokens":0}`),
 				delta(`{"input_tokens":700,"cache_read_input_tokens":null,"output_tokens":50}`),
 			},
-			want:    []acp.SessionUsageUpdate{{Size: 1000, Used: 750, Meta: callMeta(wire.CallUsage{InputTokens: new(700), OutputTokens: new(50)})}},
+			want:    []acp.SessionUsageUpdate{{Size: 1000, Used: 750, Meta: callMeta(wire.CallUsage{ResponseID: "real", InputTokens: new(700), OutputTokens: new(50)})}},
 			context: 750,
 		},
 		"empty start then real message_delta": {
 			frames: []string{
-				start("one", gatewayZero),
+				start("real", gatewayZero),
 				delta(`{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":50}`),
 			},
 			want:    realUpdates[1:],
@@ -517,14 +517,14 @@ func TestCallBreakdownMembers(t *testing.T) {
 			context: 1050,
 		},
 		"empty message_delta after a real start": {
-			frames:  []string{start("one", `{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":1}`), delta(gatewayZero)},
+			frames:  []string{start("real", `{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":1}`), delta(gatewayZero)},
 			want:    realUpdates[:1],
 			context: 1000,
 		},
 		"unstreamed call": {
-			frames: []string{record("one", `{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":1}`)},
+			frames: []string{record("real", `{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":1}`)},
 			want: []acp.SessionUsageUpdate{
-				{Size: 1000, Used: 1000, Meta: callMeta(wire.CallUsage{InputTokens: new(10), CachedReadTokens: new(900), CachedWriteTokens: new(90)})},
+				{Size: 1000, Used: 1000, Meta: callMeta(wire.CallUsage{ResponseID: "real", InputTokens: new(10), CachedReadTokens: new(900), CachedWriteTokens: new(90)})},
 			},
 			context: 1000,
 		},
@@ -585,6 +585,162 @@ func TestRestoredUsage(t *testing.T) {
 			_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(session.SessionId, cwd))
 			require.NoError(t, err)
 			require.Equal(t, tc.want, usageUpdates(h.rec.snapshot()[before:]))
+		})
+	}
+}
+
+// chunkMessageIDs lists each recorded assistant text or thought chunk's
+// messageId in delivery order, "" for a chunk without one.
+func chunkMessageIDs(updates []acp.SessionNotification) []string {
+	var ids []string
+
+	for _, update := range updates {
+		var id *string
+
+		switch {
+		case update.Update.AgentMessageChunk != nil:
+			id = update.Update.AgentMessageChunk.MessageId
+		case update.Update.AgentThoughtChunk != nil:
+			id = update.Update.AgentThoughtChunk.MessageId
+		default:
+			continue
+		}
+
+		if id == nil {
+			ids = append(ids, "")
+
+			continue
+		}
+
+		ids = append(ids, *id)
+	}
+
+	return ids
+}
+
+// TestCapturedResponseID replays the captured frames under
+// testdata/native/response-id.json: every chunk of a model call's response,
+// streamed, recorded, or restored, carries the gateway's response id as its
+// messageId, and the update reporting the call carries the same id as
+// responseId. A record claude writes itself carries no messageId and reports
+// nothing, and a call whose id is absent reports its figures without one.
+func TestCapturedResponseID(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("testdata/native/response-id.json")
+	require.NoError(t, err)
+
+	var shapes map[string][]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &shapes))
+	require.NotEmpty(t, shapes["openrouter"])
+	require.NotEmpty(t, shapes["synthetic"])
+
+	const responseID = "gen-1790864245-NF5tsJZCIzJPir6AEzAg"
+
+	call := wire.CallUsage{ResponseID: responseID, InputTokens: new(6), CachedReadTokens: new(0), CachedWriteTokens: new(17876), OutputTokens: new(17)}
+	anonymous := call
+	anonymous.ResponseID = ""
+
+	records := func(frames []json.RawMessage) []json.RawMessage {
+		var rows []json.RawMessage
+
+		for _, frame := range frames {
+			var event claude.Event
+			require.NoError(t, json.Unmarshal(frame, &event))
+
+			if event.Type == messageRoleAssistant {
+				rows = append(rows, frame)
+			}
+		}
+
+		return rows
+	}
+	withoutIDs := func(frames []json.RawMessage) []json.RawMessage {
+		stripped := make([]json.RawMessage, 0, len(frames))
+
+		for _, frame := range frames {
+			var value map[string]any
+			require.NoError(t, json.Unmarshal(frame, &value))
+
+			for _, holder := range []any{value, value["event"]} {
+				if parent, ok := holder.(map[string]any); ok {
+					if message, ok := parent["message"].(map[string]any); ok {
+						delete(message, "id")
+					}
+				}
+			}
+
+			encoded, err := json.Marshal(value)
+			require.NoError(t, err)
+
+			stripped = append(stripped, encoded)
+		}
+
+		return stripped
+	}
+
+	for name, tc := range map[string]struct {
+		frames []json.RawMessage
+		replay bool
+		ids    []string
+		usage  []acp.SessionUsageUpdate
+	}{
+		"streamed call": {
+			frames: shapes["openrouter"],
+			ids:    []string{responseID, responseID, responseID, responseID, responseID, responseID, responseID},
+			usage:  []acp.SessionUsageUpdate{{Size: 200000, Used: 17899, Meta: callMeta(call)}},
+		},
+		"restored call": {
+			frames: records(shapes["openrouter"]),
+			replay: true,
+			ids:    []string{responseID, responseID},
+		},
+		"streamed call without an id": {
+			frames: withoutIDs(shapes["openrouter"]),
+			ids:    []string{"", "", "", "", "", "", ""},
+			usage:  []acp.SessionUsageUpdate{{Size: 200000, Used: 17899, Meta: callMeta(anonymous)}},
+		},
+		"synthetic record": {
+			frames: shapes["synthetic"],
+			ids:    []string{""},
+		},
+		"restored synthetic record": {
+			frames: shapes["synthetic"],
+			replay: true,
+			ids:    []string{""},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			agent := NewAgent()
+			rec := newRecorder()
+			agent.attach(rec, nil)
+			session := agent.newSession(sessionStart{cwd: t.TempDir()})
+			session.id = "fixture-session"
+			session.contextWindow = 200000
+
+			if tc.replay {
+				rows := make([][]byte, 0, len(tc.frames))
+				for _, frame := range tc.frames {
+					rows = append(rows, frame)
+				}
+
+				require.NoError(t, session.replay(t.Context(), rows))
+			} else {
+				c := &cycle{}
+
+				for _, frame := range tc.frames {
+					var event claude.Event
+					require.NoError(t, json.Unmarshal(frame, &event))
+
+					_, err := session.projectEvent(t.Context(), nil, c, event)
+					require.NoError(t, err)
+				}
+			}
+
+			require.Equal(t, tc.ids, chunkMessageIDs(rec.snapshot()))
+			require.Equal(t, tc.usage, usageUpdates(rec.snapshot()))
 		})
 	}
 }

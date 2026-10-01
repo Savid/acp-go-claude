@@ -28,3 +28,10 @@ message ids, record uuids, the session id, and content are normalised. The
 Anthropic API reports the request at `message_start`; both other providers
 open the call with zeros, OpenRouter with null cache counts, and report usage
 only at `message_delta`.
+
+`response-id.json` was captured from Claude Code 2.1.284 on 2026-10-01 against
+OpenRouter's Anthropic endpoint with `qwen/qwen3.8-flash`. `openrouter` holds
+one top-level call's frames, `message_start` to `message_stop`, as the adapter
+forwarded them on the raw-event channel; `synthetic` holds the assistant record
+claude wrote for a rejected credential. Only the session id is normalised;
+response ids, record uuids, usage, and content are unchanged.

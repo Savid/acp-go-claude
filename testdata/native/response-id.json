@@ -1,0 +1,405 @@
+{
+  "openrouter": [
+    {
+      "event": {
+        "message": {
+          "container": null,
+          "content": [],
+          "id": "gen-1790864245-NF5tsJZCIzJPir6AEzAg",
+          "model": "qwen/qwen3.8-flash",
+          "provider": "Alibaba",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": null,
+            "cache_creation_input_tokens": null,
+            "cache_read_input_tokens": null,
+            "inference_geo": null,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "output_tokens_details": null,
+            "server_tool_use": null,
+            "service_tier": null,
+            "speed": "standard"
+          }
+        },
+        "type": "message_start"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "ttft_ms": 5682,
+      "type": "stream_event",
+      "uuid": "89c1d2ca-5f43-467c-af54-07ca348f3e02"
+    },
+    {
+      "event": {
+        "content_block": {
+          "signature": "",
+          "thinking": "",
+          "type": "thinking"
+        },
+        "index": 0,
+        "type": "content_block_start"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "81d10141-8866-4eac-847a-9ddec9f14540"
+    },
+    {
+      "estimated_tokens": 1,
+      "estimated_tokens_delta": 1,
+      "session_id": "fixture-session",
+      "subtype": "thinking_tokens",
+      "type": "system",
+      "uuid": "ff4c7173-b100-4c46-b773-26b801eb48dd"
+    },
+    {
+      "event": {
+        "delta": {
+          "thinking": "The",
+          "type": "thinking_delta"
+        },
+        "index": 0,
+        "type": "content_block_delta"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "527d1b2f-b9cf-4532-b48b-4d73ea4bf297"
+    },
+    {
+      "estimated_tokens": 4,
+      "estimated_tokens_delta": 3,
+      "session_id": "fixture-session",
+      "subtype": "thinking_tokens",
+      "type": "system",
+      "uuid": "e45f8956-801d-498b-99a1-32d5c5742dd7"
+    },
+    {
+      "event": {
+        "delta": {
+          "thinking": " user has",
+          "type": "thinking_delta"
+        },
+        "index": 0,
+        "type": "content_block_delta"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "a20fc3bf-71fa-4eda-9821-d513f097e65d"
+    },
+    {
+      "estimated_tokens": 6,
+      "estimated_tokens_delta": 2,
+      "session_id": "fixture-session",
+      "subtype": "thinking_tokens",
+      "type": "system",
+      "uuid": "ac521381-685e-4f80-943a-4d40fb006b47"
+    },
+    {
+      "event": {
+        "delta": {
+          "thinking": " simply",
+          "type": "thinking_delta"
+        },
+        "index": 0,
+        "type": "content_block_delta"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "efba5b1e-4e62-4738-b018-5daaf7793f86"
+    },
+    {
+      "estimated_tokens": 9,
+      "estimated_tokens_delta": 3,
+      "session_id": "fixture-session",
+      "subtype": "thinking_tokens",
+      "type": "system",
+      "uuid": "7d72a4aa-1a85-4f95-ba6b-820dbf6cad0d"
+    },
+    {
+      "event": {
+        "delta": {
+          "thinking": " asked to",
+          "type": "thinking_delta"
+        },
+        "index": 0,
+        "type": "content_block_delta"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "0ff64486-33df-4d38-bcfc-5392cca82814"
+    },
+    {
+      "estimated_tokens": 14,
+      "estimated_tokens_delta": 5,
+      "session_id": "fixture-session",
+      "subtype": "thinking_tokens",
+      "type": "system",
+      "uuid": "df2e2d44-8817-4d27-b241-cbdd5cb87755"
+    },
+    {
+      "event": {
+        "delta": {
+          "thinking": " reply with the word",
+          "type": "thinking_delta"
+        },
+        "index": 0,
+        "type": "content_block_delta"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "1d1c6906-f740-4f00-b5b0-dbd8df32e326"
+    },
+    {
+      "estimated_tokens": 16,
+      "estimated_tokens_delta": 2,
+      "session_id": "fixture-session",
+      "subtype": "thinking_tokens",
+      "type": "system",
+      "uuid": "ebb96f7e-081b-44e4-8f6b-d198a154e745"
+    },
+    {
+      "event": {
+        "delta": {
+          "thinking": " \"hi\".",
+          "type": "thinking_delta"
+        },
+        "index": 0,
+        "type": "content_block_delta"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "b12b815e-0fd8-4f4f-86a7-c77a1b57d005"
+    },
+    {
+      "message": {
+        "container": null,
+        "content": [
+          {
+            "signature": "",
+            "thinking": "The user has simply asked to reply with the word \"hi\".",
+            "type": "thinking"
+          }
+        ],
+        "context_management": null,
+        "id": "gen-1790864245-NF5tsJZCIzJPir6AEzAg",
+        "model": "qwen/qwen3.8-flash",
+        "provider": "Alibaba",
+        "role": "assistant",
+        "stop_details": null,
+        "stop_reason": null,
+        "stop_sequence": null,
+        "type": "message",
+        "usage": {
+          "cache_creation": null,
+          "cache_creation_input_tokens": null,
+          "cache_read_input_tokens": null,
+          "inference_geo": null,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "output_tokens_details": null,
+          "server_tool_use": null,
+          "service_tier": null,
+          "speed": "standard"
+        }
+      },
+      "parent_tool_use_id": null,
+      "request_id": "gen-1790864245-NF5tsJZCIzJPir6AEzAg",
+      "session_id": "fixture-session",
+      "timestamp": "2026-10-01T14:17:31.936Z",
+      "type": "assistant",
+      "uuid": "61522ab2-b0e4-433d-af4f-a3c9c9d78238"
+    },
+    {
+      "event": {
+        "index": 0,
+        "type": "content_block_stop"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "2170b0be-c279-4ca6-9849-9bca8523a9df"
+    },
+    {
+      "event": {
+        "content_block": {
+          "citations": [],
+          "text": "",
+          "type": "text"
+        },
+        "index": 1,
+        "type": "content_block_start"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "038fd8c9-fda9-4307-91f5-7b8ef050e7a4"
+    },
+    {
+      "event": {
+        "delta": {
+          "text": "hi",
+          "type": "text_delta"
+        },
+        "index": 1,
+        "type": "content_block_delta"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "25ee1b73-a4fd-4444-a38d-38991561cec6"
+    },
+    {
+      "message": {
+        "container": null,
+        "content": [
+          {
+            "citations": [],
+            "text": "hi",
+            "type": "text"
+          }
+        ],
+        "context_management": null,
+        "id": "gen-1790864245-NF5tsJZCIzJPir6AEzAg",
+        "model": "qwen/qwen3.8-flash",
+        "provider": "Alibaba",
+        "role": "assistant",
+        "stop_details": null,
+        "stop_reason": null,
+        "stop_sequence": null,
+        "type": "message",
+        "usage": {
+          "cache_creation": null,
+          "cache_creation_input_tokens": null,
+          "cache_read_input_tokens": null,
+          "inference_geo": null,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "output_tokens_details": null,
+          "server_tool_use": null,
+          "service_tier": null,
+          "speed": "standard"
+        }
+      },
+      "parent_tool_use_id": null,
+      "request_id": "gen-1790864245-NF5tsJZCIzJPir6AEzAg",
+      "session_id": "fixture-session",
+      "timestamp": "2026-10-01T14:17:31.938Z",
+      "type": "assistant",
+      "uuid": "65b4f4b1-64ae-4f02-9e06-711245d300ec"
+    },
+    {
+      "event": {
+        "index": 1,
+        "type": "content_block_stop"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "a6369dc5-f7f3-459e-8e05-a3040f794fc2"
+    },
+    {
+      "event": {
+        "context_management": null,
+        "delta": {
+          "container": null,
+          "stop_details": null,
+          "stop_reason": "end_turn",
+          "stop_sequence": null
+        },
+        "type": "message_delta",
+        "usage": {
+          "cache_creation": null,
+          "cache_creation_input_tokens": 17876,
+          "cache_read_input_tokens": 0,
+          "cost": 0.00358409,
+          "cost_details": {
+            "upstream_inference_completions_cost": 7.99e-06,
+            "upstream_inference_cost": 0.00358409,
+            "upstream_inference_prompt_cost": 0.0035761
+          },
+          "input_tokens": 6,
+          "is_byok": false,
+          "output_tokens": 17,
+          "output_tokens_details": {
+            "thinking_tokens": 13
+          },
+          "server_tool_use": null,
+          "service_tier": null,
+          "speed": "standard"
+        }
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "3b24ed01-49af-4ffc-a016-002296707e66"
+    },
+    {
+      "event": {
+        "type": "message_stop"
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "type": "stream_event",
+      "uuid": "8d33a229-c98d-4621-8f71-8e7d60da1183"
+    }
+  ],
+  "synthetic": [
+    {
+      "type": "assistant",
+      "message": {
+        "diagnostics": null,
+        "id": "b76ab277-ef7d-45c2-965d-8db239945a14",
+        "container": null,
+        "model": "<synthetic>",
+        "role": "assistant",
+        "stop_details": null,
+        "stop_reason": "stop_sequence",
+        "stop_sequence": "",
+        "type": "message",
+        "usage": {
+          "output_tokens_details": null,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": null,
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": null,
+          "iterations": null,
+          "speed": null
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Failed to authenticate. API Error: 401 Missing Authentication header"
+          }
+        ],
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "fixture-session",
+      "uuid": "570a2b58-af67-4b82-a023-272580c16ace",
+      "timestamp": "2026-10-01T14:17:46.834Z",
+      "error": "authentication_failed",
+      "is_api_error_message": true
+    }
+  ]
+}

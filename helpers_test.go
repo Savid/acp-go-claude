@@ -370,10 +370,10 @@ func callMeta(call wire.CallUsage) map[string]any {
 	return decodedMeta(call.Apply(nil))
 }
 
-// meta is the breakdown of a fake call whose message_delta restated every
-// figure.
-func (c fakeCall) meta() map[string]any {
-	return callMeta(wire.CallUsage{InputTokens: new(c.input), CachedReadTokens: new(c.cacheRead), CachedWriteTokens: new(c.cacheWrite), OutputTokens: new(c.output)})
+// meta is the breakdown of the fake call answered as response id, whose
+// message_delta restated every figure.
+func (c fakeCall) meta(id string) map[string]any {
+	return callMeta(wire.CallUsage{ResponseID: id, InputTokens: new(c.input), CachedReadTokens: new(c.cacheRead), CachedWriteTokens: new(c.cacheWrite), OutputTokens: new(c.output)})
 }
 
 // usageCost is the session's cumulative cost after calls fake model calls.

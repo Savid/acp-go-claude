@@ -153,7 +153,7 @@ func TestCapturedNativeAgentOrigin(t *testing.T) {
 	// call's model and claude's cumulative cost.
 	require.Equal(t, []acp.SessionUsageUpdate{
 		{Size: 1000, Used: 21493},
-		{Size: 1000, Used: 21605, Meta: callMeta(wire.CallUsage{InputTokens: new(10), CachedReadTokens: new(21003), CachedWriteTokens: new(480), OutputTokens: new(112)})},
+		{Size: 1000, Used: 21605, Meta: callMeta(wire.CallUsage{ResponseID: "msg_011CfE7zbtSB2RP8qyTWDQHM", InputTokens: new(10), CachedReadTokens: new(21003), CachedWriteTokens: new(480), OutputTokens: new(112)})},
 		{Size: 200000, Used: 21605, Cost: &acp.Cost{Amount: 0.0330726, Currency: costCurrency}},
 	}, usageUpdates(rec.snapshot()))
 	s.mu.Lock()

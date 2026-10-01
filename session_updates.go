@@ -52,10 +52,10 @@ type cycleState struct {
 	// context is the context the latest top-level model call occupied; 0
 	// when no call has reported since the cycle opened or claude compacted.
 	context int
-	// call is the native message id of the latest top-level model call and
-	// callStart the usage its message_start reported, empty when that report
-	// stated nothing; callOpen holds until the call's message_delta reports
-	// its output.
+	// call is the response id of the latest top-level model call, empty when
+	// claude reported none, and callStart the usage its message_start
+	// reported, empty when that report stated nothing; callOpen holds until
+	// the call's message_delta reports its output.
 	call      string
 	callStart wire.CallUsage
 	callOpen  bool
@@ -191,9 +191,7 @@ func (s *session) projectStream(ctx context.Context, state *cycleState, event cl
 
 	switch native.Type {
 	case nativeMessageStart:
-		message.text = ""
-
-		message.thinking = ""
+		message.id, message.text, message.thinking = "", "", ""
 		if native.Message != nil {
 			message.id = native.Message.ID
 
@@ -242,6 +240,11 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 		return err
 	}
 
+	responseID := native.ID
+	if native.Model == nativeSyntheticModel {
+		responseID = ""
+	}
+
 	for index := range blocks {
 		block := &blocks[index]
 		switch block.Type {
@@ -256,9 +259,9 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 				continue
 			}
 
-			update := acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock(text), MessageId: optionalString(native.ID)}}
+			update := acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock(text), MessageId: optionalString(responseID)}}
 			if block.Type == contentBlockTypeThinking {
-				update = acp.SessionUpdate{AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{Content: acp.TextBlock(text), MessageId: optionalString(native.ID)}}
+				update = acp.SessionUpdate{AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{Content: acp.TextBlock(text), MessageId: optionalString(responseID)}}
 			}
 
 			if err := s.emit(ctx, update); err != nil {
@@ -275,7 +278,7 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 					continue
 				}
 
-				if err := s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: *link, MessageId: optionalString(native.ID)}}); err != nil {
+				if err := s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: *link, MessageId: optionalString(responseID)}}); err != nil {
 					return err
 				}
 
@@ -291,7 +294,7 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 				}
 
 				guidance, _ := failure.Guidance()
-				if err := s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock(guidance), MessageId: optionalString(native.ID)}}); err != nil {
+				if err := s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock(guidance), MessageId: optionalString(responseID)}}); err != nil {
 					return err
 				}
 
@@ -303,7 +306,7 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 				continue
 			}
 
-			if err := s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.ImageBlock(output.Data, output.MIME), MessageId: optionalString(native.ID)}}); err != nil {
+			if err := s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.ImageBlock(output.Data, output.MIME), MessageId: optionalString(responseID)}}); err != nil {
 				return err
 			}
 
@@ -312,15 +315,16 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 		}
 	}
 
-	if state.replay || parent != "" || native.ID == "" || native.ID == state.call {
+	if state.replay || parent != "" || responseID == "" || responseID == state.call {
 		return nil
 	}
 
 	// A call no message_start announced reports its request here. The
 	// record's output_tokens is the stream's opening figure, so output is
 	// left out.
-	state.call, state.callOpen = native.ID, false
+	state.call, state.callOpen = responseID, false
 	record := callUsage(native.Usage)
+	record.ResponseID = responseID
 	record.OutputTokens = nil
 
 	return s.emitContext(ctx, state, requestTokens(record), record)
@@ -466,6 +470,7 @@ func (s *session) emitResponseUsage(ctx context.Context, state *cycleState, usag
 	}
 
 	call := responseUsage(state.callStart, end)
+	call.ResponseID = state.call
 
 	request := requestTokens(call)
 	if request == 0 {
@@ -713,7 +718,11 @@ const (
 	nativeOutputStyle     = "outputStyle"
 	nativeResult          = "result"
 	nativeStreamEvent     = "stream_event"
-	nativeSystem          = "system"
+	// nativeSyntheticModel is the model of an assistant record claude writes
+	// itself, such as an API error notice; its message id is claude's own
+	// uuid rather than a model response's id.
+	nativeSyntheticModel = "<synthetic>"
+	nativeSystem         = "system"
 	// nativeSourceURL is the source type of a native image the harness serves
 	// by link rather than inline.
 	nativeSourceURL    = "url"

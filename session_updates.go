@@ -12,6 +12,9 @@ import (
 	"github.com/savid/acp-go-core/wire"
 )
 
+// costCurrency is the currency of claude's total_cost_usd.
+const costCurrency = "USD"
+
 const (
 	messageRoleUser          = "user"
 	messageRoleAssistant     = "assistant"
@@ -23,12 +26,20 @@ const (
 
 type messageState struct {
 	id, text, thinking string
-	finalized          map[string]struct{}
-	images             map[string]struct{}
+	// finalized and images hold the assistant rows and images already
+	// emitted for the API message named by rows. A live stream delivers every
+	// row of one API message before the next message begins, so they are
+	// reset when another message arrives; replay keeps them for the whole
+	// transcript.
+	rows      string
+	finalized map[string]struct{}
+	images    map[string]struct{}
 }
 
 type cycleState struct {
-	replay           bool
+	replay bool
+	// usage is the turn's summed consumption as result reports it, for the
+	// prompt response.
 	usage            *acp.Usage
 	cost             float64
 	structuredOutput any
@@ -37,6 +48,18 @@ type cycleState struct {
 	imagesEmitted    bool
 	messages         map[string]*messageState
 	tools            map[string]*toolState
+	// context is the context the latest top-level model call occupied; 0
+	// when no call has reported since the cycle opened or claude compacted.
+	context int
+	// call is the native message id of the latest top-level model call and
+	// callInput the context its request occupied; callOpen holds until the
+	// call's message_delta reports its output.
+	call      string
+	callInput int
+	callOpen  bool
+	// model is the latest top-level call's model, the result's modelUsage
+	// entry that states its context window.
+	model string
 }
 
 func (state *cycleState) message(parent string) *messageState {
@@ -76,8 +99,6 @@ func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error 
 				update.ToolCall.Meta = meta
 			case update.ToolCallUpdate != nil:
 				update.ToolCallUpdate.Meta = meta
-			case update.UsageUpdate != nil:
-				update.UsageUpdate.Meta = meta
 			}
 		}
 
@@ -137,18 +158,20 @@ func (s *session) projectEvent(ctx context.Context, _ *runtime, c *cycle, event 
 			}
 		}
 
-		for _, usage := range event.ModelUsage {
-			if usage.ContextWindow > 0 {
-				s.mu.Lock()
-				s.contextWindow = usage.ContextWindow
-				s.mu.Unlock()
-
-				break
-			}
+		if usage := event.ModelUsage[state.model]; usage.ContextWindow > 0 {
+			s.mu.Lock()
+			s.contextWindow = usage.ContextWindow
+			s.mu.Unlock()
 		}
 
 		return true, nil
 	case nativeSystem:
+		if event.Subtype == nativeCompactBoundary && event.ParentToolUseID == "" {
+			// The summary call reports no usage, and the figure the last call
+			// left counts the context the summary replaced.
+			state.context, state.call, state.callOpen = 0, "", false
+		}
+
 		return event.Subtype == "task_notification" && c.Origin != lifecycle.CauseSubmission, nil
 	}
 
@@ -162,6 +185,7 @@ func (s *session) projectStream(ctx context.Context, state *cycleState, event cl
 
 	native := event.Event
 	message := state.message(event.ParentToolUseID)
+	topLevel := event.ParentToolUseID == ""
 
 	switch native.Type {
 	case nativeMessageStart:
@@ -170,6 +194,14 @@ func (s *session) projectStream(ctx context.Context, state *cycleState, event cl
 		message.thinking = ""
 		if native.Message != nil {
 			message.id = native.Message.ID
+
+			if topLevel {
+				return s.emitResponseInput(ctx, state, *native.Message)
+			}
+		}
+	case nativeMessageDelta:
+		if topLevel {
+			return s.emitResponseUsage(ctx, state, native.Usage)
 		}
 	case "content_block_delta":
 		switch native.Delta.Type {
@@ -189,6 +221,12 @@ func (s *session) projectStream(ctx context.Context, state *cycleState, event cl
 
 func (s *session) projectAssistant(ctx context.Context, state *cycleState, parent string, rowID string, native claude.Message) error {
 	message := state.message(parent)
+	if !state.replay && native.ID != message.rows {
+		message.rows = native.ID
+		clear(message.finalized)
+		clear(message.images)
+	}
+
 	if _, seen := message.finalized[rowID]; rowID != "" && seen {
 		return nil
 	}
@@ -272,7 +310,16 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 		}
 	}
 
-	return nil
+	if state.replay || parent != "" || native.ID == "" || native.ID == state.call {
+		return nil
+	}
+
+	// A call no message_start announced reports its request here. The
+	// record's output_tokens is the stream's opening figure, so output is
+	// left out.
+	state.call, state.callOpen = native.ID, false
+
+	return s.emitContext(ctx, state, requestTokens(native.Usage))
 }
 
 func (s *session) projectToolResults(ctx context.Context, state *cycleState, blocks []claude.ContentBlock) error {
@@ -336,29 +383,81 @@ func mapUsage(usage claude.Usage) *acp.Usage {
 	return &acp.Usage{InputTokens: int(usage.InputTokens), OutputTokens: int(usage.OutputTokens), CachedReadTokens: &read, CachedWriteTokens: &write, TotalTokens: int(usage.InputTokens+usage.OutputTokens) + read + write}
 }
 
-func (s *session) emitUsage(ctx context.Context, state *cycleState, stats *claude.ContextUsage) {
-	s.mu.Lock()
-	size := s.contextWindow
-	s.mu.Unlock()
+// requestTokens is the context a model call's request occupies, counted as
+// claude counts it: input plus cache reads and cache writes.
+func requestTokens(usage claude.Usage) int {
+	return int(usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens)
+}
 
-	used := 0
-	if state.usage != nil {
-		used = state.usage.TotalTokens
+// contextTokens is the context a finished model call leaves occupied, counted
+// as claude counts it: its request plus its whole output. The request comes
+// from message_delta where the provider restates it, else from the call's
+// message_start. A call whose request reported nothing carries no usable
+// figure.
+func contextTokens(usage claude.Usage, opening int) (int, bool) {
+	request := requestTokens(usage)
+	if request == 0 {
+		request = opening
 	}
 
-	if stats != nil {
-		used = int(stats.TotalTokens)
+	return request + int(usage.OutputTokens), request > 0
+}
 
-		// A native reading that cannot state the window keeps the one the
-		// turn's model usage already proved.
-		if stats.MaxTokens > 0 {
-			size = stats.MaxTokens
-		}
+// emitResponseInput reports the context a top-level model call's request
+// occupies the moment the call starts, before its thinking and output stream.
+// A provider that reports usage only at the end of the stream opens the call
+// with zeros and reports nothing here.
+func (s *session) emitResponseInput(ctx context.Context, state *cycleState, message claude.Message) error {
+	state.call, state.callInput, state.callOpen = message.ID, requestTokens(message.Usage), true
+	if message.Model != "" {
+		state.model = message.Model
 	}
 
-	update := &acp.SessionUsageUpdate{Size: int(size), Used: used}
+	return s.emitContext(ctx, state, state.callInput)
+}
+
+// emitResponseUsage reports the context a top-level model call leaves
+// occupied once its message_delta states the whole output.
+func (s *session) emitResponseUsage(ctx context.Context, state *cycleState, usage claude.Usage) error {
+	if !state.callOpen {
+		return nil
+	}
+
+	state.callOpen = false
+
+	used, ok := contextTokens(usage, state.callInput)
+	if !ok {
+		return nil
+	}
+
+	return s.emitContext(ctx, state, used)
+}
+
+// emitContext reports one model call's context occupancy and keeps it as the
+// cycle's latest figure. A call without a figure reports nothing. size is the
+// session's known context window.
+func (s *session) emitContext(ctx context.Context, state *cycleState, used int) error {
+	if used <= 0 {
+		return nil
+	}
+
+	state.context = used
+
+	return s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: s.knownContextWindow(), Used: used}})
+}
+
+// emitSettledUsage reports a settled cycle: the context its last model call
+// left, the session's cumulative cost, and the structured result. Without a
+// figure since the cycle opened or claude compacted, nothing is sent unless a
+// structured result must still reach the host, which then reports used as 0.
+func (s *session) emitSettledUsage(ctx context.Context, state *cycleState) {
+	if state.context == 0 && state.structuredOutput == nil {
+		return
+	}
+
+	update := &acp.SessionUsageUpdate{Size: s.knownContextWindow(), Used: state.context}
 	if state.cost > 0 {
-		update.Cost = &acp.Cost{Amount: state.cost, Currency: "USD"}
+		update.Cost = &acp.Cost{Amount: state.cost, Currency: costCurrency}
 	}
 
 	if state.structuredOutput != nil {
@@ -366,6 +465,28 @@ func (s *session) emitUsage(ctx context.Context, state *cycleState, stats *claud
 	}
 
 	_ = s.emit(ctx, acp.SessionUpdate{UsageUpdate: update})
+}
+
+// knownContextWindow is the selected model's context window as claude last
+// reported it, else 0.
+func (s *session) knownContextWindow() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return int(s.contextWindow)
+}
+
+// refreshContextWindow adopts the selected model's context window as claude
+// reports it; a failed read leaves it unknown.
+func (s *session) refreshContextWindow(ctx context.Context, rt *runtime) {
+	window, err := rt.client.ContextWindow(ctx)
+	if err != nil {
+		window = 0
+	}
+
+	s.mu.Lock()
+	s.contextWindow = window
+	s.mu.Unlock()
 }
 
 func (s *session) emitRestoredUsage(ctx context.Context, rt *runtime) {
@@ -380,7 +501,7 @@ func (s *session) emitRestoredUsage(ctx context.Context, rt *runtime) {
 		s.mu.Unlock()
 	}
 
-	s.emitUsage(ctx, &cycleState{}, &stats)
+	_ = s.emit(ctx, acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Size: s.knownContextWindow(), Used: int(stats.TotalTokens)}})
 }
 
 func suppressedCommand(name string) bool {
@@ -537,10 +658,14 @@ const (
 	nativeDefault        = "default"
 	nativeEffortLevel    = "effortLevel"
 	nativeMessageStart   = "message_start"
-	nativeOutputStyle    = "outputStyle"
-	nativeResult         = "result"
-	nativeStreamEvent    = "stream_event"
-	nativeSystem         = "system"
+	nativeMessageDelta   = "message_delta"
+	// nativeCompactBoundary is the system record claude emits once it has
+	// replaced its context with a summary.
+	nativeCompactBoundary = "compact_boundary"
+	nativeOutputStyle     = "outputStyle"
+	nativeResult          = "result"
+	nativeStreamEvent     = "stream_event"
+	nativeSystem          = "system"
 	// nativeSourceURL is the source type of a native image the harness serves
 	// by link rather than inline.
 	nativeSourceURL    = "url"

@@ -152,6 +152,10 @@ func (s *session) setConfigOption(ctx context.Context, id acp.SessionConfigId, v
 		return nil, s.transportFailure(ctx, rt, settingsErr)
 	}
 
+	if id == configModel {
+		s.refreshContextWindow(ctx, rt)
+	}
+
 	s.mu.Lock()
 	switch id {
 	case configModel:

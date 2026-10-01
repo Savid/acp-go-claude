@@ -25,9 +25,13 @@ type Event struct {
 	Raw              json.RawMessage       `json:"-"`
 }
 
+// StreamEvent is one partial-message event of the model call in flight.
+// message_start carries the call's request usage; message_delta carries its
+// final usage, whose output_tokens is the call's whole output.
 type StreamEvent struct {
 	Type    string   `json:"type"`
 	Message *Message `json:"message"`
+	Usage   Usage    `json:"usage"`
 	Delta   struct {
 		Type     string `json:"type"`
 		Text     string `json:"text"`
@@ -35,6 +39,8 @@ type StreamEvent struct {
 	} `json:"delta"`
 }
 
+// Message is one native message. An assistant record's usage repeats its
+// call's message_start usage, so its output_tokens is not the call's output.
 type Message struct {
 	ID         string          `json:"id"`
 	Role       string          `json:"role"`
@@ -89,6 +95,8 @@ type ModelUsage struct {
 	ContextWindow int64 `json:"contextWindow"`
 }
 
+// ContextUsage is the get_context_usage answer: claude's estimate of the
+// tokens in context and the selected model's context window.
 type ContextUsage struct {
 	TotalTokens int64 `json:"totalTokens"`
 	MaxTokens   int64 `json:"maxTokens"`

@@ -148,6 +148,14 @@ func TestCapturedNativeAgentOrigin(t *testing.T) {
 	require.Equal(t, "activity", events[1]["cause"])
 	require.Equal(t, "success", events[1]["outcome"])
 	require.Contains(t, agentText(rec.snapshot()), "background agent")
+	// The call reports its request at message_start and adds its output at
+	// message_delta; settlement takes the window result states for the
+	// call's model and claude's cumulative cost.
+	require.Equal(t, []acp.SessionUsageUpdate{
+		{Size: 1000, Used: 21493},
+		{Size: 1000, Used: 21605},
+		{Size: 200000, Used: 21605, Cost: &acp.Cost{Amount: 0.0330726, Currency: costCurrency}},
+	}, usageUpdates(rec.snapshot()))
 	s.mu.Lock()
 	require.Nil(t, s.cycle)
 	s.mu.Unlock()

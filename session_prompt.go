@@ -290,8 +290,7 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 
 	if t.ended == turnSettled {
 		if !cancelled {
-			stats := s.settledStats(settleCtx, rt)
-			s.emitUsage(settleCtx, &t.state, stats)
+			s.emitSettledUsage(settleCtx, &t.state)
 			s.emitSessionInfo(settleCtx, params.Prompt)
 		}
 
@@ -334,15 +333,6 @@ func (s *session) settleTurn(ctx context.Context, rt *runtime, t *turn, params a
 		Usage:         t.state.usage,
 		UserMessageId: params.MessageId,
 	}, nil
-}
-
-func (s *session) settledStats(ctx context.Context, rt *runtime) *claude.ContextUsage {
-	stats, err := rt.client.ContextUsage(ctx)
-	if err != nil {
-		return nil
-	}
-
-	return &stats
 }
 
 // mirrorFailure maps a failed mirror commit onto the turn-failure shape. A

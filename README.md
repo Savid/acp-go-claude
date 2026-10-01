@@ -81,7 +81,7 @@ are omitted. Executable lookup uses the base environment before session override
 `agentCapabilities._meta.claude.structuredOutput` advertises the schema surface.
 `session/set_config_option` exposes `model`, `mode`, `effort`, and
 `output_style` when available. Model and command catalogs come from native
-initialization. Structured output appears on usage updates at
+initialization. Structured output appears on the turn's final usage update at
 `_meta.claude.structuredOutput`. Delegated updates carry
 `_meta.claude.parentToolUseId`.
 

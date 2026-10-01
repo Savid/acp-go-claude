@@ -186,9 +186,19 @@ func (c *Client) ApplySettings(ctx context.Context, settings map[string]any) err
 func (c *Client) ContextUsage(ctx context.Context) (ContextUsage, error) {
 	var result ContextUsage
 
-	err := c.Control(ctx, map[string]any{keySubtype: "get_context_usage"}, &result)
+	err := c.Control(ctx, map[string]any{keySubtype: subtypeContextUsage}, &result)
 
 	return result, err
+}
+
+// ContextWindow reads the selected model's context window. The summary detail
+// answers from local state without counting tokens through the provider.
+func (c *Client) ContextWindow(ctx context.Context) (int64, error) {
+	var result ContextUsage
+
+	err := c.Control(ctx, map[string]any{keySubtype: subtypeContextUsage, "detail": "summary"}, &result)
+
+	return result.MaxTokens, err
 }
 
 func (c *Client) Reply(ctx context.Context, id string, result any, err error) error {
@@ -207,6 +217,7 @@ const (
 	responseError       = "error"
 	keySubtype          = "subtype"
 	typeControlResponse = "control_response"
+	subtypeContextUsage = "get_context_usage"
 )
 
 const keyType = "type"

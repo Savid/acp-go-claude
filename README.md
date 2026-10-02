@@ -25,8 +25,8 @@ go install github.com/savid/acp-go-claude/cmd/acp-go-claude@latest
 acp-go-claude [-path claude] [-home DIR] [-model MODEL] [-seed-file rel=host]... [-debug]
 ```
 
-Verified against Claude Code 2.1.273. `-path` selects the executable; `-home`
-sets `CLAUDE_CONFIG_DIR`; `-model` selects the default native model identifier.
+`-path` selects the executable; `-home` sets `CLAUDE_CONFIG_DIR`; `-model`
+selects the default native model identifier.
 `-seed-file` writes a file relative to the native home before launch.
 `-scratch-dir` selects the parent for temporary quota probes; empty uses system temp. `-version` prints the adapter version. Diagnostics go to
 stderr. OpenTelemetry uses the standard `OTEL_*` variables.

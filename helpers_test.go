@@ -331,6 +331,56 @@ func agentText(updates []acp.SessionNotification) string {
 	return text.String()
 }
 
+// usageUpdates returns the recorded usage_update payloads in delivery order,
+// without the variant discriminator the wire decoding fills in and with _meta
+// as a host decodes it.
+func usageUpdates(updates []acp.SessionNotification) []acp.SessionUsageUpdate {
+	var usage []acp.SessionUsageUpdate
+
+	for _, update := range updates {
+		if payload := update.Update.UsageUpdate; payload != nil {
+			usage = append(usage, acp.SessionUsageUpdate{Size: payload.Size, Used: payload.Used, Cost: payload.Cost, Meta: decodedMeta(payload.Meta)})
+		}
+	}
+
+	return usage
+}
+
+// decodedMeta is meta as a host decodes it from the wire.
+func decodedMeta(meta map[string]any) map[string]any {
+	if meta == nil {
+		return nil
+	}
+
+	data, err := json.Marshal(meta)
+	if err != nil {
+		panic(err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		panic(err)
+	}
+
+	return decoded
+}
+
+// callMeta is the _meta of the update that reports a call with breakdown.
+func callMeta(call wire.CallUsage) map[string]any {
+	return decodedMeta(call.Apply(nil))
+}
+
+// meta is the breakdown of the fake call answered as response id, whose
+// message_delta restated every figure.
+func (c fakeCall) meta(id string) map[string]any {
+	return callMeta(wire.CallUsage{ResponseID: id, InputTokens: new(c.input), CachedReadTokens: new(c.cacheRead), CachedWriteTokens: new(c.cacheWrite), OutputTokens: new(c.output)})
+}
+
+// usageCost is the session's cumulative cost after calls fake model calls.
+func usageCost(calls int) *acp.Cost {
+	return &acp.Cost{Amount: float64(calls) * fakeCallCost, Currency: costCurrency}
+}
+
 // lifecycleEvents extracts the lifecycle envelopes in delivery order.
 func lifecycleEvents(updates []acp.SessionNotification) []map[string]any {
 	events := make([]map[string]any, 0)

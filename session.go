@@ -25,8 +25,7 @@ const (
 	// sessionAbortTimeout bounds the native abort a cancel or close sends.
 	sessionAbortTimeout = 5 * time.Second
 	// sessionSettleTimeout bounds one turn's settlement after the native run
-	// ended: the stats read, the mirror commit, and the terminal lifecycle
-	// event.
+	// ended: the mirror commit and the terminal lifecycle event.
 	sessionSettleTimeout = 60 * time.Second
 	// claudeInitializeTimeout bounds the native control-protocol handshake.
 	claudeInitializeTimeout = 60 * time.Second
@@ -351,6 +350,8 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model strin
 		return s.startFailure(ctx, accessErr)
 	}
 
+	s.refreshContextWindow(initCtx, rt)
+
 	s.mu.Lock()
 	rt.quotaAccess = access
 	rt.quotaModel = settings.Effective.Model
@@ -545,14 +546,16 @@ func (s *session) openAgentCycle(ctx context.Context, rt *runtime) *cycle {
 }
 
 // settleAgentCycle runs the agent-origin settlement on the pump: usage, the
-// mirror commit, then the terminal idle.
+// mirror commit, then the terminal idle. A cancelled cycle reports no usage.
 func (s *session) settleAgentCycle(ctx context.Context, rt *runtime, c *cycle) {
 	s.beginSettlement(c)
 
 	settleCtx, cancel := context.WithTimeout(ctx, sessionSettleTimeout)
 	defer cancel()
 
-	s.emitUsage(settleCtx, &c.state, nil)
+	if !s.cycleCancelled(c) {
+		s.emitSettledUsage(settleCtx, &c.state)
+	}
 
 	if err := s.commitMirror(settleCtx); err != nil {
 		// The cycle's state is not durable, so the incarnation is fenced and the

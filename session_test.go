@@ -142,6 +142,21 @@ func TestNativeExitAfterASettledTurnFencesTheIncarnation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
 
+	// The next prompt follows claude's exit, not its race with the response.
+	live, err := h.agent.session(h.ctx(), session.SessionId)
+	require.NoError(t, err)
+	live.mu.Lock()
+	rt := live.runtime
+	live.mu.Unlock()
+
+	if rt != nil {
+		select {
+		case <-rt.done:
+		case <-time.After(testTimeout):
+			t.Fatal("claude never left after its turn")
+		}
+	}
+
 	next, err := h.prompt(session.SessionId, "HELLO", promptMeta(2))
 	require.NoError(t, err)
 	require.Equal(t, acp.StopReasonEndTurn, next.StopReason)

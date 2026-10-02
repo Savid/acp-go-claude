@@ -148,13 +148,13 @@ func TestAccountUsageResponseMapping(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 9, 17, 2, 41, 3, 900, time.UTC)
-	scoped := claude.ScopedWindow{Window: claude.Window{Utilization: new(float64(22))}, DisplayName: "Fable"}
+	scoped := claude.ScopedWindow{Utilization: new(float64(22)), DisplayName: "Fable"}
 
 	response, err := accountUsageResponse(claude.AccountUsage{Plan: "pro", Available: true, Windows: &claude.RateLimits{ModelScoped: []claude.ScopedWindow{scoped}}}, now)
 	require.NoError(t, err)
 	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "pro", Limits: []wire.AccountUsageLimit{{ObservedAt: "2026-09-17T02:41:03Z", ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22}}}, response, "the display name keys and labels a scoped limit")
 
-	padded := claude.ScopedWindow{Window: claude.Window{Utilization: new(float64(22)), ResetsAt: "2026-09-19T08:00:00.051625+00:00"}, DisplayName: " Fable "}
+	padded := claude.ScopedWindow{Utilization: new(float64(22)), ResetsAt: "2026-09-19T08:00:00.051625+00:00", DisplayName: " Fable "}
 	response, err = accountUsageResponse(claude.AccountUsage{Plan: " Max ", Available: true, Windows: &claude.RateLimits{ModelScoped: []claude.ScopedWindow{padded}}}, now)
 	require.NoError(t, err)
 	require.Equal(t, wire.AccountUsageResponse{Available: true, Plan: "Max", Limits: []wire.AccountUsageLimit{{ObservedAt: "2026-09-17T02:41:03Z", ID: "weekly_scoped/Fable", Label: "Fable", UsedPercent: 22, ResetsAt: "2026-09-19T08:00:00Z"}}}, response, "native padding is trimmed from the plan and the model name")

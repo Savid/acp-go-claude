@@ -493,12 +493,16 @@ func TestStructuredOutputIsAdvertisedAndDelivered(t *testing.T) {
 
 	for _, update := range h.rec.snapshot() {
 		usage := update.Update.UsageUpdate
-		if usage == nil || usage.Meta == nil {
+		if usage == nil {
 			continue
 		}
 
+		// Call breakdowns ride the per-call updates; the structured result
+		// rides the settled one.
 		meta, ok := usage.Meta["claude"].(map[string]any)
-		require.True(t, ok)
+		if !ok {
+			continue
+		}
 
 		result, ok := meta["structuredOutput"].(map[string]any)
 		require.True(t, ok, "the native structured result did not land where the capability names it")

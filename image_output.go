@@ -22,18 +22,14 @@ func decodeOutputImage(block claude.ContentBlock, limit int64) (image.Output, *i
 }
 
 // toolState is the exact-id lifecycle published for one native tool call.
+// Its content is published once, with the terminal status, and not retained.
 type toolState struct {
 	published bool
 	terminal  bool
-	// content is the last emitted complete content array; each later
-	// content-bearing update merges onto it so no delivered item disappears
-	// under ACP's whole-array replacement.
-	content []toolContentItem
 }
 
 type toolContentItem struct {
 	content    acp.ToolCallContent
-	key        string
 	imageBytes int64
 }
 
@@ -126,7 +122,7 @@ func (s *session) publishToolTerminal(ctx context.Context, state *cycleState, to
 	if result != nil {
 		var failure *image.OutputError
 
-		snapshot, failure = mapToolContent(tool.content, result, s.agent.options.ImageLimits.core())
+		snapshot, failure = mapToolContent(result, s.agent.options.ImageLimits.core())
 		if failure != nil {
 			if state.replay {
 				return failure
@@ -144,26 +140,15 @@ func (s *session) publishToolTerminal(ctx context.Context, state *cycleState, to
 		return err
 	}
 
-	s.recordToolContent(state, tool, snapshot)
-	tool.terminal = true
-
-	return nil
-}
-
-func (s *session) recordToolContent(state *cycleState, tool *toolState, snapshot []toolContentItem) {
-	if len(snapshot) == 0 {
-		return
-	}
-
-	tool.content = snapshot
-
 	for _, item := range snapshot {
 		if item.imageBytes > 0 {
 			state.imagesEmitted = true
-
-			return
 		}
 	}
+
+	tool.terminal = true
+
+	return nil
 }
 
 // failToolImage handles an image the adapter will not ship on tool
@@ -188,10 +173,9 @@ func (s *session) failToolImage(ctx context.Context, state *cycleState, toolCall
 	return wire.TurnFailed(vendor, failure.TurnFailure())
 }
 
-// mapToolContent builds the next complete content snapshot from the
-// previously emitted one: text and validated images, merged so an already
-// delivered item never disappears, bounded per tool call.
-func mapToolContent(previous []toolContentItem, blocks []claude.ContentBlock, limits image.Limits) ([]toolContentItem, *image.OutputError) {
+// mapToolContent builds a tool call's complete content snapshot: text and
+// validated images, bounded per tool call.
+func mapToolContent(blocks []claude.ContentBlock, limits image.Limits) ([]toolContentItem, *image.OutputError) {
 	next := make([]toolContentItem, 0, len(blocks))
 	seen := make(map[string]struct{})
 
@@ -204,7 +188,7 @@ func mapToolContent(previous []toolContentItem, blocks []claude.ContentBlock, li
 				continue
 			}
 
-			next = append(next, toolContentItem{content: acp.ToolContent(acp.TextBlock(block.Text)), key: "text:" + block.Text})
+			next = append(next, toolContentItem{content: acp.ToolContent(acp.TextBlock(block.Text))})
 		case contentBlockTypeImage:
 			if link := remoteImageLink(*block); link != nil {
 				key := "uri:" + link.ResourceLink.Uri
@@ -213,7 +197,8 @@ func mapToolContent(previous []toolContentItem, blocks []claude.ContentBlock, li
 				}
 
 				seen[key] = struct{}{}
-				next = append(next, toolContentItem{content: acp.ToolContent(*link), key: "uri:" + link.ResourceLink.Uri})
+
+				next = append(next, toolContentItem{content: acp.ToolContent(*link)})
 
 				continue
 			}
@@ -229,19 +214,17 @@ func mapToolContent(previous []toolContentItem, blocks []claude.ContentBlock, li
 			}
 
 			seen[key] = struct{}{}
+
 			next = append(next, toolContentItem{
 				content:    acp.ToolContent(acp.ImageBlock(output.Data, output.MIME)),
-				key:        key,
 				imageBytes: output.SizeBytes,
 			})
 		}
 	}
 
-	merged := mergeToolContent(previous, next)
-
 	var total int64
 
-	for _, item := range merged {
+	for _, item := range next {
 		total += item.imageBytes
 		if item.imageBytes > 0 && total > limits.EffectiveOutputPerToolCall() {
 			return nil, &image.OutputError{
@@ -253,29 +236,7 @@ func mapToolContent(previous []toolContentItem, blocks []claude.ContentBlock, li
 		}
 	}
 
-	return merged, nil
-}
-
-// mergeToolContent replaces text and retains images already delivered.
-func mergeToolContent(previous []toolContentItem, next []toolContentItem) []toolContentItem {
-	if len(previous) == 0 {
-		return next
-	}
-
-	present := make(map[string]struct{}, len(next))
-	for _, item := range next {
-		present[item.key] = struct{}{}
-	}
-
-	merged := make([]toolContentItem, 0, len(previous)+len(next))
-
-	for _, item := range previous {
-		if _, ok := present[item.key]; item.imageBytes > 0 && !ok {
-			merged = append(merged, item)
-		}
-	}
-
-	return append(merged, next...)
+	return next, nil
 }
 
 func toolContent(items []toolContentItem) []acp.ToolCallContent {

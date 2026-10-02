@@ -81,9 +81,23 @@ are omitted. Executable lookup uses the base environment before session override
 `agentCapabilities._meta.claude.structuredOutput` advertises the schema surface.
 `session/set_config_option` exposes `model`, `mode`, `effort`, and
 `output_style` when available. Model and command catalogs come from native
-initialization. Structured output appears on usage updates at
+initialization. Structured output appears on the turn's final usage update at
 `_meta.claude.structuredOutput`. Delegated updates carry
 `_meta.claude.parentToolUseId`.
+
+Each top-level model call reports `usage_update` with the context its request
+occupies at `message_start` and the context it leaves at `message_delta`. The
+`message_delta` update carries the call's token breakdown from claude's
+`input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, and
+`output_tokens`, leaving out any figure claude did not report, and the
+response id as `responseId`. A usage report whose figures are all zero or
+absent, as a gateway replaying a cached response sends, reports nothing.
+
+Assistant text, thought, and image chunks, live or replayed, carry the model
+response's id as `messageId`: the `message.id` claude records from the
+gateway's response, so every chunk of one response shares it with that call's
+`responseId`. A response without an id, and a record claude writes itself
+(model `<synthetic>`, such as an API error notice), carry neither.
 
 Native permission requests are relayed to ACP; a failed or cancelled answer
 denies the operation. Native form and URL elicitations require the matching

@@ -47,6 +47,10 @@ var fakeAccountUsage = map[string]any{
 	"behaviors": nil,
 }
 
+// fakeClaudeEnvEmptyContext makes get_context_usage estimate an empty
+// context, as claude does before it can count one.
+const fakeClaudeEnvEmptyContext = "ACP_GO_CLAUDE_TEST_EMPTY_CONTEXT"
+
 // fakeClaudeEnvResumeHold names a file a resumed fake claude creates before it
 // stops answering, so a test can act while the adapter is still relaunching.
 const fakeClaudeEnvResumeHold = "ACP_GO_CLAUDE_TEST_RESUME_HOLD"
@@ -89,6 +93,112 @@ type fakeClaude struct {
 	turnMu   sync.Mutex
 	abort    chan struct{}
 	replies  map[string]chan json.RawMessage
+
+	// usageMu guards the selected model and the session's cumulative cost,
+	// which runs and control requests both read.
+	usageMu sync.Mutex
+	model   string
+	cost    float64
+}
+
+// fakeContextWindow is each fake model's context window.
+func fakeContextWindow(model string) int64 {
+	if model == "haiku" {
+		return 500
+	}
+
+	return 1000
+}
+
+// fakeCallCost is every fake model call's cost, exact in binary so sums
+// compare.
+const fakeCallCost = 0.25
+
+// fakeCall is one model call's native usage: the new input, the cached prefix
+// it read, the prefix it wrote to the cache, and its whole output.
+type fakeCall struct {
+	input, cacheRead, cacheWrite, output int
+}
+
+// start is the usage message_start carries: the request and an opening
+// output figure.
+func (c fakeCall) start() map[string]any {
+	return map[string]any{"input_tokens": c.input, "cache_read_input_tokens": c.cacheRead, "cache_creation_input_tokens": c.cacheWrite, "output_tokens": 1}
+}
+
+// end is the usage message_delta carries: the request restated and the whole
+// output.
+func (c fakeCall) end() map[string]any {
+	return map[string]any{"input_tokens": c.input, "cache_read_input_tokens": c.cacheRead, "cache_creation_input_tokens": c.cacheWrite, "output_tokens": c.output}
+}
+
+// helloCall is the one model call a plain prompt makes.
+var helloCall = fakeCall{input: 10, output: 5}
+
+// fakeRun accumulates one query's calls as claude sums them for its result.
+type fakeRun struct {
+	f     *fakeClaude
+	model string
+	sum   fakeCall
+}
+
+// begin opens one model call's stream.
+func (r *fakeRun) begin(id string, start map[string]any) {
+	r.f.write(map[string]any{"type": "stream_event", "uuid": "stream-" + id, "session_id": r.f.id, "event": map[string]any{"type": nativeMessageStart, "message": map[string]any{"id": id, "role": "assistant", "model": r.model, "content": []any{}, "usage": start}}})
+}
+
+// assistant writes one assistant record of a call. Its usage repeats the
+// call's opening figure, as claude's records do.
+func (r *fakeRun) assistant(id string, row string, start map[string]any, content []map[string]any) {
+	r.f.write(map[string]any{"type": "assistant", "uuid": row, "session_id": r.f.id, "message": map[string]any{"id": id, "role": "assistant", "model": r.model, "content": content, "usage": start}})
+}
+
+// finish closes one model call: its message_delta, then its usage in the
+// query's sum and the session's cost.
+func (r *fakeRun) finish(call fakeCall, delta map[string]any) {
+	r.f.write(map[string]any{"type": "stream_event", "session_id": r.f.id, "event": map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn"}, "usage": delta}})
+	r.spend(call)
+}
+
+// spend counts one call that reached the provider.
+func (r *fakeRun) spend(call fakeCall) {
+	r.sum.input += call.input
+	r.sum.cacheRead += call.cacheRead
+	r.sum.cacheWrite += call.cacheWrite
+	r.sum.output += call.output
+
+	// A replayed response costs nothing.
+	if call == (fakeCall{}) {
+		return
+	}
+
+	r.f.usageMu.Lock()
+	r.f.cost += fakeCallCost
+	r.f.usageMu.Unlock()
+}
+
+// step is one complete tool-using model call and its tool result.
+func (r *fakeRun) step(id string, call fakeCall) {
+	r.begin(id, call.start())
+	r.assistant(id, "assistant-"+id, call.start(), []map[string]any{{"type": "tool_use", "id": "tool-" + id, "name": "Bash", "input": map[string]any{"command": "true"}}})
+	r.finish(call, call.end())
+	r.f.write(map[string]any{"type": "user", "session_id": r.f.id, "message": map[string]any{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "tool-" + id, "content": "ok"}}}})
+}
+
+// result reports the query: its summed usage, the session's cumulative cost,
+// and the context window of each model the session used.
+func (r *fakeRun) result(text string) map[string]any {
+	r.f.usageMu.Lock()
+	cost := r.f.cost
+	r.f.usageMu.Unlock()
+
+	return map[string]any{"type": "result", "uuid": "result-" + text, "session_id": r.f.id, "subtype": "success",
+		"usage":          map[string]any{"input_tokens": r.sum.input, "cache_read_input_tokens": r.sum.cacheRead, "cache_creation_input_tokens": r.sum.cacheWrite, "output_tokens": r.sum.output},
+		"total_cost_usd": cost,
+		"modelUsage": map[string]any{
+			r.model:      map[string]any{"contextWindow": fakeContextWindow(r.model)},
+			"fake-other": map[string]any{"contextWindow": 9000},
+		}}
 }
 
 // launchFlag returns the value of a repeated <name> <value> launch flag, and
@@ -144,6 +254,7 @@ func runFakeClaude(args []string) int {
 	}
 	structured, structuredRequested := launchFlag(args, "--json-schema")
 	settings := map[string]any{"model": launchModel, nativeOutputStyle: "default"}
+	f.model = launchModel
 	if os.Getenv(fakeClaudeEnvUnsetEffort) != "1" {
 		settings[nativeEffortLevel] = "low"
 	}
@@ -176,6 +287,10 @@ func runFakeClaude(args []string) int {
 				result = map[string]any{"effective": settings}
 			case "set_model":
 				settings["model"] = frame.Request["model"]
+				model, _ := frame.Request["model"].(string)
+				f.usageMu.Lock()
+				f.model = model
+				f.usageMu.Unlock()
 			case "set_permission_mode":
 				if _, ok := frame.Request["mode"].(string); !ok {
 					return 2
@@ -187,7 +302,12 @@ func runFakeClaude(args []string) int {
 				}
 				maps.Copy(settings, values)
 			case "get_context_usage":
-				result = claude.ContextUsage{TotalTokens: 20, MaxTokens: 1000}
+				f.usageMu.Lock()
+				result = claude.ContextUsage{TotalTokens: 20, MaxTokens: fakeContextWindow(f.model)}
+				if os.Getenv(fakeClaudeEnvEmptyContext) != "" {
+					result = claude.ContextUsage{MaxTokens: fakeContextWindow(f.model)}
+				}
+				f.usageMu.Unlock()
 			case "get_usage":
 				var answered bool
 				if result, answered = f.accountUsage(frame.RequestID); !answered {
@@ -272,7 +392,29 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}, structured string,
 		os.Exit(23)
 	}
 	f.row("user", text)
-	f.write(map[string]any{"type": "stream_event", "uuid": "stream-" + text, "session_id": f.id, "event": map[string]any{"type": nativeMessageStart, "message": map[string]any{"id": "reply-" + text, "role": "assistant", "content": []any{}}}})
+	f.usageMu.Lock()
+	run := &fakeRun{f: f, model: f.model}
+	f.usageMu.Unlock()
+
+	id, call := "reply-"+text, helloCall
+
+	if text == "NOSTREAM" {
+		// A call claude made without streaming reports only through its
+		// records, which all carry the call's usage.
+		call = fakeCall{input: 200, cacheRead: 300, output: 7}
+		run.assistant(id, "assistant-thought-"+id, call.end(), []map[string]any{{"type": "thinking", "thinking": "hm"}})
+		run.assistant(id, "assistant-"+id, call.end(), []map[string]any{{"type": "text", "text": "reply: " + text}})
+		run.spend(call)
+		f.row("assistant", "reply: "+text)
+		f.write(run.result(text))
+
+		return
+	}
+
+	call, start := run.prelude(text, id, call)
+
+	run.begin(id, start)
+
 	if text == "QUOTA_SESSION_EXHAUSTED" {
 		f.write(map[string]any{"type": "rate_limit_event", "session_id": f.id, "rate_limit_info": map[string]any{"status": "rejected", "rateLimitType": "five_hour", "utilization": 1, "resetsAt": time.Now().Add(time.Hour).Unix()}})
 		f.write(map[string]any{"type": "assistant", "session_id": f.id, "error": "rate_limit"})
@@ -280,7 +422,7 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}, structured string,
 
 		return
 	}
-	if text == "BLOCK" {
+	if text == "BLOCK" || text == "STEPSLOW" {
 		<-abort
 		f.write(map[string]any{"type": "result", "session_id": f.id, "stop_reason": "aborted"})
 
@@ -341,9 +483,16 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}, structured string,
 		answer = outcome
 	}
 	f.write(map[string]any{"type": "stream_event", "session_id": f.id, "event": map[string]any{"type": "content_block_delta", "delta": map[string]any{"type": "text_delta", "text": answer[:3]}}})
-	f.write(map[string]any{"type": "assistant", "uuid": "assistant-" + text, "session_id": f.id, "message": map[string]any{"id": "reply-" + text, "role": "assistant", "content": []map[string]any{{"type": "text", "text": answer}}}})
+	run.assistant(id, "assistant-"+text, start, []map[string]any{{"type": "text", "text": answer}})
 	f.row("assistant", answer)
-	result := map[string]any{"type": "result", "uuid": "result-" + text, "session_id": f.id, "subtype": "success", "usage": map[string]any{"input_tokens": 10, "output_tokens": 5}, "total_cost_usd": 0.01}
+	run.finish(call, call.end())
+
+	if text == "COMPACTEND" {
+		// A manual compaction runs after the last call of the query.
+		f.write(fakeCompactBoundary(f.id, "manual"))
+	}
+
+	result := run.result(text)
 	if structuredRequested {
 		var decoded any
 		if json.Unmarshal([]byte(structured), &decoded) == nil {
@@ -357,4 +506,75 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}, structured string,
 	if text == "AGENTWORK" {
 		f.turn("background", abort, structured, structuredRequested)
 	}
+}
+
+// prelude runs a script's model calls up to its final call and returns that
+// call with the usage its message_start carries.
+func (r *fakeRun) prelude(text string, id string, call fakeCall) (fakeCall, map[string]any) {
+	switch text {
+	case "GATEWAY":
+		// A gateway that reports usage only at the end of the stream opens
+		// the call with zeros and no cache figures.
+		return fakeCall{input: 300, cacheRead: 700, output: 40}, map[string]any{"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": nil, "cache_creation_input_tokens": nil}
+	case "EMPTY":
+		// A gateway replaying a cached response reports every figure as zero,
+		// at the start of the stream and at its end.
+		return fakeCall{}, fakeCall{}.end()
+	case "REPLAY":
+		// A real call, then one a gateway answers from its response cache.
+		r.step(id+"-1", fakeCall{input: 100, cacheRead: 1000, output: 20})
+
+		return fakeCall{}, fakeCall{}.end()
+	}
+
+	call = r.steps(text, id, call)
+
+	return call, call.start()
+}
+
+// steps runs the model calls a script makes before its final call and returns
+// that final call.
+func (r *fakeRun) steps(text string, id string, call fakeCall) fakeCall {
+	switch text {
+	case "MULTI":
+		// Each call resends the context the previous one left.
+		r.step(id+"-1", fakeCall{input: 100, cacheRead: 1000, output: 20})
+		r.step(id+"-2", fakeCall{input: 50, cacheRead: 1120, output: 30})
+
+		return fakeCall{input: 40, cacheRead: 1200, output: 10}
+	case "STEER":
+		// Input queued while the query runs joins it at the next tool
+		// boundary, and the query carries on.
+		r.step(id+"-1", fakeCall{input: 100, cacheRead: 1000, output: 20})
+		r.f.write(map[string]any{"type": "user", "session_id": r.f.id, "message": map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": "steer"}}}})
+
+		return fakeCall{input: 30, cacheRead: 1120, output: 10}
+	case "RETRY":
+		// The provider drops the first attempt mid-stream and claude retries.
+		r.begin(id+"-1", fakeCall{input: 100, cacheRead: 1000}.start())
+		r.f.write(map[string]any{"type": "system", "subtype": "api_retry", "session_id": r.f.id, "attempt": 1, "max_retries": 10, "retry_delay_ms": 0, "error_status": 529})
+
+		return fakeCall{input: 100, cacheRead: 1000, output: 20}
+	case "COMPACT":
+		// The context crosses claude's threshold, so it compacts before the
+		// next call.
+		r.step(id+"-1", fakeCall{input: 100, cacheRead: 800, output: 50})
+		r.f.write(fakeCompactBoundary(r.f.id, "auto"))
+
+		return fakeCall{input: 10, cacheRead: 300, output: 5}
+	case "COMPACTEND":
+		return fakeCall{input: 100, cacheRead: 800, output: 50}
+	case "STEPSLOW":
+		r.step(id+"-1", fakeCall{input: 100, cacheRead: 1000, output: 20})
+
+		return fakeCall{input: 50, cacheRead: 1120, output: 30}
+	}
+
+	return call
+}
+
+// fakeCompactBoundary is the record claude writes once a compaction replaced
+// the context with a summary.
+func fakeCompactBoundary(session string, trigger string) map[string]any {
+	return map[string]any{"type": "system", "subtype": nativeCompactBoundary, "session_id": session, "compact_metadata": map[string]any{"trigger": trigger, "pre_tokens": 950, "post_tokens": 120}}
 }

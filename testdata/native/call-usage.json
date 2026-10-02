@@ -1,0 +1,280 @@
+{
+  "anthropic": [
+    {
+      "type": "stream_event",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "event": {
+        "type": "message_start",
+        "message": {
+          "id": "msg-anthropic",
+          "role": "assistant",
+          "model": "claude-haiku-4-5-20251001",
+          "content": [],
+          "usage": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 7000,
+            "cache_read_input_tokens": 14704,
+            "output_tokens": 3
+          }
+        }
+      }
+    },
+    {
+      "type": "assistant",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "uuid": "row-anthropic-1",
+      "message": {
+        "id": "msg-anthropic",
+        "role": "assistant",
+        "model": "claude-haiku-4-5-20251001",
+        "content": [
+          {
+            "type": "text",
+            "text": "ok"
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7000,
+          "cache_read_input_tokens": 14704,
+          "output_tokens": 3
+        }
+      }
+    },
+    {
+      "type": "assistant",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "uuid": "row-anthropic-2",
+      "message": {
+        "id": "msg-anthropic",
+        "role": "assistant",
+        "model": "claude-haiku-4-5-20251001",
+        "content": [
+          {
+            "type": "text",
+            "text": "ok"
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7000,
+          "cache_read_input_tokens": 14704,
+          "output_tokens": 3
+        }
+      }
+    },
+    {
+      "type": "assistant",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "uuid": "row-anthropic-3",
+      "message": {
+        "id": "msg-anthropic",
+        "role": "assistant",
+        "model": "claude-haiku-4-5-20251001",
+        "content": [
+          {
+            "type": "text",
+            "text": "ok"
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7000,
+          "cache_read_input_tokens": 14704,
+          "output_tokens": 3
+        }
+      }
+    },
+    {
+      "type": "stream_event",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "event": {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use"
+        },
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7000,
+          "cache_read_input_tokens": 14704,
+          "output_tokens": 194
+        }
+      }
+    }
+  ],
+  "gateway": [
+    {
+      "type": "stream_event",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "event": {
+        "type": "message_start",
+        "message": {
+          "id": "msg-gateway",
+          "role": "assistant",
+          "model": "openrouter/qwen/qwen3.8-flash",
+          "content": [],
+          "usage": {
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "assistant",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "uuid": "row-gateway-1",
+      "message": {
+        "id": "msg-gateway",
+        "role": "assistant",
+        "model": "openrouter/qwen/qwen3.8-flash",
+        "content": [
+          {
+            "type": "text",
+            "text": "ok"
+          }
+        ],
+        "usage": {
+          "input_tokens": 0,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "type": "assistant",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "uuid": "row-gateway-2",
+      "message": {
+        "id": "msg-gateway",
+        "role": "assistant",
+        "model": "openrouter/qwen/qwen3.8-flash",
+        "content": [
+          {
+            "type": "text",
+            "text": "ok"
+          }
+        ],
+        "usage": {
+          "input_tokens": 0,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "type": "stream_event",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "event": {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use"
+        },
+        "usage": {
+          "input_tokens": 19797,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 256,
+          "output_tokens": 245
+        }
+      }
+    }
+  ],
+  "openrouter": [
+    {
+      "type": "stream_event",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "event": {
+        "type": "message_start",
+        "message": {
+          "id": "msg-openrouter",
+          "role": "assistant",
+          "model": "qwen/qwen3.8-flash",
+          "content": [],
+          "usage": {
+            "input_tokens": 0,
+            "cache_creation_input_tokens": null,
+            "cache_read_input_tokens": null,
+            "output_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "assistant",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "uuid": "row-openrouter-1",
+      "message": {
+        "id": "msg-openrouter",
+        "role": "assistant",
+        "model": "qwen/qwen3.8-flash",
+        "content": [
+          {
+            "type": "text",
+            "text": "ok"
+          }
+        ],
+        "usage": {
+          "input_tokens": 0,
+          "cache_creation_input_tokens": null,
+          "cache_read_input_tokens": null,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "type": "assistant",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "uuid": "row-openrouter-2",
+      "message": {
+        "id": "msg-openrouter",
+        "role": "assistant",
+        "model": "qwen/qwen3.8-flash",
+        "content": [
+          {
+            "type": "text",
+            "text": "ok"
+          }
+        ],
+        "usage": {
+          "input_tokens": 0,
+          "cache_creation_input_tokens": null,
+          "cache_read_input_tokens": null,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "type": "stream_event",
+      "session_id": "fixture-session",
+      "parent_tool_use_id": null,
+      "event": {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use"
+        },
+        "usage": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 20115,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 81
+        }
+      }
+    }
+  ]
+}

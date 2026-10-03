@@ -55,6 +55,18 @@ const fakeClaudeEnvEmptyContext = "ACP_GO_CLAUDE_TEST_EMPTY_CONTEXT"
 // stops answering, so a test can act while the adapter is still relaunching.
 const fakeClaudeEnvResumeHold = "ACP_GO_CLAUDE_TEST_RESUME_HOLD"
 
+// fakeClaudeEnvLaunchLog names a file every fake claude launch appends a line
+// to, so a test can count native launches.
+const fakeClaudeEnvLaunchLog = "ACP_GO_CLAUDE_TEST_LAUNCH_LOG"
+
+// fakeClaudeEnvLaunchGate names a file a launched fake claude waits for before
+// it announces itself, so a test can hold an establishment in native start.
+const fakeClaudeEnvLaunchGate = "ACP_GO_CLAUDE_TEST_LAUNCH_GATE"
+
+// fakeClaudeEnvLaunchFail makes a launched fake claude exit before it
+// announces itself.
+const fakeClaudeEnvLaunchFail = "ACP_GO_CLAUDE_TEST_LAUNCH_FAIL"
+
 // fakeClaudeResumeHold is how long a held resume refuses to serve. It outlasts
 // the shutdown the adapter sends when it gives up on the relaunch.
 const fakeClaudeResumeHold = 30 * time.Second
@@ -233,7 +245,30 @@ func fakeClaudeSessionID(args []string) string {
 	return id
 }
 
+// fakeClaudeLaunched records this launch, waits while a test's launch gate is
+// closed, and exits when the test asked the launch to fail.
+func fakeClaudeLaunched() {
+	if path := os.Getenv(fakeClaudeEnvLaunchLog); path != "" {
+		if file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+			_, _ = file.WriteString("launch\n")
+			_ = file.Close()
+		}
+	}
+	if gate := os.Getenv(fakeClaudeEnvLaunchGate); gate != "" {
+		for {
+			if _, err := os.Stat(gate); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if os.Getenv(fakeClaudeEnvLaunchFail) == "1" {
+		os.Exit(1)
+	}
+}
+
 func runFakeClaude(args []string) int {
+	fakeClaudeLaunched()
 	cwd, _ := os.Getwd()
 	id := fakeClaudeSessionID(args)
 	f := &fakeClaude{id: id, path: claude.SessionPath(os.Getenv(claude.EnvConfigDir), cwd, id), replies: make(map[string]chan json.RawMessage)}

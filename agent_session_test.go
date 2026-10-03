@@ -3,6 +3,10 @@ package claudeacp
 import (
 	"context"
 	"encoding/json"
+	"maps"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -259,6 +263,114 @@ func TestRestoreWaitsForPreviousOpening(t *testing.T) {
 			s, err := a.session(t.Context(), created.SessionId)
 			require.NoError(t, err)
 			require.True(t, s.lc.Active())
+		})
+	}
+}
+
+// limitedHarness serves an agent limited to one active session whose native
+// launches are counted in the returned log.
+func limitedHarness(t *testing.T, env map[string]string) (h *harness, launches string) {
+	t.Helper()
+
+	launches = filepath.Join(t.TempDir(), "launches")
+	merged := map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvLaunchLog: launches}
+	maps.Copy(merged, env)
+	h = newHarness(t, WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}), WithEnv(merged))
+	h.initialize()
+
+	return h, launches
+}
+
+// nativeLaunches counts the fake claude processes recorded in log.
+func nativeLaunches(log string) int {
+	data, _ := os.ReadFile(log)
+
+	return strings.Count(string(data), "\n")
+}
+
+func requireActiveSessionsBackpressure(t *testing.T, err error) {
+	t.Helper()
+
+	data := requestErrorData(t, err)
+	require.Equal(t, "backpressure", data["error"])
+	require.Equal(t, "active_sessions", data["limit"])
+}
+
+func TestActiveSessionLimitRefusesBeforeLaunch(t *testing.T) {
+	t.Parallel()
+
+	h, log := limitedHarness(t, nil)
+	h.newSession()
+	launches := nativeLaunches(log)
+
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir()))
+	requireActiveSessionsBackpressure(t, err)
+	require.Equal(t, launches, nativeLaunches(log), "a refused session/new launched claude")
+}
+
+func TestActiveSessionLimitCountsEstablishing(t *testing.T) {
+	t.Parallel()
+
+	gate := filepath.Join(t.TempDir(), "gate")
+	h, log := limitedHarness(t, map[string]string{fakeClaudeEnvLaunchGate: gate})
+	release := sync.OnceFunc(func() { require.NoError(t, os.WriteFile(gate, nil, 0o600)) })
+	t.Cleanup(release)
+
+	ctx := h.ctx()
+	cwd := t.TempDir()
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := h.conn.NewSession(ctx, wire.NewSessionRequest(cwd))
+		done <- err
+	}()
+
+	require.Eventually(t, func() bool { return nativeLaunches(log) == 1 }, testTimeout, 5*time.Millisecond)
+
+	_, err := h.conn.NewSession(ctx, wire.NewSessionRequest(t.TempDir()))
+	requireActiveSessionsBackpressure(t, err)
+	require.Equal(t, 1, nativeLaunches(log), "a refused session/new launched claude")
+
+	release()
+	require.NoError(t, <-done)
+}
+
+func TestActiveSessionLimitFailedLaunchFreesSlot(t *testing.T) {
+	t.Parallel()
+
+	h, _ := limitedHarness(t, nil)
+	fail := WithSessionClaudeOptions(NewClaudeOptions(WithClaudeEnv(map[string]string{fakeClaudeEnvLaunchFail: "1"})))
+
+	_, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(t.TempDir(), fail))
+	require.Equal(t, "claude_internal_failure", requestErrorData(t, err)["error"])
+
+	h.newSession()
+}
+
+func TestActiveSessionLimitRefusesRestoreBeforeLaunch(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []string{acp.AgentMethodSessionLoad, acp.AgentMethodSessionResume} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+
+			h, log := limitedHarness(t, nil)
+			cwd := t.TempDir()
+			created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+			require.NoError(t, err)
+			_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+			require.NoError(t, err)
+			h.newSession()
+			launches := nativeLaunches(log)
+
+			if method == acp.AgentMethodSessionLoad {
+				_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(created.SessionId, cwd))
+			} else {
+				_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(created.SessionId, cwd))
+			}
+
+			requireActiveSessionsBackpressure(t, err)
+			require.Equal(t, launches, nativeLaunches(log), "a refused restore launched claude")
 		})
 	}
 }

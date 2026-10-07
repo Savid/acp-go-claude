@@ -181,3 +181,15 @@ spends no model tokens. Live tests spend tokens and prove ACP → native CLI →
 ACP continuation in a temporary home. Native auth environment variables are
 inherited; `ACP_GO_CLAUDE_HOME` optionally supplies a portable credential file.
 `ACP_GO_CLAUDE_MODEL` selects the live test model.
+
+## Context compaction
+
+Reports completed top-level compactions, with the native trigger and
+before/after context counts when present.
+
+Notifications carry `acp-go.dev/compaction` on the notification’s `_meta`,
+with an otherwise empty `session_info_update`. The value is `acp-go-core`
+`wire.Compaction`: a required `compactionId` and `status`, and optional
+`trigger`, `contextBefore`, and `contextAfter`. Each completed attempt has a
+distinct ID. Unknown facts are omitted. These are live notifications; historical
+replay emits none. Usage accounting is independent.

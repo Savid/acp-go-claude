@@ -34,6 +34,7 @@ const (
 // session is one ACP session: one claude conversation, driven by one live claude
 // process at a time.
 type session struct {
+	compactions           wire.Compactions
 	callbacks             sync.WaitGroup
 	agent                 *Agent
 	id                    acp.SessionId
@@ -482,6 +483,15 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event claude.Eve
 	c := s.cycle
 	closing := s.closing
 	s.mu.Unlock()
+
+	if t == nil && c == nil && event.Type == nativeSystem && event.Subtype == nativeCompactBoundary && event.ParentToolUseID == "" {
+		if err := s.projectCompaction(ctx, event); err != nil {
+			s.agent.log.WarnContext(ctx, "compaction notification failed",
+				slog.String("session_id", string(s.id)), slog.String("reason", err.Error()))
+		}
+
+		return
+	}
 
 	if t == nil && c == nil && bearsWork(event) && !closing {
 		c = s.openAgentCycle(ctx, rt)

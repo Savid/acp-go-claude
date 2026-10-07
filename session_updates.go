@@ -114,6 +114,12 @@ func (s *session) emit(ctx context.Context, updates ...acp.SessionUpdate) error 
 
 // projectEvent maps native stream records, with result as the turn boundary.
 func (s *session) projectEvent(ctx context.Context, _ *runtime, c *cycle, event claude.Event) (bool, error) {
+	if event.Type == nativeSystem && event.Subtype == nativeCompactBoundary && event.ParentToolUseID == "" {
+		c.state.context, c.state.call, c.state.callOpen = 0, "", false
+
+		return false, s.projectCompaction(ctx, event)
+	}
+
 	if s.cycleCancelled(c) {
 		return event.Type == nativeResult && event.ParentToolUseID == "", nil
 	}
@@ -168,12 +174,6 @@ func (s *session) projectEvent(ctx context.Context, _ *runtime, c *cycle, event 
 
 		return true, nil
 	case nativeSystem:
-		if event.Subtype == nativeCompactBoundary && event.ParentToolUseID == "" {
-			// The summary call reports no usage, and the figure the last call
-			// left counts the context the summary replaced.
-			state.context, state.call, state.callOpen = 0, "", false
-		}
-
 		return event.Subtype == "task_notification" && c.Origin != lifecycle.CauseSubmission, nil
 	}
 

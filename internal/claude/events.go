@@ -2,7 +2,14 @@ package claude
 
 import "encoding/json"
 
+type CompactMetadata struct {
+	PostTokens *int   `json:"post_tokens"` //nolint:tagliatelle // Native token fields use snake_case.
+	Trigger    string `json:"trigger"`
+	PreTokens  *int   `json:"pre_tokens"` //nolint:tagliatelle // Native token fields use snake_case.
+}
+
 type Event struct {
+	CompactMetadata  *CompactMetadata      `json:"compact_metadata"` //nolint:tagliatelle // Native compaction metadata uses snake_case.
 	Model            string                `json:"model"`
 	Type             string                `json:"type"`
 	Subtype          string                `json:"subtype"`

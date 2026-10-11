@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,8 @@ import (
 	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 func TestPromptStreamsOnceAndCommits(t *testing.T) {
@@ -842,4 +845,136 @@ func TestDeleteAwaitsDeferredOpening(t *testing.T) {
 	_, installed := a.sessions[created.SessionId]
 	a.mu.Unlock()
 	require.False(t, installed)
+}
+
+// spanBarrier holds the first span named name until release closes, so a
+// test can stop an operation just before it reaches the store.
+type spanBarrier struct {
+	tracenoop.TracerProvider
+	name    string
+	armed   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *spanBarrier) Tracer(string, ...trace.TracerOption) trace.Tracer {
+	return spanBarrierTracer{barrier: b}
+}
+
+type spanBarrierTracer struct {
+	tracenoop.Tracer
+	barrier *spanBarrier
+}
+
+func (t spanBarrierTracer) Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+	if name == t.barrier.name && t.barrier.armed.CompareAndSwap(true, false) {
+		t.barrier.entered <- struct{}{}
+		<-t.barrier.release
+	}
+
+	return t.Tracer.Start(ctx, name, opts...)
+}
+
+// A close that arrives while a restore is establishing, before its first
+// commit, waits for the restore to release its gate, and the restore then
+// refuses to open the closed session.
+func TestCloseJoinsRestoreEstablishment(t *testing.T) {
+	t.Parallel()
+	for _, agentClose := range []bool{false, true} {
+		name := "close_session"
+		if agentClose {
+			name = "close_agent"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			barrier := &spanBarrier{name: "acp.session_store.commit", entered: make(chan struct{}, 1), release: make(chan struct{})}
+			release := sync.OnceFunc(func() { close(barrier.release) })
+			t.Cleanup(release)
+			a := NewAgent(testOptions(t, WithTracerProvider(barrier))...)
+			t.Cleanup(func() { _ = a.Close() })
+			a.attach(newRecorder(), nil)
+			_, err := a.Initialize(t.Context(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+			require.NoError(t, err)
+			cwd := t.TempDir()
+			created, err := a.NewSession(t.Context(), wire.NewSessionRequest(cwd))
+			require.NoError(t, err)
+			_, err = a.Prompt(t.Context(), wire.TextPromptRequest(created.SessionId, "HELLO"))
+			require.NoError(t, err)
+			_, err = a.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: created.SessionId})
+			require.NoError(t, err)
+
+			barrier.armed.Store(true)
+			loaded := make(chan error, 1)
+			go func() {
+				_, loadErr := a.LoadSession(t.Context(), wire.LoadSessionRequest(created.SessionId, cwd))
+				loaded <- loadErr
+			}()
+			select {
+			case <-barrier.entered:
+			case <-time.After(testTimeout):
+				t.Fatal("restore did not reach its establishment commit")
+			}
+
+			closed := make(chan error, 1)
+			go func() {
+				if agentClose {
+					closed <- a.Close()
+
+					return
+				}
+				_, closeErr := a.CloseSession(t.Context(), acp.CloseSessionRequest{SessionId: created.SessionId})
+				closed <- closeErr
+			}()
+			select {
+			case closeErr := <-closed:
+				t.Fatalf("close returned while the restore was establishing: %v", closeErr)
+			case <-time.After(200 * time.Millisecond):
+			}
+
+			release()
+			select {
+			case closeErr := <-closed:
+				require.NoError(t, closeErr)
+			case <-time.After(testTimeout):
+				t.Fatal("close did not join the restore")
+			}
+			select {
+			case loadErr := <-loaded:
+				require.Error(t, loadErr, "a restore closed during establishment must not report an open session")
+			case <-time.After(testTimeout):
+				t.Fatal("restore did not finish")
+			}
+		})
+	}
+}
+
+// A process that died mid-line leaves a torn transcript tail; the relaunch
+// cuts it so claude's next row starts on its own line and commits.
+func TestRelaunchCutsTornTranscriptTail(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+	_, err := h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "CRASH", nil)
+	require.Error(t, err)
+
+	s, err := h.agent.session(t.Context(), session.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	path := s.nativePath
+	s.mu.Unlock()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = file.WriteString(`{"type":"user","mess`)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	response, err := h.prompt(session.SessionId, "again", nil)
+	require.NoError(t, err, "a torn tail wedged the relaunched session's commits")
+	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+	tail, err := sessionlog.ReadJSONL(path, sessionlog.Cursor{})
+	require.NoError(t, err)
+	require.Len(t, tail.Rows, 4)
 }

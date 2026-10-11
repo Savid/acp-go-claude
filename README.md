@@ -172,7 +172,8 @@ The first commit publishes the whole generation. Each later commit reads only
 the transcript lines claude appended since the last one and appends them,
 rewriting the record only when it changed; a commit with nothing new writes
 nothing. A transcript that was replaced or rewritten is republished whole, and
-one that shrank fails the commit.
+one that shrank fails the commit. Before claude continues a transcript, a
+final line left torn by a process that died mid-write is cut.
 
 Transcripts remain in Claude's home under `projects/<project>/<session-id>.jsonl`.
 Load adopts newer native rows when the shared prefix matches, or materializes

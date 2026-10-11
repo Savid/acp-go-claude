@@ -65,6 +65,9 @@ type session struct {
 	commands      []acp.AvailableCommand
 	title         string
 	updatedAt     string
+	// persisted marks a session whose establishment committed its
+	// generation; until then the establishing request owns the gate.
+	persisted bool
 	// ephemeral marks a session the host deletes without needing it back: it
 	// is never written to the store and never listed.
 	ephemeral bool
@@ -76,10 +79,9 @@ type session struct {
 	cycle     *cycle
 	dialogs   map[string]*dialog
 
-	openMu   sync.Mutex
-	mirrorMu sync.Mutex
-	lcMu     sync.Mutex
-	lc       lifecycle.Publisher
+	openMu sync.Mutex
+	lcMu   sync.Mutex
+	lc     lifecycle.Publisher
 }
 
 // runtime is one claude process generation.
@@ -215,6 +217,12 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 	s.mu.Unlock()
 
 	if sessionPath != "" {
+		// A process that died mid-line left a torn tail claude would append
+		// after; cutting it keeps every committed line whole.
+		if cutErr := sessionlog.CutTornTail(sessionPath); cutErr != nil {
+			return nil, s.startFailure(ctx, cutErr)
+		}
+
 		started, readErr := claude.TranscriptStarted(sessionPath)
 		if readErr != nil {
 			return nil, s.startFailure(ctx, readErr)
@@ -861,6 +869,7 @@ func (s *session) close(ctx context.Context) error {
 	}
 
 	s.closing = true
+	joinEstablishment := !s.persisted
 	s.closeDone = make(chan struct{})
 	t := s.turn
 	rt := s.runtime
@@ -892,10 +901,8 @@ func (s *session) close(ctx context.Context) error {
 		s.stopRuntime(ctx, rt)
 	}
 
-	// An initial mirror may not have started yet; its establishment owns the
-	// gate. Committed waits for a commit in flight, so it is read outside the
-	// session lock once the turn and process are stopped.
-	if !s.mirror.Committed() {
+	// An initial mirror may not have started yet; its establishment owns the gate.
+	if joinEstablishment {
 		s.gate <- struct{}{}
 		defer func() { <-s.gate }()
 	}
@@ -905,7 +912,11 @@ func (s *session) close(ctx context.Context) error {
 	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettleTimeout)
 	defer cancel()
 
-	if s.mirror.Committed() {
+	s.mu.Lock()
+	persisted := s.persisted
+	s.mu.Unlock()
+
+	if persisted {
 		if err := s.commitMirror(commitCtx); err != nil {
 			errs = append(errs, err)
 		}

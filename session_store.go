@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
@@ -60,16 +61,13 @@ func (s *session) record() sessionRecord {
 }
 
 // commitMirror publishes the transcript rows claude appended since the last
-// commit with the current session configuration as one durable generation.
-// The configuration is sampled under the same lock that orders commits, so a
-// later commit never publishes an older record.
+// commit with the current session configuration as one durable generation,
+// and marks the session persisted. The mirror samples the configuration
+// after its read, under its own lock, so no session lock is held here.
 func (s *session) commitMirror(ctx context.Context) error {
 	if s.ephemeral {
 		return nil
 	}
-
-	s.mirrorMu.Lock()
-	defer s.mirrorMu.Unlock()
 
 	s.mu.Lock()
 	path := s.nativePath
@@ -79,13 +77,17 @@ func (s *session) commitMirror(ctx context.Context) error {
 		return nil
 	}
 
-	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, "commit")
-	err := s.mirror.Commit(commitCtx, sessionlog.File(path), s.record())
+	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, observer.SessionStoreCommit)
+	err := s.mirror.Commit(commitCtx, sessionlog.File(path), func(sessionlog.Tail) (any, error) { return s.record(), nil })
 	finish(err)
 
 	if err != nil {
 		return fmt.Errorf("commit session mirror: %w", err)
 	}
+
+	s.mu.Lock()
+	s.persisted = true
+	s.mu.Unlock()
 
 	return nil
 }
@@ -99,7 +101,7 @@ type storedSession struct {
 
 // loadStored reads the native rows and required current configuration.
 func (a *Agent) loadStored(ctx context.Context, sessionID acp.SessionId) (storedSession, error) {
-	loadCtx, finish := a.observe.StartSessionStore(ctx, "load")
+	loadCtx, finish := a.observe.StartSessionStore(ctx, observer.SessionStoreLoad)
 
 	var record sessionRecord
 
@@ -119,7 +121,7 @@ func (a *Agent) loadStored(ctx context.Context, sessionID acp.SessionId) (stored
 
 // loadStoredRecord reads only the configuration record, for listing.
 func (a *Agent) loadStoredRecord(ctx context.Context, sessionID acp.SessionId) (sessionRecord, bool, error) {
-	loadCtx, finish := a.observe.StartSessionStore(ctx, "load_record")
+	loadCtx, finish := a.observe.StartSessionStore(ctx, observer.SessionStoreLoadRecord)
 
 	var record sessionRecord
 

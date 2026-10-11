@@ -119,8 +119,8 @@ func (a *Agent) loadStored(ctx context.Context, sessionID acp.SessionId) (stored
 	return storedSession{rows: rows, record: record, found: found}, nil
 }
 
-// loadStoredRecord reads only the configuration record, for listing.
-func (a *Agent) loadStoredRecord(ctx context.Context, sessionID acp.SessionId) (sessionRecord, bool, error) {
+// loadRecord reads only the configuration record, for listing.
+func (a *Agent) loadRecord(ctx context.Context, sessionID acp.SessionId) (sessionRecord, bool, error) {
 	loadCtx, finish := a.observe.StartSessionStore(ctx, observer.SessionStoreLoadRecord)
 
 	var record sessionRecord

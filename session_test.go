@@ -17,6 +17,7 @@ import (
 	"github.com/savid/acp-go-claude/internal/claude"
 	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/process"
 	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
@@ -974,6 +975,69 @@ func TestRelaunchCutsTornTranscriptTail(t *testing.T) {
 	response, err := h.prompt(session.SessionId, "again", nil)
 	require.NoError(t, err, "a torn tail wedged the relaunched session's commits")
 	require.Equal(t, acp.StopReasonEndTurn, response.StopReason)
+	tail, err := sessionlog.ReadJSONL(path, sessionlog.Cursor{})
+	require.NoError(t, err)
+	require.Len(t, tail.Rows, 4)
+}
+
+// A relaunch waits for the process of the generation it replaces before it
+// repairs the transcript, so a claude still exiting cannot write after the cut.
+func TestRelaunchWaitsForTheRetiredProcess(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.initialize()
+	session := h.newSession()
+	_, err := h.prompt(session.SessionId, "HELLO", nil)
+	require.NoError(t, err)
+	_, err = h.prompt(session.SessionId, "CRASH", nil)
+	require.Error(t, err)
+
+	// A fake claude held at its launch gate stands in for a process that has
+	// not exited yet.
+	lingering, err := process.Start(t.Context(), process.Request{
+		Executable: os.Args[0],
+		Env:        append(os.Environ(), fakeClaudeEnv+"=1", fakeClaudeEnvLaunchGate+"="+filepath.Join(t.TempDir(), "never")),
+		Dir:        t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lingering.Kill(); _ = lingering.Close() })
+
+	s, err := h.agent.session(t.Context(), session.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	require.NotNil(t, s.retired, "a generation that ended is retired, not forgotten")
+	s.retired = &runtime{proc: lingering}
+	path := s.nativePath
+	s.mu.Unlock()
+
+	torn := `{"type":"user","mess`
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = file.WriteString(torn)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	prompted := make(chan error, 1)
+	go func() {
+		_, promptErr := h.prompt(session.SessionId, "again", nil)
+		prompted <- promptErr
+	}()
+	select {
+	case promptErr := <-prompted:
+		t.Fatalf("a relaunch went ahead while the previous process was alive: %v", promptErr)
+	case <-time.After(300 * time.Millisecond):
+	}
+	content, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.True(t, strings.HasSuffix(string(content), torn), "the transcript was repaired under a live process")
+
+	require.NoError(t, lingering.Kill())
+	select {
+	case promptErr := <-prompted:
+		require.NoError(t, promptErr)
+	case <-time.After(testTimeout):
+		t.Fatal("the relaunch did not continue once the previous process exited")
+	}
 	tail, err := sessionlog.ReadJSONL(path, sessionlog.Cursor{})
 	require.NoError(t, err)
 	require.Len(t, tail.Rows, 4)

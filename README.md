@@ -159,27 +159,15 @@ answers `{"available": false, "reason": "not_reported"}`.
 ### Persistence
 
 Provide an `acpcore.SessionStore` through `WithSessionStore` for durable
-recovery. The default is an in-memory store. Format
-`claude-transcript-jsonl-v2` stores native transcript rows and one current
-configuration record under `config`, committed atomically. The record holds
-the session and native IDs, the listing `title`, cwd, the transcript location
-as `nativePath`, the accepted environment and paths, and the session's model,
-effort, permission mode, system prompt, bare mode, output schema, and output
-style. `session/list` reads only the records. A session closed before its
-first prompt retains its configuration and empty history.
+recovery; the default is an in-memory store. Commit, restore, and recovery
+follow [Sessions and the Session Store](https://github.com/savid/acp-go-core/blob/master/docs/03-sessions-and-store.md).
 
-The first commit publishes the whole generation. Each later commit reads only
-the transcript lines claude appended since the last one and appends them,
-rewriting the record only when it changed; a commit with nothing new writes
-nothing. A transcript that was replaced or rewritten is republished whole, and
-one that shrank fails the commit. Before claude continues a transcript, a
-final line left torn by a process that died mid-write is cut.
-
-Transcripts remain in Claude's home under `projects/<project>/<session-id>.jsonl`.
-Load adopts newer native rows when the shared prefix matches, or materializes
-missing rows from the store. Divergent logs fail restore. `session/load`
-replays history; `session/resume` restores without replay. Close and delete
-leave native files in place.
+Format `claude-transcript-jsonl-v2` holds Claude's transcript rows under the
+main subpath and one record under `config`: the session and native IDs, the
+listing `title`, cwd, `nativePath`, the accepted environment and paths, and
+the session's model, effort, permission mode, system prompt, bare mode, output
+schema, and output style. Transcripts live in Claude's home under
+`projects/<project>/<session-id>.jsonl`; close and delete leave them in place.
 
 ## Development
 

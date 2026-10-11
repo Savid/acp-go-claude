@@ -54,8 +54,11 @@ type session struct {
 	// change, or a restore.
 	gate chan struct{}
 
-	mu            sync.Mutex
-	runtime       *runtime
+	mu      sync.Mutex
+	runtime *runtime
+	// retired is the last unbound generation, whose process may still be
+	// exiting; a relaunch waits for it before touching the transcript.
+	retired       *runtime
 	model         string
 	contextWindow int64
 	models        []claude.Model
@@ -217,6 +220,10 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 	s.mu.Unlock()
 
 	if sessionPath != "" {
+		if waitErr := s.awaitRetired(ctx); waitErr != nil {
+			return nil, s.startFailure(ctx, waitErr)
+		}
+
 		// A process that died mid-line left a torn tail claude would append
 		// after; cutting it keeps every committed line whole.
 		if cutErr := sessionlog.CutTornTail(sessionPath); cutErr != nil {
@@ -640,6 +647,7 @@ func (s *session) runtimeEnded(ctx context.Context, rt *runtime) {
 		}
 
 		s.runtime = nil
+		s.retired = rt
 	}
 	s.mu.Unlock()
 	s.openMu.Unlock()
@@ -651,8 +659,41 @@ func (s *session) dropRuntime(rt *runtime) {
 	s.mu.Lock()
 	if s.runtime == rt {
 		s.runtime = nil
+		s.retired = rt
 	}
 	s.mu.Unlock()
+}
+
+// awaitRetired waits, bounded by sessionShutdownTimeout, for the process of
+// the last unbound generation to exit, so no dying claude writes into the
+// transcript a relaunch is about to repair and continue.
+func (s *session) awaitRetired(ctx context.Context) error {
+	s.mu.Lock()
+	retired := s.retired
+	s.mu.Unlock()
+
+	if retired == nil {
+		return nil
+	}
+
+	timer := time.NewTimer(sessionShutdownTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-retired.proc.Done():
+	case <-timer.C:
+		return errors.New("previous claude process has not exited")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	s.mu.Lock()
+	if s.retired == retired {
+		s.retired = nil
+	}
+	s.mu.Unlock()
+
+	return nil
 }
 
 // signalRuntime ends one process generation: the group is signalled and the

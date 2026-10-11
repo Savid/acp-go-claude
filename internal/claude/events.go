@@ -29,6 +29,7 @@ type Event struct {
 	TotalCostUSD     float64               `json:"total_cost_usd"`    //nolint:tagliatelle // Claude uses this native wire spelling.
 	Usage            Usage                 `json:"usage"`
 	ModelUsage       map[string]ModelUsage `json:"modelUsage"`
+	RateLimitInfo    *quotaEventInfo       `json:"rate_limit_info"` //nolint:tagliatelle // Claude uses this native wire spelling.
 	Raw              json.RawMessage       `json:"-"`
 }
 

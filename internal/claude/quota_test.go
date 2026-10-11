@@ -36,12 +36,22 @@ func TestQuotaEventsPreserveScopeAndDoNotInventPercentages(t *testing.T) {
 		{"five_hour", QuotaSession, true}, {"seven_day", QuotaWeekly, true}, {"seven_day_overage_included", QuotaFable, true}, {"seven_day_overage_included", "unknown", false},
 	} {
 		raw, _ := json.Marshal(map[string]any{"rate_limit_info": map[string]any{"status": "rejected", "rateLimitType": tc.name}})
-		windows, exhausted := QuotaEvent(Event{Type: "rate_limit_event", Raw: raw}, tc.fable, now)
+		windows, exhausted := QuotaEvent(rateLimitEvent(t, raw), tc.fable, now)
 		require.Empty(t, windows)
 		require.Equal(t, tc.want, exhausted)
 	}
 	raw := json.RawMessage(`{"rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":1800000000},"seven_day":{"utilization":0.8,"resetsAt":1800000000}}}}`)
-	windows, exhausted := QuotaEvent(Event{Type: "rate_limit_event", Raw: raw}, true, now)
+	windows, exhausted := QuotaEvent(rateLimitEvent(t, raw), true, now)
 	require.Len(t, windows, 2)
 	require.Equal(t, QuotaSession, exhausted)
+}
+
+// rateLimitEvent decodes a native rate-limit frame as the client does.
+func rateLimitEvent(t *testing.T, raw []byte) Event {
+	t.Helper()
+
+	event := Event{Type: "rate_limit_event"}
+	require.NoError(t, json.Unmarshal(raw, &event))
+
+	return event
 }

@@ -1,7 +1,6 @@
 package claude
 
 import (
-	"encoding/json"
 	"math"
 	"net/http"
 	"strconv"
@@ -108,14 +107,11 @@ func QuotaEvent(event Event, fable bool, now time.Time) ([]QuotaWindow, string) 
 		return nil, ""
 	}
 
-	var envelope struct {
-		Info quotaEventInfo `json:"rate_limit_info"` //nolint:tagliatelle // Native stream-json member.
-	}
-	if json.Unmarshal(event.Raw, &envelope) != nil {
+	if event.RateLimitInfo == nil {
 		return nil, ""
 	}
 
-	info := envelope.Info
+	info := *event.RateLimitInfo
 
 	var windows []QuotaWindow
 

@@ -26,7 +26,10 @@ const (
 )
 
 type messageState struct {
-	id, text, thinking string
+	id string
+	// textUsed and thinkingUsed count the bytes of the current API message's
+	// streamed text and thinking its completed blocks already matched.
+	textUsed, thinkingUsed int
 	// finalized and images hold the assistant rows and images already
 	// emitted for the API message named by rows. A live stream delivers every
 	// row of one API message before the next message begins, so they are
@@ -48,7 +51,10 @@ type cycleState struct {
 	errorMessage     string
 	imagesEmitted    bool
 	messages         map[string]*messageState
-	tools            map[string]*toolState
+	// text and thinking hold the deltas each parent's current API message
+	// streamed, keyed by parent tool use.
+	text, thinking wire.StreamedText
+	tools          map[string]*toolState
 	// context is the context the latest top-level model call occupied; 0
 	// when no call has reported since the cycle opened or claude compacted.
 	context int
@@ -191,7 +197,11 @@ func (s *session) projectStream(ctx context.Context, state *cycleState, event cl
 
 	switch native.Type {
 	case nativeMessageStart:
-		message.id, message.text, message.thinking = "", "", ""
+		message.id, message.textUsed, message.thinkingUsed = "", 0, 0
+
+		state.text.Forget(event.ParentToolUseID)
+		state.thinking.Forget(event.ParentToolUseID)
+
 		if native.Message != nil {
 			message.id = native.Message.ID
 
@@ -206,11 +216,11 @@ func (s *session) projectStream(ctx context.Context, state *cycleState, event cl
 	case "content_block_delta":
 		switch native.Delta.Type {
 		case "text_delta":
-			message.text += native.Delta.Text
+			state.text.Add(event.ParentToolUseID, native.Delta.Text)
 
 			return s.emit(ctx, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock(native.Delta.Text), MessageId: optionalString(message.id)}})
 		case "thinking_delta":
-			message.thinking += native.Delta.Thinking
+			state.thinking.Add(event.ParentToolUseID, native.Delta.Thinking)
 
 			return s.emit(ctx, acp.SessionUpdate{AgentThoughtChunk: &acp.SessionUpdateAgentThoughtChunk{Content: acp.TextBlock(native.Delta.Thinking), MessageId: optionalString(message.id)}})
 		}
@@ -249,12 +259,12 @@ func (s *session) projectAssistant(ctx context.Context, state *cycleState, paren
 		block := &blocks[index]
 		switch block.Type {
 		case contentBlockTypeText, contentBlockTypeThinking:
-			text, pending := block.Text, &message.text
+			text, streamed, used := block.Text, &state.text, &message.textUsed
 			if block.Type == contentBlockTypeThinking {
-				text, pending = block.Thinking, &message.thinking
+				text, streamed, used = block.Thinking, &state.thinking, &message.thinkingUsed
 			}
 
-			text = consumeAssistantText(pending, text)
+			text = consumeAssistantText(streamed, parent, used, text)
 			if text == "" {
 				continue
 			}
@@ -355,24 +365,35 @@ func (s *session) projectToolResults(ctx context.Context, state *cycleState, blo
 	return nil
 }
 
-// consumeAssistantText matches one completed content fragment to pending deltas.
-func consumeAssistantText(pending *string, full string) string {
+// consumeAssistantText matches one completed content block to the deltas
+// streamed for key after the used bytes, and returns the part of the block
+// they did not carry. Once every streamed byte is matched the deltas are
+// released.
+func consumeAssistantText(streamed *wire.StreamedText, key string, used *int, full string) string {
 	if full == "" {
 		return ""
 	}
 
-	if after, ok := strings.CutPrefix(*pending, full); ok {
-		*pending = after
+	text := streamed.Text(key)
+	pending := text[*used:]
 
+	var suffix string
+
+	switch {
+	case strings.HasPrefix(pending, full):
+		*used += len(full)
+	case strings.HasPrefix(full, pending):
+		suffix = full[len(pending):]
+		*used = len(text)
+	default:
 		return ""
 	}
 
-	if !strings.HasPrefix(full, *pending) {
-		return ""
-	}
+	if *used == len(text) {
+		streamed.Forget(key)
 
-	suffix := strings.TrimPrefix(full, *pending)
-	*pending = ""
+		*used = 0
+	}
 
 	return suffix
 }

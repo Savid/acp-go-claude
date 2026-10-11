@@ -1,7 +1,6 @@
 package claude
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +8,8 @@ import (
 	"io"
 	"strconv"
 	"sync"
+
+	"github.com/savid/acp-go-core/wire"
 )
 
 // ErrTransportClosed reports that the claude stdout stream ended before a
@@ -55,30 +56,44 @@ func (c *Client) read(ctx context.Context) {
 	defer close(c.done)
 	defer close(c.events)
 
-	scanner := bufio.NewScanner(c.output)
-	scanner.Buffer(make([]byte, 64<<10), 16<<20)
+	lines := wire.NewLineReader(c.output, wire.NativeLineMaxBytes)
 
-	for scanner.Scan() {
-		raw := append(json.RawMessage(nil), scanner.Bytes()...)
+	for {
+		raw, err := lines.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				err = nil
+			}
 
-		var header struct {
-			Type     string          `json:"type"`
-			Response controlResponse `json:"response"`
+			c.fail(err)
+
+			return
 		}
-		if err := json.Unmarshal(raw, &header); err != nil {
+
+		// One decode serves both a control response and an event; the
+		// reader allocates each line afresh, so the event keeps it as Raw.
+		var frame struct {
+			Event
+			Response *controlResponse `json:"response"`
+		}
+		if err := json.Unmarshal(raw, &frame); err != nil {
 			c.fail(fmt.Errorf("decode native frame: %w", err))
 
 			return
 		}
 
-		if header.Type == typeControlResponse {
+		if frame.Type == typeControlResponse {
+			if frame.Response == nil {
+				continue
+			}
+
 			c.mu.Lock()
-			pending := c.pending[header.Response.RequestID]
+			pending := c.pending[frame.Response.RequestID]
 			c.mu.Unlock()
 
 			if pending != nil {
 				select {
-				case pending <- header.Response:
+				case pending <- *frame.Response:
 				default:
 				}
 			}
@@ -86,14 +101,9 @@ func (c *Client) read(ctx context.Context) {
 			continue
 		}
 
-		var event Event
-		if err := json.Unmarshal(raw, &event); err != nil {
-			c.fail(fmt.Errorf("decode native event: %w", err))
-
-			return
-		}
-
+		event := frame.Event
 		event.Raw = raw
+
 		select {
 		case c.events <- event:
 		case <-ctx.Done():
@@ -102,8 +112,6 @@ func (c *Client) read(ctx context.Context) {
 			return
 		}
 	}
-
-	c.fail(scanner.Err())
 }
 
 func (c *Client) fail(err error) { c.mu.Lock(); defer c.mu.Unlock(); c.err = err }

@@ -18,7 +18,7 @@ func TestReplayKeepsFragmentsWithOneAPIMessageID(t *testing.T) {
 	agent := NewAgent()
 	rec := newRecorder()
 	agent.attach(rec, nil)
-	session := agent.newSession(sessionStart{cwd: t.TempDir()})
+	session := agent.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 	session.id = "replay-session"
 	rows := make([][]byte, 0, 3)
 	rows = append(rows,
@@ -32,7 +32,7 @@ func TestReplayKeepsFragmentsWithOneAPIMessageID(t *testing.T) {
 func TestPromptContentOrderAndDocuments(t *testing.T) {
 	t.Parallel()
 	agent := NewAgent()
-	session := agent.newSession(sessionStart{cwd: t.TempDir()})
+	session := agent.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 	mime := "application/pdf"
 	blocks := []acp.ContentBlock{acp.TextBlock("before"), {Resource: &acp.ContentBlockResource{Resource: acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{MimeType: &mime, Blob: base64.StdEncoding.EncodeToString([]byte("%PDF-"))}}}}, acp.TextBlock("after")}
 	prompt, err := session.mapPrompt(t.Context(), blocks)
@@ -48,7 +48,7 @@ func TestReplayRejectsInvalidImageBytes(t *testing.T) {
 	t.Parallel()
 	agent := NewAgent()
 	agent.attach(newRecorder(), nil)
-	session := agent.newSession(sessionStart{cwd: t.TempDir()})
+	session := agent.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 	session.id = "replay-session"
 	rows := [][]byte{[]byte(`{"type":"assistant","uuid":"image","message":{"id":"api-image","role":"assistant","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"%%%"}}]}}`)}
 	err := session.replay(t.Context(), rows)
@@ -405,7 +405,7 @@ func TestCapturedCallUsageShapes(t *testing.T) {
 			agent := NewAgent()
 			rec := newRecorder()
 			agent.attach(rec, nil)
-			session := agent.newSession(sessionStart{cwd: t.TempDir()})
+			session := agent.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 			session.contextWindow = 200000
 			c := &cycle{}
 
@@ -433,7 +433,7 @@ func TestLiveAssistantStateHoldsOneMessage(t *testing.T) {
 	agent := NewAgent()
 	rec := newRecorder()
 	agent.attach(rec, nil)
-	session := agent.newSession(sessionStart{cwd: t.TempDir()})
+	session := agent.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 	state := &cycleState{}
 
 	for _, id := range []string{"one", "two", "three"} {
@@ -540,7 +540,7 @@ func TestCallBreakdownMembers(t *testing.T) {
 			agent := NewAgent()
 			rec := newRecorder()
 			agent.attach(rec, nil)
-			session := agent.newSession(sessionStart{cwd: t.TempDir()})
+			session := agent.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 			session.contextWindow = 1000
 			c := &cycle{}
 
@@ -716,7 +716,7 @@ func TestCapturedResponseID(t *testing.T) {
 			agent := NewAgent()
 			rec := newRecorder()
 			agent.attach(rec, nil)
-			session := agent.newSession(sessionStart{cwd: t.TempDir()})
+			session := agent.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 			session.id = "fixture-session"
 			session.contextWindow = 200000
 
@@ -743,4 +743,23 @@ func TestCapturedResponseID(t *testing.T) {
 			require.Equal(t, tc.usage, usageUpdates(rec.snapshot()))
 		})
 	}
+}
+
+func TestConsumeAssistantTextMatchesBlocksAgainstStreamedDeltas(t *testing.T) {
+	t.Parallel()
+
+	var streamed wire.StreamedText
+
+	used := 0
+
+	streamed.Add("", "Hello")
+	streamed.Add("", "Wor")
+	require.Empty(t, consumeAssistantText(&streamed, "", &used, "Hello"), "a fully streamed block emits nothing")
+	require.Equal(t, 5, used)
+	require.Equal(t, "ld", consumeAssistantText(&streamed, "", &used, "World"), "a partly streamed block emits its unstreamed suffix")
+	require.Zero(t, used, "matching every streamed byte releases the deltas")
+	require.Empty(t, streamed.Text(""))
+	require.Equal(t, "!", consumeAssistantText(&streamed, "", &used, "!"), "a block with no deltas emits whole")
+	streamed.Add("", "abc")
+	require.Empty(t, consumeAssistantText(&streamed, "", &used, "xyz"), "a block that disagrees with its deltas emits nothing")
 }

@@ -226,7 +226,7 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 
 		// A process that died mid-line left a torn tail claude would append
 		// after; cutting it keeps every committed line whole.
-		if cutErr := sessionlog.CutTornTail(sessionPath); cutErr != nil {
+		if cutErr := s.cutTornTail(ctx, sessionPath); cutErr != nil {
 			return nil, s.startFailure(ctx, cutErr)
 		}
 

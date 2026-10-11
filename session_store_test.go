@@ -1,13 +1,16 @@
 package claudeacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -467,7 +470,8 @@ func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), created.Meta)
 	id := acp.SessionId("acp-conversation-independent-of-native-id")
 	record.SessionID = string(id)
-	require.NoError(t, sessionlog.NewMirror(store, string(id)).Commit(t.Context(), sessionlog.Rows(rows), func(sessionlog.Tail) (any, error) { return record, nil }))
+	_, err = sessionlog.NewMirror(store, string(id)).Commit(t.Context(), sessionlog.Rows(rows), func(sessionlog.Tail) (any, error) { return record, nil })
+	require.NoError(t, err)
 	require.NoError(t, store.Delete(t.Context(), acpcore.SessionKey{SessionID: string(created.SessionId)}))
 
 	before := len(h.rec.snapshot())
@@ -737,4 +741,81 @@ func BenchmarkCommitMirror(b *testing.B) {
 			}
 		})
 	}
+}
+
+// logCapture records the adapter's structured log lines.
+type logCapture struct {
+	mu    sync.Mutex
+	lines bytes.Buffer
+}
+
+func (c *logCapture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.lines.Write(p)
+}
+
+func (c *logCapture) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.lines.String()
+}
+
+func (c *logCapture) option() Option {
+	return WithLogger(slog.New(slog.NewTextHandler(c, &slog.HandlerOptions{Level: slog.LevelWarn})))
+}
+
+// appendFailureStore fails the next Append once armed, so the mirror
+// recovers by republishing.
+type appendFailureStore struct {
+	acpcore.SessionStore
+	fail atomic.Bool
+}
+
+func (s *appendFailureStore) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail.CompareAndSwap(true, false) {
+		return errors.New("append unavailable")
+	}
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
+}
+
+// Every mirror recovery is logged once: a republish after a failed append,
+// and a restore that repaired the native transcript.
+func TestMirrorRecoveriesAreLogged(t *testing.T) {
+	t.Parallel()
+	logs := &logCapture{}
+	store := &appendFailureStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store), logs.option())
+	h.initialize()
+	cwd := t.TempDir()
+	created, err := h.conn.NewSession(h.ctx(), wire.NewSessionRequest(cwd))
+	require.NoError(t, err)
+
+	store.fail.Store(true)
+	_, err = h.prompt(created.SessionId, "HELLO", nil)
+	require.NoError(t, err, "a failed append recovers by republishing")
+	require.Equal(t, 1, strings.Count(logs.String(), "session mirror republished"))
+	require.Contains(t, logs.String(), "reason=append_failed")
+
+	s, err := h.agent.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	s.mu.Lock()
+	path := s.nativePath
+	s.mu.Unlock()
+	_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})
+	require.NoError(t, err)
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = file.WriteString(`{"type":"user","mess`)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(created.SessionId, cwd))
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(logs.String(), "native session file repaired on restore"))
+	require.Contains(t, logs.String(), "torn_bytes_cut=20")
 }

@@ -953,7 +953,8 @@ func TestCloseJoinsRestoreEstablishment(t *testing.T) {
 // cuts it so claude's next row starts on its own line and commits.
 func TestRelaunchCutsTornTranscriptTail(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t)
+	logs := &logCapture{}
+	h := newHarness(t, logs.option())
 	h.initialize()
 	session := h.newSession()
 	_, err := h.prompt(session.SessionId, "HELLO", nil)
@@ -978,6 +979,8 @@ func TestRelaunchCutsTornTranscriptTail(t *testing.T) {
 	tail, err := sessionlog.ReadJSONL(path, sessionlog.Cursor{})
 	require.NoError(t, err)
 	require.Len(t, tail.Rows, 4)
+	require.Equal(t, 1, strings.Count(logs.String(), "native session file tail repaired"))
+	require.Contains(t, logs.String(), "bytes_cut=20")
 }
 
 // A relaunch waits for the process of the generation it replaces before it

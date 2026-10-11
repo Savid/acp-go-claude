@@ -3,6 +3,7 @@ package claudeacp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -78,8 +79,10 @@ func (s *session) commitMirror(ctx context.Context) error {
 	}
 
 	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, observer.SessionStoreCommit)
-	err := s.mirror.Commit(commitCtx, sessionlog.File(path), func(sessionlog.Tail) (any, error) { return s.record(), nil })
+	report, err := s.mirror.Commit(commitCtx, sessionlog.File(path), func(sessionlog.Tail) (any, error) { return s.record(), nil })
+	s.agent.observe.RecordRepublish(commitCtx, string(report.Republish))
 	finish(err)
+	s.logRepublish(ctx, report)
 
 	if err != nil {
 		return fmt.Errorf("commit session mirror: %w", err)
@@ -160,12 +163,54 @@ func (r sessionRecord) validate(sessionID string) error {
 // the store. A disagreement at a shared position fails the restore. It
 // returns the rows the session now holds.
 func (s *session) hydrate(ctx context.Context, stored storedSession) ([][]byte, error) {
-	rows, err := s.mirror.Hydrate(ctx, s.nativePath, stored.rows, stored.record, func(rows [][]byte) error {
+	rows, hydrated, err := s.mirror.Hydrate(ctx, s.nativePath, stored.rows, stored.record, func(rows [][]byte) error {
 		return claude.ValidateRows(rows, stored.record.NativeSessionID)
 	})
 	if err != nil {
 		return nil, wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, err)
 	}
 
+	if hydrated.Changed() {
+		s.agent.log.WarnContext(ctx, "native session file repaired on restore",
+			slog.String("session_id", string(s.id)),
+			slog.Int64("torn_bytes_cut", hydrated.Tail.Cut),
+			slog.Bool("record_terminated", hydrated.Tail.Terminated),
+			slog.Int64("invalid_bytes_cut", hydrated.InvalidCut),
+			slog.Bool("rewritten_from_store", hydrated.Rewritten))
+	}
+
+	s.logRepublish(ctx, hydrated.Commit)
+
 	return rows, nil
+}
+
+// logRepublish warns once for a commit that republished the whole
+// generation for a reason other than its first publication.
+func (s *session) logRepublish(ctx context.Context, report sessionlog.CommitReport) {
+	if !report.Recovery() {
+		return
+	}
+
+	s.agent.log.WarnContext(ctx, "session mirror republished",
+		slog.String("session_id", string(s.id)),
+		slog.String("reason", string(report.Republish)),
+		slog.Any("append_error", report.AppendErr))
+}
+
+// cutTornTail cuts a final transcript line a dead process left torn, and
+// warns once when it changed the file.
+func (s *session) cutTornTail(ctx context.Context, path string) error {
+	torn, err := sessionlog.CutTornTail(path)
+	if err != nil {
+		return err
+	}
+
+	if torn.Changed() {
+		s.agent.log.WarnContext(ctx, "native session file tail repaired",
+			slog.String("session_id", string(s.id)),
+			slog.Int64("bytes_cut", torn.Cut),
+			slog.Bool("record_terminated", torn.Terminated))
+	}
+
+	return nil
 }

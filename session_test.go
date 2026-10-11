@@ -16,6 +16,7 @@ import (
 	"github.com/savid/acp-go-claude/internal/claude"
 	acpcore "github.com/savid/acp-go-core"
 	"github.com/savid/acp-go-core/lifecycle"
+	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 	"github.com/stretchr/testify/require"
 )
@@ -70,9 +71,9 @@ func TestNativeContinuationAndHydration(t *testing.T) {
 	require.NoError(t, os.Remove(path))
 	_, err = h.conn.ResumeSession(h.ctx(), wire.ResumeSessionRequest(created.SessionId, cwd))
 	require.NoError(t, err)
-	rows, err := claude.ReadRows(path)
+	tail, err := sessionlog.ReadJSONL(path, sessionlog.Cursor{})
 	require.NoError(t, err)
-	require.Len(t, rows, 4)
+	require.Len(t, tail.Rows, 4)
 }
 func TestPermissionAndElicitationLifecycle(t *testing.T) {
 	t.Parallel()
@@ -202,8 +203,8 @@ func TestRelativeNativeHomeUsesSessionCwd(t *testing.T) {
 	require.Len(t, rows, 1)
 	var record sessionRecord
 	require.NoError(t, json.Unmarshal(rows[0], &record))
-	require.Equal(t, claude.SessionPath(filepath.Join(record.Cwd, "native-home"), record.Cwd, string(session.SessionId)), record.SessionFile)
-	require.FileExists(t, record.SessionFile)
+	require.Equal(t, claude.SessionPath(filepath.Join(record.Cwd, "native-home"), record.Cwd, string(session.SessionId)), record.NativePath)
+	require.FileExists(t, record.NativePath)
 }
 
 func TestLateDialogAfterCancellationIsRefused(t *testing.T) {

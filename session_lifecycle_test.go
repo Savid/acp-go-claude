@@ -79,6 +79,7 @@ func TestCloseBackgroundCycleRequiresCommit(t *testing.T) {
 
 				return len(events) >= 5 && events[4]["state"] == "running"
 			})
+			appendNativeRow(t, h, created.SessionId)
 			before := len(lifecycleEvents(h.rec.snapshot()))
 			store.fail.Store(fail)
 			_, err = h.conn.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: created.SessionId})

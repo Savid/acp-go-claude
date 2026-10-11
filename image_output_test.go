@@ -16,7 +16,7 @@ func TestAssistantImageOrderIdentityAndReplay(t *testing.T) {
 	agent := NewAgent()
 	rec := newRecorder()
 	agent.attach(rec, nil)
-	session := agent.newSession(sessionStart{cwd: t.TempDir()})
+	session := agent.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 	session.id = "image-session"
 	blocks := []claude.ContentBlock{{Type: "text", Text: "before"}, {Type: "image", Source: &claude.Source{Type: nativeBase64, MediaType: "image/png", Data: tinyPNG}}, {Type: "text", Text: "after"}}
 	blocks = append(blocks[:2], append([]claude.ContentBlock{blocks[1]}, blocks[2:]...)...)
@@ -52,7 +52,7 @@ func TestAssistantOutputRefusalAndRemoteLink(t *testing.T) {
 		agent := NewAgent(WithImageLimits(ImageLimits{MaxOutputBytesPerImage: 10}))
 		rec := newRecorder()
 		agent.attach(rec, nil)
-		session := agent.newSession(sessionStart{cwd: t.TempDir()})
+		session := agent.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 		content, err := json.Marshal([]claude.ContentBlock{{Type: "image", Source: &source}})
 		require.NoError(t, err)
 		require.NoError(t, session.projectAssistant(t.Context(), &cycleState{}, "", "image-row", claude.Message{ID: "image", Content: content}))

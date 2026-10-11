@@ -38,7 +38,7 @@ func TestPromptMediaReachesNativeShape(t *testing.T) {
 	handoff.Image.Uri = &uri
 	handoff.Image.Meta = map[string]any{wire.HandoffKey: map[string]any{"version": 1, "digest": hex.EncodeToString(digest[:]), "sizeBytes": len(bytes)}}
 	agent := NewAgent(WithInputHandoffRoot(root))
-	session := agent.newSession(sessionStart{cwd: t.TempDir()})
+	session := agent.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 	inline := acp.ImageBlock(tinyPNG, "image/png")
 	mapped, err := session.mapPrompt(t.Context(), []acp.ContentBlock{acp.TextBlock("before"), inline, acp.TextBlock("after")})
 	require.NoError(t, err)
@@ -72,7 +72,7 @@ func TestPromptImageGateFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			agent := NewAgent(WithImageLimits(ImageLimits{MaxInputBytesPerImage: tc.limit}))
-			session := agent.newSession(sessionStart{cwd: t.TempDir()})
+			session := agent.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 			_, err := session.mapPrompt(t.Context(), []acp.ContentBlock{acp.ImageBlock(tc.data, tc.mime)})
 			require.Equal(t, -32602, requestErrorCode(t, err))
 			require.Equal(t, "prompt.image", requestErrorData(t, err)["field"])

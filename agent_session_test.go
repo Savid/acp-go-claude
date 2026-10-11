@@ -37,6 +37,19 @@ func (s *commitBarrier) Replace(ctx context.Context, key acpcore.SessionKey, rep
 
 	return s.SessionStore.Replace(ctx, key, replacements)
 }
+
+func (s *commitBarrier) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.block.CompareAndSwap(true, false) {
+		s.entered <- key
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
+}
 func TestEstablishmentExcludesPrompt(t *testing.T) {
 	for _, phase := range []string{"new_session", "cold_load"} {
 		t.Run(phase, func(t *testing.T) {
@@ -64,7 +77,8 @@ func TestEstablishmentExcludesPrompt(t *testing.T) {
 					_, err := h.conn.NewSession(ctx, wire.NewSessionRequest(cwd))
 					done <- err
 				} else {
-					_, err := h.conn.LoadSession(ctx, wire.LoadSessionRequest(id, cwd))
+					// A changed carrier gives the restore a configuration to commit.
+					_, err := h.conn.LoadSession(ctx, wire.LoadSessionRequest(id, cwd, WithSessionClaudeOptions(NewClaudeOptions(WithClaudeSystemPrompt("restored")))))
 					done <- err
 				}
 			}()
@@ -90,6 +104,7 @@ func TestFailedCloseStillDetachesTheSession(t *testing.T) {
 	h := newHarness(t, WithSessionStore(store), WithConcurrencyLimits(ConcurrencyLimits{MaxActiveSessions: 1}))
 	h.initialize()
 	session := h.newSession()
+	appendNativeRow(t, h, session.SessionId)
 
 	store.fail.Store(true)
 

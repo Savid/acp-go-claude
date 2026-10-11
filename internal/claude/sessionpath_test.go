@@ -9,46 +9,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReadRowsRefusesMalformedTranscripts(t *testing.T) {
+func TestTranscriptStartedReadsOnlyUntilARecord(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 
-	missing, err := ReadRows(filepath.Join(dir, "absent.jsonl"))
+	for name, test := range map[string]struct {
+		content string
+		want    bool
+	}{
+		"empty":        {"", false},
+		"blank":        {strings.Repeat(" \n", 5<<10), false},
+		"record":       {"{\"a\":1}\n", true},
+		"blank prefix": {strings.Repeat("\n", 5<<10) + "{\"a\":1}\n", true},
+		"unterminated": {"{\"a\":", true},
+	} {
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".jsonl")
+		require.NoError(t, os.WriteFile(path, []byte(test.content), 0o600))
+
+		started, err := TranscriptStarted(path)
+		require.NoError(t, err, name)
+		require.Equal(t, test.want, started, name)
+	}
+
+	started, err := TranscriptStarted(filepath.Join(dir, "absent.jsonl"))
 	require.NoError(t, err, "an absent transcript is an empty conversation, not a failure")
-	require.Nil(t, missing)
-
-	valid := filepath.Join(dir, "valid.jsonl")
-	require.NoError(t, os.WriteFile(valid, []byte("{\"a\":1}\n{\"b\":2}\n"), 0o600))
-	rows, err := ReadRows(valid)
-	require.NoError(t, err)
-	require.Len(t, rows, 2)
-
-	torn := filepath.Join(dir, "torn.jsonl")
-	require.NoError(t, os.WriteFile(torn, []byte("{\"a\":1}\n{\"b\":"), 0o600))
-	_, err = ReadRows(torn)
-	require.ErrorContains(t, err, "invalid native transcript row")
-
-	oversize := filepath.Join(dir, "oversize.jsonl")
-	require.NoError(t, os.WriteFile(oversize, []byte(`{"a":"`+strings.Repeat("x", 17<<20)+`"}`+"\n"), 0o600))
-	_, err = ReadRows(oversize)
-	require.Error(t, err, "a row beyond the scanner bound is refused rather than truncated")
-}
-
-func TestWriteRowsReplacesTheTranscript(t *testing.T) {
-	t.Parallel()
-
-	path := filepath.Join(t.TempDir(), "projects", "p", "s.jsonl")
-	require.NoError(t, WriteRows(path, [][]byte{[]byte(`{"a":1}`)}))
-	require.NoError(t, WriteRows(path, [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)}))
-
-	rows, err := ReadRows(path)
-	require.NoError(t, err)
-	require.Len(t, rows, 2)
-
-	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".transcript-*"))
-	require.NoError(t, err)
-	require.Empty(t, leftovers)
+	require.False(t, started)
 }
 
 func TestValidateRowsRequiresThisSessionsIdentity(t *testing.T) {

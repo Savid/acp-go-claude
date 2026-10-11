@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,6 +52,14 @@ func (s *mirrorFaultStore) Replace(ctx context.Context, key acpcore.SessionKey, 
 	}
 
 	return s.SessionStore.Replace(ctx, key, replacements)
+}
+
+func (s *mirrorFaultStore) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail.Load() {
+		return errors.New("mirror unavailable")
+	}
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
 }
 
 func TestMirrorFailureFencesTurnAndAllowsRetry(t *testing.T) {
@@ -226,7 +236,7 @@ func TestDivergentNativeRowsRefuseRestore(t *testing.T) {
 	require.NoError(t, err)
 	var record sessionRecord
 	require.NoError(t, json.Unmarshal(records[0], &record))
-	require.NoError(t, os.WriteFile(record.SessionFile, []byte(`{"type":"user","message":{"content":"different"}}`+"\n"), 0600))
+	require.NoError(t, os.WriteFile(record.NativePath, []byte(`{"type":"user","message":{"content":"different"}}`+"\n"), 0600))
 	_, err = h.conn.LoadSession(h.ctx(), wire.LoadSessionRequest(session.SessionId, record.Cwd))
 	require.Equal(t, "claude_restore_failed", requestErrorData(t, err)["error"])
 }
@@ -330,10 +340,10 @@ func TestRestoreIntoDifferentNativeHome(t *testing.T) {
 	var record sessionRecord
 	require.Len(t, rows, 1)
 	require.NoError(t, json.Unmarshal(rows[0], &record))
-	relative, err := filepath.Rel(home, record.SessionFile)
+	relative, err := filepath.Rel(home, record.NativePath)
 	require.NoError(t, err)
 	require.True(t, filepath.IsLocal(relative))
-	require.FileExists(t, record.SessionFile)
+	require.FileExists(t, record.NativePath)
 }
 
 func TestEmptySessionRestores(t *testing.T) {
@@ -348,24 +358,10 @@ func TestEmptySessionRestores(t *testing.T) {
 	require.NoError(t, err, "a successfully created session must remain recoverable before its first prompt")
 }
 
-// commitFaultStore fails exactly the failAt'th commit and serves every other.
-type commitFaultStore struct {
-	acpcore.SessionStore
-	failAt int32
-	calls  atomic.Int32
-}
-
-func (s *commitFaultStore) Replace(ctx context.Context, key acpcore.SessionKey, replacements []acpcore.SessionStoreReplacement) error {
-	if s.calls.Add(1) == s.failAt {
-		return errors.New("mirror unavailable")
-	}
-
-	return s.SessionStore.Replace(ctx, key, replacements)
-}
-
 func TestAgentCycleCommitFailureEndsTheGeneration(t *testing.T) {
-	store := &commitFaultStore{SessionStore: acpcore.NewInMemorySessionStore(), failAt: 3}
-	a := NewAgent(testOptions(t, WithSessionStore(store))...)
+	store := &mirrorFaultStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	gate := filepath.Join(t.TempDir(), "background")
+	a := NewAgent(testOptions(t, WithSessionStore(store), WithEnv(map[string]string{fakeClaudeEnv: "1", fakeClaudeEnvBackgroundGate: gate}))...)
 	t.Cleanup(func() { _ = a.Close() })
 	rec := newRecorder()
 	a.attach(rec, nil)
@@ -384,6 +380,8 @@ func TestAgentCycleCommitFailureEndsTheGeneration(t *testing.T) {
 	request.Meta = promptMeta(1)
 	_, err = a.Prompt(t.Context(), request)
 	require.NoError(t, err)
+	store.fail.Store(true)
+	require.NoError(t, os.WriteFile(gate, nil, 0o600))
 
 	// A failed background commit has no terminal wire event. Wait for the
 	// pump to finish shutdown, then submit exactly one recovery prompt.
@@ -394,6 +392,7 @@ func TestAgentCycleCommitFailureEndsTheGeneration(t *testing.T) {
 	}
 	require.Equal(t, []string{"lifecycle_snapshot", "prompt_accepted", "state_update:running", "state_update:idle", "state_update:running"},
 		eventTypes(lifecycleEvents(rec.snapshot())), "an uncommitted agent-origin cycle must not publish a terminal idle")
+	store.fail.Store(false)
 	request = wire.TextPromptRequest(created.SessionId, "HELLO")
 	request.Meta = promptMeta(2)
 	response, err := a.Prompt(t.Context(), request)
@@ -411,9 +410,10 @@ func TestResidualNativeStateIsNeverAdopted(t *testing.T) {
 	h.initialize()
 
 	orphan := "00000000-0000-4000-8000-00000000abcd"
-	require.NoError(t, claude.WriteRows(claude.SessionPath(home, cwd, orphan), [][]byte{
+	_, err := sessionlog.WriteJSONL(claude.SessionPath(home, cwd, orphan), [][]byte{
 		[]byte(`{"type":"user","uuid":"11111111-1111-4111-8111-111111111111","sessionId":"` + orphan + `","cwd":"` + cwd + `","timestamp":"2026-09-15T00:00:00Z","message":{"id":"m1","role":"user","content":[{"type":"text","text":"hello"}]}}`),
-	}))
+	})
+	require.NoError(t, err)
 
 	list, err := h.conn.ListSessions(h.ctx(), wire.ListSessionsRequest())
 	require.NoError(t, err)
@@ -439,6 +439,14 @@ func (s *recoveryFaultStore) Replace(ctx context.Context, main acpcore.SessionKe
 	return s.SessionStore.Replace(ctx, main, replacements)
 }
 
+func (s *recoveryFaultStore) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.fail.Load() {
+		return errors.New("injected store failure")
+	}
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
+}
+
 func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	t.Parallel()
 	store := acpcore.NewInMemorySessionStore()
@@ -459,7 +467,7 @@ func TestNativeBindingSurvivesLoadAndResume(t *testing.T) {
 	require.Equal(t, wire.NativeSessionMeta(vendor, record.NativeSessionID), created.Meta)
 	id := acp.SessionId("acp-conversation-independent-of-native-id")
 	record.SessionID = string(id)
-	require.NoError(t, sessionlog.Commit(t.Context(), store, string(id), rows, record))
+	require.NoError(t, sessionlog.NewMirror(store, string(id)).Commit(t.Context(), sessionlog.Rows(rows), record))
 	require.NoError(t, store.Delete(t.Context(), acpcore.SessionKey{SessionID: string(created.SessionId)}))
 
 	before := len(h.rec.snapshot())
@@ -506,6 +514,14 @@ func (s *firstMirrorFailureStore) Replace(ctx context.Context, key acpcore.Sessi
 	}
 
 	return s.SessionStore.Replace(ctx, key, rows)
+}
+
+func (s *firstMirrorFailureStore) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	if s.calls.Add(1) == 1 {
+		return errors.New("initial mirror unavailable")
+	}
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
 }
 
 func TestFailedNewSessionDoesNotPersistDuringCleanup(t *testing.T) {
@@ -557,6 +573,8 @@ func TestFailedSessionOpenReleasesActiveSlot(t *testing.T) {
 type countingStore struct {
 	acpcore.SessionStore
 	replaces atomic.Int32
+	appends  atomic.Int32
+	appended atomic.Int32
 	deletes  atomic.Int32
 }
 
@@ -564,6 +582,13 @@ func (s *countingStore) Replace(ctx context.Context, key acpcore.SessionKey, rep
 	s.replaces.Add(1)
 
 	return s.SessionStore.Replace(ctx, key, replacements)
+}
+
+func (s *countingStore) Append(ctx context.Context, key acpcore.SessionKey, base int, entries []acpcore.SessionStoreEntry, replacements []acpcore.SessionStoreReplacement) error {
+	s.appends.Add(1)
+	s.appended.Add(int32(len(entries)))
+
+	return s.SessionStore.Append(ctx, key, base, entries, replacements)
 }
 
 func (s *countingStore) Delete(ctx context.Context, key acpcore.SessionKey) error {
@@ -629,4 +654,87 @@ func TestSessionMetaIsRefusedOutsideNew(t *testing.T) {
 		wire.SessionMetaKey: map[string]any{"persist": false},
 	})))
 	require.Equal(t, "_meta."+wire.SessionMetaKey+".persist", requestErrorData(t, err)["field"])
+}
+
+// Each turn appends only the transcript rows claude added; a configuration
+// change rewrites only the record, and a commit with nothing new writes
+// nothing.
+func TestMirrorAppendsOnlyWhatChanged(t *testing.T) {
+	t.Parallel()
+	store := &countingStore{SessionStore: acpcore.NewInMemorySessionStore()}
+	h := newHarness(t, WithSessionStore(store))
+	h.initialize()
+	created := h.newSession()
+	require.EqualValues(t, 1, store.replaces.Load(), "establishment publishes the first generation")
+
+	for turn := 1; turn <= 2; turn++ {
+		_, err := h.prompt(created.SessionId, "HELLO", nil)
+		require.NoError(t, err)
+		require.EqualValues(t, turn, store.appends.Load())
+		require.EqualValues(t, 2*turn, store.appended.Load(), "a turn appends its user and assistant rows only")
+	}
+
+	_, err := h.conn.SetSessionConfigOption(h.ctx(), SetModelRequest(created.SessionId, "haiku"))
+	require.NoError(t, err)
+	require.EqualValues(t, 3, store.appends.Load())
+	require.EqualValues(t, 4, store.appended.Load(), "a configuration change appends no rows")
+
+	s, err := h.agent.session(t.Context(), created.SessionId)
+	require.NoError(t, err)
+	require.NoError(t, s.commitMirror(t.Context()))
+	require.EqualValues(t, 3, store.appends.Load(), "an unchanged session writes nothing")
+	require.EqualValues(t, 1, store.replaces.Load())
+
+	var record sessionRecord
+	rows, found, err := sessionlog.Load(t.Context(), store, string(created.SessionId), &record)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Len(t, rows, 4)
+	require.Equal(t, "haiku", record.Model)
+	require.Equal(t, "HELLO", record.Title)
+}
+
+// BenchmarkCommitMirror measures one turn's commit of ten new rows on top of
+// a large transcript.
+func BenchmarkCommitMirror(b *testing.B) {
+	for _, rows := range []int{2000, 20000} {
+		b.Run(fmt.Sprintf("rows=%d", rows), func(b *testing.B) {
+			dir := b.TempDir()
+			id := "00000000-0000-4000-8000-000000000001"
+			path := filepath.Join(dir, id+".jsonl")
+			row := func(index int) string {
+				return fmt.Sprintf(`{"type":"assistant","uuid":"%d","sessionId":"%s","message":{"id":"m%d","role":"assistant","content":[{"type":"text","text":"%s"}]}}`+"\n", index, id, index, strings.Repeat("x", 1000))
+			}
+
+			var history strings.Builder
+			for index := range rows {
+				history.WriteString(row(index))
+			}
+
+			require.NoError(b, os.WriteFile(path, []byte(history.String()), 0o600))
+
+			store := acpcore.NewInMemorySessionStore()
+			s := &session{agent: &Agent{store: store}, id: acp.SessionId(id), nativeID: id, cwd: dir, nativePath: path, mirror: sessionlog.NewMirror(store, id)}
+			require.NoError(b, s.commitMirror(b.Context()))
+
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			require.NoError(b, err)
+			b.Cleanup(func() { _ = file.Close() })
+
+			next := rows
+
+			b.ReportAllocs()
+
+			for b.Loop() {
+				for range 10 {
+					_, _ = file.WriteString(row(next))
+					next++
+				}
+
+				if err := s.commitMirror(b.Context()); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }

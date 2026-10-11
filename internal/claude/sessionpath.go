@@ -1,10 +1,11 @@
 package claude
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -13,65 +14,37 @@ func SessionPath(home, cwd, id string) string {
 	return filepath.Join(home, "projects", ProjectDirName(cwd), id+".jsonl")
 }
 
-func ReadRows(path string) ([][]byte, error) {
+// TranscriptStarted reports whether the transcript at path holds any
+// record, reading only up to its first non-blank byte. A missing file holds
+// none.
+func TranscriptStarted(path string) (bool, error) {
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return false, nil
 	}
 
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
-	var rows [][]byte
+	buffer := make([]byte, 4<<10)
 
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64<<10), 16<<20)
-
-	for scanner.Scan() {
-		row := append([]byte(nil), scanner.Bytes()...)
-		if !json.Valid(row) {
-			return nil, errors.New("invalid native transcript row")
+	for {
+		read, readErr := file.Read(buffer)
+		if len(bytes.TrimSpace(buffer[:read])) > 0 {
+			return true, nil
 		}
 
-		rows = append(rows, row)
-	}
+		if errors.Is(readErr, io.EOF) {
+			return false, nil
+		}
 
-	return rows, scanner.Err()
-}
-
-func WriteRows(path string, rows [][]byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-
-	file, err := os.CreateTemp(filepath.Dir(path), ".transcript-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(file.Name())
-
-	for _, row := range rows {
-		if _, err := file.Write(append(append([]byte(nil), row...), '\n')); err != nil {
-			_ = file.Close()
-
-			return err
+		if readErr != nil {
+			return false, readErr
 		}
 	}
-
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-
-		return err
-	}
-
-	if err := file.Close(); err != nil {
-		return err
-	}
-
-	return os.Rename(file.Name(), path)
 }
 
 // ValidateRows refuses stored rows that are not this session's transcript:

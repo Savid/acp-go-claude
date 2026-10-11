@@ -457,3 +457,16 @@ func (w *requestWriter) cancelPrompt() error {
 
 	return err
 }
+
+// appendNativeRow appends one row to a live session's transcript, so its next
+// commit has native history to write.
+func appendNativeRow(t *testing.T, h *harness, id acp.SessionId) {
+	t.Helper()
+
+	s, err := h.agent.session(t.Context(), id)
+	require.NoError(t, err)
+	s.mu.Lock()
+	f := fakeClaude{id: s.nativeID, path: s.nativePath}
+	s.mu.Unlock()
+	f.row("user", "written after the last commit")
+}

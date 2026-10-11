@@ -13,6 +13,7 @@ import (
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -45,15 +46,16 @@ type session struct {
 	rawEvents             *wire.RawEvents
 	// agentDir is claude's config root for this session's launches.
 	agentDir string
-	// sessionFile is the native session file claude writes.
-	sessionFile string
+	// nativePath is the transcript claude appends to.
+	nativePath string
+	// mirror publishes the transcript and configuration to the store.
+	mirror *sessionlog.Mirror
 	// gate admits one foreground operation at a time: a prompt, a config
 	// change, or a restore.
 	gate chan struct{}
 
 	mu            sync.Mutex
 	runtime       *runtime
-	mirrored      int
 	model         string
 	contextWindow int64
 	models        []claude.Model
@@ -63,8 +65,6 @@ type session struct {
 	commands      []acp.AvailableCommand
 	title         string
 	updatedAt     string
-	// persisted marks a successfully committed mirror.
-	persisted bool
 	// ephemeral marks a session the host deletes without needing it back: it
 	// is never written to the store and never listed.
 	ephemeral bool
@@ -199,7 +199,7 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 	}
 
 	s.mu.Lock()
-	s.sessionFile = claude.SessionPath(s.agentDir, s.cwd, s.nativeID)
+	s.nativePath = claude.SessionPath(s.agentDir, s.cwd, s.nativeID)
 
 	if s.model == "" {
 		s.model = s.options.Model
@@ -215,12 +215,12 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 	s.mu.Unlock()
 
 	if sessionPath != "" {
-		rows, readErr := claude.ReadRows(sessionPath)
+		started, readErr := claude.TranscriptStarted(sessionPath)
 		if readErr != nil {
 			return nil, s.startFailure(ctx, readErr)
 		}
 
-		launch.Resume = len(rows) > 0
+		launch.Resume = started
 	}
 
 	proc, err := process.Start(ctx, process.Request{
@@ -266,16 +266,6 @@ func (s *session) launch(ctx context.Context, sessionPath string) (*runtime, err
 	return rt, nil
 }
 
-// bindRestored records the native file and the row count a restore hydrated,
-// under the lock the mirror and relaunch paths read them with.
-func (s *session) bindRestored(path string, mirrored int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.sessionFile = path
-	s.mirrored = mirrored
-}
-
 // launchEnvironment applies the session overlay to the construction-time environment.
 func (s *session) launchEnvironment() ([]string, error) {
 	environment := s.agent.environment(s.options.Env, nil)
@@ -304,7 +294,7 @@ func (s *session) startFailure(ctx context.Context, err error) error {
 		slog.String("reason", err.Error()),
 	)
 
-	return wire.InternalFailure(vendor, internalClassNativeStart)
+	return wire.InternalFailure(vendor, wire.ClassNativeStart)
 }
 
 // configureRuntime discovers the native catalogs and current session settings.
@@ -314,7 +304,7 @@ func (s *session) configureRuntime(ctx context.Context, rt *runtime, model strin
 
 	initialized, err := rt.client.Initialize(initCtx)
 	if err != nil {
-		return s.startFailure(ctx, err)
+		return s.startFailure(ctx, process.LaunchFailure(rt.proc, vendor, err))
 	}
 
 	s.mu.Lock()
@@ -392,7 +382,7 @@ func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 	s.mu.Lock()
 	rt := s.runtime
 	ending := rt != nil && rt.ending
-	sessionFile := s.sessionFile
+	nativePath := s.nativePath
 	s.mu.Unlock()
 
 	if rt != nil {
@@ -407,7 +397,7 @@ func (s *session) ensureRuntime(ctx context.Context) (*runtime, error) {
 		}
 	}
 
-	rt, err := s.launch(ctx, sessionFile)
+	rt, err := s.launch(ctx, nativePath)
 	if err != nil {
 		return nil, err
 	}
@@ -452,7 +442,7 @@ func (s *session) handleEvent(ctx context.Context, rt *runtime, event claude.Eve
 	}
 
 	if event.SessionID != "" && event.SessionID != s.nativeID {
-		s.poisonSession(ctx, "native_session_identity_drift")
+		s.poisonSession(ctx, wire.CauseNativeSessionIdentityDrift)
 
 		return
 	}
@@ -871,7 +861,6 @@ func (s *session) close(ctx context.Context) error {
 	}
 
 	s.closing = true
-	joinEstablishment := !s.persisted
 	s.closeDone = make(chan struct{})
 	t := s.turn
 	rt := s.runtime
@@ -903,22 +892,20 @@ func (s *session) close(ctx context.Context) error {
 		s.stopRuntime(ctx, rt)
 	}
 
-	// An initial mirror may not have started yet; its establishment owns the gate.
-	if joinEstablishment {
+	// An initial mirror may not have started yet; its establishment owns the
+	// gate. Committed waits for a commit in flight, so it is read outside the
+	// session lock once the turn and process are stopped.
+	if !s.mirror.Committed() {
 		s.gate <- struct{}{}
 		defer func() { <-s.gate }()
 	}
-
-	s.mu.Lock()
-	persisted := s.persisted
-	s.mu.Unlock()
 
 	var errs []error
 
 	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionSettleTimeout)
 	defer cancel()
 
-	if persisted {
+	if s.mirror.Committed() {
 		if err := s.commitMirror(commitCtx); err != nil {
 			errs = append(errs, err)
 		}

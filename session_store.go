@@ -2,14 +2,10 @@ package claudeacp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log/slog"
 	"maps"
-
 	"path/filepath"
 	"slices"
-	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
@@ -20,14 +16,15 @@ import (
 )
 
 // sessionRecord is the adapter-owned state a session needs to resume: where
-// claude keeps the native file and the configuration the session was established
-// with.
+// claude keeps the native file, the listing title, and the configuration the
+// session was established with.
 type sessionRecord struct {
 	SessionID             string            `json:"sessionId"`
 	NativeSessionID       string            `json:"nativeSessionId"`
+	Title                 string            `json:"title,omitempty"`
 	Cwd                   string            `json:"cwd"`
 	AdditionalDirectories []string          `json:"additionalDirectories,omitempty"`
-	SessionFile           string            `json:"sessionFile"`
+	NativePath            string            `json:"nativePath"`
 	Env                   map[string]string `json:"env,omitempty"`
 	ExtraPathDirs         []string          `json:"extraPathDirs,omitempty"`
 	Model                 string            `json:"model,omitempty"`
@@ -37,7 +34,6 @@ type sessionRecord struct {
 	SystemPrompt          string            `json:"systemPrompt,omitempty"`
 	OutputSchema          map[string]any    `json:"outputSchema,omitempty"`
 	OutputStyle           string            `json:"outputStyle,omitempty"`
-	UpdatedAtUnixMilli    int64             `json:"updatedAtUnixMilli"`
 }
 
 func (s *session) record() sessionRecord {
@@ -47,9 +43,10 @@ func (s *session) record() sessionRecord {
 	return sessionRecord{
 		SessionID:             string(s.id),
 		NativeSessionID:       s.nativeID,
+		Title:                 s.title,
 		Cwd:                   s.cwd,
 		AdditionalDirectories: slices.Clone(s.additionalDirectories),
-		SessionFile:           s.sessionFile,
+		NativePath:            s.nativePath,
 		Env:                   maps.Clone(s.options.Env),
 		ExtraPathDirs:         slices.Clone(s.options.ExtraPathDirs),
 		Model:                 s.model,
@@ -59,12 +56,13 @@ func (s *session) record() sessionRecord {
 		SystemPrompt:          s.options.SystemPrompt,
 		OutputSchema:          wire.CloneMap(s.options.OutputSchema),
 		OutputStyle:           s.outputStyle,
-		UpdatedAtUnixMilli:    time.Now().UnixMilli(),
 	}
 }
 
-// commitMirror publishes the native rows and current session configuration
-// as one durable generation.
+// commitMirror publishes the transcript rows claude appended since the last
+// commit with the current session configuration as one durable generation.
+// The configuration is sampled under the same lock that orders commits, so a
+// later commit never publishes an older record.
 func (s *session) commitMirror(ctx context.Context) error {
 	if s.ephemeral {
 		return nil
@@ -74,40 +72,20 @@ func (s *session) commitMirror(ctx context.Context) error {
 	defer s.mirrorMu.Unlock()
 
 	s.mu.Lock()
-	path := s.sessionFile
-	mirrored := s.mirrored
+	path := s.nativePath
 	s.mu.Unlock()
 
 	if path == "" {
 		return nil
 	}
 
-	rows, err := claude.ReadRows(path)
-	if err != nil {
-		return fmt.Errorf("read native session: %w", err)
-	}
-
-	if len(rows) < mirrored {
-		return fmt.Errorf("native log shrank from %d to %d rows", mirrored, len(rows))
-	}
-
-	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, "replace")
-	err = sessionlog.Commit(commitCtx, s.agent.store, string(s.id), rows, s.record())
+	commitCtx, finish := s.agent.observe.StartSessionStore(ctx, "commit")
+	err := s.mirror.Commit(commitCtx, sessionlog.File(path), s.record())
 	finish(err)
-
-	if err == nil {
-		s.mu.Lock()
-		s.persisted = true
-		s.mu.Unlock()
-	}
 
 	if err != nil {
 		return fmt.Errorf("commit session mirror: %w", err)
 	}
-
-	s.mu.Lock()
-	s.mirrored = len(rows)
-	s.mu.Unlock()
 
 	return nil
 }
@@ -133,14 +111,30 @@ func (a *Agent) loadStored(ctx context.Context, sessionID acp.SessionId) (stored
 	finish(err)
 
 	if err != nil {
-		return storedSession{}, a.restoreRefused(ctx, sessionID, err)
+		return storedSession{}, wire.RestoreRefused(ctx, a.log, vendor, sessionID, err)
 	}
 
 	return storedSession{rows: rows, record: record, found: found}, nil
 }
 
+// loadStoredRecord reads only the configuration record, for listing.
+func (a *Agent) loadStoredRecord(ctx context.Context, sessionID acp.SessionId) (sessionRecord, bool, error) {
+	loadCtx, finish := a.observe.StartSessionStore(ctx, "load_record")
+
+	var record sessionRecord
+
+	found, err := sessionlog.LoadRecord(loadCtx, a.store, string(sessionID), &record)
+	if err == nil && found {
+		err = record.validate(string(sessionID))
+	}
+
+	finish(err)
+
+	return record, found, err
+}
+
 func (r sessionRecord) validate(sessionID string) error {
-	if uuid.Validate(r.NativeSessionID) != nil || r.SessionID != sessionID || !filepath.IsAbs(r.Cwd) || !filepath.IsAbs(r.SessionFile) || r.UpdatedAtUnixMilli <= 0 {
+	if uuid.Validate(r.NativeSessionID) != nil || r.SessionID != sessionID || !filepath.IsAbs(r.Cwd) || !filepath.IsAbs(r.NativePath) {
 		return fmt.Errorf("invalid session record identity or location")
 	}
 
@@ -157,89 +151,19 @@ func (r sessionRecord) validate(sessionID string) error {
 	return nil
 }
 
-// hydrate reconciles the store with claude's own file before a load or resume. An
-// existing native file at least as long as the store wins and its newer rows
-// are adopted; a missing or shorter one is materialized from the store. A
-// disagreement at a shared position fails the restore. It returns the native
-// path and the rows the session now holds.
-func (a *Agent) hydrate(ctx context.Context, sessionID acp.SessionId, stored storedSession, cwd string, agentDir string) (string, [][]byte, error) {
-	path := claude.SessionPath(agentDir, cwd, stored.record.NativeSessionID)
-
-	native, err := claude.ReadRows(path)
+// hydrate reconciles the store with claude's own file before a load or
+// resume through the session's mirror, which then holds the stored
+// generation. An existing native file at least as long as the store wins and
+// its newer rows are adopted; a missing or shorter one is materialized from
+// the store. A disagreement at a shared position fails the restore. It
+// returns the rows the session now holds.
+func (s *session) hydrate(ctx context.Context, stored storedSession) ([][]byte, error) {
+	rows, err := s.mirror.Hydrate(ctx, s.nativePath, stored.rows, stored.record, func(rows [][]byte) error {
+		return claude.ValidateRows(rows, stored.record.NativeSessionID)
+	})
 	if err != nil {
-		return "", nil, a.restoreRefused(ctx, sessionID, err)
+		return nil, wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, err)
 	}
 
-	rows, nativeWins, err := sessionlog.Reconcile(native, stored.rows)
-	if err != nil {
-		return "", nil, a.restoreRefused(ctx, sessionID, err)
-	}
-
-	// An empty conversation is a legal stored generation; a non-empty one must
-	// be this session's own transcript.
-	if len(rows) != 0 {
-		if err := claude.ValidateRows(rows, stored.record.NativeSessionID); err != nil {
-			return "", nil, a.restoreRefused(ctx, sessionID, err)
-		}
-	}
-
-	if nativeWins {
-		if len(rows) > len(stored.rows) {
-			if err := sessionlog.Commit(ctx, a.store, string(sessionID), rows, stored.record); err != nil {
-				return "", nil, a.restoreRefused(ctx, sessionID, err)
-			}
-		}
-
-		return path, rows, nil
-	}
-
-	if err := claude.WriteRows(path, rows); err != nil {
-		return "", nil, a.restoreRefused(ctx, sessionID, err)
-	}
-
-	return path, rows, nil
-}
-
-func (a *Agent) restoreRefused(ctx context.Context, sessionID acp.SessionId, err error) error {
-	a.log.ErrorContext(ctx, "claude session restore failed",
-		slog.String("session_id", string(sessionID)), slog.String("reason", err.Error()))
-
-	return wire.RestoreFailed(vendor)
-}
-
-// storedTitle derives a listing title: the first user message text, else the
-// session id.
-func storedTitle(sessionID string, rows [][]byte) string {
-	for _, row := range rows {
-		var entry struct {
-			Type    string          `json:"type"`
-			Message json.RawMessage `json:"message"`
-		}
-
-		if json.Unmarshal(row, &entry) != nil || entry.Type != messageRoleUser {
-			continue
-		}
-
-		var message claude.Message
-		if json.Unmarshal(entry.Message, &message) != nil || message.Role != messageRoleUser {
-			continue
-		}
-
-		blocks, err := message.ContentBlocks()
-		if err != nil {
-			continue
-		}
-
-		for index := range blocks {
-			if blocks[index].Type != contentBlockTypeText {
-				continue
-			}
-
-			if title := wire.NormalizeTitle(blocks[index].Text); title != "" {
-				return title
-			}
-		}
-	}
-
-	return sessionID
+	return rows, nil
 }

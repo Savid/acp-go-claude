@@ -44,6 +44,9 @@ err := claudeacp.Serve(ctx, os.Stdin, os.Stdout,
 `WithHome` applies last. Only `ACP_GO_CLAUDE_INTERNAL_*` markers are dropped.
 Session `extraPathDirs` prepend to the resulting `PATH`; empty PATH components
 are omitted. Executable lookup uses the base environment before session overrides.
+The adapter sets no native tuning variables; memory and traffic settings such
+as `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and `CLAUDE_CODE_TOOL_MEMORY_LIMIT`
+are the host's to pass through these environments.
 
 | Process option | Meaning |
 |---|---|
@@ -157,9 +160,19 @@ answers `{"available": false, "reason": "not_reported"}`.
 
 Provide an `acpcore.SessionStore` through `WithSessionStore` for durable
 recovery. The default is an in-memory store. Format
-`claude-transcript-jsonl-v1` stores native transcript rows and one current
-configuration record under `config`, committed atomically. A session closed
-before its first prompt retains its configuration and empty history.
+`claude-transcript-jsonl-v2` stores native transcript rows and one current
+configuration record under `config`, committed atomically. The record holds
+the session and native IDs, the listing `title`, cwd, the transcript location
+as `nativePath`, the accepted environment and paths, and the session's model,
+effort, permission mode, system prompt, bare mode, output schema, and output
+style. `session/list` reads only the records. A session closed before its
+first prompt retains its configuration and empty history.
+
+The first commit publishes the whole generation. Each later commit reads only
+the transcript lines claude appended since the last one and appends them,
+rewriting the record only when it changed; a commit with nothing new writes
+nothing. A transcript that was replaced or rewritten is republished whole, and
+one that shrank fails the commit.
 
 Transcripts remain in Claude's home under `projects/<project>/<session-id>.jsonl`.
 Load adopts newer native rows when the shared prefix matches, or materializes

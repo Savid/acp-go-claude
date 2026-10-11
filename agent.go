@@ -5,14 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"maps"
 	"net/http"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
@@ -40,7 +38,7 @@ const (
 	// SessionStoreFormat identifies the store layout this package writes: raw
 	// claude session JSONL rows under the main subpath plus the adapter's session
 	// record under the config subpath.
-	SessionStoreFormat = "claude-transcript-jsonl-v1"
+	SessionStoreFormat = "claude-transcript-jsonl-v2"
 
 	vendor = "claude"
 
@@ -146,7 +144,7 @@ func (a *Agent) validateOptions() *acp.RequestError {
 		{"home", process.ValidateOptionalAbsolutePath(options.Home)},
 		{"scratchDir", process.ValidateOptionalAbsolutePath(options.ScratchDir)},
 		{"inputHandoffRoot", image.ValidateHandoffRoot(options.InputHandoffRoot)},
-		{"configuredModels", validateConfiguredModels(options.ConfiguredModels)},
+		{"configuredModels", wire.ValidateConfiguredModels(options.ConfiguredModels)},
 		{metaEnvKey, process.ValidateNames(options.Env)},
 		{"concurrencyLimits", wire.ValidateConcurrencyLimits(options.ConcurrencyLimits.MaxActiveSessions, options.ConcurrencyLimits.MaxConcurrentClientCalls)},
 		{"imageLimits", options.ImageLimits.core().Validate()},
@@ -160,24 +158,6 @@ func (a *Agent) validateOptions() *acp.RequestError {
 		a.log.Error("claude agent option rejected", slog.String("field", check.field), slog.String("reason", check.err.Error()))
 
 		return wire.InvalidOptions(vendor, check.field)
-	}
-
-	return nil
-}
-
-func validateConfiguredModels(ids []string) error {
-	seen := make(map[string]struct{}, len(ids))
-
-	for index, id := range ids {
-		if id == "" || id != strings.TrimSpace(id) {
-			return fmt.Errorf("configured model %d %q is not a model id", index, id)
-		}
-
-		if _, duplicate := seen[id]; duplicate {
-			return fmt.Errorf("configured model %q is listed twice", id)
-		}
-
-		seen[id] = struct{}{}
 	}
 
 	return nil
@@ -372,11 +352,7 @@ func (a *Agent) Authenticate(_ context.Context, params acp.AuthenticateRequest) 
 		return acp.AuthenticateResponse{}, openErr
 	}
 
-	if refusal := lifecycle.RejectKey(params.Meta); refusal != nil {
-		return acp.AuthenticateResponse{}, wire.ParamRefusal(refusal)
-	}
-
-	return acp.AuthenticateResponse{}, acp.NewInvalidParams(map[string]any{"methodId": params.MethodId})
+	return acp.AuthenticateResponse{}, wire.AuthenticateRefused(params)
 }
 
 // Logout exists because the SDK interface requires it.
@@ -480,7 +456,7 @@ func (a *Agent) ensureExecutable(ctx context.Context) (string, error) {
 
 	a.log.ErrorContext(ctx, "claude executable resolution failed", slog.String("reason", err.Error()))
 
-	return "", wire.InternalFailure(vendor, internalClassNativeStart)
+	return "", wire.InternalFailure(vendor, wire.ClassNativeStart)
 }
 
 // environment builds the merge for one launch: the inherited process
@@ -502,7 +478,3 @@ func (a *Agent) environment(sessionEnv map[string]string, owned map[string]strin
 		InternalPrefix: claude.InternalEnvPrefix,
 	}
 }
-
-// internalClassNativeStart is the claude_internal_failure class of a native
-// claude process that could not be started or configured for a session.
-const internalClassNativeStart = "native_start"

@@ -63,6 +63,10 @@ const fakeClaudeEnvLaunchLog = "ACP_GO_CLAUDE_TEST_LAUNCH_LOG"
 // it announces itself, so a test can hold an establishment in native start.
 const fakeClaudeEnvLaunchGate = "ACP_GO_CLAUDE_TEST_LAUNCH_GATE"
 
+// fakeClaudeEnvBackgroundGate names a file a fake claude waits for before the
+// background work AGENTWORK starts, so a test can commit the prompt first.
+const fakeClaudeEnvBackgroundGate = "ACP_GO_CLAUDE_TEST_BACKGROUND_GATE"
+
 // fakeClaudeEnvLaunchFail makes a launched fake claude exit before it
 // announces itself.
 const fakeClaudeEnvLaunchFail = "ACP_GO_CLAUDE_TEST_LAUNCH_FAIL"
@@ -245,6 +249,20 @@ func fakeClaudeSessionID(args []string) string {
 	return id
 }
 
+// awaitFakeGate waits until the file gate names exists; an empty name is open.
+func awaitFakeGate(gate string) {
+	if gate == "" {
+		return
+	}
+
+	for {
+		if _, err := os.Stat(gate); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // fakeClaudeLaunched records this launch, waits while a test's launch gate is
 // closed, and exits when the test asked the launch to fail.
 func fakeClaudeLaunched() {
@@ -254,14 +272,7 @@ func fakeClaudeLaunched() {
 			_ = file.Close()
 		}
 	}
-	if gate := os.Getenv(fakeClaudeEnvLaunchGate); gate != "" {
-		for {
-			if _, err := os.Stat(gate); err == nil {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	awaitFakeGate(os.Getenv(fakeClaudeEnvLaunchGate))
 	if os.Getenv(fakeClaudeEnvLaunchFail) == "1" {
 		os.Exit(1)
 	}
@@ -539,6 +550,7 @@ func (f *fakeClaude) turn(text string, abort <-chan struct{}, structured string,
 		f.turn("BLOCK", abort, structured, structuredRequested)
 	}
 	if text == "AGENTWORK" {
+		awaitFakeGate(os.Getenv(fakeClaudeEnvBackgroundGate))
 		f.turn("background", abort, structured, structuredRequested)
 	}
 }

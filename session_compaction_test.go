@@ -61,7 +61,7 @@ func TestCompactionNativeBoundaryAndReplay(t *testing.T) {
 	a := NewAgent()
 	rec := newRecorder()
 	a.attach(rec, nil)
-	s := a.newSession(sessionStart{cwd: t.TempDir()})
+	s := a.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 	c := &cycle{}
 	event := claude.Event{Type: nativeSystem, Subtype: nativeCompactBoundary, UUID: "first", CompactMetadata: &claude.CompactMetadata{Trigger: "manual", PreTokens: new(0), PostTokens: new(0)}}
 	for range 2 {
@@ -113,7 +113,7 @@ func TestCompactionSendFailureKeepsRuntime(t *testing.T) {
 	a := NewAgent()
 	rec := &compactionFailureClient{recorder: newRecorder()}
 	a.attach(rec, nil)
-	s := a.newSession(sessionStart{cwd: t.TempDir()})
+	s := a.newSession(sessionStart{cwd: t.TempDir()}, "", "")
 	s.nativeID = "root"
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

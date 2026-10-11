@@ -6,6 +6,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/savid/acp-go-claude/internal/claude"
+	"github.com/savid/acp-go-core/wire"
 )
 
 func (s *session) replay(ctx context.Context, rows [][]byte) error {
@@ -19,7 +20,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 			Message         *claude.Message `json:"message"`
 		}
 		if err := json.Unmarshal(row, &entry); err != nil {
-			return s.agent.restoreRefused(ctx, s.id, err)
+			return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, err)
 		}
 
 		if entry.Message == nil {
@@ -30,12 +31,12 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 		switch entry.Type {
 		case messageRoleAssistant:
 			if err := s.projectAssistant(rowCtx, state, entry.ParentToolUseID, entry.UUID, *entry.Message); err != nil {
-				return s.agent.restoreRefused(ctx, s.id, err)
+				return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, err)
 			}
 		case messageRoleUser:
 			blocks, err := entry.Message.ContentBlocks()
 			if err != nil {
-				return s.agent.restoreRefused(ctx, s.id, err)
+				return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, err)
 			}
 
 			for index := range blocks {
@@ -49,7 +50,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 				if block.Type == contentBlockTypeImage {
 					out, failure := decodeOutputImage(*block, s.agent.options.ImageLimits.core().EffectiveOutputPerImage())
 					if failure != nil {
-						return s.agent.restoreRefused(ctx, s.id, failure)
+						return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, failure)
 					}
 
 					if err := s.emit(rowCtx, acp.UpdateUserMessage(acp.ImageBlock(out.Data, out.MIME))); err != nil {
@@ -59,7 +60,7 @@ func (s *session) replay(ctx context.Context, rows [][]byte) error {
 			}
 
 			if err := s.projectToolResults(rowCtx, state, blocks); err != nil {
-				return s.agent.restoreRefused(ctx, s.id, err)
+				return wire.RestoreRefused(ctx, s.agent.log, vendor, s.id, err)
 			}
 		}
 	}

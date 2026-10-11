@@ -87,7 +87,7 @@ func TestRestoreRejectsMalformedNativeExtension(t *testing.T) {
 			require.NoError(t, err)
 			var record sessionRecord
 			require.NoError(t, json.Unmarshal(before["config"][0], &record))
-			file, err := os.OpenFile(record.SessionFile, os.O_APPEND|os.O_WRONLY, 0)
+			file, err := os.OpenFile(record.NativePath, os.O_APPEND|os.O_WRONLY, 0)
 			require.NoError(t, err)
 			_, err = file.WriteString(`{"type":7}` + "\n")
 			require.NoError(t, err)

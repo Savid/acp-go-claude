@@ -1,6 +1,7 @@
 package claudeacp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"github.com/savid/acp-go-core/lifecycle"
 	"github.com/savid/acp-go-core/observer"
 	"github.com/savid/acp-go-core/process"
+	"github.com/savid/acp-go-core/sessionlog"
 	"github.com/savid/acp-go-core/wire"
 )
 
@@ -80,14 +82,19 @@ func (a *Agent) validateStart(params sessionStart, mcpServers []acp.McpServer, m
 	return params, nil
 }
 
-// newSession builds the session value and its initial native binding.
-func (a *Agent) newSession(start sessionStart) *session {
-	id := uuid.NewString()
+// newSession builds the session value, its store mirror, and its native
+// binding: a fresh UUID for both ids when id is empty.
+func (a *Agent) newSession(start sessionStart, id acp.SessionId, nativeID string) *session {
+	if id == "" {
+		nativeID = uuid.NewString()
+		id = acp.SessionId(nativeID)
+	}
 
 	s := &session{
 		agent:                 a,
-		id:                    acp.SessionId(id),
-		nativeID:              id,
+		id:                    id,
+		nativeID:              nativeID,
+		mirror:                sessionlog.NewMirror(a.store, string(id)),
 		cwd:                   start.cwd,
 		additionalDirectories: slices.Clone(start.additionalDirectories),
 		options:               start.meta.options.clone(),
@@ -137,7 +144,7 @@ func (a *Agent) install(ctx context.Context, s *session) error {
 	case a.deleted[s.id]:
 		refusal = wire.UnknownSession()
 	case a.sessions[s.id] != nil:
-		refusal = wire.InternalFailure(vendor, internalClassNativeStart)
+		refusal = wire.InternalFailure(vendor, wire.ClassNativeStart)
 	}
 
 	if refusal == nil {
@@ -235,7 +242,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (r
 	}
 	defer releaseSlot()
 
-	s := a.newSession(start)
+	s := a.newSession(start, "", "")
 	s.rawEvents = wire.NewRawEvents(vendor, string(s.id), vendor, start.meta.rawEvents)
 
 	rt, err := s.launch(ctx, "")
@@ -426,21 +433,18 @@ func (a *Agent) restore(
 		start.additionalDirectories = slices.Clone(stored.record.AdditionalDirectories)
 	}
 
-	s := a.newSession(start)
-	s.id = sessionID
-	s.nativeID = stored.record.NativeSessionID
+	s := a.newSession(start, sessionID, stored.record.NativeSessionID)
 	s.rawEvents = wire.NewRawEvents(vendor, string(sessionID), vendor, start.meta.rawEvents)
-	s.title = storedTitle(stored.record.NativeSessionID, stored.rows)
+	s.title = stored.record.Title
 	s.outputStyle = stored.record.OutputStyle
+	s.nativePath = claude.SessionPath(s.agentDir, s.cwd, s.nativeID)
 
-	path, rows, err := a.hydrate(ctx, sessionID, stored, start.cwd, s.agentDir)
+	rows, err := s.hydrate(ctx, stored)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	s.bindRestored(path, len(rows))
-
-	rt, err := s.launch(ctx, path)
+	rt, err := s.launch(ctx, s.nativePath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -476,7 +480,7 @@ func (a *Agent) restore(
 		_ = s.close(context.WithoutCancel(ctx))
 		a.detach(ctx, s)
 
-		return nil, nil, a.restoreRefused(ctx, sessionID, err)
+		return nil, nil, wire.RestoreRefused(ctx, a.log, vendor, sessionID, err)
 	}
 
 	if replay {
@@ -665,25 +669,26 @@ func (a *Agent) ListSessions(ctx context.Context, params acp.ListSessionsRequest
 			continue
 		}
 
-		stored, loadErr := a.loadStored(ctx, id)
+		record, found, loadErr := a.loadStoredRecord(ctx, id)
 		if loadErr != nil {
+			a.log.ErrorContext(ctx, "stored session record unreadable",
+				slog.String("session_id", string(id)), slog.String("reason", loadErr.Error()))
+
 			return acp.ListSessionsResponse{}, wire.InternalFailure(vendor, "")
 		}
 
-		cwd := stored.record.Cwd
-
-		if filter != "" && cwd != filter {
+		if !found || (filter != "" && record.Cwd != filter) {
 			continue
 		}
 
-		title := storedTitle(stored.record.NativeSessionID, stored.rows)
+		title := cmp.Or(record.Title, string(id))
 		updatedAt := time.UnixMilli(summary.UpdatedAtUnixMilli).UTC().Format(time.RFC3339)
 
 		sessions = append(sessions, acp.SessionInfo{
-			Meta:                  wire.NativeSessionMeta(vendor, stored.record.NativeSessionID),
+			Meta:                  wire.NativeSessionMeta(vendor, record.NativeSessionID),
 			SessionId:             id,
-			Cwd:                   cwd,
-			AdditionalDirectories: slices.Clone(stored.record.AdditionalDirectories),
+			Cwd:                   record.Cwd,
+			AdditionalDirectories: slices.Clone(record.AdditionalDirectories),
 			Title:                 &title,
 			UpdatedAt:             &updatedAt,
 		})
